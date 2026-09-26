@@ -229,6 +229,12 @@ fn missing_binary_hint(dest: &str, t: &targets::BuildTarget) -> String {
              <arch>` — the images carry them on x86_64 only"
                 .to_string()
         }
+        // The dynamic-linking trio, which every image now carries: the loader, the shared
+        // C library and one dynamically linked C program. One recipe builds all three.
+        "/libexec/ld.so" | "/lib/libc.so" | "/bin/dynclib" => format!(
+            "the dynamic-linking artifacts are built by `just dynlib-{arch}` \
+             (`just build-{arch}` runs it too)"
+        ),
         _ => format!("run `just userland-{arch}` first (`just build-{arch}` runs it too)"),
     }
 }

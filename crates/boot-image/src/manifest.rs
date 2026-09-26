@@ -50,6 +50,20 @@ pub const BOOT_BINS: &[(&str, &str)] = &[
     // `/bin/ctest` is the second C smoke test: uses the full libc (errno,
     // malloc family, printf/stdio, strings). Same build path as helloc.
     ("/bin/ctest", "ctest"),
+    // The dynamic-linking trio: the loader, the shared C library, and one C program
+    // linked against it rather than against the `minix-libc` rlib. `just dynlib-<arch>`
+    // builds them — the loader from `crates/ldso` with `tools/minix-ldso.ld`, the other
+    // two with `tools/build-dynlibc.py` — and every image-assembling recipe depends on
+    // it, so dynamic linking is something an image *has* rather than something only its
+    // gate builds.
+    //
+    // The loader is here for `/bin/dynclib`'s sake: a binary carrying `PT_INTERP` cannot
+    // be exec'd without it. None of the three is in the boot path — VFS's `PT_INTERP`
+    // branch is reached only by a binary that carries one, and every program the boot
+    // path runs is still static and non-PIE, which is D2 in `DYNAMIC_LINKING.md`.
+    ("/libexec/ld.so", "ldso"),
+    ("/lib/libc.so", "libc.so"),
+    ("/bin/dynclib", "dynclib"),
     // `/bin/threadtest` is the thread smoke test: spawns kernel threads
     // that share the process address space, do PM IPC, and are joined back.
     ("/bin/threadtest", "threadtest"),

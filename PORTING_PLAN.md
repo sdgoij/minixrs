@@ -121,9 +121,13 @@ a dedicated `Proc.p_t6` slot (the old layout lost it to `sstatus`).
 
 **Dynamic linking (opt-in) landed as a self-contained track** — a Rust loader
 (`crates/ldso`, installed as `/libexec/ld.so`) and a `PT_INTERP` branch in VFS's exec, on
-all three arches, gated by `just test-dynlink-{x86,riscv64,aarch64}`. The default build
-stays static and non-PIE, exactly as MINIX's does: nothing in the boot path changes unless
-a binary carries `PT_INTERP`. The design, the phases (0–7, complete; 4 dropped) and the
+all three arches, gated by `just test-dynlink-{x86,riscv64,aarch64}`. The default *linking*
+stays static and non-PIE, exactly as MINIX's does: linking a program dynamically is opt-in,
+and nothing in the boot path carries `PT_INTERP`. What an image now *carries* is the
+capability: `/libexec/ld.so`, `/lib/libc.so` (the port's C library as a shared object) and
+`/bin/dynclib` (a C program linked against it) are in `BOOT_BINS`, so every image has them
+and the boot test checks for them — while every program the boot path runs is still static.
+The design, the phases (0–7, complete; 4 dropped) and the
 measured result that a shared object's read-only pages are one frame set across processes
 live in [`DYNAMIC_LINKING.md`](DYNAMIC_LINKING.md), which builds on the file-backed exec
 substrate in [`FILEMMAP.md`](FILEMMAP.md).

@@ -192,25 +192,25 @@ build target="x86":
 
 # build-x86* embeds /bin/coreutils, so the multicall must be built and copied
 # into the shared target dir first.
-build-x86: userland-x86 coreutils-x86
+build-x86: userland-x86 coreutils-x86 dynlib-x86
     rm -f target/mkboot target/mkboot.exe
     "{{stage1-rustc}}" tools/mkboot.rs --edition 2024 -o target/mkboot
     target/mkboot embed_initramfs,embed_minixfs
 
-build-x86-test: userland-x86 coreutils-x86
+build-x86-test: userland-x86 coreutils-x86 dynlib-x86
     rm -f target/mkboot target/mkboot.exe
     "{{stage1-rustc}}" tools/mkboot.rs --edition 2024 -o target/mkboot
     target/mkboot embed_initramfs,embed_minixfs,integration-tests kernel-test
 
-build-x86-boot: userland-x86 coreutils-x86
+build-x86-boot: userland-x86 coreutils-x86 dynlib-x86
     rm -f target/mkboot target/mkboot.exe
     "{{stage1-rustc}}" tools/mkboot.rs --edition 2024 -o target/mkboot
     target/mkboot embed_initramfs,embed_minixfs,boot-test kernel-boot
 
-build-riscv64: userland-riscv64 coreutils-riscv64
+build-riscv64: userland-riscv64 coreutils-riscv64 dynlib-riscv64
     RUSTC="{{stage1-rustc}}" cargo build -p kernel-boot --bin kernel-boot-riscv64 --target riscv64gc-unknown-minix --features embed_initramfs,embed_minixfs,riscv64 --release
 
-build-aarch64: userland-aarch64
+build-aarch64: userland-aarch64 dynlib-aarch64
     RUSTC="{{stage1-rustc}}" cargo build -p kernel-boot --bin kernel-boot-aarch64 --target aarch64-unknown-minix --features embed_initramfs,embed_minixfs,aarch64 --release
 
 # ---------- run ----------
@@ -344,8 +344,8 @@ test-bash-aarch64 boot-timeout="60":
 
 # Boot the dynamic-linking artifacts and drive `tools/smoke/dyn.tsv` at them.
 # `/bin/dynhello` is an `ET_EXEC` with `PT_INTERP /libexec/ld.so` and `DT_NEEDED`
-# for two shared objects, one of which names the other, so the strings that live
-# only in those objects are what prove the loader chose a base for each of them,
+# for three shared objects, one of which names another three times, so the strings that
+# live only in those objects are what prove the loader chose a base for each of them,
 # followed a dependency of a dependency, resolved names across objects, applied
 # each object's own `RELATIVE` fixups and `R_X86_64_COPY`, and ran the objects'
 # initialisers in dependency order. Two further steps ask for a fork after the
@@ -357,13 +357,16 @@ test-bash-aarch64 boot-timeout="60":
 # all and the boot below would pass while proving nothing. (The check is against
 # the built program, which is the file `/bin/dynhello` is a copy of.)
 #
-# The injection is what puts the four files in the image: like bash, they are
-# deliberately not `BOOT_BINS`, so an image build never depends on them having
-# been built.
+# The injection adds the loader's *own* test objects to a standard image: `libdyn*.so`
+# and `/bin/dynhello` are deliberately not `BOOT_BINS`, so no image carries them. What
+# they need in order to run — the loader, `/lib/libc.so` and `/bin/dynclib` — an image
+# does carry, and this gate is where the shipped `/bin/dynclib` is exercised, so a
+# regression in it is caught here rather than only in a gate that had built its own
+# copy.
 test-dynlink-x86 boot-timeout="40": dynlink-x86
-    DYNLINK_BINS='/libexec/ld.so=target/x86_64-pc-minix/release/ldso;/lib/libdyn.so=target/dynlink/x86/libdyn.so;/lib/libdyn2.so=target/dynlink/x86/libdyn2.so;/lib/libdyn3.so=target/dynlink/x86/libdyn3.so;/bin/dynhello=target/dynlink/x86/dynhello;/lib/libc.so=target/dynlink/x86/libc.so;/bin/dynclib=target/dynlink/x86/dynclib' just build-x86
+    DYNLINK_BINS='/lib/libdyn.so=target/dynlink/x86/libdyn.so;/lib/libdyn2.so=target/dynlink/x86/libdyn2.so;/lib/libdyn3.so=target/dynlink/x86/libdyn3.so;/bin/dynhello=target/dynlink/x86/dynhello' just build-x86
     @if grep -q 'dynlink' target/dynlink/x86/dynhello; then echo "!! /bin/dynhello contains a 'dynlink' string - the message cannot have come from a shared object" >&2; exit 1; fi
-    @if grep -q 'No such file or directory' target/dynlink/x86/dynclib; then echo "!! /bin/dynclib contains the error message - it cannot have come from libc.so" >&2; exit 1; fi
+    @if grep -q 'No such file or directory' target/x86_64-pc-minix/release/dynclib; then echo "!! /bin/dynclib contains the error message - it cannot have come from libc.so" >&2; exit 1; fi
     mkdir -p target/images/x86_64-pc-minix
     cp target/trampoline.elf target/images/x86_64-pc-minix/minix-x86.elf
     @just _assert-qemu-version qemu-system-x86_64
@@ -373,37 +376,62 @@ test-dynlink-x86 boot-timeout="40": dynlink-x86
 # The same artifacts for riscv64. `tools/build-dynlink.py` and
 # `tools/build-dynlibc.py` take the target; only the loader's `_start` and its TLS
 # placement differ between them (`crates/ldso`).
-dynlink-riscv64:
+dynlib-riscv64:
     @test -n "{{stage1-rustc}}" || (echo 'error: stage1 rustc not found — run `just bootstrap` first' >&2 && exit 1)
     RUSTC="{{stage1-rustc}}" RUSTFLAGS="-C link-arg=-Ttools/minix-ldso.ld -C link-arg=--no-eh-frame-hdr" cargo build -p ldso --bin ldso --features bin --target riscv64gc-unknown-minix --release
-    python tools/build-dynlink.py riscv64
     python tools/build-dynlibc.py riscv64
+
+dynlink-riscv64: dynlib-riscv64
+    python tools/build-dynlink.py riscv64
 
 # The dynamic-linking gate for riscv64: the same `tools/smoke/dyn.tsv` scenario as
 # x86_64, which is deliberately arch-neutral — it asserts on symbols only the shared
 # objects contain, on an errno read through the loader's TLS, and on the program's
 # own constructor, none of which depends on the instruction set.
 test-dynlink-riscv64 boot-timeout="60": dynlink-riscv64
-    DYNLINK_BINS='/libexec/ld.so=target/riscv64gc-unknown-minix/release/ldso;/lib/libdyn.so=target/dynlink/riscv64/libdyn.so;/lib/libdyn2.so=target/dynlink/riscv64/libdyn2.so;/lib/libdyn3.so=target/dynlink/riscv64/libdyn3.so;/bin/dynhello=target/dynlink/riscv64/dynhello;/lib/libc.so=target/dynlink/riscv64/libc.so;/bin/dynclib=target/dynlink/riscv64/dynclib' just build-riscv64
+    DYNLINK_BINS='/lib/libdyn.so=target/dynlink/riscv64/libdyn.so;/lib/libdyn2.so=target/dynlink/riscv64/libdyn2.so;/lib/libdyn3.so=target/dynlink/riscv64/libdyn3.so;/bin/dynhello=target/dynlink/riscv64/dynhello' just build-riscv64
     @if grep -q 'dynlink' target/dynlink/riscv64/dynhello; then echo "!! /bin/dynhello contains a 'dynlink' string - the message cannot have come from a shared object" >&2; exit 1; fi
-    @if grep -q 'No such file or directory' target/dynlink/riscv64/dynclib; then echo "!! /bin/dynclib contains the error message - it cannot have come from libc.so" >&2; exit 1; fi
+    @if grep -q 'No such file or directory' target/riscv64gc-unknown-minix/release/dynclib; then echo "!! /bin/dynclib contains the error message - it cannot have come from libc.so" >&2; exit 1; fi
     @just _assert-qemu-version qemu-system-riscv64
     FEED_SCENARIO=tools/smoke/dyn.tsv sh tools/smoke/feed.sh target/test-dynlink-riscv64.log {{boot-timeout}} qemu-system-riscv64 -machine virt -m 256M -nographic -global virtio-mmio.force-legacy=off -netdev user,id=net0 -device virtio-net-device,netdev=net0 -device virtio-gpu-device -device virtio-keyboard-device -kernel target/riscv64gc-unknown-minix/release/kernel-boot-riscv64
     @echo "dynlink: /bin/dynhello printed what only the shared objects contain, before and after a fork and an exec, and /bin/dynclib ran against libc.so (riscv64)"
 
-dynlink-aarch64:
+dynlib-aarch64:
     @test -n "{{stage1-rustc}}" || (echo 'error: stage1 rustc not found — run `just bootstrap` first' >&2 && exit 1)
     RUSTC="{{stage1-rustc}}" RUSTFLAGS="-C link-arg=-Ttools/minix-ldso.ld -C link-arg=--no-eh-frame-hdr" cargo build -p ldso --bin ldso --features bin --target aarch64-unknown-minix --release
-    python tools/build-dynlink.py aarch64
     python tools/build-dynlibc.py aarch64
 
+dynlink-aarch64: dynlib-aarch64
+    python tools/build-dynlink.py aarch64
+
 test-dynlink-aarch64 boot-timeout="60": dynlink-aarch64
-    DYNLINK_BINS='/libexec/ld.so=target/aarch64-unknown-minix/release/ldso;/lib/libdyn.so=target/dynlink/aarch64/libdyn.so;/lib/libdyn2.so=target/dynlink/aarch64/libdyn2.so;/lib/libdyn3.so=target/dynlink/aarch64/libdyn3.so;/bin/dynhello=target/dynlink/aarch64/dynhello;/lib/libc.so=target/dynlink/aarch64/libc.so;/bin/dynclib=target/dynlink/aarch64/dynclib' just build-aarch64
+    DYNLINK_BINS='/lib/libdyn.so=target/dynlink/aarch64/libdyn.so;/lib/libdyn2.so=target/dynlink/aarch64/libdyn2.so;/lib/libdyn3.so=target/dynlink/aarch64/libdyn3.so;/bin/dynhello=target/dynlink/aarch64/dynhello' just build-aarch64
     @if grep -q 'dynlink' target/dynlink/aarch64/dynhello; then echo "!! /bin/dynhello contains a 'dynlink' string - the message cannot have come from a shared object" >&2; exit 1; fi
-    @if grep -q 'No such file or directory' target/dynlink/aarch64/dynclib; then echo "!! /bin/dynclib contains the error message - it cannot have come from libc.so" >&2; exit 1; fi
+    @if grep -q 'No such file or directory' target/aarch64-unknown-minix/release/dynclib; then echo "!! /bin/dynclib contains the error message - it cannot have come from libc.so" >&2; exit 1; fi
     @just _assert-qemu-version qemu-system-aarch64
     FEED_SCENARIO=tools/smoke/dyn.tsv sh tools/smoke/feed.sh target/test-dynlink-aarch64.log {{boot-timeout}} qemu-system-aarch64 -machine virt -cpu cortex-a57 -m 256M -nographic -no-reboot -global virtio-mmio.force-legacy=off -netdev user,id=net0 -device virtio-net-device,netdev=net0 -device virtio-gpu-device -device virtio-keyboard-device -kernel target/aarch64-unknown-minix/release/kernel-boot-aarch64
     @echo "dynlink: /bin/dynhello printed what only the shared objects contain, before and after a fork and an exec, and /bin/dynclib ran against libc.so (aarch64)"
+
+# The gate on `just cdyn` — the recipe a user is told to use for a program of their own.
+# Every other recipe here builds its programs with `tools/build-dynlink.py` or
+# `tools/build-dynlibc.py`; this one goes through the recipe's own interface and boots what
+# it produced, which is what makes the two commands `tools/cdyn.py` prints for a user
+# something that has been run at least once. The link underneath is that script's, the same
+# one the shipped `/bin/dynclib` gets.
+#
+# The injection is `MINIXFS_EXTRA` set inside the recipe, so the Justfile's
+# `MSYS2_ENV_CONV_EXCL` covers it. A user setting the variable in their own shell has to
+# cover it themselves, which is why the hint `tools/cdyn.py` prints names that variable on
+# Windows.
+test-cdyn-x86 boot-timeout="40": dynlib-x86
+    just cdyn tools/cdyn-demo.c x86
+    @if grep -q 'No such file or directory' target/dync/x86/cdyn-demo; then echo "!! the program contains the error message - it cannot have come from libc.so" >&2; exit 1; fi
+    MINIXFS_EXTRA='/bin/cdyn-demo=target/dync/x86/cdyn-demo' just build-x86
+    mkdir -p target/images/x86_64-pc-minix
+    cp target/trampoline.elf target/images/x86_64-pc-minix/minix-x86.elf
+    @just _assert-qemu-version qemu-system-x86_64
+    FEED_SCENARIO=tools/smoke/cdyn.tsv sh tools/smoke/feed.sh target/test-cdyn-x86.log {{boot-timeout}} qemu-system-x86_64 -nographic -m 256M -no-reboot -vga none -device bochs-display,id=fb0 -kernel target/images/x86_64-pc-minix/minix-x86.elf -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0 -device virtio-tablet-pci,display=fb0
+    @echo "cdyn: a program built by the recipe ran against the shipped libc.so (x86_64)"
 
 # Measure whether two processes that map one object through the loader share its
 # physical frames — Phase 5 of DYNAMIC_LINKING.md. `tools/dso_share_probe.py` boots
@@ -418,14 +446,14 @@ test-dynlink-aarch64 boot-timeout="60": dynlink-aarch64
 # the two it has. aarch64 needs its read-only bit (`AP[2]`) handled differently from the
 # other two, so it is not a recipe yet.
 probe-dso-share-x86: dynlink-x86
-    DYNLINK_BINS='/libexec/ld.so=target/x86_64-pc-minix/release/ldso;/lib/libdyn.so=target/dynlink/x86/libdyn.so;/lib/libdyn2.so=target/dynlink/x86/libdyn2.so;/lib/libdyn3.so=target/dynlink/x86/libdyn3.so;/bin/dynhello=target/dynlink/x86/dynhello;/lib/libc.so=target/dynlink/x86/libc.so;/bin/dynclib=target/dynlink/x86/dynclib' just build-x86
+    DYNLINK_BINS='/lib/libdyn.so=target/dynlink/x86/libdyn.so;/lib/libdyn2.so=target/dynlink/x86/libdyn2.so;/lib/libdyn3.so=target/dynlink/x86/libdyn3.so;/bin/dynhello=target/dynlink/x86/dynhello' just build-x86
     mkdir -p target/images/x86_64-pc-minix
     cp target/trampoline.elf target/images/x86_64-pc-minix/minix-x86.elf
     @just _assert-qemu-version qemu-system-x86_64
     python tools/dso_share_probe.py --arch x86
 
 probe-dso-share-riscv64: dynlink-riscv64
-    DYNLINK_BINS='/libexec/ld.so=target/riscv64gc-unknown-minix/release/ldso;/lib/libdyn.so=target/dynlink/riscv64/libdyn.so;/lib/libdyn2.so=target/dynlink/riscv64/libdyn2.so;/lib/libdyn3.so=target/dynlink/riscv64/libdyn3.so;/bin/dynhello=target/dynlink/riscv64/dynhello;/lib/libc.so=target/dynlink/riscv64/libc.so;/bin/dynclib=target/dynlink/riscv64/dynclib' just build-riscv64
+    DYNLINK_BINS='/lib/libdyn.so=target/dynlink/riscv64/libdyn.so;/lib/libdyn2.so=target/dynlink/riscv64/libdyn2.so;/lib/libdyn3.so=target/dynlink/riscv64/libdyn3.so;/bin/dynhello=target/dynlink/riscv64/dynhello' just build-riscv64
     @just _assert-qemu-version qemu-system-riscv64
     python tools/dso_share_probe.py --arch riscv64
 
@@ -511,16 +539,16 @@ _assert-qemu-version emulator:
     @command -v {{emulator}} > /dev/null || (echo "!! {{emulator}} is not on PATH." >&2; exit 1)
     @v=$({{emulator}} --version 2>/dev/null | sed -n '1s/^QEMU emulator version \([0-9][0-9.]*\).*/\1/p'); major=${v%%.*}; if [ -z "$major" ] || [ "$major" -lt {{qemu-min-version}} ]; then echo "!! {{emulator}} is version ${v:-unknown}; the suites need QEMU {{qemu-min-version}} or newer - older emulators hang the aarch64 boot suite." >&2; exit 1; fi
 
-build-riscv64-test: userland-riscv64 coreutils-riscv64
+build-riscv64-test: userland-riscv64 coreutils-riscv64 dynlib-riscv64
     RUSTC="{{stage1-rustc}}" cargo build -p kernel-boot --bin kernel-boot-riscv64-test --target riscv64gc-unknown-minix --features embed_initramfs,embed_minixfs,riscv64,integration-tests --release
 
-build-aarch64-test: userland-aarch64
+build-aarch64-test: userland-aarch64 dynlib-aarch64
     RUSTC="{{stage1-rustc}}" cargo build -p kernel-boot --bin kernel-boot-aarch64-test --target aarch64-unknown-minix --features embed_initramfs,embed_minixfs,aarch64,integration-tests --release
 
-build-riscv64-boot: userland-riscv64 coreutils-riscv64
+build-riscv64-boot: userland-riscv64 coreutils-riscv64 dynlib-riscv64
     RUSTC="{{stage1-rustc}}" cargo build -p kernel-boot --bin kernel-boot-riscv64-boot --target riscv64gc-unknown-minix --features embed_initramfs,embed_minixfs,riscv64,boot-test --release
 
-build-aarch64-boot: userland-aarch64
+build-aarch64-boot: userland-aarch64 dynlib-aarch64
     RUSTC="{{stage1-rustc}}" cargo build -p kernel-boot --bin kernel-boot-aarch64-boot --target aarch64-unknown-minix --features embed_initramfs,embed_minixfs,aarch64,boot-test --release
 
 test-qemu target="x86":
@@ -668,17 +696,42 @@ build-c-hello arch="x86":
 build-bash arch="x86":
     python tools/build-bash.py {{arch}}
 
-# The dynamic-linking artifacts (x86_64 only): the loader (`/libexec/ld.so`,
-# `crates/ldso` linked with its own script, `tools/minix-ldso.ld`), and, through
-# `tools/build-dynlink.py`, the two shared objects and the dynamically linked test
-# program. Phase 3 adds, through `tools/build-dynlibc.py`, `libc.so` itself and a
-# C program linked against it. `test-dynlink-x86` puts all six in an image and
-# boots it.
-dynlink-x86:
+# The dynamic-linking artifacts an *image* carries: the loader (`/libexec/ld.so`,
+# `crates/ldso` linked with its own script, `tools/minix-ldso.ld`), the shared C library
+# (`/lib/libc.so`) and a C program linked against it (`/bin/dynclib`). All three are in
+# `crates/boot-image/src/manifest.rs`'s `BOOT_BINS`, so every recipe that assembles an
+# image depends on this one, and an image has dynamic linking whether or not its gate was
+# ever run. The loader is what a `PT_INTERP` binary needs to be exec'd at all; nothing in
+# the boot path carries one, so an image with these three boots exactly as before
+# (`DYNAMIC_LINKING.md` D2).
+#
+# The loader lands in the release dir from cargo, and `tools/build-dynlibc.py` puts the
+# other two there, the way `tools/build-c-hello.py` does for helloc/ctest.
+dynlib-x86:
     @test -n "{{stage1-rustc}}" || (echo 'error: stage1 rustc not found - run `just bootstrap` first' >&2 && exit 1)
     RUSTC="{{stage1-rustc}}" RUSTFLAGS="-C link-arg=-Ttools/minix-ldso.ld -C link-arg=--no-eh-frame-hdr" cargo build -p ldso --bin ldso --features bin --target x86_64-pc-minix --release
-    python tools/build-dynlink.py x86
     python tools/build-dynlibc.py x86
+
+# What the loader's *own* gate needs on top of `dynlib-x86`: `tools/build-dynlink.py`
+# builds `libdyn*.so` and `dynhello`, whose strings live only in the objects and which no
+# image ships. `test-dynlink-x86` injects those four into a standard image
+# (`DYNLINK_BINS`) and boots it.
+dynlink-x86: dynlib-x86
+    python tools/build-dynlink.py x86
+
+# Build a C program of your own against the shared C library. `just cdyn tools/myprog.c`
+# writes `target/dync/<arch>/<stem>`, and the program runs on a booted system with nothing
+# else added: every image already carries `/lib/libc.so` and the loader the program asks
+# for. `tools/cdyn.py` then prints the two commands that boot it — the second sets
+# `MINIXFS_EXTRA`, and on Windows it is prefixed with `MSYS2_ENV_CONV_EXCL` so the `/bin/...`
+# value survives MSYS's path conversion (a value that does not is refused by
+# `crates/kernel/build.rs`).
+#
+# `tools/cdyn.py` is the same link `tools/build-dynlibc.py` gives the shipped
+# `/bin/dynclib`, so a program of your own gets the flags that program is tested with, and
+# `just test-cdyn-x86` is the gate on this recipe.
+cdyn src arch="x86":
+    python tools/cdyn.py {{arch}} {{src}}
 
 # Build the C++ runtime (libc++ + libc++abi) for the x86_64 Minix cross
 # toolchain and merge them into target/cxx/minix-runtime/libstdc++.a.

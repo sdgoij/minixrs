@@ -41,6 +41,7 @@ The last few days moved the project from "boots a shell" to "a real toolchain ta
 - **uutils/coreutils runs on the OS** — the multicall binary (60 applets) boots, allocates and writes output a second tool reads back; it is embedded on x86_64 and riscv64, gated by `just test-coreutils-wedge`. The coreutils submodule tracks the port (see [coreutils](#coreutils) below).
 - **GNU bash runs** — built by the fork's stage1 (a POSIX host, see `C_BUILD.md`), injected as `/bin/bash` and booted: it prints its banner, runs `-c`, loops, arithmetic and redirects, and gets its own `$PWD`. Getting there filled the C surface it needed (`termios`/`ioctl`, `mknod`, `inet_*`, `scanf`, an environment that survives `exec`) plus two gaps it found in the shell and the libc: a shell that did not remove quotes, and a `getcwd` that returned `ENOSYS`.
 - **A `ls` that behaves like one** — sorted, and laid out in columns that fit the terminal (80 columns when the tty cannot say, which a serial console cannot), one name per line when the output is a file or a pipe. A wider directory listing is what found an MFS `getdents` bug: at end-of-directory it returned `OK` with a stale reply payload, so a reader asking until it got 0 was handed the same entries for ever.
+- **Dynamic linking** — a Rust loader (`crates/ldso`, installed as `/libexec/ld.so`) that VFS's exec enters as a program's `PT_INTERP`, and every image now carries it together with the port's C library as a shared object (`/lib/libc.so`) and a C program linked against it (`/bin/dynclib`). The loader maps each `DT_NEEDED` at a deterministic base, binds eagerly, follows the dependency graph transitively, applies every object's relocations and runs its initialisers in order, maps one file once (by inode, not by the name it was asked for), and gives a dynamically linked program thread-local storage. Linking dynamically stays opt-in as MINIX's is — the default is still static; a program of your own is `just cdyn`, which links against the `/lib/libc.so` every image already carries; see [below](#dynamic-linking).
 
 ## coreutils
 
@@ -70,6 +71,61 @@ The excluded applets are the ones the port cannot run yet: `chmod` and `touch` n
 and `pwd` and `mktemp` need a working `std::env::current_dir` (KNOWN_ISSUES item 24). The OS
 ships its own `/bin/chmod`, `/bin/rm` and friends for those.
 
+## Dynamic linking
+
+Opt-in, and the default is unchanged: every program the boot path runs is static and non-PIE,
+exactly as in MINIX. What an image *carries* is the capability — the loader
+`/libexec/ld.so`, the port's C library as a shared object `/lib/libc.so`, and `/bin/dynclib`,
+a C program linked against it — so `just build` embeds all three in both images and the boot
+test checks for them.
+
+The loader is `crates/ldso`, entered by VFS's exec as a program's `PT_INTERP` interpreter. It
+maps every `DT_NEEDED` object at a base from a deterministic allocator (there is no ASLR, so a
+loader failure is reproducible), applies each object's `RELATIVE` fixups, resolves `GLOB_DAT`,
+`JUMP_SLOT` and `COPY` **eagerly** — an unresolved symbol fails the load rather than faulting
+on the first call — follows the dependency graph depth-first, runs the objects' initialisers
+in dependency order, and installs the one static TLS module the port's runtime can hold. One
+file is one mapping however it is named: the check is the file (`st_dev`/`st_ino`), not the
+spelling, so a soname and a path to the same object do not become two copies. The crate is
+new rather than a port of `ld.elf_so`, but the rules are the reference's — `search.c`'s "a name
+containing a slash is a path", and `load.c`'s path-then-inode "already loaded".
+
+What it does not do yet, each a deferral rather than a stub: `dlopen`/`dlsym`,
+`LD_LIBRARY_PATH`, auxv (the loader uses a fixed 4 KiB page), and MINIX's
+soname/versioned-symlink scheme, so the search is literal — `/lib/`, `/usr/lib/`, or the name
+itself when it contains a `/`. A dynamically linked program can carry **six** shared objects:
+an address space holds 32 regions, the two images plus the stack and the heap take 8, and an
+object costs one region per `PT_LOAD` (four for the way LLD links a `-shared` object); the
+seventh fails the load with a message that says so. Thread-local storage is a single module,
+refused by name when a second object asks for it.
+
+Building anything dynamic goes through the fork's `-elf` (position-independent) targets, which
+`just bootstrap` builds. `tools/build-dynlibc.py` builds `libc.so` and `dynclib` with them
+(`just dynlib-<arch>`, which every image build runs). `just cdyn tools/myprog.c` links a
+program of your own the way that script links `dynclib` — `-Bdynamic`, `-l:libc.so`,
+`--allow-shlib-undefined` for the TLS symbols the loader supplies, and
+`--dynamic-linker=/libexec/ld.so` — writes `target/dync/<arch>/<stem>`, and prints the two
+commands that build an image with it and boot it (`MINIXFS_EXTRA`; on Windows the hint also
+names `MSYS2_ENV_CONV_EXCL`, without which MSYS rewrites the `/bin/...` value on the way to a
+native tool and the build refuses it). Every image already carries what the program needs, so
+nothing is added to the image but the program itself.
+
+- [DYNAMIC_LINKING.md](DYNAMIC_LINKING.md) — the design decisions, the phased plan (0–7), the
+  measurements and the traps; it builds on the file-backed exec path in
+  [FILEMMAP.md](FILEMMAP.md).
+- `just test-dynlink-x86` (also `riscv64`, `aarch64`) — boots an image and drives
+  `tools/smoke/dyn.tsv`: the loader's bases, relocations, transitive load, cross-object
+  resolution and initialiser order, before and after a `fork` and a re-`exec`, then the shipped
+  `/bin/dynclib`'s line — `errno` read through the loader's thread-local storage, `strerror`'s
+  buffer inside `libc.so`, and the program's own `.init_array`.
+- `just test-cdyn-x86` — the gate on the recipe for a program of your own: it builds
+  `tools/cdyn-demo.c` with `just cdyn`, injects the result and boots `tools/smoke/cdyn.tsv`,
+  whose line is a string only `libc.so` holds.
+- `just probe-dso-share-x86` (also `riscv64`) — measures from the host's page tables that two
+  processes mapping one object share its read-only frames (13/13 on x86_64).
+- `cargo test -p ldso` — the host side: the ELF parse, every relocation rule, the base
+  allocator and the name resolution.
+
 ## Quick Start
 
 ### Prerequisites
@@ -81,7 +137,7 @@ ships its own `/bin/chmod`, `/bin/rm` and friends for those.
 - QEMU 11 or newer (`qemu-system-x86_64`, `qemu-system-riscv64`,
   `qemu-system-aarch64`) — the test recipes refuse an older emulator, which hangs
   the aarch64 boot suite
-- Clang 22 (x86 trampoline, C smoke tests, C++ runtime cross build)
+- Clang 22 (x86 trampoline, C smoke tests, the dynamic-linking artifacts on every arch, C++ runtime cross build)
 - CMake + Ninja (for the C++ runtime cross build — `just libcxx-x86`)
 - [Just](https://just.systems/) (build runner)
 - **For the wasm32 target only:** a Rust **nightly** with the `rust-src` component — that target is a
@@ -232,6 +288,16 @@ See `.agents/skills/` for domain deep-dives:
   the steps into the shell that comes up, through `tools/smoke/feed.sh`; `run.js` drives
   the same steps in the wasm engine. `arch-tests` runs it on every PR, so an image whose
   shell cannot run a command has to fail the build rather than a download.
+- **Dynamic linking:** `just test-dynlink-{x86,riscv64,aarch64}` boots an image and drives
+  `tools/smoke/dyn.tsv` — the loader's relocations, transitive load, cross-object resolution
+  and initialiser order, across a `fork` and a re-`exec`, then the shipped `/bin/dynclib`
+  against `/lib/libc.so`. It is a per-arch scenario rather than another `scenario.tsv` step
+  because wasm drives that one and has no dynamic linking. `just test-cdyn-x86` is the gate on
+  `just cdyn`, the recipe for a program of your own: it builds `tools/cdyn-demo.c` with the
+  recipe, injects it and boots `tools/smoke/cdyn.tsv`. `just probe-dso-share-{x86,riscv64}`
+  measures read-only frame sharing between two processes from the host's page tables, and
+  `cargo test -p ldso` covers the loader's parsing, relocation rules and name resolution on
+  the host. The boot test asserts that an image carries the loader and the two objects.
 - **wasm (the browser target):** `sh tools/wasm-browser/build.sh` builds and stages the artifacts
   first (it runs `tools/wasm-servers/build.sh`, then copies the three into the page's `build/`), then
   - `node tools/wasm-servers/boot.cjs` — the boot chain and every device, at quiescence (82 checks)

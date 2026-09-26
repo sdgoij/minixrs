@@ -78,6 +78,7 @@ pub unsafe fn run_boot_tests() {
     failures += test_initramfs_sh_exists();
     failures += test_initramfs_boot_files();
     failures += test_initramfs_pipetest_elf();
+    failures += test_dynamic_artifacts_present();
 
     // K: PM MPROC page table walk
     failures += test_pm_mproc_pt();
@@ -746,6 +747,32 @@ fn test_initramfs_boot_files() -> u32 {
     }
     if failures == 0 {
         serial_write("  OK all boot files present\r\n");
+    }
+    failures
+}
+
+/// The dynamic-linking artifacts an image carries must be there: the loader, the shared
+/// C library, and one C program linked against it.
+///
+/// They are not boot-critical — nothing the boot path execs carries `PT_INTERP` — so
+/// they are not in `test_initramfs_boot_files`'s list. They are checked here because
+/// they are `BOOT_BINS`: a `crates/boot-image/src/manifest.rs` entry the build did not
+/// produce would make an image that boots and cannot run its own dynamic program, which
+/// only shows up when something tries. The *behaviour* is `tools/smoke/dyn.tsv`'s
+/// `/bin/dynclib` step in the three `just test-dynlink-<arch>` gates.
+fn test_dynamic_artifacts_present() -> u32 {
+    let files = ["/libexec/ld.so", "/lib/libc.so", "/bin/dynclib"];
+    let mut failures: u32 = 0;
+    for &f in &files {
+        if kernel::initramfs::find_initramfs_file(f).is_none() {
+            serial_write("  FAIL: missing ");
+            serial_write(f);
+            serial_write("\r\n");
+            failures += 1;
+        }
+    }
+    if failures == 0 {
+        serial_write("  OK dynamic-linking artifacts present\r\n");
     }
     failures
 }

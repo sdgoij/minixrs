@@ -1,0 +1,20 @@
+# The `just cdyn` scenario: a program the *user* built with the recipe, linked against the
+# shared C library, run in a standard image.
+#
+#   FEED_SCENARIO=tools/smoke/cdyn.tsv sh tools/smoke/feed.sh <log> <seconds> <qemu command…>
+#
+# Driven by `just test-cdyn-x86`, which is the only gate that goes through the recipe's own
+# interface rather than `tools/build-dynlink.py` and `tools/build-dynlibc.py`: it runs
+# `just cdyn tools/cdyn-demo.c`, injects the result with `MINIXFS_EXTRA`, and boots. The
+# link underneath is `tools/cdyn.py`'s, the same one the shipped `/bin/dynclib` gets.
+#
+# One step per line, as `tools/smoke/scenario.tsv` documents: the command, a tab, and the
+# whole line its output must produce.
+#
+# The expected output is `strerror(ENOENT)` from `libc.so`, reached through the loader.
+# Nothing in `tools/cdyn-demo.c` computes that string, and `printf`, `open`, `strerror` and
+# `errno` (a thread local in the object) are all resolved from `/lib/libc.so` at run time —
+# so the line is evidence of the whole chain and not of one call. The gate fails if the
+# program itself contains the message.
+
+/bin/cdyn-demo	cdyn-ok No such file or directory

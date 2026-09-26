@@ -189,6 +189,18 @@ wasm has no page faults and `exec` is a host `instantiate`, so there is nothing 
 Mirror MINIX: no default changes. Add a `just` recipe and a build flag, keep the static
 path bit-identical, and make every gate run both.
 
+**As amended when the artifacts were shipped.** An image now *carries* the loader
+(`/libexec/ld.so`), the shared C library (`/lib/libc.so`) and one dynamically linked C
+program (`/bin/dynclib`) — all three in
+`crates/boot-image/src/manifest.rs`'s `BOOT_BINS`, so every recipe that assembles an image
+builds and embeds them, and the boot test asserts they are there. What that does not change
+is the decision itself: every program the boot path runs is still static and non-PIE, VFS's
+`PT_INTERP` branch is reached only by a binary that carries one, and linking a program
+dynamically remains opt-in (`-Bdynamic` plus `--dynamic-linker`, per §6.5). An image with
+the three artifacts boots exactly as one without them, which is what "nothing in the boot
+path changes" has to mean for the claim to be worth anything. The cost is the three files
+in both images (≈200 KiB per image, and the loader is 33 KiB of it).
+
 ### D3 — A new Rust loader crate, not a port of `ld.elf_so`
 
 The project is from-scratch Rust with no C runtime to host NetBSD's `ld.elf_so`
@@ -664,6 +676,14 @@ As built:
 - `tools/build-dynlibc.py` builds `libc.so` (`cargo rustc --crate-type cdylib` under the
   dyn target, `--features so`, soname `libc.so`) and `tools/dynclib.c` linked against it,
   and `dynlink-x86` runs it after `tools/build-dynlink.py`.
+
+    Those two objects moved when dynamic linking became something an image *has* rather
+    than something only its gate built: the script now writes them into the release
+  directory (`target/<triple>/release/`, the way `tools/build-c-hello.py` places
+  helloc/ctest), `BOOT_BINS` carries `/lib/libc.so` and `/bin/dynclib` alongside
+  `/libexec/ld.so`, and every image-assembling recipe depends on `just dynlib-<arch>`.
+    The gate injects only the loader's own test objects now (`libdyn*.so`, `dynhello`), and
+    its `/bin/dynclib` step therefore exercises the *shipped* program. See D2 above.
 - The loader's TLS work is `rtld.rs::install_tls` + `__tls_get_addr` + the loader-defined
   bounds symbols; `reloc.rs` gained `R_X86_64_DTPMOD64` (the walk writes a module id, not
   a symbol value) and `layout.rs` the block-size rule, both host-tested.
@@ -674,9 +694,12 @@ As built:
 
 Gate (`just test-dynlink-x86`, four steps in one boot): the three `dynhello` steps above,
 plus `/bin/dynclib`, which must print
-`libc-dyn-ok errno=2 msg=No such file or directory ctor=1`. The line is the whole chain in
-one place: the program asks `open` for a path that cannot exist (a `libc.so` symbol),
-reads `errno` (its thread-local, so through the loader's `__tls_get_addr`), prints
+`libc-dyn-ok errno=2 msg=No such file or directory ctor=1`. The image the gate boots is a
+*standard* one (`just build-x86`) plus the loader's test objects injected through
+`DYNLINK_BINS`, because the loader, `libc.so` and `dynclib` are `BOOT_BINS` now — so this
+step measures what an image ships, not a copy the gate built for itself. The line is the
+whole chain in one place: the program asks `open` for a path that cannot exist (a `libc.so`
+symbol), reads `errno` (its thread-local, so through the loader's `__tls_get_addr`), prints
 `strerror`'s answer (a pointer into a buffer inside `libc.so`), and reports whether its
 own constructor ran (`ctor`). The gate fails if the executable contains the message, so
 the message can only have come from the object, and it fails if `ctor` is 0 — the

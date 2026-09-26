@@ -26,6 +26,10 @@
  * The message is therefore deliberately *not* in this file, and
  * `just test-dynlink-x86` fails the gate if the executable contains it.
  *
+ * It is not a test binary: `/bin/dynclib` is in
+ * `crates/boot-image/src/manifest.rs`'s `BOOT_BINS`, so every image carries it (with
+ * `/lib/libc.so` and the loader it needs). This gate is where it runs.
+ *
  * `hold` exists for `tools/dso_share_probe.py`, which measures whether two
  * processes mapping this object share its frames (Phase 5). It prints a marker and
  * then blocks on the console, so the two lives the probe needs can be started from

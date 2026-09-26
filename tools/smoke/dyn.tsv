@@ -2,8 +2,10 @@
 #
 #   FEED_SCENARIO=tools/smoke/dyn.tsv sh tools/smoke/feed.sh <log> <seconds> <qemu command…>
 #
-# Driven by `just test-dynlink-x86`, which builds the loader and the C artifacts
-# and injects all of them into the image (`DYNLINK_BINS`).
+# Driven by `just test-dynlink-x86`, which boots a standard image (`just build-x86`) with
+# the loader's own test objects injected (`DYNLINK_BINS`): the loader, `/lib/libc.so` and
+# `/bin/dynclib` are in `BOOT_BINS`, so every image carries those three and this scenario
+# is where the shipped `/bin/dynclib` is exercised.
 #
 # One step per line, as `tools/smoke/scenario.tsv` documents: the command, a tab,
 # and the whole line its output must produce.
