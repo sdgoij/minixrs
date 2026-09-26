@@ -25,6 +25,13 @@ bin = []
 
 [dependencies]
 minix-rt = { path = "../minix-rt", default-features = false }
+# The loader stats every `DT_NEEDED` it opens, so that two names for one file are one
+# mapping rather than two — `fstat`'s `st_dev`/`st_ino` is the only thing that settles
+# a second spelling of a file. The VFS call numbers and message layouts are
+# `minix-std`'s (`fs::fstat`), so the alternative is a second copy of `VFS_FSTAT`'s
+# layout here, which is the kind of duplicate that goes stale. `minix-std` is `no_std`
+# and needs no allocator, and the loader links only that one path.
+minix-std = { path = "../minix-std", default-features = false }
 
 [lints]
 workspace = true

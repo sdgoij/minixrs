@@ -6,11 +6,20 @@
  * is a variable it reads out of libdyn — a COPY, which the loader fills with the
  * object's bytes after applying the object's own `RELATIVE` fixup.
  *
- * It prints one line holding all three values. Each comes from a shared object and
+ * It prints one line holding all of them. Each comes from a shared object and
  * none is in this file, so the line is the loader's work — and one line rather
  * than three because the smoke harness matches whole lines anywhere in the log: a
  * second expected line would be satisfied by the first run's output and prove
  * nothing.
+ *
+ * A fourth field, `count=`, is how many times `libdyn2.so`'s initialiser ran, counted
+ * in `libdyn.so` — one mapping of that file means one constructor call. It is what
+ * makes "one file, one mapping" an assertion rather than a construction: a loader that
+ * mapped the file once per `DT_NEEDED` spelling would run the initialiser more than
+ * once. In this image it does not get that far — a third object does not fit the
+ * address space, so the load dies instead (`tools/smoke/dyn.tsv`, and
+ * `DYNAMIC_LINKING.md` §7 Phase 2 for the measurement) — and the field is a *number*
+ * on purpose: every string this prints still comes from an object.
  *
  * Its argument asks for a lifecycle to be exercised, and prefixes the line with
  * what happened, which is what makes each of the harness's steps distinct:
@@ -37,6 +46,7 @@ extern int execv(const char *path, char *const argv[]);
 extern const char *dyn_message(void);
 extern const char *dyn_second(void);
 extern const char *const dyn_pointer;
+extern int dyn_init_count(void);
 
 static size_t slen(const char *s) {
     size_t n = 0;
@@ -48,6 +58,22 @@ static size_t slen(const char *s) {
 
 static void emit(const char *s) {
     write(1, s, slen(s));
+}
+
+/* Print a non-negative int: the counter's value is the point of its field, so it has
+ * to be the real number and not a fixed string. */
+static void emit_int(int v) {
+    char buf[12];
+    int i = (int)sizeof buf;
+    if (v == 0) {
+        write(1, "0", 1);
+        return;
+    }
+    while (v > 0) {
+        buf[--i] = (char)('0' + v % 10);
+        v /= 10;
+    }
+    write(1, buf + i, (size_t)((int)sizeof buf - i));
 }
 
 static int streq(const char *a, const char *b) {
@@ -98,6 +124,8 @@ int main(int argc, char **argv) {
     emit(dyn_pointer);
     write(1, " ", 1);
     emit(dyn_second());
+    write(1, " count=", 7);
+    emit_int(dyn_init_count());
     write(1, "\n", 1);
     exit(0);
     return 0; /* not reached */

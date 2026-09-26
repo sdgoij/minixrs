@@ -37,12 +37,10 @@ use crate::layout::{
 use crate::reloc::{
     Def, RelocError, RelocImage, SYMNAME_MAX, Scope, SymError, SymName, TLS_MODULE_ID, apply_table,
 };
+use crate::search::{PATH_MAX, SEARCH_PATH, names_a_path, search_path_join};
 use core::arch::asm;
 use core::ptr;
 use core::sync::atomic::{AtomicU64, Ordering};
-
-/// A `DT_NEEDED` name is looked up here, in order.
-const SEARCH_PATH: &[&[u8]] = &[b"/lib/", b"/usr/lib/"];
 
 /// What a header page that is not this loader's machine is reported as.
 ///
@@ -58,8 +56,6 @@ const NOT_ELF: &[u8] = b"ld.so: the image is not an aarch64 ELF\n";
 
 const PAGE: u64 = 0x1000;
 const MAX_OBJECTS: usize = 8;
-/// Longest library name kept for the "already loaded" check.
-const NAME_MAX: usize = 128;
 
 fn write_bytes(b: &[u8]) {
     unsafe { minix_rt::write(2, b.as_ptr(), b.len()) };
@@ -113,6 +109,10 @@ enum LoadError {
     NoTlsSpace,
     TooManyObjects,
     CannotLoad,
+    /// A `DT_NEEDED` was opened but would not stat, so there is no way to tell whether
+    /// it is a file already loaded. Refused rather than mapped blind: a second mapping
+    /// of one file is two copies of its data and a second run of its initialisers.
+    CannotStat,
     NoSpace,
     DtRel,
     Reloc(RelocError),
@@ -129,6 +129,7 @@ fn die_load(e: LoadError) -> ! {
         LoadError::NoTlsSpace => die(b"ld.so: no room for a thread-local block\n"),
         LoadError::TooManyObjects => die(b"ld.so: too many objects\n"),
         LoadError::CannotLoad => die(b"ld.so: cannot load DT_NEEDED\n"),
+        LoadError::CannotStat => die(b"ld.so: cannot stat a DT_NEEDED\n"),
         LoadError::NoSpace => die(b"ld.so: no room for another object\n"),
         LoadError::DtRel => die(b"ld.so: PLT relocations are not RELA\n"),
         LoadError::Reloc(RelocError::BadSize(_)) => die(b"ld.so: malformed RELA table size\n"),
@@ -194,25 +195,29 @@ unsafe fn cstr_va(va: u64) -> &'static [u8] {
     unsafe { core::slice::from_raw_parts(va as *const u8, n) }
 }
 
-/// The `DT_NEEDED` name an object was loaded by, so a second request for the same
-/// library does not map it again. Bytes, because the string it came from lived in
-/// a file the loader has since closed.
+/// The path a loaded object came from, so a second request for it does not map it
+/// again. Bytes, because the string it came from lived in a file the loader has since
+/// closed.
+///
+/// The *resolved* path — what [`load`] opened, not the `DT_NEEDED` spelling it came
+/// from — because two spellings of one file resolve to one path, and that is the part
+/// of "already loaded" that needs no syscall to see.
 #[derive(Clone, Copy)]
 struct LibName {
-    buf: [u8; NAME_MAX],
+    buf: [u8; PATH_MAX],
     len: u8,
 }
 
 impl LibName {
     const EMPTY: Self = Self {
-        buf: [0; NAME_MAX],
+        buf: [0; PATH_MAX],
         len: 0,
     };
 
-    /// Copy `name` in. `false` when it does not fit — [`load`] has already refused
+    /// Copy `name` in. `false` when it does not fit — callers have already refused
     /// names that long, so this cannot happen for a name that reached a load.
     fn set(&mut self, name: &[u8]) -> bool {
-        if name.len() > NAME_MAX {
+        if name.len() > PATH_MAX {
             return false;
         }
         self.buf[..name.len()].copy_from_slice(name);
@@ -239,6 +244,19 @@ struct TlsSlot {
     memsz: u64,
 }
 
+/// What identifies the file an object was mapped from: the device and inode `fstat`
+/// reports for the descriptor it was mapped from.
+///
+/// Two spellings of one file — a path and a soname, a `..` in a path, a hard link —
+/// share these, and no comparison of the names can see that they are one file. The
+/// reference keeps both fields on every `Obj_Entry` and settles a second load with
+/// them (`libexec/ld.elf_so/load.c:_rtld_load_object`).
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct Identity {
+    dev: u64,
+    ino: u64,
+}
+
 /// One loaded ELF object: the link-time facts its dynamic array states, and the
 /// bias they were mapped at (`0` for a non-PIE main program). Every read adds
 /// the bias; `img_start`/`img_end` are the runtime addresses a relocation
@@ -256,8 +274,11 @@ struct Object {
     img_end: u64,
     /// The thread-local storage it brings with it, if any.
     tls: Option<TlsSlot>,
-    /// The name it was loaded by, empty for the main program.
+    /// The path it was loaded from, empty for the main program.
     name: LibName,
+    /// The file it was mapped from, `None` for the main program: the loader is given
+    /// its header page, not a descriptor, so there is nothing to stat.
+    identity: Option<Identity>,
 }
 
 impl Object {
@@ -271,6 +292,7 @@ impl Object {
         img_end: 0,
         tls: None,
         name: LibName::EMPTY,
+        identity: None,
     };
 
     /// The name of dynamic symbol `idx`, if it is a defined global or weak.
@@ -484,7 +506,20 @@ impl RelocImage for GuestImage {
 }
 
 /// Map one shared object's segments at `base` and read its dynamic tables.
-fn read_and_map(fd: i32, alloc: &mut BaseAlloc) -> Result<Object, LoadError> {
+///
+/// `path` and `identity` are what the object is and where it came from, filled in
+/// here because they are what a second request for the same file is matched against
+/// and there is no moment between this call and the list at which the object exists
+/// without them.
+fn read_and_map(
+    fd: i32,
+    path: &[u8],
+    identity: Identity,
+    alloc: &mut BaseAlloc,
+) -> Result<Object, LoadError> {
+    if path.len() > PATH_MAX {
+        return Err(LoadError::CannotLoad);
+    }
     let mut hdr = [0u8; PAGE as usize];
     let n = minix_rt::read(fd, &mut hdr);
     if n < 64 {
@@ -575,33 +610,100 @@ fn read_and_map(fd: i32, alloc: &mut BaseAlloc) -> Result<Object, LoadError> {
         img_end: base + hi,
         tls,
         name: LibName::EMPTY,
+        identity: Some(identity),
     };
+    if !obj.name.set(path) {
+        return Err(LoadError::CannotLoad);
+    }
     obj.symtab = unsafe { obj.dyn_tag(DT_SYMTAB) }.ok_or(LoadError::NoDynamic)?;
     obj.strtab = unsafe { obj.dyn_tag(DT_STRTAB) }.ok_or(LoadError::NoDynamic)?;
     obj.nsym = unsafe { obj.sym_count() };
     Ok(obj)
 }
 
-/// Open a `DT_NEEDED` name from the search path and map it.
-fn load(name: &[u8], alloc: &mut BaseAlloc) -> Result<Object, LoadError> {
-    if name.len() + 16 > 128 {
-        return Err(LoadError::CannotLoad);
+/// One candidate path, and what is behind it.
+enum Candidate {
+    /// A file none of `objects` was mapped from: the object, mapped and described.
+    Fresh(Object),
+    /// A file an object in the list already maps, under this path or another spelling
+    /// of it. The descriptor is closed and nothing is mapped.
+    Loaded,
+    /// Nothing is at that path, so the next search-path directory may still have the
+    /// name.
+    Absent,
+}
+
+/// Open `path` and decide what it is: a file to map, one already mapped, or none.
+///
+/// Both of the loader's "already loaded" checks are here, and in the reference's
+/// order. The path costs nothing — an object that came from this exact path *is* this
+/// object — so it comes first. What the open adds is the other spelling of it: only
+/// `st_dev`/`st_ino` can say that a path and a soname, a `..`, or a hard link are one
+/// file, which is why the reference opens and stats *before* it decides
+/// (`libexec/ld.elf_so/load.c:_rtld_load_object`).
+fn open_candidate(
+    path: &[u8],
+    objects: &[Object],
+    alloc: &mut BaseAlloc,
+) -> Result<Candidate, LoadError> {
+    if objects.iter().any(|o| o.name.as_bytes() == path) {
+        return Ok(Candidate::Loaded);
     }
-    let mut path = [0u8; 128];
-    for dir in SEARCH_PATH {
-        let total = dir.len() + name.len();
-        path[..dir.len()].copy_from_slice(dir);
-        path[dir.len()..total].copy_from_slice(name);
-        let fd = minix_rt::open(&path[..total], 0);
-        if fd < 0 {
-            continue;
-        }
-        let fd = fd as i32;
-        let obj = read_and_map(fd, alloc);
+    let fd = minix_rt::open(path, 0);
+    if fd < 0 {
+        return Ok(Candidate::Absent);
+    }
+    let fd = fd as i32;
+    let Ok(st) = minix_std::fs::fstat(fd) else {
         minix_rt::close(fd);
-        let mut obj = obj?;
-        obj.name.set(name);
-        return Ok(obj);
+        return Err(LoadError::CannotStat);
+    };
+    let identity = Identity {
+        dev: st.st_dev,
+        ino: st.st_ino,
+    };
+    if objects.iter().any(|o| o.identity == Some(identity)) {
+        minix_rt::close(fd);
+        return Ok(Candidate::Loaded);
+    }
+    let obj = read_and_map(fd, path, identity, alloc);
+    minix_rt::close(fd);
+    Ok(Candidate::Fresh(obj?))
+}
+
+/// Open a `DT_NEEDED` name and map the object behind it, unless one is loaded.
+///
+/// `Ok(None)` is that case: the name resolved to a file the list already has, whether
+/// by the path it resolved to or by the file itself. `objects` must be the objects
+/// loaded so far — the whole point is to not add a second mapping of one of them.
+fn load(
+    name: &[u8],
+    objects: &[Object],
+    alloc: &mut BaseAlloc,
+) -> Result<Option<Object>, LoadError> {
+    if names_a_path(name) {
+        // A hard-coded pathname is the file, not a name to look for: the search path
+        // is for bare names only (`search.c`).
+        if name.len() > PATH_MAX {
+            return Err(LoadError::CannotLoad);
+        }
+        return match open_candidate(name, objects, alloc)? {
+            Candidate::Fresh(obj) => Ok(Some(obj)),
+            Candidate::Loaded => Ok(None),
+            Candidate::Absent => Err(LoadError::CannotLoad),
+        };
+    }
+
+    let mut path = [0u8; PATH_MAX];
+    for dir in SEARCH_PATH {
+        let n = search_path_join(dir, name, &mut path).ok_or(LoadError::CannotLoad)?;
+        match open_candidate(&path[..n], objects, alloc)? {
+            Candidate::Fresh(obj) => return Ok(Some(obj)),
+            // Loaded through this directory, so the later ones would name the same
+            // file and are not searched.
+            Candidate::Loaded => return Ok(None),
+            Candidate::Absent => continue,
+        }
     }
     Err(LoadError::CannotLoad)
 }
@@ -642,6 +744,12 @@ unsafe fn needed_names(obj: &Object, out: &mut [LibName; MAX_OBJECTS]) -> usize 
             let name = unsafe { cstr_va(obj.bias + obj.strtab + rd_u64(p + 8)) };
             if out[n].set(name) {
                 n += 1;
+            } else {
+                // Dropping it would be a load that half-happened, and silently: the
+                // object it names would simply never be there, with nothing said about
+                // why. There is no such thing as a partial load — the main program's
+                // relocations against it would fail, or worse, resolve elsewhere.
+                die_load(LoadError::CannotLoad);
             }
         }
         p += DYN_SIZE as u64;
@@ -656,6 +764,10 @@ unsafe fn needed_names(obj: &Object, out: &mut [LibName; MAX_OBJECTS]) -> usize 
 /// diamond (two objects naming one library) or a cycle terminates instead of
 /// filling the list. Relocations do not depend on the order, because a lookup
 /// searches every object; the initialisers do, and walk the list backwards.
+///
+/// "Already in the list" is [`load`]'s decision, and it is about the file rather than
+/// about the `DT_NEEDED` spelling: one library named by two objects, or by one object
+/// twice under a name and a path, is one mapping.
 unsafe fn load_dependencies(
     objects: &mut [Object; MAX_OBJECTS],
     count: &mut usize,
@@ -665,17 +777,12 @@ unsafe fn load_dependencies(
     let mut names = [LibName::EMPTY; MAX_OBJECTS];
     let n = unsafe { needed_names(&objects[owner], &mut names) };
     for name in names.iter().take(n) {
-        if objects[..*count]
-            .iter()
-            .any(|o| o.name.as_bytes() == name.as_bytes())
-        {
-            continue;
-        }
         if *count == MAX_OBJECTS {
             die_load(LoadError::TooManyObjects);
         }
-        let obj = match load(name.as_bytes(), alloc) {
-            Ok(o) => o,
+        let obj = match load(name.as_bytes(), &objects[..*count], alloc) {
+            Ok(Some(o)) => o,
+            Ok(None) => continue,
             Err(e) => die_load(e),
         };
         let idx = *count;
@@ -956,6 +1063,11 @@ pub unsafe fn run(argc: u64, argv: u64, envp: u64, main_hdr: u64) -> u64 {
         img_end: main_hi,
         tls,
         name: LibName::EMPTY,
+        // The loader has the main program's header page, not a descriptor for it, so
+        // there is nothing to stat. It needs no identity: a `DT_NEEDED` cannot name
+        // it, and nothing is ever compared against it — the empty name above is not a
+        // path either.
+        identity: None,
     };
     main.symtab = match unsafe { main.dyn_tag(DT_SYMTAB) } {
         Some(v) => v,

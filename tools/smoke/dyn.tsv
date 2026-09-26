@@ -9,8 +9,9 @@
 # and the whole line its output must produce.
 #
 # `/bin/dynhello` is a non-PIE `ET_EXEC` with `PT_INTERP /libexec/ld.so` and
-# `DT_NEEDED` for two shared objects, one of which names the other. Its line holds
-# one value per mechanism the loader has to get right:
+# `DT_NEEDED` for two shared objects, one of which names the other — three times, by
+# soname and by two paths to the same file. Its line holds one value per mechanism the
+# loader has to get right:
 #
 #   dynlink-ok     libdyn's `JUMP_SLOT` — the main's PLT call, resolved by name;
 #                  the value also depends on libdyn's own `DT_NEEDED` having been
@@ -21,6 +22,17 @@
 #   dynlink-2-ok   libdyn2's initialiser — the value is its uninitialised form
 #                  until a constructor runs, so it is the order and the calling of
 #                  constructors that this field is about
+#   count=1        how many times that initialiser ran, counted in `libdyn.so` (the
+#                  one object the executable names once, so the count is about
+#                  libdyn2's mapping and not its own). `libdyn.so` names `libdyn2`
+#                  three ways — `libdyn2.so` (a soname the loader has to search for),
+#                  `/lib/libdyn2.so` and `/lib/./libdyn2.so` — and all three are one
+#                  file, so the check is about the file and not the spelling. A second
+#                  mapping would run the initialiser twice; it does not get that far
+#                  here, because a third object does not fit the address space at all
+#                  (`DYNAMIC_LINKING.md` §7 Phase 2), so the load dies instead. The
+#                  field is a number so that every string on the line still comes from
+#                  an object.
 #
 # None of those strings is in the executable: `just test-dynlink-x86` fails the
 # gate if it is, which is what makes these lines evidence about the loader rather
@@ -37,9 +49,9 @@
 #   exec    `re-exec-ok`, printed by the process that `dynhello exec` replaced
 #           itself with: a second load of the same program works
 
-/bin/dynhello	dynlink-ok dynlink-data dynlink-2-ok
-/bin/dynhello fork	child-ok dynlink-ok dynlink-data dynlink-2-ok
-/bin/dynhello exec	re-exec-ok dynlink-ok dynlink-data dynlink-2-ok
+/bin/dynhello	dynlink-ok dynlink-data dynlink-2-ok count=1
+/bin/dynhello fork	child-ok dynlink-ok dynlink-data dynlink-2-ok count=1
+/bin/dynhello exec	re-exec-ok dynlink-ok dynlink-data dynlink-2-ok count=1
 
 # `/bin/dynclib` is a C program linked against `libc.so` rather than the static
 # library: every libc symbol it calls is resolved by the loader before `main`.

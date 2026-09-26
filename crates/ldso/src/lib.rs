@@ -7,9 +7,10 @@
 //! `RELATIVE` fixups against its base, places the thread-local storage the objects
 //! brought, and hands back the main program's entry point.
 //!
-//! [`elf`] and [`reloc`] are host-buildable and carry the unit tests
-//! (`cargo test -p ldso`), so the parsing and the relocation rules are checked
-//! without a guest. [`rtld`] and the `ldso` binary are minix-only.
+//! [`elf`], [`layout`], [`reloc`] and [`search`] are host-buildable and carry the
+//! unit tests (`cargo test -p ldso`), so the parsing, the placement, the relocation
+//! rules and the name resolution are checked without a guest. [`rtld`] and the
+//! `ldso` binary are minix-only.
 #![cfg_attr(not(test), no_std)]
 // The loader's errors carry a symbol name so a failure can say *which* symbol,
 // and there is no allocator here to box one with. They travel once, on the cold
@@ -19,6 +20,7 @@
 pub mod elf;
 pub mod layout;
 pub mod reloc;
+pub mod search;
 
 #[cfg(target_os = "minix")]
 pub mod rtld;

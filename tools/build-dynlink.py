@@ -14,8 +14,10 @@ The executable is linked with the fork's stage1 rustc as the driver (the same wa
 
 Phase 0 was one object; Phase 1 needs two, because the loader's *base* allocator
 is only exercised when a second object has to land somewhere other than the
-first. Phase 2 chains them: `libdyn` names `libdyn2`, so one of the objects is a
-dependency of a dependency and of the executable at the same time.
+Phase 2 chains them: `libdyn` names `libdyn2`, so one of the objects is a
+dependency of a dependency and of the executable at the same time — and names it by
+a soname *and* by two paths to the same file, so that "loads once" is about the
+file rather than about the spelling.
 
 Phase 7 made this three-arch: the C objects and the executable are compiled and
 linked for whichever target is named, and only the loader's own `_start` and TLS
@@ -44,6 +46,21 @@ from lld import find_lld  # noqa: E402
 DSOS = ("libdyn2", "libdyn")
 INTERP = "/libexec/ld.so"
 OUT = ROOT / "target" / "dynlink"
+
+# Two link-only copies of `libdyn2.o` beside the installed object, whose *sonames* are
+# paths to it: `libdynpath.so` names `/lib/libdyn2.so` and `libdyndot.so` names
+# `/lib/./libdyn2.so`. lld records a shared library's soname as the `DT_NEEDED` of
+# whatever links it, so these are what let `libdyn.so` name one file by a path rather
+# than by a name — which is the case the loader's "already loaded" check has to settle
+# by the file (`st_dev`/`st_ino`) and not by the string. The dotted one is the harder
+# of the two: it reaches the same inode through a path that is not even the same text
+# as `/lib/libdyn2.so`.
+#
+# Neither copy is installed, so all three names are one file with one inode.
+ALIASES = (
+    ("libdynpath.so", "/lib/libdyn2.so"),
+    ("libdyndot.so", "/lib/./libdyn2.so"),
+)
 
 
 def find_stage1_rustc() -> "pathlib.Path | None":
@@ -82,25 +99,47 @@ def build(arch: Arch, rustc: pathlib.Path, lld: pathlib.Path) -> int:
     if run(["clang", *cflags, "-o", work / "dynhello.o", ROOT / "tools" / "dynhello.c"]) != 0:
         return 1
 
-    # The shared objects must be position-independent. `libdyn2` is built and linked
-    # first: `libdyn` names it as its own DT_NEEDED, which is what makes the loader
-    # follow a dependency of a dependency (and find the object the executable also
-    # names, so it is mapped once).
+    # The shared objects must be position-independent. `libdyn2` is built first: `libdyn`
+    # names it as its own DT_NEEDED, which is what makes the loader follow a dependency
+    # of a dependency (and find the object the executable also names, so it is mapped
+    # once — under three different names, in fact; see `ALIASES`).
     dso_flags = [*arch.base_cflags(), "-fno-builtin", "-O2", "-fPIC", "-c", *compile_flags()]
     for name in DSOS:
         if run(["clang", *dso_flags, "-o", work / f"{name}.o", ROOT / "tools" / f"{name}.c"]) != 0:
             return 1
 
     # Link each .so with LLD directly (the minix target specs ask for `lld` on
-    # PATH; we have the toolchain's own), against the objects built before it.
-    for i, name in enumerate(DSOS):
-        dso = work / f"{name}.so"
-        earlier = [arg for dep in DSOS[:i] for arg in (f"-L{work}", f"-l:{dep}.so")]
-        link_so = [lld, "-flavor", "gnu", "-shared", "-soname", f"{name}.so", "-o", dso,
-                   work / f"{name}.o", *earlier]
-        if run(link_so) != 0:
+    # PATH; we have the toolchain's own).
+    #
+    # `libdyn2.so` first: it is the file `dynhello` and `libdyn` both name, and the two
+    # aliases are the same object linked again under a path soname.
+    dso2 = work / "libdyn2.so"
+    if run([lld, "-flavor", "gnu", "-shared", "-soname", "libdyn2.so",
+            "-o", dso2, work / "libdyn2.o"]) != 0:
+        return 1
+    print(f"wrote {dso2}")
+
+    alias_args = []
+    for alias_name, soname in ALIASES:
+        alias = work / alias_name
+        if run([lld, "-flavor", "gnu", "-shared", "-soname", soname,
+                "-o", alias, work / "libdyn2.o"]) != 0:
             return 1
-        print(f"wrote {dso}")
+        print(f"wrote {alias} (soname {soname})")
+        alias_args += ["-L" + str(work), "-l:" + alias_name]
+
+    # `libdyn.so` names `libdyn2` three ways: by soname — which the loader has to find
+    # on its search path — and by the two paths above, which it must recognise as the
+    # file it already mapped rather than mapping a second copy of. `--no-as-needed` is
+    # what keeps the aliases in `DT_NEEDED`: they export exactly the same symbols as
+    # `libdyn2.so`, so only the first of them would otherwise be recorded.
+    dso1 = work / "libdyn.so"
+    link_so = [lld, "-flavor", "gnu", "-shared", "-soname", "libdyn.so", "-o", dso1,
+               work / "libdyn.o", "--no-as-needed",
+               "-L" + str(work), "-l:libdyn2.so", *alias_args]
+    if run(link_so) != 0:
+        return 1
+    print(f"wrote {dso1}")
 
     # minix-libc for the target: the executable's write/exit come from here.
     env = {**os.environ, "RUSTC": str(rustc)}

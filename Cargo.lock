@@ -112,6 +112,7 @@ name = "ldso"
 version = "0.1.0"
 dependencies = [
  "minix-rt",
+ "minix-std",
 ]
 
 [[package]]

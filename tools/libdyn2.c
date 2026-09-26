@@ -8,13 +8,23 @@
  *   once and not twice;
  * - it has an initialiser, and `dyn_second` reports whether that initialiser ran —
  *   so the printed value is evidence that constructors are called (and called
- *   before the object that depends on them).
+ *   before the object that depends on them);
+ * - the initialiser also bumps `libdyn.so`'s counter, so *how many times* it ran is
+ *   visible from the program, which is the only way a second mapping of this file
+ *   would show. See `libdyn.c`.
  *
  * Freestanding — see `libdyn.c`.
  */
 
 static const char before_init[] = "dynlink-2-no-ctor";
 static const char after_init[] = "dynlink-2-ok";
+
+/* The count lives in `libdyn.so`: this object is the one the loader may map twice,
+ * so a count in here would be one per copy and prove nothing. The symbol is left
+ * undefined at link time — a `-shared` link allows that — and the loader resolves it
+ * from the object that defines it, which is also what keeps this object free of a
+ * `DT_NEEDED` for the counter. */
+extern void dyn_init_bump(void);
 
 /* A `static` pointer into this object's own data, so its initialiser is an
  * R_X86_64_RELATIVE fixup; the initialiser below then replaces it.
@@ -26,6 +36,7 @@ static const char *volatile state = before_init;
 
 __attribute__((constructor)) static void init_state(void) {
     state = after_init;
+    dyn_init_bump();
 }
 
 const char *dyn_second(void);

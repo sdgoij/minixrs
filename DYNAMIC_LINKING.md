@@ -552,9 +552,13 @@ As built:
 - Weak undefined symbols resolve to 0 rather than failing the load; a strong one still
   fails it (D6). The referencing object's symbol bind is what decides, so the trait has
   `sym_is_weak`.
-- Loading is a dependency-first DFS over `DT_NEEDED` with a name-based "already loaded"
-  check, so a diamond loads one mapping and a cycle terminates. The list is reverse
-  topological, which is why initialisers walk it backwards.
+- Loading is a dependency-first DFS over `DT_NEEDED`, and a library already in the list is
+  not mapped again — decided by the **file**, not by the `DT_NEEDED` spelling: first the
+  resolved path (no syscall), then `st_dev`/`st_ino` from `fstat` on the descriptor just
+  opened. Those are the reference's two checks (`libexec/ld.elf_so/load.c::_rtld_load_object`),
+  and the name rule they need is `search.c`'s: a name containing a slash is a path, opened as
+  it stands, and only a bare name is looked for under `/lib/`, `/usr/lib/`. The list is
+  reverse topological, which is why initialisers walk it backwards.
 - Initialisers are called with `argc`/`argv`/`envp`, so the loader's `_start` now reads
   `envp` off the exec'd stack.
 - An object with `PT_TLS` is refused: the port's TLS is one module's, and silently
@@ -564,7 +568,7 @@ Gate (`just test-dynlink-x86`, three steps in one boot):
 
 | Step | Line | What only that step can show |
 |---|---|---|
-| `/bin/dynhello` | `dynlink-ok dynlink-data dynlink-2-ok` | bases, both objects' relocations, transitive load, cross-object resolution, initialisers |
+| `/bin/dynhello` | `dynlink-ok dynlink-data dynlink-2-ok count=1` | bases, both objects' relocations, transitive load, cross-object resolution, initialisers, one initialiser run per object |
 | `/bin/dynhello fork` | `child-ok …` | the mappings survive `fork`: the child calls into both objects and exits 0 |
 | `/bin/dynhello exec` | `re-exec-ok …` | a second load of the same program, by the process the first one replaced itself with |
 
@@ -579,11 +583,45 @@ once, at its own offset, with the rest of the image untouched — the scope each
 with, a weak reference resolving to 0 and the strong one failing, the allocator and the
 `PT_TLS` query.
 
-**Known gap.** De-duplication is by the name a `DT_NEEDED` gave; two different names for
-one file (a path and a soname) would map it twice. It is also not *isolated* by the gate:
-a duplicate mapping would still print the right line, because both copies are resolvable.
-The gate proves the loading order and the initialiser order; the single mapping is
-correct by construction rather than measured.
+**Closed — and measuring it corrected the claim above.** The earlier text here said
+"already loaded" was decided by the name a `DT_NEEDED` gave, and that a duplicate mapping
+"would still print the right line". The first was a gap; the second was wrong.
+
+`libdyn.so` now names `libdyn2.so` three ways in one link: the soname (which the loader has
+to find on its search path), `/lib/libdyn2.so`, and `/lib/./libdyn2.so`. The last two are
+*sonames* on link-only copies of the same object (`tools/build-dynlink.py::ALIASES`), so all
+three names are one file with one inode and only the first is installed. The loader settles
+them by the resolved path, then by `st_dev`/`st_ino`, and maps once.
+
+The gate no longer takes that on trust. `libdyn2.so`'s initialiser bumps a counter in
+`libdyn.so` — the one object the executable names once, so the count is about `libdyn2`'s
+mapping and not its own — and `/bin/dynhello` prints it as `count=1`. A second mapping would
+run the initialiser twice and print `count=2`. (The phase notes above quote the gate line as
+it was then; that field is this change's.) The count travels through a call rather than an
+exported variable because `dynhello` is non-PIE and an exported variable would be read
+through an `R_X86_64_COPY` — a second place the count could live.
+
+**What the duplicate does *not* do here, which is the more interesting result.** The
+`count=2` case cannot arise in this image at all: the second mapping does not fit. An address
+space holds **16 regions** (`crates/servers/src/vm/region.rs::MAX_REGIONS`); the two images'
+`PT_LOAD`s plus the stack and the heap take **8** before the loader maps anything, and the
+loader maps **one region per `PT_LOAD`** — four for each object here (`R`, `R E`, `RW`, `RW`,
+which is what an LLD `-shared` link emits). A dynamically linked program in this port
+therefore fits **exactly two shared objects**, and both a third object and a second mapping of
+the first are refused by VM with `EAGAIN`. Measured by adding a temporary diagnostic to
+`finish_mmap_file`: region counts `9,10,11,12` while `libdyn2` is mapped, `13,14,15,16` while
+`libdyn` is, and then the refusal at `16`.
+
+The failure is also misreported. Every non-returning `mmap` in `read_and_map` is
+`LoadError::NotObject`, so VM's `EAGAIN` reaches the user as `a DT_NEEDED is not a PIC
+object` — a message about the image when the problem is the address space. Telling the two
+apart needs `minix-rt`'s `vmem::mmap` to carry the errno instead of collapsing it to
+`MAP_FAILED`; see §8.
+
+So the gate proves the fix the only way this image can: without the check the load dies
+rather than the line printing twice. The `count=1` field is what keeps the property an
+assertion rather than a construction, and it is what would catch a loader that mapped twice
+on an image with regions to spare.
 
 ### Phase 3 — toolchain, and a dynamic C library — **done, less the soname scheme**
 
@@ -831,6 +869,22 @@ Gate: `just test-dynlink-riscv64` and `just test-dynlink-aarch64`, the same arch
 - **`MAX_EXEC_SEGS = 8` / `EXEC_HDR_MAX = 8192`.** Fine for the interpreter; do **not**
   reuse `pm_exec`'s header reader to parse a DSO — DSOs are the *loader's* problem and
   should be read/mapped by the loader, not VFS.
+- **The region table, not memory, is what bounds how many objects a program can have.**
+  `MAX_REGIONS` is **16 per process** (`vm/region.rs`) and the loader spends **one region per
+  `PT_LOAD`** — four for each LLD `-shared` object (`R`, `R E`, `RW`, `RW`). The two images'
+  regions plus the stack and the heap take 8 before the loader runs, so the sixteenth slot is
+  the last one a *second* object uses and a dynamically linked program here fits **two**: the
+  third object's first `mmap` is refused (`EAGAIN`). Adding an object needs regions to spare,
+  not memory — fewer image regions, a coarser mapping, or a larger table. Measured, and the
+  counts are in §7 Phase 2; the same measurement was written because the doc claimed a
+  duplicate would show up as a doubled initialiser count, and it does not.
+- **An `mmap` that fails is reported as a bad image.** `read_and_map` returns
+  `LoadError::NotObject` for a `PT_LOAD` `mmap` that does not land where it was asked to, so
+  VM's `EAGAIN` — the region table above — reaches the user as
+  `a DT_NEEDED is not a PIC object`: a message about the image when the cause is the address
+  space. From the loader the two are indistinguishable, because `minix-rt`'s `vmem::mmap`
+  collapses VM's reply to `MAP_FAILED` and drops the errno; telling them apart means reading
+  VM's reply, not the loader's.
 - **RISC-V X bit / AArch64 address range.** Executable regions must reach `VR_EXEC` so
   RISC-V text pages get the X PTE (`FILEMMAP.md §5` Bug 4); `MAX_USER_ADDRESS` on
   aarch64 covers the whole TTBR0 range, so a bad loader base can become an eret-retry
