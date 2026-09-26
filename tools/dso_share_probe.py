@@ -7,20 +7,18 @@ the loader maps the object's read-only segments *read-only* — a loader that ma
 them writable so it can patch them in place gets a private copy of every page. The
 doc's gate asks for a measured assertion rather than a comment, so this measures:
 
-  boot the dynamic-linking image, run the object's program once or twice so its pages
-  are in the cache, then run `/bin/dynclib hold | /bin/dynclib hold` (the shell's own
-  fork and exec, so two lives are running the same dynamic image with `libc.so` mapped
-  by the loader), and walk *both* processes' page tables from outside the guest,
+  boot the dynamic-linking image, run `/bin/dynclib hold | /bin/dynclib hold` (the shell's
+  own fork and exec, so two lives are running the same dynamic image with `libc.so`
+  mapped by the loader), and walk *both* processes' page tables from outside the guest,
   comparing the physical frames behind the object's read-only pages.
 
-The warm-up is not a convenience. A page already in the cache is shared the moment a
-second process maps it, because a cache *hit* needs no fill and so cannot race. Two
-lives that are the *first* to touch a page at the same time each fault privately
-instead: a miss on a fill already in flight is still a miss. That is measured, not
-assumed — with two cold lives the run sees no cache hits at all, with three it sees 13
-as the later one arrives after the fills. C MINIX's fault path has the same property
-(nothing joins an in-flight fill). So this measures the property the phase is about,
-*an object already in memory is shared*, and the phase records the caveat.
+Both lives start together, which is the hard case and the one the shell, `init` and any
+build job produce: the two fill the same pages at the same time. VM joins a fill already
+in flight, so the second process waits for the first's page and maps that frame rather
+than filling a private copy of its own (`vm/vfs_request.rs::park_page` and
+`release_parked`). Without that joining, both miss every page the other is filling and
+the measurement fails — which is what it did before the joining landed, and what makes
+this probe worth re-running when VM's file fault path changes.
 
 Only read-only pages are compared. Each mapping's writable `.data`/`.got` is *expected*
 to be private (that is where the relocations go), so counting those as failures would
@@ -51,10 +49,9 @@ arch parameter for `frames_in` and for the `fpu_state`-to-`p_cr3` derivation bel
 (that field is an inline area on riscv64, not a pointer), and `satp` in place of
 CR3.
 
-As first run, without the warm-up, it reported FAIL and invited a wrong conclusion:
-the pages were private, and only reading VM's own state showed why (`DYNAMIC_LINKING.md`
-§7 Phase 5). Its job is to keep that verdict honest, so it warms the cache and compares
-the read-only pages.
+As first run it reported FAIL and invited a wrong conclusion: the pages were private, and
+only reading VM's own state showed why (`DYNAMIC_LINKING.md` §7 Phase 5). Its job is to
+keep that verdict honest.
 
 Usage: python tools/dso_share_probe.py [MEM] [DYNCLIB_PATH]
 """
@@ -113,10 +110,6 @@ CHUNK_BYTES = 6
 CHUNK_PAUSE = 0.02
 
 HOLD_COMMAND = f"{DYNCLIB} hold | {DYNCLIB} hold"
-# The program run before the pipeline, to put the object's pages in the cache. See the
-# module docstring: a hit cannot race, a fill can.
-WARM_COMMAND = DYNCLIB
-WARM_RUNS = 2
 
 qemu = subprocess.Popen(
     [
@@ -161,27 +154,6 @@ def wait_for(needle: bytes, timeout: float) -> bool:
             return True
         time.sleep(0.05)
     return seen(needle)
-
-
-def settle(quiet: float = 0.7, timeout: float = 20.0) -> None:
-    """Wait until the console has been quiet for `quiet` seconds.
-
-    Used after a warm-up run, to know it finished. Waiting for the program's own
-    output would tie the probe to what that program prints, and waiting for a prompt
-    is ambiguous: an echoed command begins with one too.
-    """
-    deadline = time.time() + timeout
-    last_len = len(out)
-    last_change = time.time()
-    while time.time() < deadline:
-        time.sleep(0.1)
-        with lock:
-            now_len = len(out)
-        if now_len != last_len:
-            last_len = now_len
-            last_change = time.time()
-        elif time.time() - last_change >= quiet:
-            return
 
 
 def send_raw(data: bytes) -> None:
@@ -393,14 +365,6 @@ def main() -> int:
         place = layout()
         print(f"proc table 0x{place[0]:x}, slot stride {place[1]}, p_cr3 at"
               f" +{place[2]}", flush=True)
-
-        # Warm the cache first; the module docstring says why that is not a
-        # convenience.
-        for _ in range(WARM_RUNS):
-            if not send_command(WARM_COMMAND):
-                return fail(f"the guest never echoed the whole of '{WARM_COMMAND}'")
-            settle()
-        print(f"cache warmed with {WARM_RUNS} run(s) of {WARM_COMMAND}", flush=True)
 
         if not send_command(HOLD_COMMAND):
             return fail(f"the guest never echoed the whole of '{HOLD_COMMAND}'")

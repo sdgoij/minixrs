@@ -1178,7 +1178,13 @@ enum PageOutcome {
 /// mapped it, the cache has the frame, or it lies past the file's end) costs no request, and the
 /// pages that do are asked for one at a time. The chain continues from the FDIO completion
 /// (`finish_file_page`), which is why the fault travels with each page.
-fn advance_fault(fault: Fault) {
+///
+/// `pub(crate)` because a fault parked on another process's fill ([`vfs_request::release_parked`])
+/// is re-driven here once its page has landed: the parked fault travels with the pages it has
+/// left, exactly like the fault whose fill resolves.
+///
+/// [`vfs_request::release_parked`]: crate::vm::vfs_request::release_parked
+pub(crate) fn advance_fault(fault: Fault) {
     let mut fault = fault;
     while let Some(va) = fault.next_page() {
         match start_file_page(va, &fault) {
@@ -1191,6 +1197,44 @@ fn advance_fault(fault: Fault) {
             mem::sys_vmctl(fault.ep, VMCTL_CLEAR_PAGEFAULT, 0);
         }
     }
+}
+
+/// Map the cached frame for a file page into the address space `state` describes, with the
+/// region's permissions, and record it in the region.
+///
+/// False when the page is not in the cache, or the mapping could not be made — in which case
+/// nothing is left mapped and the caller falls through (to its own fill, for a fault; to its own
+/// path, for a parked one).
+///
+/// The cache holds a `PhysBlock` reference on the frame; this takes another for the mapping, so
+/// teardown (`pb_unref`) leaves the cache's reference and the frame behind.
+fn map_cached_page(state: &PageState) -> bool {
+    let Some((phys, pb)) = cache::cache_find_byino(state.dev, state.ino, state.file_off, true)
+    else {
+        return false;
+    };
+    let cr3 = state.fault.cr3;
+    let mut pt_flags = kernel::pagetable::MAP_USER;
+    if state.exec {
+        pt_flags |= kernel::pagetable::MAP_EXEC;
+    }
+    if state.writable {
+        // MAP_SHARED writable regions map the shared frame read-write.
+        pt_flags |= kernel::pagetable::MAP_WRITE;
+    }
+    if crate::vm::vm_map_page_in(cr3, state.page_addr, phys, pt_flags) == 0
+        && crate::vm::pb::pb_ref(pb)
+    {
+        if let Some(vmp) = unsafe { proc::vmproc_lookup(state.fault.ep) }
+            && let Some(r) = vmp.vm_regions.find_mut(state.page_addr)
+        {
+            r.add_page(state.page_addr, phys);
+        }
+        return true;
+    }
+    // Mapping or reference failed — unmap anything we mapped.
+    let _ = crate::vm::vm_unmap_page_in(cr3, state.page_addr);
+    false
 }
 
 /// Start one page of a file-backed region: allocate a fresh page, map it writable at the VA, and
@@ -1250,37 +1294,40 @@ fn start_file_page(va: u64, fault: &Fault) -> PageOutcome {
     // private allocate path even for shared regions).
     let cacheable = (!writable || shared) && file_off + page_size <= file_size;
 
+    // Everything the completion needs, before anything is allocated: the cache-hit and parking
+    // paths below both want it and neither has a frame yet (`pa` is filled in once there is one).
+    let state = PageState {
+        fault: *fault,
+        page_addr,
+        pa: 0,
+        file_off,
+        file_size,
+        writable,
+        exec,
+        cacheable,
+        dev,
+        ino,
+    };
+
     // Cache hit: map the existing frame with the region's permissions and skip allocation + FDIO.
-    // The cache holds a PhysBlock reference on the frame; bump it for this process's mapping so
-    // teardown (pb_unref) leaves the cache's reference and the frame behind.
-    //
     // Keyed by the file's identity, not by `(dev, file_off)`: `dev` is one filesystem's number and
     // `file_off` is a *file* offset, so the device-offset form would share one entry between every
     // file's page 0 (see `vm/cache.rs`).
-    if cacheable
-        && let Some((cached_phys, cached_pb)) = cache::cache_find_byino(dev, ino, file_off, true)
-    {
-        let mut pt_flags = kernel::pagetable::MAP_USER;
-        if exec {
-            pt_flags |= kernel::pagetable::MAP_EXEC;
-        }
-        if writable {
-            // MAP_SHARED writable regions map the shared frame read-write.
-            pt_flags |= kernel::pagetable::MAP_WRITE;
-        }
-        if crate::vm::vm_map_page_in(cr3, page_addr, cached_phys, pt_flags) == 0
-            && crate::vm::pb::pb_ref(cached_pb)
-        {
-            if let Some(vmp) = unsafe { proc::vmproc_lookup(ep) }
-                && let Some(r) = vmp.vm_regions.find_mut(page_addr)
-            {
-                r.add_page(page_addr, cached_phys);
-            }
-            return PageOutcome::Done;
-        }
-        // Mapping or reference failed — unmap anything we mapped and fall through to the
-        // fresh-allocate path.
-        let _ = crate::vm::vm_unmap_page_in(cr3, page_addr);
+    if cacheable && map_cached_page(&state) {
+        return PageOutcome::Done;
+    }
+
+    // Miss — but another process is already filling this very page. Wait for their fill and map its
+    // frame, instead of filling a private copy that will never be shared with theirs. This is what
+    // makes two processes started *together* share an object's read-only pages; without it each
+    // misses every page the other is filling and both end up private.
+    //
+    // `cacheable` is what decides whether joining is sound: a writable MAP_PRIVATE page is not
+    // cacheable (its frame is its owner's and may be modified), so it never parks and never has a
+    // joiner. A read-only page and a MAP_SHARED one both become the object's shared frame, which is
+    // exactly what a joiner wants.
+    if cacheable && file_off < file_size && crate::vm::vfs_request::park_page(state) {
+        return PageOutcome::Pending;
     }
 
     let pa = crate::vm::vm_alloc_pages(1);
@@ -1318,18 +1365,8 @@ fn start_file_page(va: u64, fault: &Fault) -> PageOutcome {
         return PageOutcome::Killed;
     }
 
-    let state = PageState {
-        fault: *fault,
-        page_addr,
-        pa,
-        file_off,
-        file_size,
-        writable,
-        exec,
-        cacheable,
-        dev,
-        ino,
-    };
+    // The frame this page will arrive in.
+    let state = PageState { pa, ..state };
 
     if file_off < file_size {
         let job = crate::vm::vfs_request::Job::Page(state);
@@ -1439,16 +1476,24 @@ pub fn finish_file_page(state: PageState, reply: &[u8; 64]) {
             .try_into()
             .unwrap_or([0; 4]),
     );
-    if result != 0 {
+    let landed = if result != 0 {
         let _ = crate::vm::vm_unmap_page_in(state.fault.cr3, state.page_addr);
         crate::vm::vm_free_pages(state.pa, 1);
         kill_faulting(state.fault.ep);
-        return;
+        false
+    } else {
+        // False means the process was killed while its page was being finished; the page's
+        // mapping and frame are already released.
+        finish_page(&state, true)
+    };
+
+    // However that turned out, faults parked on this fill have to move on: with the frame if the
+    // page reached the cache, or by taking their own path if it did not.
+    crate::vm::vfs_request::release_parked(state.dev, state.ino, state.file_off, landed);
+
+    if landed {
+        advance_fault(state.fault);
     }
-    if !finish_page(&state, true) {
-        return;
-    }
-    advance_fault(state.fault);
 }
 
 /// Send a signal to a process via the kernel.
@@ -1826,6 +1871,10 @@ fn do_exit(msg: &mut Message) -> i32 {
     if !is_user_ep(ep) {
         return EINVAL;
     }
+
+    // Drop anything parked on a fill for this process before the address space goes: a completion
+    // arriving later must not map a page into a destroyed — and possibly reused — CR3.
+    crate::vm::vfs_request::forget_parked(ep);
 
     // Close file-region vmfds that no other process references before
     // destroying the address space (fork children may share them).

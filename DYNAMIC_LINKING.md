@@ -19,14 +19,13 @@ toolchain this has to extend), `.agents/skills/minix-kernel-boundary` and
   (`FILEMMAP.md`) and **userland `mmap` with `MAP_FIXED` and `MAP_SHARED`**
   (`vm/mod.rs::do_mmap`, `finish_mmap_file`). So this is an *addition* to a working
   substrate, not a replacement of it.
-- **The payoff is nearly free — now measured.** VM's file page cache shares a read-only
-  DSO page across processes, as the draft claimed and with no new VM code: all 13 read-only
-  pages of `libc.so` are one frame set in two processes (`just probe-dso-share-x86`), with
-  each mapping's writable `.data`/`.got` private. The sharp edge is a *first-touch race*,
-  not a missing mechanism — nothing joins a fill already in flight, so two processes
-  starting the very first use of an object together each pay for it (measured: no cache
-  hits with two cold lives, 13 with three). One soundness fix came with the measurement:
-  the cache key did not include the inode. Phase 5 (§7).
+- **The payoff is nearly free — now measured, and the one hole closed.** VM's file page cache
+  shares a read-only DSO page across processes, as the draft claimed, and Phase 5 also made
+  the *simultaneous* case work: two lives that reach a page together become one fill rather
+  than two, so all 13 read-only pages of `libc.so` are one frame set in two processes started
+  as a pipeline (`just probe-dso-share-x86`), with each mapping's writable `.data`/`.got`
+  private. One soundness fix came with the measurement: the cache key did not include the
+  inode. Phase 5 (§7).
 - The kernel ELF loader needs almost no change: the **exec path never checks `e_type`**
   (`servers/src/vfs/exec.rs::pm_exec` reads `PT_LOAD`s directly), and DSOs are mapped by
   *userland* `mmap`, not by `parse_elf_header`. The one kernel-side edit is a register
@@ -98,7 +97,8 @@ add the machinery, change no default.
   what Phase 3 delivered; two processes of the *same* binary get it free. What stays
   private per process either way is the writable, relocated part (`.data`/`.got`) and
   every monomorphised instantiation (`tools/rc-cost.py`), and that is what bounds the
-  saving. The sharp edge is a first-touch race (Phase 5). See §2.3 and Phase 4's decision.
+  saving. Phase 5 measured the sharing and closed the simultaneous-start case. See §2.3 and
+  Phase 4's decision.
 - **Smaller C binaries and a smaller image** — for the programs that link `minix-libc`, which
   is where the copies were: `bash` and `ctest` carry it today and `libc.so` is not carried at
   all. Phase 3 is the size of it; a Rust binary's library code is largely inlined, so this does
@@ -704,25 +704,30 @@ The last partial page of a read-only segment being private
 (`file_off + page_size <= file_size` fails there, one page per segment) is expected, and
 the probe shows exactly that for the main program's own text.
 
-**Sharing works, with no new VM code.** `tools/dso_share_probe.py` (recipe
-`just probe-dso-share-x86`) boots the dynamic image, warms the cache by running the
-program twice, then runs `/bin/dynclib hold | /bin/dynclib hold` — two lives of the same
-dynamic image, `libc.so` mapped by the loader in each — and walks **both** processes' page
-tables from *outside* the guest (only the kernel knows a virtual address's frame, and the
-loader is the subject under test). Result: **all 13 read-only pages are one physical frame
-set**, and the 4 writable pages are private as designed. So `vm/cache.rs` does what the
-draft said it would: a read-only DSO page is shared by every process that maps an object
-already in memory.
+**Sharing works for two lives started together.** `tools/dso_share_probe.py` (recipe
+`just probe-dso-share-x86`) boots the dynamic image, runs
+`/bin/dynclib hold | /bin/dynclib hold` — two lives of the same dynamic image, `libc.so`
+mapped by the loader in each — and walks **both** processes' page tables from *outside* the
+guest (only the kernel knows a virtual address's frame, and the loader is the subject under
+test). Result: **all 13 read-only pages are one physical frame set**, and the 4 writable
+pages are private as designed. A shared object's text is therefore paid for once however
+its users start, which is the point of the whole phase.
 
-**Why two lives must not be the *first* to touch a page.** Without the warm-up the same
-probe reports every page private, because a page's first fault is a *fill*, and nothing
-joins a fill already in flight: two processes that reach a page at the same time each miss
-and each allocate privately. Measured: with two cold lives the cache takes **no hits at
-all**; with three it takes 13, the later one arriving after the fills. C MINIX's fault
-path is the same (`mappedfile_pagefault` allocates per fault; only
-`find_cached_page_byino` can hit). So the property this phase is about holds, and the
-caveat is that two processes starting the very first use of an object together each pay
-for it. Joining in-flight fills would remove that and is deliberately not done here.
+**Two fills of one page are one fill.** The first run of that probe, without any change to
+VM, reported every page private: a page's first fault is a *fill*, and nothing joined a
+fill already in flight, so two lives that reached a page at the same time each missed and
+each allocated privately. Measured at the time — with two cold lives the cache took **no
+hits at all**, with three it took 13, the later one arriving after the fills — and the same
+shape C MINIX has (`mappedfile_pagefault` allocates per fault; only
+`find_cached_page_byino` can hit). The port now joins them: `vm/vfs_request.rs::park_page`
+parks a fault on the fill of the same file page that another process already has in
+flight, and `release_parked` maps that frame into the waiter and lets it carry on. Only
+*cacheable* fills are joinable — a writable `MAP_PRIVATE` page's frame is its owner's and
+may be modified — which is the same predicate that decided the page could be shared at all.
+Parking is keyed like the cache, on `(dev, ino, file offset)`, and a parked fault is
+dropped when its process exits (`forget_parked`), so a completion can never map into a
+freed address space. It also *reduces* the demand on the VFS request pool: two faults on
+one page are one FDIO.
 
 **What went wrong the first time, recorded because this work invites it.** The first run
 was read as "the cache is empty", and its cause assigned to `cache_insert` refusing
@@ -750,8 +755,9 @@ no caller outside the tests.
 
 Gate: a measured assertion that two processes' `.so` text maps to one physical frame set
 (not a comment), on at least two arches. **x86_64 passes** — `just probe-dso-share-x86`,
-13/13 read-only pages, 4 writable ones private. The second arch is inherited by Phase 7,
-because `crates/ldso` has no other arch yet and the probe's page-table walk is x86_64's.
+13/13 read-only pages, 4 writable ones private, on each of three runs. The second arch is
+inherited by Phase 7, because `crates/ldso` has no other arch yet and the probe's page-table
+walk is x86_64's.
 
 ### Phase 6 — `dlopen`/`dlsym` (optional)
 
@@ -792,6 +798,12 @@ landing each phase on x86_64 first, then porting, matching how the exec work wen
 - **`parse_elf_header` is stricter than `pm_exec`.** If the initramfs/boot path
   (`load_elf`) is ever handed a dynamic binary it will reject it (correctly). Don't
   "fix" it into accepting `ET_DYN` as part of this work; it is a different path.
+- **Joining a fill adds a wait that C MINIX does not have.** `park_page` blocks a process on
+  another process's FDIO, so a cycle is conceivable that C cannot have: the filler's *other*
+  thread waiting on the parked process while the parked process waits for the fill. VFS
+  answers a fault quickly, and the same shape already exists within one process
+  (`page_pending`), but a hang here would look like a wedged guest rather than a bug in a
+  gate — reach for `tools/dso_share_probe.py` and VM's request pool first.
 - **Doc/skill traps.** `silent-failure-traps` applies to the new gates: a scenario step
   whose input is sent before the prompt is dropped, and an expectation another step
   already printed makes a command that never ran pass.
@@ -832,7 +844,10 @@ Plus the existing suites must stay green on all three arches at every phase
    include the inode, so two files' pages at one offset shared an entry — not to be
    *enabled*. Residual questions: is a per-process writable `.data`/`.got` for each DSO
    acceptable (it is the standard cost, and it caps how much a `.so` actually saves); and
-   is the first-touch race worth joining in-flight fills to remove?
+   is the first-touch race worth joining in-flight fills to remove? **Done in Phase 5**:
+   `park_page`/`release_parked` join a fill already in flight, so two lives started together
+   share. Residual: the joining is x86_64-measured only, and it is a wait C MINIX does not
+   have (§8).
 2. **Rust `std` strategy** (Phase 4): dynamic libc + static std, or dynamic `libstd`? Not
    decidable until Phase 3 costs the C ABI surface.
 3. **Main program PIE or not?** Non-PIE is simpler (no `RELATIVE` in the main, fixed

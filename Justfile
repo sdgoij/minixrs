@@ -375,9 +375,9 @@ test-dynlink-x86 boot-timeout="40": dynlink-x86
 # the dynamic image, runs `/bin/dynclib hold | /bin/dynclib hold` (two lives of the
 # same dynamic image, `libc.so` mapped by the loader in each), then walks both
 # processes' page tables from outside the guest and compares the frames behind the
-# object's pages. It is a probe and not a gate: as first run it reports FAIL, and
-# the failure is the finding (`DYNAMIC_LINKING.md` §7 Phase 5 says what it means
-# and where the cause is).
+# object's read-only pages. The two lives start together, which is the case that needs
+# VM to join a fill already in flight; it is a probe rather than a smoke gate because it
+# drives QEMU itself, so run it when VM's file fault path or the loader changes.
 probe-dso-share-x86: dynlink-x86
     DYNLINK_BINS='/libexec/ld.so=target/x86_64-pc-minix/release/ldso;/lib/libdyn.so=target/dynlink/x86/libdyn.so;/lib/libdyn2.so=target/dynlink/x86/libdyn2.so;/bin/dynhello=target/dynlink/x86/dynhello;/lib/libc.so=target/dynlink/x86/libc.so;/bin/dynclib=target/dynlink/x86/dynclib' just build-x86
     mkdir -p target/images/x86_64-pc-minix
