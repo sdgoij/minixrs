@@ -10,24 +10,24 @@ Produces, under `target/dynlink/<arch>/`:
   than the `minix-libc` rlib, so every libc symbol it calls is resolved by the
   loader at run time.
 
-Both are x86_64-only, like the loader itself (D1 of `DYNAMIC_LINKING.md`).
-Usage: python tools/build-dynlibc.py [x86]
+Usage: python tools/build-dynlibc.py [x86|riscv64|aarch64]
 
 Three things about the build are not obvious:
 
-* The shared object needs `core` and `alloc` built *position-independent*. The
-  minix target's sysroot `libcore` is not, and the link fails with
-  `R_X86_64_64 cannot be used against local symbol` until `-Z build-std` rebuilds
-  them under a PIC target — which is why `tools/minix-dyn-target/` exists rather
-  than a `-C` flag: the target's `crt_static_allows_dylibs` is also what stops
-  rustc from dropping the `cdylib` crate type outright
-  (`rustc_session/src/output.rs::invalid_output_for_target`).
+* The shared object is built for the arch's `-elf` triple — a target of the
+  fork's own (`compiler/rustc_target/src/spec/targets/*_minix_elf.rs`), which
+  differs from the executable one in being `pic` and allowing dylibs. Neither is
+  a flag that could be passed instead: what a `cdylib` must not contain is the
+  absolute relocations of the precompiled `core`/`alloc`, and those come from the
+  target's sysroot, so the target is what has to be PIC. `tools/rust-config.py`
+  lists these triples with `no-std = true`, so their sysroots hold `core` and
+  `alloc` and nothing else — all this object links.
 * `--features so` gives the object the `panic` lang item a final artifact needs.
 * `link-arg=--soname=libc.so` is what makes the program's `DT_NEEDED` the name the
   loader searches for: `/lib/libc.so`.
 
-Prerequisites: a nightly cargo with `rust-src` (for `build-std`), the fork's
-stage1 compiler and an LLD (`just bootstrap`), and clang on PATH.
+Prerequisites: the fork's stage1 compiler and an LLD (`just bootstrap`), and
+clang on PATH.
 """
 
 from __future__ import annotations
@@ -47,28 +47,20 @@ from lld import find_lld  # noqa: E402
 
 INTERP = "/libexec/ld.so"
 OUT = ROOT / "target" / "dynlink"
-# The `cdylib` build gets a cargo target directory of its own: `-Z build-std`
-# builds a whole sysroot, and keeping it here keeps those PIC objects out of
-# `target/<triple>`, which the static userland is built from (D2).
-BUILD_DIR = ROOT / "target" / "dynlibc"
-
-
-def dyn_target(arch: Arch) -> pathlib.Path:
-    """The PIC target spec for `arch`.
-
-    One JSON per target, named after the arch's triple — a JSON spec cannot
-    inherit, so each carries the whole target, and the name is what makes
-    cargo's build directory for it predictable (the object's path below depends
-    on that name).
-    """
-    path = ROOT / "tools" / "minix-dyn-target" / f"{arch.triple}-dyn.json"
-    if not path.is_file():
-        sys.exit(f"error: no PIC target spec for {arch.name} at {path}")
-    return path
 
 # What cargo names the object, before it is given the name its soname declares.
 CRATE_SO = "libminix_libc.so"
 DSO = "libc.so"
+
+
+def dyn_triple(arch: Arch) -> str:
+    """The PIC triple for `arch`, whose sysroot holds `core` and `alloc`.
+
+    The `-elf` suffix is what the fork's target list and `tools/rust-config.py`
+    agree on — see the comment there for why it is not `-dyn` — and cargo's build
+    directory for it follows from the name.
+    """
+    return f"{arch.triple}-elf"
 
 
 def find_stage1_rustc() -> "pathlib.Path | None":
@@ -97,22 +89,19 @@ def run(cmd: list[object], env: "dict | None" = None) -> int:
 def build(arch: Arch, rustc: pathlib.Path, lld: pathlib.Path) -> int:
     work = OUT / arch.name
     work.mkdir(parents=True, exist_ok=True)
-    target = dyn_target(arch)
+    triple = dyn_triple(arch)
 
-    # Cargo drives the object's link so it can find the sysroot it just built
-    # (`target/dynlibc/.../build/core/<hash>/out`) instead of the path being
-    # spelled out here — it is a cargo-internal detail. The linker is passed
-    # explicitly for the same reason as everywhere else: the target spec asks for
-    # `lld` on PATH, which is not the LLD the rest of the build uses.
-    env = {**os.environ, "CARGO_TARGET_DIR": str(BUILD_DIR)}
+    # The stage1 compiler is what has this target built in and a sysroot for it,
+    # so it is the RUSTC here as it is in every other recipe. Cargo drives the
+    # object's link so the linker can be passed explicitly — the target spec
+    # names `lld` on PATH, which is not the LLD the rest of the build uses.
+    env = {**os.environ, "RUSTC": str(rustc)}
     so = [
-        "cargo", "+nightly", "rustc",
-        "-Z", "json-target-spec",
-        "-Z", "build-std=core,alloc",
+        "cargo", "rustc",
         "--release",
         "-p", "minix-libc",
         "--features", "so",
-        "--target", str(target),
+        "--target", triple,
         "--crate-type", "cdylib",
         "--",
         "-C", f"linker={lld}",
@@ -121,7 +110,7 @@ def build(arch: Arch, rustc: pathlib.Path, lld: pathlib.Path) -> int:
     if run(so, env=env) != 0:
         return 1
 
-    built = BUILD_DIR / target.stem / "release" / CRATE_SO
+    built = ROOT / "target" / triple / "release" / CRATE_SO
     if not built.is_file():
         print(f"error: {built} was not produced", file=sys.stderr)
         return 1

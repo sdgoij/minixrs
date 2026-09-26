@@ -35,10 +35,12 @@ toolchain this has to extend), `.agents/skills/minix-kernel-boundary` and
   **classic non-PIE first** progression so each phase adds exactly one mechanism.
 - **wasm32 is out of scope** — exec there is host module instantiation and there are no
   faults to fault on (`ARCH_WASM32.md`). This is a three-arch project.
-- **The toolchain fork was not needed.** The long pole was expected to be a dynamic/PIC
-  variant of the `*-minix` targets in `rust/`, but a JSON target plus `-Z build-std`
-  carries Phases 0–3 (§6.5). The fork's static target is untouched, so static stays
-  exactly what it was (D2).
+- **The toolchain fork carries the PIC targets after all — and the static path is untouched.**
+  Phases 0–3 first ran on a JSON target plus `-Z build-std`, which needed a nightly; the targets
+  are now the fork's own `*-minix-elf` triples, built by the same stage1 compiler as the rest of
+  the port, with `no-std` sysroots holding the PIC `core`/`alloc` a shared object links (§6.5).
+  The *executable* specs are byte-for-byte what they were, so static stays exactly what it was
+  (D2), and no artifact in the tree needs a nightly.
 - **Phase 3 is a dynamic C library.** `minix-libc` builds as `libc.so`, and a C program
   linked against it runs — which needed the loader to place thread-local storage, since
   the library has `#[thread_local]` statics of its own (§6.6, D8).
@@ -406,22 +408,29 @@ by a toolchain an ordinary image build must not depend on, so they go in the way
   cdylib` — and three things had to be arranged for that to work
   (`tools/build-dynlibc.py`):
 
-  1. **A PIC/`cdylib` target: `tools/minix-dyn-target/x86_64-pc-minix-dyn.json`.**
-     `relocation-model: pic` and `dynamic-linking: true`, plus
-     `crt-static-allows-dylibs: true` — without that last flag rustc *silently drops* the
-     `cdylib` crate type when `crt-static-default` is on, which is what the minix target
-     sets (`rustc_session/src/output.rs::invalid_output_for_target`): the object was built
-     as an rlib and no `.so` appeared. The target also **drops** the built-in minix
-     target's `pre_link_args --image-base=0x1000000`: an object is mapped at
-     `slot + p_vaddr`, so a non-zero link-time base would put it that far past the slot
-     reserved for it — `rtld.rs` reserves the object's *highest* vaddr
-     (`image_extent`'s `hi`) rather than its extent for the same reason.
-  2. **`-Z build-std=core,alloc`.** The target's sysroot `libcore` is not position
-     independent, and the link fails with `R_X86_64_64 cannot be used against local
-     symbol` until `build-std` rebuilds it under the PIC target. That, and not a fork, is
-     what makes the toolchain the long pole: the fork's static target is never touched
-     (D2), and the object's `core` is built into `target/dynlibc/` rather than into the
-     sysroot the static userland links against.
+  1. **A PIC/`cdylib` target of the fork's own: the `-elf` triples**
+     (`compiler/rustc_target/src/spec/targets/*_minix_elf.rs`, registered in
+     `rustc_target/src/spec/mod.rs`). `relocation-model: pic` and
+     `dynamic-linking: true`, plus `crt-static-allows-dylibs: true` — without that last
+     flag rustc *silently drops* the `cdylib` crate type when `crt-static-default` is on,
+     which is what the minix target sets
+     (`rustc_session/src/output.rs::invalid_output_for_target`): the object was built as an
+     rlib and no `.so` appeared. The target also **drops** the built-in minix target's
+     `pre_link_args --image-base=0x1000000`: an object is mapped at `slot + p_vaddr`, so a
+     non-zero link-time base would put it that far past the slot reserved for it —
+     `rtld.rs` reserves the object's *highest* vaddr (`image_extent`'s `hi`) rather than
+     its extent for the same reason. **The suffix is `-elf` and not `-dyn`** for a reason
+     worth knowing before "fixing" it (§8).
+  2. **That target's sysroot holds a PIC `core`/`alloc`, and that is *why* it has to be a
+     target.** A `-C relocation-model=pic` on the crate cannot fix the *precompiled*
+     `core`: the link fails with `R_X86_64_64 cannot be used against local symbol` until
+     the `core` it links against is PIC. `tools/rust-config.py` therefore lists the `-elf`
+     triples in `config.toml` **with `no-std = true`**, which makes bootstrap build those
+     two crates and no std into their sysroots — 7 files where the static target has 51.
+     That is the set `-Z build-std=core,alloc` used to produce, now built by the same
+     stage1 compiler as everything else, with no nightly and no separate
+     `CARGO_TARGET_DIR`. Rows 1–3 are therefore no longer a toolchain the port *lacks*;
+     `just bootstrap` (and the pinned CI toolchain release) produce them.
   3. **`--features so` and `link-arg=--soname=libc.so`.** A `cdylib` is a final artifact
      and nothing downstream supplies the `panic` lang item, so the feature adds one
      (`crates/minix-libc/src/lib.rs`); the soname is what makes the program's `DT_NEEDED`
@@ -580,9 +589,9 @@ correct by construction rather than measured.
 
 - `minix-libc` builds as `libc.so` with a soname, so **C programs** link dynamically —
   which is where `bash` could eventually shrink.
-- Building it needed a PIC/`cdylib` target and `build-std`; the toolchain fork was not
-  needed after all (§6.5). The loader gained single-module TLS (§6.6, D8) and the
-  loader-defined symbols the object leaves undefined.
+- Building it needed a PIC/`cdylib` target, which first came from a JSON spec plus
+  `-Z build-std` and is now the fork's own `-elf` triple (§6.5). The loader gained
+  single-module TLS (§6.6, D8) and the loader-defined symbols the object leaves undefined.
 - Three things the loader turned out to assume, found by building a real library against
   it rather than a two-function test object (each is now a fixed bug, recorded here
   because the same assumptions are easy to reintroduce):
@@ -684,10 +693,12 @@ Three things follow, and each is enough on its own:
 
 Against that, the cost is exactly what Phases 0–3 avoided. A `dylib` cannot be built for
 the minix target at all — `cannot produce dylib for minix-std as the target
-x86_64-pc-minix does not support these crate types` — so it needs either the fork's target
-spec (`dynamic_linking: true`, `crt_static_allows_dylibs`) or the whole userland build moved
-onto a JSON target with `-Z build-std`, which is every `just build-*`, the image build and
-the stage1-verification flow. Then: the `panic` lang item in the new object (the same
+x86_64-pc-minix does not support these crate types` — and the `-elf` targets Phases 0–3
+added are the *loader's* side of that, not the userland's: a Rust dylib needs the userland
+itself built for a spec with `dynamic_linking: true` and `crt_static_allows_dylibs`, which
+is `relocation_model: pic`, so every existing binary changes with it — or a second sysroot
+for the whole userland, the image build and the stage1-verification flow included. Then:
+the `panic` lang item in the new object (the same
 problem Phase 3's `cdylib` had), `-C prefer-dynamic` plus `PT_INTERP` and the loader on
 *every* userland binary, and the Rust-dylib caveats — the ABI is pinned to one compiler
 build, the symbols are mangled and hashed, and only the non-inlined items are shared at all.
@@ -860,6 +871,17 @@ Gate: `just test-dynlink-riscv64` and `just test-dynlink-aarch64`, the same arch
   distinct; the whole line then arrives and runs, which is what `tools/smoke/dyn.tsv`'s short
   commands never exposed. A truncated line still *runs*, so a gate that checks only that
   something happened passes on a mangled command — the echo has to be checked whole.
+- **The shared-object targets are `-elf`, not `-dyn`, and the reason is cc-rs.** They
+  first landed as `<triple>-dyn`, which `just bootstrap` rejected before it built anything:
+  `error occurred in cc-rs: unknown environment/ABI `dyn` in target
+  `aarch64-unknown-minix-dyn``. `bootstrap` asks cc-rs for a C compiler for *every* target
+  in `config.toml` (`utils/cc_detect.rs::fill_compilers`), and cc-rs parses a four-component
+  triple's last component as an environment/ABI, refusing one it does not know
+  (`cc-rs/src/target/parser.rs::parse_envabi`). `-elf` is the one it maps to *no*
+  environment and *no* ABI, so the name is the executable triple plus a suffix and nothing
+  else, matching the fork's existing `*-none-elf` spelling; `-gnu` would parse but claims an
+  ABI this target has no glibc for. What the suffix may not do is vary the *OS*: the port's
+  crates are `#[cfg(target_os = "minix")]`, so `minix` has to stay the OS component.
 - **Doc/skill traps.** `silent-failure-traps` applies to the new gates: a scenario step
   whose input is sent before the prompt is dropped, and an expectation another step
   already printed makes a command that never ran pass.
@@ -905,13 +927,18 @@ Plus the existing suites must stay green on all three arches at every phase
    `park_page`/`release_parked` join a fill already in flight, so two lives started together
    share. Residual: the joining is measured on x86_64 and riscv64 only (not aarch64), and it
    is a wait C MINIX does not have (§8).
-2. **Rust `std` strategy** (Phase 4): dynamic libc + static std, or dynamic `libstd`? Not
-   decidable until Phase 3 costs the C ABI surface.
+2. ~~**Rust `std` strategy** (Phase 4): dynamic libc + static std, or dynamic `libstd`?~~
+   **Answered by dropping Phase 4.** Phase 3 costed the C ABI surface and `tools/rc-cost.py`
+   showed nothing in the port is shaped like a `libstd`, so std stays static and the shared
+   object is the C library alone.
 3. **Main program PIE or not?** Non-PIE is simpler (no `RELATIVE` in the main, fixed
    address as today) but a PIE main is the modern shape and gives the loader a reason to
-   need `AT_BASE`. Recommend non-PIE through Phase 1.
-4. **`ps_strings`/`AT_SUN_EXECNAME`**: skip (no `ps`). Confirm nothing in the port's
-   `std` PAL wants them.
+   need `AT_BASE`. Recommend non-PIE through Phase 1. **As built: non-PIE** — the main is
+   still `ET_EXEC` at `0x01000000` (D5) and `AT_BASE` is unused, so this stays an option the
+   plan left open rather than a decision that was taken.
+4. **`ps_strings`/`AT_SUN_EXECNAME`**: skip (no `ps`). **Confirmed**: neither name, nor
+   `AT_PAGESZ`, appears anywhere in `crates/` or the minix `std` PAL, so there is no consumer
+   to give them to (`AT_PAGESZ` would otherwise be the first auxv entry worth passing, D9).
 5. **Where does the loader live when the root FS is not mounted?** The boot binaries come
    from the initramfs; confirm the loader must be in **both** the initramfs and the
    MinixFS image, or only the latter (early execs happen before `mount_root`).
@@ -947,15 +974,16 @@ Dynamic tags needed: `DT_NEEDED`, `DT_STRTAB`/`DT_STRSZ`/`DT_SYMTAB`/`DT_SYMENT`
 
 ## Appendix B — bookkeeping
 
-- `README.md` "Project Structure": add `crates/ldso`.
-- `PORTING_PLAN.md`: a "Dynamic linking" phase entry pointing at this file.
+- `README.md` "Project Structure": add `crates/ldso` (**done**).
+- `PORTING_PLAN.md`: a "Dynamic linking" phase entry pointing at this file (**done**, as a
+  status entry rather than a phase: the work is a track of its own and Phase 4 was dropped).
 - `Justfile`: `dynlink-x86` / `test-dynlink-x86` (**done**); `dynlink-riscv64` /
   `dynlink-aarch64` and their `test-` recipes (**done**, Phase 7, on the same
   `tools/smoke/dyn.tsv`); `probe-dso-share-x86` and `probe-dso-share-riscv64` (**done**,
   Phase 5's measurement — not in `test-arches`, see §9; `--arch` selects the walk, and
   aarch64's is still owed, §7 Phase 5).
 - `.agents/skills/minix-boot-process`: a note that a dynamic exec enters `ld.so` first —
-  a future boot-chain reader will otherwise conclude the wrong process started.
+  a future boot-chain reader will otherwise conclude the wrong process started (**done**).
 - Any `.rules` addition (per the hygiene policy, in the PR description, not inline). Two
   candidates from Phase 0: "the exec path has no `e_type` check while `parse_elf_header`
   does — don't conflate them", and "a new directory in `build_minixfs` renumbers every
