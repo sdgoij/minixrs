@@ -1253,9 +1253,12 @@ fn start_file_page(va: u64, fault: &Fault) -> PageOutcome {
     // Cache hit: map the existing frame with the region's permissions and skip allocation + FDIO.
     // The cache holds a PhysBlock reference on the frame; bump it for this process's mapping so
     // teardown (pb_unref) leaves the cache's reference and the frame behind.
+    //
+    // Keyed by the file's identity, not by `(dev, file_off)`: `dev` is one filesystem's number and
+    // `file_off` is a *file* offset, so the device-offset form would share one entry between every
+    // file's page 0 (see `vm/cache.rs`).
     if cacheable
-        && let Some((cached_phys, cached_pb)) =
-            cache::cache_find(dev, file_off, Some(ino), file_off, true)
+        && let Some((cached_phys, cached_pb)) = cache::cache_find_byino(dev, ino, file_off, true)
     {
         let mut pt_flags = kernel::pagetable::MAP_USER;
         if exec {
@@ -1412,14 +1415,11 @@ fn finish_page(state: &PageState, tail_zero: bool) -> bool {
     if state.cacheable
         && let Some(pb_idx) = pb_idx
     {
-        cache::cache_insert(
-            state.dev,
-            state.file_off,
-            state.ino,
-            state.file_off,
-            state.pa,
-            pb_idx,
-        );
+        // The file form, so a page of one file cannot be looked up as another's. It also
+        // accepts device 0, which a guard copied from C's `NO_DEV` would refuse: 0 is a
+        // device number this port really uses, so that guard would make a whole
+        // filesystem's file pages silently uncacheable.
+        cache::cache_insert_byino(state.dev, state.ino, state.file_off, state.pa, pb_idx);
     }
     if let Some(vmp) = unsafe { proc::vmproc_lookup(state.fault.ep) }
         && let Some(r) = vmp.vm_regions.find_mut(state.page_addr)
@@ -3053,7 +3053,7 @@ fn do_mapcache(msg: &mut Message) -> i32 {
         let i = i as u64;
         let off = dev_offset + i * PAGE_SIZE;
         let Some((phys, _)) =
-            cache::cache_find(dev, off, Some(ino), ino_offset + i * PAGE_SIZE, true)
+            cache::cache_find_bydev(dev, off, Some(ino), ino_offset + i * PAGE_SIZE, true)
         else {
             return ENOENT;
         };
@@ -3165,7 +3165,7 @@ fn do_setcache(msg: &mut Message) -> i32 {
             Some(idx) if crate::vm::pb::pb_get(idx).is_some_and(|b| b.refcount == 1) => idx,
             _ => return EFAULT,
         };
-        cache::cache_insert(dev, off, ino, ino_off, phys, pb);
+        cache::cache_insert_bydev(dev, off, ino, ino_off, phys, pb);
     }
     OK
 }

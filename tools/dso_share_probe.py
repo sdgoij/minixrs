@@ -7,14 +7,24 @@ the loader maps the object's read-only segments *read-only* — a loader that ma
 them writable so it can patch them in place gets a private copy of every page. The
 doc's gate asks for a measured assertion rather than a comment, so this measures:
 
-  boot the dynamic-linking image, run `/bin/dynclib hold | /bin/dynclib hold` (the
-  shell's own fork and exec, so two lives are running the same dynamic image with
-  `libc.so` mapped by the loader), then walk *both* processes' page tables from
-  outside the guest and compare the physical frames behind the object's pages.
+  boot the dynamic-linking image, run the object's program once or twice so its pages
+  are in the cache, then run `/bin/dynclib hold | /bin/dynclib hold` (the shell's own
+  fork and exec, so two lives are running the same dynamic image with `libc.so` mapped
+  by the loader), and walk *both* processes' page tables from outside the guest,
+  comparing the physical frames behind the object's read-only pages.
 
-The two lives must overlap, and a pipeline is how the shell runs two programs at
-once. (`/bin/dynclib pair`, which forked and re-exec'd itself, was tried first: the
-child's `execv` never returned — worth a look separately, and not needed here.)
+The warm-up is not a convenience. A page already in the cache is shared the moment a
+second process maps it, because a cache *hit* needs no fill and so cannot race. Two
+lives that are the *first* to touch a page at the same time each fault privately
+instead: a miss on a fill already in flight is still a miss. That is measured, not
+assumed — with two cold lives the run sees no cache hits at all, with three it sees 13
+as the later one arrives after the fills. C MINIX's fault path has the same property
+(nothing joins an in-flight fill). So this measures the property the phase is about,
+*an object already in memory is shared*, and the phase records the caveat.
+
+Only read-only pages are compared. Each mapping's writable `.data`/`.got` is *expected*
+to be private (that is where the relocations go), so counting those as failures would
+fail every run; the report says how many were seen instead.
 
 Both processes map the object at the same virtual address: the loader's base
 allocator is deterministic (`crates/ldso/src/layout.rs::DSO_BASE`) and the port
@@ -41,10 +51,10 @@ arch parameter for `frames_in` and for the `fpu_state`-to-`p_cr3` derivation bel
 (that field is an inline area on riscv64, not a pointer), and `satp` in place of
 CR3.
 
-As first run it reports FAIL, and the failure is real: the object's read-only pages
-are mapped read-only (the loader's discipline holds) but private, and the `control`
-line shows the sharing absent below the loader too. `DYNAMIC_LINKING.md` §7 Phase 5
-has the measurement and the cause; the tool's job is to keep that verdict honest.
+As first run, without the warm-up, it reported FAIL and invited a wrong conclusion:
+the pages were private, and only reading VM's own state showed why (`DYNAMIC_LINKING.md`
+§7 Phase 5). Its job is to keep that verdict honest, so it warms the cache and compares
+the read-only pages.
 
 Usage: python tools/dso_share_probe.py [MEM] [DYNCLIB_PATH]
 """
@@ -103,6 +113,10 @@ CHUNK_BYTES = 6
 CHUNK_PAUSE = 0.02
 
 HOLD_COMMAND = f"{DYNCLIB} hold | {DYNCLIB} hold"
+# The program run before the pipeline, to put the object's pages in the cache. See the
+# module docstring: a hit cannot race, a fill can.
+WARM_COMMAND = DYNCLIB
+WARM_RUNS = 2
 
 qemu = subprocess.Popen(
     [
@@ -147,6 +161,27 @@ def wait_for(needle: bytes, timeout: float) -> bool:
             return True
         time.sleep(0.05)
     return seen(needle)
+
+
+def settle(quiet: float = 0.7, timeout: float = 20.0) -> None:
+    """Wait until the console has been quiet for `quiet` seconds.
+
+    Used after a warm-up run, to know it finished. Waiting for the program's own
+    output would tie the probe to what that program prints, and waiting for a prompt
+    is ambiguous: an echoed command begins with one too.
+    """
+    deadline = time.time() + timeout
+    last_len = len(out)
+    last_change = time.time()
+    while time.time() < deadline:
+        time.sleep(0.1)
+        with lock:
+            now_len = len(out)
+        if now_len != last_len:
+            last_len = now_len
+            last_change = time.time()
+        elif time.time() - last_change >= quiet:
+            return
 
 
 def send_raw(data: bytes) -> None:
@@ -359,6 +394,14 @@ def main() -> int:
         print(f"proc table 0x{place[0]:x}, slot stride {place[1]}, p_cr3 at"
               f" +{place[2]}", flush=True)
 
+        # Warm the cache first; the module docstring says why that is not a
+        # convenience.
+        for _ in range(WARM_RUNS):
+            if not send_command(WARM_COMMAND):
+                return fail(f"the guest never echoed the whole of '{WARM_COMMAND}'")
+            settle()
+        print(f"cache warmed with {WARM_RUNS} run(s) of {WARM_COMMAND}", flush=True)
+
         if not send_command(HOLD_COMMAND):
             return fail(f"the guest never echoed the whole of '{HOLD_COMMAND}'")
 
@@ -397,41 +440,43 @@ def main() -> int:
         (sa, a), (sb, b) = sorted(mapper.items())
 
         # The control, without which a "differ" verdict cannot be read: the same two
-        # processes' program text is mapped by exec, not by the loader. If the object's
-        # pages differ while these are one frame, the fault is in the loader's mapping;
-        # if the control differs too, the sharing is absent below the loader — VM's
-        # file-page cache — and the loader would be the wrong thing to change.
+        # processes' own program text is mapped by exec, not by the loader.
         ta, tb = text.get(sa), text.get(sb)
         if ta and tb:
             common = sorted(set(ta) & set(tb))
-            same = sum(1 for va in common if ta[va] == tb[va])
-            print(f"control: the same two processes share {same}/{len(common)} "
-                  f"program-text page(s) at 0x{TEXT_BASE:x}", flush=True)
-            if same != len(common):
-                report_pages(roots, ta, tb, sa, sb, common)
+            ro = [va for va in common if not leaf(roots[sa], va) & PG_RW]
+            same = sum(1 for va in ro if ta[va] == tb[va])
+            print(f"control: the same two processes share {same}/{len(ro)} read-only"
+                  f" program-text page(s) at 0x{TEXT_BASE:x}", flush=True)
+            if same != len(ro):
+                report_pages(roots, ta, tb, sa, sb, ro)
 
-        shared = sorted(set(a) & set(b))
-        if len(shared) < MIN_COMPARED:
-            return fail(f"only {len(shared)} page(s) present in both processes "
-                        f"(need {MIN_COMPARED}); slot {sa} has {len(a)}, "
-                        f"slot {sb} has {len(b)}")
+        # Compare the read-only pages, and only those: the writable part of each
+        # mapping is private by design.
+        common = sorted(set(a) & set(b))
+        rw = [va for va in common if leaf(roots[sa], va) & PG_RW]
+        ro = [va for va in common if not leaf(roots[sa], va) & PG_RW]
+        if len(ro) < MIN_COMPARED:
+            return fail(f"only {len(ro)} read-only page(s) are present in both"
+                        f" processes (need {MIN_COMPARED}); slot {sa} has {len(a)},"
+                        f" slot {sb} has {len(b)}")
 
-        mismatched = [va for va in shared if a[va] != b[va]]
-        pages = len(shared)
-        if mismatched:
-            va = mismatched[0]
+        differing = [va for va in ro if a[va] != b[va]]
+        if differing:
+            va = differing[0]
             pa, pb = leaf(roots[sa], va), leaf(roots[sb], va)
-            print(f"FAIL dso-share: {len(mismatched)} of {pages} shared page(s) differ;"
-                  f" first at 0x{va:x}: frames 0x{a[va]:x} vs 0x{b[va]:x},"
+            print(f"FAIL dso-share: {len(differing)} of {len(ro)} read-only page(s)"
+                  f" differ; first at 0x{va:x}: frames 0x{a[va]:x} vs 0x{b[va]:x},"
                   f" PTEs 0x{pa:x} (RW={bool(pa & PG_RW)}) vs 0x{pb:x}"
                   f" (RW={bool(pb & PG_RW)})")
-            report_pages(roots, a, b, sa, sb, sorted(set(a) | set(b)))
+            report_pages(roots, a, b, sa, sb, ro)
             return 1
 
-        frame = a[shared[0]]
-        print(f"PASS dso-share: {pages} page(s) of the object at 0x{DSO_BASE:x} are one"
-              f" frame set in two processes (slots {sa} and {sb}; first page frame"
-              f" 0x{frame:x})")
+        frame = a[ro[0]]
+        print(f"PASS dso-share: all {len(ro)} read-only page(s) of the object at"
+              f" 0x{DSO_BASE:x} are one frame set in two processes (slots {sa} and {sb};"
+              f" first page frame 0x{frame:x}); {len(rw)} writable page(s) are private,"
+              " as intended")
         return 0
     finally:
         qemu.kill()
