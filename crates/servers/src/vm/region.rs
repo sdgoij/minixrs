@@ -4,10 +4,27 @@
 //! For Phase 2, uses a flat array of regions per process (no AVL tree).
 
 /// Maximum number of regions per process.
-/// Boot processes have 2-3 (code, data/brk, stack). Allow room for mmap.
-pub const MAX_REGIONS: usize = 16;
+///
+/// Measured, not guessed. An address space starts with **8** before any shared object is
+/// mapped: `crates/ldso`'s two images (3 `PT_LOAD` regions each) plus the stack and the
+/// heap. A shared object costs **one region per `PT_LOAD`** — 4 for an LLD `-shared`
+/// object (`R`, `R E`, `RW`, `RW`, each on a page of its own) — so the old 16 held
+/// exactly two objects and refused a third (`DYNAMIC_LINKING.md` §7 Phase 2). This is
+/// twice that: `8 + 4n <= 32` leaves **6** objects, which is the slack a program with a
+/// library of its own needs.
+///
+/// Raising it is cheap because [`VirRegion`] carries no per-page state (see there); a
+/// 32-entry table is *smaller* than the 16-entry one was.
+pub const MAX_REGIONS: usize = 32;
 
 /// A single contiguous virtual memory region with physical backing.
+///
+/// No per-page frame list. One was here — 16 frames inline, 128 of the struct's 192 bytes
+/// — written in *fault* order while its only reader indexed it by page *offset*, so the
+/// two agreed only when a region's pages happened to fault in address order; and nothing
+/// called that reader at all. A fault puts its frame in the page table, which is where
+/// the mapping lives; what the region needs is [`npages`]. Dropping the array takes a
+/// region from 192 bytes to 64, which is what makes [`MAX_REGIONS`] affordable.
 #[derive(Debug, Clone, Copy)]
 #[repr(C)]
 pub struct VirRegion {
@@ -17,13 +34,12 @@ pub struct VirRegion {
     pub length: u64,
     /// Region flags (VR_WRITABLE, VR_ANON, VR_DIRECT, VR_PRESENT, VR_FILE).
     pub flags: u32,
-    /// Number of physical pages backing this region.
-    pub npages: u32,
-    /// Physical addresses of backing pages (up to MAX_PHYS_PAGES).
+    /// How many of this region's pages have been faulted in.
     ///
-    /// For anonymous regions with lazy allocation, phys_pages may be
-    /// mostly zero until page faults trigger allocation.
-    pub phys_pages: [u64; MAX_PHYS_PAGES],
+    /// Reported by `VMIW_REGION` as the region's backing pages (`tools/exec_loop_mem.py`
+    /// checks the total does not grow across execs). For a lazy region it counts the
+    /// pages *present*, which is what makes it a number distinct from `length`.
+    pub npages: u32,
     /// For VR_FILE regions: device of the backing file (from FDLOOKUP).
     pub dev: u32,
     /// For VR_FILE regions: inode number of the backing file.
@@ -45,10 +61,6 @@ pub struct VirRegion {
     /// allocation; teardown must not return these frames to the allocator.
     pub phys_base: u64,
 }
-
-/// Maximum physical pages tracked inline per region.
-/// 16 pages = 64 KB; larger regions page-fault and add entries dynamically.
-pub const MAX_PHYS_PAGES: usize = 16;
 
 // Region flags
 
@@ -95,7 +107,6 @@ impl VirRegion {
             length,
             flags,
             npages: 0,
-            phys_pages: [0u64; MAX_PHYS_PAGES],
             dev: 0,
             ino: 0,
             fd: -1,
@@ -112,7 +123,6 @@ impl VirRegion {
             length,
             flags,
             npages: 0,
-            phys_pages: [0u64; MAX_PHYS_PAGES],
             dev: 0,
             ino: 0,
             fd: -1,
@@ -139,7 +149,6 @@ impl VirRegion {
             length,
             flags,
             npages: 0,
-            phys_pages: [0u64; MAX_PHYS_PAGES],
             dev,
             ino,
             fd,
@@ -179,33 +188,14 @@ impl VirRegion {
         self.vaddr < other.end() && other.vaddr < self.end()
     }
 
-    /// Record a physical page at the given virtual address offset.
-    /// Returns the index, or None if the array is full.
-    pub fn add_page(&mut self, _vaddr: u64, phys: u64) -> Option<usize> {
-        let idx = self.npages as usize;
-        if idx >= MAX_PHYS_PAGES {
-            return None;
-        }
-        self.phys_pages[idx] = phys;
+    /// Record that one more of this region's pages has been faulted in.
+    ///
+    /// A count and no frame: the frame was just written into the process's page table
+    /// by the caller, and that is where teardown reads it back from. (The inline array
+    /// this replaces kept the frames here, in fault order, while the only reader
+    /// indexed them by page offset — and had no callers.)
+    pub fn note_page(&mut self) {
         self.npages += 1;
-        Some(idx)
-    }
-
-    /// Find the physical page for a virtual address within this region.
-    pub fn phys_at(&self, addr: u64) -> Option<u64> {
-        if !self.contains(addr) {
-            return None;
-        }
-        let page_size: u64 = 4096;
-        let offset = (addr - self.vaddr) / page_size;
-        let idx = offset as usize;
-        if idx < MAX_PHYS_PAGES && idx < self.npages as usize {
-            let pa = self.phys_pages[idx];
-            if pa != 0 {
-                return Some(pa);
-            }
-        }
-        None
     }
 }
 
@@ -331,22 +321,15 @@ impl RegionList {
                 if new_r.end() >= r.end() {
                     self.take_into(&mut carved, slot);
                 } else {
-                    // Trim the head, and the pages with it: `phys_pages` is indexed
-                    // by the region's own page number, so the survivors move down.
+                    // Trim the head, and the faulted-page count with it.
                     let Some(r) = self.regions[slot].as_mut() else {
                         continue;
                     };
                     let cut = new_r.end() - r.vaddr;
-                    let pages = (cut / 4096) as usize;
+                    let pages = cut / 4096;
                     r.vaddr = new_r.end();
                     r.length -= cut;
                     r.npages = r.npages.saturating_sub(pages as u32);
-                    for j in 0..r.npages as usize {
-                        r.phys_pages[j] = r.phys_pages[j + pages];
-                    }
-                    for j in r.npages as usize..MAX_PHYS_PAGES {
-                        r.phys_pages[j] = 0;
-                    }
                 }
             } else {
                 // `new_r` starts inside this region: trim the tail.
@@ -406,13 +389,18 @@ mod tests {
     }
 
     #[test]
-    fn test_region_add_page() {
+    fn a_faulted_page_is_counted() {
         let mut r = VirRegion::new(0x1000, 0x4000, VR_ANON);
-        assert!(r.add_page(0x1000, 0x8000).is_some());
-        assert_eq!(r.npages, 1);
-        assert_eq!(r.phys_pages[0], 0x8000);
-        assert_eq!(r.phys_at(0x1000), Some(0x8000));
-        assert_eq!(r.phys_at(0x2000), None); // not added yet
+        assert_eq!(r.npages, 0);
+        r.note_page();
+        r.note_page();
+        assert_eq!(r.npages, 2);
+        // A count of pages present, not of pages the region could hold: a region larger
+        // than any inline array once held keeps counting.
+        for _ in 0..64 {
+            r.note_page();
+        }
+        assert_eq!(r.npages, 66);
     }
 
     #[test]

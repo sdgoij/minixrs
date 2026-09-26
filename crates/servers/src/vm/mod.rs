@@ -1038,7 +1038,7 @@ fn handle_pagefault_for(ep: i32, addr: u64, error_code: u32) {
         if let Some(vmp) = unsafe { proc::vmproc_lookup(ep) }
             && let Some(r) = vmp.vm_regions.find_mut(page_addr)
         {
-            r.add_page(page_addr, pa);
+            r.note_page();
         }
         unsafe {
             mem::sys_vmctl(ep, VMCTL_CLEAR_PAGEFAULT, 0);
@@ -1222,13 +1222,11 @@ fn map_cached_page(state: &PageState) -> bool {
         // MAP_SHARED writable regions map the shared frame read-write.
         pt_flags |= kernel::pagetable::MAP_WRITE;
     }
-    if crate::vm::vm_map_page_in(cr3, state.page_addr, phys, pt_flags) == 0
-        && crate::vm::pb::pb_ref(pb)
-    {
+    if crate::vm::vm_map_page_in(cr3, state.page_addr, phys, pt_flags) == 0 && pb::pb_ref(pb) {
         if let Some(vmp) = unsafe { proc::vmproc_lookup(state.fault.ep) }
             && let Some(r) = vmp.vm_regions.find_mut(state.page_addr)
         {
-            r.add_page(state.page_addr, phys);
+            r.note_page();
         }
         return true;
     }
@@ -1461,7 +1459,7 @@ fn finish_page(state: &PageState, tail_zero: bool) -> bool {
     if let Some(vmp) = unsafe { proc::vmproc_lookup(state.fault.ep) }
         && let Some(r) = vmp.vm_regions.find_mut(state.page_addr)
     {
-        r.add_page(state.page_addr, state.pa);
+        r.note_page();
     }
     true
 }

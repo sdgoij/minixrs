@@ -1,8 +1,8 @@
 /* The dynamic executable.
  *
  * A non-PIE `ET_EXEC` linked with `PT_INTERP` (`/libexec/ld.so`) and `DT_NEEDED`
- * (`libdyn.so`, `libdyn2.so`): its calls to `dyn_message` and `dyn_second` go
- * through a PLT/GOT the loader must resolve before `main` runs, and `dyn_pointer`
+ * (`libdyn.so`, `libdyn2.so`, `libdyn3.so`): its calls to `dyn_message` and `dyn_second`
+ * go through a PLT/GOT the loader must resolve before `main` runs, and `dyn_pointer`
  * is a variable it reads out of libdyn — a COPY, which the loader fills with the
  * object's bytes after applying the object's own `RELATIVE` fixup.
  *
@@ -16,10 +16,15 @@
  * in `libdyn.so` — one mapping of that file means one constructor call. It is what
  * makes "one file, one mapping" an assertion rather than a construction: a loader that
  * mapped the file once per `DT_NEEDED` spelling would run the initialiser more than
- * once. In this image it does not get that far — a third object does not fit the
- * address space, so the load dies instead (`tools/smoke/dyn.tsv`, and
- * `DYNAMIC_LINKING.md` §7 Phase 2 for the measurement) — and the field is a *number*
- * on purpose: every string this prints still comes from an object.
+ * once. (The phase notes in `DYNAMIC_LINKING.md` quote the gate line as it was then;
+ * `count=` and the fifth field are later.)
+ *
+ * The fifth, `dynlink-3-ok`, comes from `libdyn3.so`: a third object named by nothing
+ * but this program, so the line only appears if the address space had room for a
+ * program's *own* library on top of the two the loader needs. See `tools/libdyn3.c`.
+ *
+ * Both extra fields are the loader's to lose and neither is a fixed string on this side:
+ * the count is a number and the string is in an object.
  *
  * Its argument asks for a lifecycle to be exercised, and prefixes the line with
  * what happened, which is what makes each of the harness's steps distinct:
@@ -45,6 +50,7 @@ extern pid_t wait(int *status);
 extern int execv(const char *path, char *const argv[]);
 extern const char *dyn_message(void);
 extern const char *dyn_second(void);
+extern const char *dyn_third(void);
 extern const char *const dyn_pointer;
 extern int dyn_init_count(void);
 
@@ -124,6 +130,8 @@ int main(int argc, char **argv) {
     emit(dyn_pointer);
     write(1, " ", 1);
     emit(dyn_second());
+    write(1, " ", 1);
+    emit(dyn_third());
     write(1, " count=", 7);
     emit_int(dyn_init_count());
     write(1, "\n", 1);

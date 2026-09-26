@@ -361,7 +361,7 @@ test-bash-aarch64 boot-timeout="60":
 # deliberately not `BOOT_BINS`, so an image build never depends on them having
 # been built.
 test-dynlink-x86 boot-timeout="40": dynlink-x86
-    DYNLINK_BINS='/libexec/ld.so=target/x86_64-pc-minix/release/ldso;/lib/libdyn.so=target/dynlink/x86/libdyn.so;/lib/libdyn2.so=target/dynlink/x86/libdyn2.so;/bin/dynhello=target/dynlink/x86/dynhello;/lib/libc.so=target/dynlink/x86/libc.so;/bin/dynclib=target/dynlink/x86/dynclib' just build-x86
+    DYNLINK_BINS='/libexec/ld.so=target/x86_64-pc-minix/release/ldso;/lib/libdyn.so=target/dynlink/x86/libdyn.so;/lib/libdyn2.so=target/dynlink/x86/libdyn2.so;/lib/libdyn3.so=target/dynlink/x86/libdyn3.so;/bin/dynhello=target/dynlink/x86/dynhello;/lib/libc.so=target/dynlink/x86/libc.so;/bin/dynclib=target/dynlink/x86/dynclib' just build-x86
     @if grep -q 'dynlink' target/dynlink/x86/dynhello; then echo "!! /bin/dynhello contains a 'dynlink' string - the message cannot have come from a shared object" >&2; exit 1; fi
     @if grep -q 'No such file or directory' target/dynlink/x86/dynclib; then echo "!! /bin/dynclib contains the error message - it cannot have come from libc.so" >&2; exit 1; fi
     mkdir -p target/images/x86_64-pc-minix
@@ -384,7 +384,7 @@ dynlink-riscv64:
 # objects contain, on an errno read through the loader's TLS, and on the program's
 # own constructor, none of which depends on the instruction set.
 test-dynlink-riscv64 boot-timeout="60": dynlink-riscv64
-    DYNLINK_BINS='/libexec/ld.so=target/riscv64gc-unknown-minix/release/ldso;/lib/libdyn.so=target/dynlink/riscv64/libdyn.so;/lib/libdyn2.so=target/dynlink/riscv64/libdyn2.so;/bin/dynhello=target/dynlink/riscv64/dynhello;/lib/libc.so=target/dynlink/riscv64/libc.so;/bin/dynclib=target/dynlink/riscv64/dynclib' just build-riscv64
+    DYNLINK_BINS='/libexec/ld.so=target/riscv64gc-unknown-minix/release/ldso;/lib/libdyn.so=target/dynlink/riscv64/libdyn.so;/lib/libdyn2.so=target/dynlink/riscv64/libdyn2.so;/lib/libdyn3.so=target/dynlink/riscv64/libdyn3.so;/bin/dynhello=target/dynlink/riscv64/dynhello;/lib/libc.so=target/dynlink/riscv64/libc.so;/bin/dynclib=target/dynlink/riscv64/dynclib' just build-riscv64
     @if grep -q 'dynlink' target/dynlink/riscv64/dynhello; then echo "!! /bin/dynhello contains a 'dynlink' string - the message cannot have come from a shared object" >&2; exit 1; fi
     @if grep -q 'No such file or directory' target/dynlink/riscv64/dynclib; then echo "!! /bin/dynclib contains the error message - it cannot have come from libc.so" >&2; exit 1; fi
     @just _assert-qemu-version qemu-system-riscv64
@@ -398,7 +398,7 @@ dynlink-aarch64:
     python tools/build-dynlibc.py aarch64
 
 test-dynlink-aarch64 boot-timeout="60": dynlink-aarch64
-    DYNLINK_BINS='/libexec/ld.so=target/aarch64-unknown-minix/release/ldso;/lib/libdyn.so=target/dynlink/aarch64/libdyn.so;/lib/libdyn2.so=target/dynlink/aarch64/libdyn2.so;/bin/dynhello=target/dynlink/aarch64/dynhello;/lib/libc.so=target/dynlink/aarch64/libc.so;/bin/dynclib=target/dynlink/aarch64/dynclib' just build-aarch64
+    DYNLINK_BINS='/libexec/ld.so=target/aarch64-unknown-minix/release/ldso;/lib/libdyn.so=target/dynlink/aarch64/libdyn.so;/lib/libdyn2.so=target/dynlink/aarch64/libdyn2.so;/lib/libdyn3.so=target/dynlink/aarch64/libdyn3.so;/bin/dynhello=target/dynlink/aarch64/dynhello;/lib/libc.so=target/dynlink/aarch64/libc.so;/bin/dynclib=target/dynlink/aarch64/dynclib' just build-aarch64
     @if grep -q 'dynlink' target/dynlink/aarch64/dynhello; then echo "!! /bin/dynhello contains a 'dynlink' string - the message cannot have come from a shared object" >&2; exit 1; fi
     @if grep -q 'No such file or directory' target/dynlink/aarch64/dynclib; then echo "!! /bin/dynclib contains the error message - it cannot have come from libc.so" >&2; exit 1; fi
     @just _assert-qemu-version qemu-system-aarch64
@@ -418,14 +418,14 @@ test-dynlink-aarch64 boot-timeout="60": dynlink-aarch64
 # the two it has. aarch64 needs its read-only bit (`AP[2]`) handled differently from the
 # other two, so it is not a recipe yet.
 probe-dso-share-x86: dynlink-x86
-    DYNLINK_BINS='/libexec/ld.so=target/x86_64-pc-minix/release/ldso;/lib/libdyn.so=target/dynlink/x86/libdyn.so;/lib/libdyn2.so=target/dynlink/x86/libdyn2.so;/bin/dynhello=target/dynlink/x86/dynhello;/lib/libc.so=target/dynlink/x86/libc.so;/bin/dynclib=target/dynlink/x86/dynclib' just build-x86
+    DYNLINK_BINS='/libexec/ld.so=target/x86_64-pc-minix/release/ldso;/lib/libdyn.so=target/dynlink/x86/libdyn.so;/lib/libdyn2.so=target/dynlink/x86/libdyn2.so;/lib/libdyn3.so=target/dynlink/x86/libdyn3.so;/bin/dynhello=target/dynlink/x86/dynhello;/lib/libc.so=target/dynlink/x86/libc.so;/bin/dynclib=target/dynlink/x86/dynclib' just build-x86
     mkdir -p target/images/x86_64-pc-minix
     cp target/trampoline.elf target/images/x86_64-pc-minix/minix-x86.elf
     @just _assert-qemu-version qemu-system-x86_64
     python tools/dso_share_probe.py --arch x86
 
 probe-dso-share-riscv64: dynlink-riscv64
-    DYNLINK_BINS='/libexec/ld.so=target/riscv64gc-unknown-minix/release/ldso;/lib/libdyn.so=target/dynlink/riscv64/libdyn.so;/lib/libdyn2.so=target/dynlink/riscv64/libdyn2.so;/bin/dynhello=target/dynlink/riscv64/dynhello;/lib/libc.so=target/dynlink/riscv64/libc.so;/bin/dynclib=target/dynlink/riscv64/dynclib' just build-riscv64
+    DYNLINK_BINS='/libexec/ld.so=target/riscv64gc-unknown-minix/release/ldso;/lib/libdyn.so=target/dynlink/riscv64/libdyn.so;/lib/libdyn2.so=target/dynlink/riscv64/libdyn2.so;/lib/libdyn3.so=target/dynlink/riscv64/libdyn3.so;/bin/dynhello=target/dynlink/riscv64/dynhello;/lib/libc.so=target/dynlink/riscv64/libc.so;/bin/dynclib=target/dynlink/riscv64/dynclib' just build-riscv64
     @just _assert-qemu-version qemu-system-riscv64
     python tools/dso_share_probe.py --arch riscv64
 

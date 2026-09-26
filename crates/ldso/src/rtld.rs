@@ -113,6 +113,10 @@ enum LoadError {
     /// it is a file already loaded. Refused rather than mapped blind: a second mapping
     /// of one file is two copies of its data and a second run of its initialisers.
     CannotStat,
+    /// VM refused a segment's `mmap`. `EAGAIN` is the address space having no room for
+    /// another region, which is about the *process* rather than about the object; the
+    /// rest travel as the errno they are, because the loader cannot name them all.
+    Refused(i32),
     NoSpace,
     DtRel,
     Reloc(RelocError),
@@ -130,6 +134,14 @@ fn die_load(e: LoadError) -> ! {
         LoadError::TooManyObjects => die(b"ld.so: too many objects\n"),
         LoadError::CannotLoad => die(b"ld.so: cannot load DT_NEEDED\n"),
         LoadError::CannotStat => die(b"ld.so: cannot stat a DT_NEEDED\n"),
+        LoadError::Refused(e) if e == minix_std::EAGAIN => {
+            die(b"ld.so: no room in the address space for another object\n")
+        }
+        LoadError::Refused(e) => {
+            write_bytes(b"ld.so: VM refused a segment mapping (error ");
+            write_dec(e.unsigned_abs() as u64);
+            die(b")\n")
+        }
         LoadError::NoSpace => die(b"ld.so: no room for another object\n"),
         LoadError::DtRel => die(b"ld.so: PLT relocations are not RELA\n"),
         LoadError::Reloc(RelocError::BadSize(_)) => die(b"ld.so: malformed RELA table size\n"),
@@ -558,7 +570,7 @@ fn read_and_map(
             prot |= minix_rt::vmem::PROT_EXEC;
         }
         let r = unsafe {
-            minix_rt::vmem::mmap(
+            minix_rt::vmem::mmap_status(
                 va as *mut u8,
                 len as usize,
                 prot,
@@ -567,7 +579,10 @@ fn read_and_map(
                 off as i64,
             )
         };
-        if r.is_null() || r as u64 != va {
+        // VM's own reason, when it has one: a full region table is not a property of
+        // the image, and `MAP_FAILED` alone used to make the two look alike.
+        let r = r.map_err(LoadError::Refused)?;
+        if r as u64 != va {
             return Err(LoadError::NotObject);
         }
         // A `PT_LOAD`'s memory size can exceed its file size: the tail is the

@@ -82,7 +82,8 @@ fn vm_call(msg: &mut [u8; 64]) -> Result<(), i32> {
 /// type (MAP_*), `fd` is the file descriptor (-1 for anonymous), `offset`
 /// is the file offset.
 ///
-/// Returns the mapped address on success, [`MAP_FAILED`] on error.
+/// Returns the mapped address on success, [`MAP_FAILED`] on error. VM's reason for a
+/// failure is dropped; [`mmap_status`] is this call with that kept.
 ///
 /// # Safety
 ///
@@ -97,6 +98,40 @@ pub unsafe fn mmap(
     offset: i64,
 ) -> *mut u8 {
     #[cfg(target_os = "minix")]
+    {
+        match unsafe { mmap_status(addr, length, prot, flags, fd, offset) } {
+            Ok(mapped) => mapped,
+            Err(_) => MAP_FAILED,
+        }
+    }
+    #[cfg(not(target_os = "minix"))]
+    {
+        let _ = (addr, length, prot, flags, fd, offset);
+        MAP_FAILED
+    }
+}
+
+/// [`mmap`], keeping the errno VM replied with.
+///
+/// `MAP_FAILED` says only that something went wrong, and a caller that has to tell
+/// *which* thing needs this instead. The case that matters: `-EAGAIN` is the address
+/// space refusing another region (its table is full, `crates/servers/src/vm/region.rs`),
+/// while `-EINVAL` is a request VM will not take at all — and `crates/ldso`'s loader,
+/// which maps each `PT_LOAD` of a shared object with `MAP_FIXED`, used to report both as
+/// `a DT_NEEDED is not a PIC object`.
+///
+/// # Safety
+///
+/// As [`mmap`].
+pub unsafe fn mmap_status(
+    addr: *mut u8,
+    length: usize,
+    prot: i32,
+    flags: i32,
+    fd: i32,
+    offset: i64,
+) -> Result<*mut u8, i32> {
+    #[cfg(target_os = "minix")]
     unsafe {
         let mut msg = [0u8; 64];
         msg_set_i32(&mut msg, OFF_TYPE, VM_MMAP as i32);
@@ -108,18 +143,15 @@ pub unsafe fn mmap(
         // offset is stored at bytes 40..48 (after fd at 36)
         msg[40..48].copy_from_slice(&offset.to_ne_bytes());
 
-        if vm_call(&mut msg).is_ok() {
-            // The reply carries the mapped address as a u64 in m1i1|m1i2
-            // (message bytes 8..16).
-            msg_u64(&msg, OFF_VM_RET) as *mut u8
-        } else {
-            MAP_FAILED
-        }
+        vm_call(&mut msg)?;
+        // The reply carries the mapped address as a u64 in m1i1|m1i2
+        // (message bytes 8..16).
+        Ok(msg_u64(&msg, OFF_VM_RET) as *mut u8)
     }
     #[cfg(not(target_os = "minix"))]
     {
         let _ = (addr, length, prot, flags, fd, offset);
-        MAP_FAILED
+        Err(-78) // ENOSYS — no VM to ask on the host
     }
 }
 

@@ -3,8 +3,8 @@
 
 Produces, under `target/dynlink/`:
 
-* `libdyn.so`, `libdyn2.so` — the shared objects (`tools/libdyn.c`,
-  `tools/libdyn2.c`), built with LLD directly;
+* `libdyn.so`, `libdyn2.so`, `libdyn3.so` — the shared objects (`tools/libdyn.c`,
+  `tools/libdyn2.c`, `tools/libdyn3.c`), built with LLD directly;
 * `dynhello`   — a classic-dynamic `ET_EXEC` (`tools/dynhello.c`) with `PT_INTERP`
   (`/libexec/ld.so`) and `DT_NEEDED` for both objects.
 
@@ -14,10 +14,15 @@ The executable is linked with the fork's stage1 rustc as the driver (the same wa
 
 Phase 0 was one object; Phase 1 needs two, because the loader's *base* allocator
 is only exercised when a second object has to land somewhere other than the
-Phase 2 chains them: `libdyn` names `libdyn2`, so one of the objects is a
+first. Phase 2 chains them: `libdyn` names `libdyn2`, so one of the objects is a
 dependency of a dependency and of the executable at the same time — and names it by
 a soname *and* by two paths to the same file, so that "loads once" is about the
 file rather than about the spelling.
+
+`libdyn3` is the third: named by the executable only, depending on nothing, so
+that what the program's three objects exhaust is the *address space* rather than
+the symbol tables — the region budget a dynamically linked program has
+(`tools/libdyn3.c`, `DYNAMIC_LINKING.md` §7 Phase 2).
 
 Phase 7 made this three-arch: the C objects and the executable are compiled and
 linked for whichever target is named, and only the loader's own `_start` and TLS
@@ -43,7 +48,7 @@ from ccarch import X86_64, Arch, resolve_argv  # noqa: E402
 from ccflags import compile_flags  # noqa: E402
 from lld import find_lld  # noqa: E402
 
-DSOS = ("libdyn2", "libdyn")
+DSOS = ("libdyn2", "libdyn", "libdyn3")
 INTERP = "/libexec/ld.so"
 OUT = ROOT / "target" / "dynlink"
 
@@ -140,6 +145,15 @@ def build(arch: Arch, rustc: pathlib.Path, lld: pathlib.Path) -> int:
     if run(link_so) != 0:
         return 1
     print(f"wrote {dso1}")
+
+    # The third object: named by the executable alone, depending on nothing and with
+    # nothing depending on it, so what it exercises is the *address space* rather than
+    # resolution — it is the region budget, measured (`tools/libdyn3.c`).
+    dso3 = work / "libdyn3.so"
+    if run([lld, "-flavor", "gnu", "-shared", "-soname", "libdyn3.so",
+            "-o", dso3, work / "libdyn3.o"]) != 0:
+        return 1
+    print(f"wrote {dso3}")
 
     # minix-libc for the target: the executable's write/exit come from here.
     env = {**os.environ, "RUSTC": str(rustc)}
