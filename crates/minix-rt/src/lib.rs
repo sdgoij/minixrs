@@ -1788,16 +1788,15 @@ impl core::fmt::Write for BufWriter<'_> {
 // allocator itself is mmap-backed (see `allocator` module) and does not
 // use this window.
 
-/// End of the userland bump-heap VA range (exclusive).
+/// Start of the userland bump-heap VA range.
 ///
-/// The heap starts at [`HEAP_BASE`] (the kernel pre-maps a 1 MiB window at
-/// exec) and grows upward through VM's brk, which demand-maps pages.
-/// Raised from the historical 1 MiB window so MFS's block cache (~4 MiB)
-/// and other heap users fit; on x86/riscv the anonymous-mmap base sits at
-/// the same 4 GiB mark so heap and mmap cannot collide. On aarch64 user
-/// space is only the low 1 GiB (the kernel's EL1-only identity map starts
-/// at 0x40000000), so the heap lives below the mmap base (0x30000000)
-/// instead.
+/// The heap starts here (the kernel pre-maps a 1 MiB window at exec) and
+/// grows upward through VM's brk, which demand-maps pages. Raised from the
+/// historical 1 MiB window so MFS's block cache (~4 MiB) and other heap
+/// users fit; on x86/riscv the anonymous-mmap base sits at the same 4 GiB
+/// mark so heap and mmap cannot collide. On aarch64 user space is only the
+/// low 1 GiB (the kernel's EL1-only identity map starts at 0x40000000), so
+/// the heap lives below the mmap base (0x30000000) instead.
 pub const HEAP_BASE: usize = if cfg!(target_arch = "aarch64") {
     0x2000_0000
 } else if cfg!(target_arch = "wasm32") {

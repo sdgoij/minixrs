@@ -44,22 +44,21 @@
 #![no_std]
 #![no_main]
 
-/// Region the host uses for the Asyncify data buffer and its stack.
-///
-/// Sized and argued exactly as `wasm-servers` sizes it: 64 KiB of stack against the fitted
-/// ~36 bytes per frame, generous on purpose because the failure mode is a silent
-/// corruption rather than a trap.
-const ASYNCIFY_BUF_SIZE: usize = 65536;
-
-#[repr(C, align(16))]
-struct AsyncifyScratch([u8; ASYNCIFY_BUF_SIZE + 16]);
-
-static mut ASYNCIFY_SCRATCH: AsyncifyScratch = AsyncifyScratch([0; ASYNCIFY_BUF_SIZE + 16]);
+// Region the host uses for the Asyncify data buffer and its stack.
+//
+// Argued exactly as `wasm-servers` argues it: the buffer goes at the module's own
+// end-of-statics, because a reserved static can be laid out inside the port's
+// bump-heap window, where an allocator overwrites it. The host owns the size.
+unsafe extern "C" {
+    // lld's end-of-static-data symbol. Only its address is ever taken.
+    static __heap_base: u8;
+}
 
 /// Address of the scratch region, so the host does not have to guess.
 #[unsafe(no_mangle)]
 pub extern "C" fn asyncify_scratch_ptr() -> u32 {
-    core::ptr::addr_of_mut!(ASYNCIFY_SCRATCH) as u32
+    let end = core::ptr::addr_of!(__heap_base) as usize;
+    ((end + 15) & !15) as u32
 }
 
 /// How much room the host has for the argv blob. Two orders of magnitude more than the

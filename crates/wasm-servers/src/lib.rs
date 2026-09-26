@@ -39,30 +39,35 @@
 #![no_std]
 #![no_main]
 
-/// Region the host uses for the Asyncify data buffer and its stack.
-///
-/// The buffer has to live somewhere the program will never touch, and this is
-/// that place by construction: a reserved static nothing else refers to. The M2
-/// guest instead took the address from the linker's `__heap_base`, which this
-/// module does not export — and a region the host can name directly is the
-/// sturdier arrangement of the two, given that an Asyncify overflow corrupts
-/// memory silently rather than trapping.
-///
-/// 64 KiB of stack, sized the same way the fork spike sized it (36.1 bytes per
-/// frame, so ~1800 frames). A server blocking in its receive loop is nowhere
-/// near that; the number is generous on purpose, because the failure mode is
-/// silent.
-const ASYNCIFY_BUF_SIZE: usize = 65536;
-
-#[repr(C, align(16))]
-struct AsyncifyScratch([u8; ASYNCIFY_BUF_SIZE + 16]);
-
-static mut ASYNCIFY_SCRATCH: AsyncifyScratch = AsyncifyScratch([0; ASYNCIFY_BUF_SIZE + 16]);
+// Region the host uses for the Asyncify data buffer and its stack.
+//
+// The buffer has to live where no allocator ever writes, and a reserved static
+// does not qualify: this port's direct bump heap is a fixed window at `HEAP_BASE`
+// (2 MiB here), while the linker places `.bss` wherever it likes. This module's
+// statics run well past that window, and a build whose scratch landed at 0x294000
+// — *inside* the block cache's own range — had MFS allocate its first file read
+// over the scratch and trap on the next unwind. The linker's `__heap_base` is the
+// first byte past the whole static image, so a buffer there is out of every
+// allocator's reach by construction.
+//
+// The host owns the buffer's size — 64 KiB, which the fork spike's fitted 36.1
+// bytes per frame makes ~1800 frames of stack, far past any server's deepest
+// block. It is generous on purpose, because an Asyncify overflow corrupts
+// silently rather than trapping.
+unsafe extern "C" {
+    // lld's end-of-static-data symbol, defined for every module with linear
+    // memory. Only its address is ever taken.
+    static __heap_base: u8;
+}
 
 /// Address of the scratch region, so the host does not have to guess.
+///
+/// At the module's own end-of-statics, rounded up to the 16-byte alignment the
+/// Asyncify struct the host writes requires.
 #[unsafe(no_mangle)]
 pub extern "C" fn asyncify_scratch_ptr() -> u32 {
-    core::ptr::addr_of_mut!(ASYNCIFY_SCRATCH) as u32
+    let end = core::ptr::addr_of!(__heap_base) as usize;
+    ((end + 15) & !15) as u32
 }
 
 #[unsafe(no_mangle)]

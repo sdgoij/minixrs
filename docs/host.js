@@ -610,10 +610,16 @@ export function createHost({
   function instantiate(st, module, argv, entry) {
     st.memory = new WebAssembly.Memory({ initial: 256, maximum: 4096 });
     st.inst = new WebAssembly.Instance(module, makeImports(st));
-    // The module names its own scratch region; it is not derived from a linker default. The
-    // 16-byte Asyncify struct goes at its start and the unwind stack follows.
+    // The module names its own scratch region — the end of its static image, from the linker.
+    // The 16-byte Asyncify struct goes at its start and the unwind stack follows.
     st.scratch = st.inst.exports.asyncify_scratch_ptr();
     st.dataPtr = st.scratch;
+    // The buffer sits at the module's own end-of-statics, which can be at the very top of the
+    // instance's initial memory, so cover it before the struct goes in.
+    const bufEnd = st.dataPtr + STRUCT_SIZE + BUF_SIZE;
+    if (bufEnd > st.memory.buffer.byteLength) {
+      st.memory.grow(Math.ceil((bufEnd - st.memory.buffer.byteLength) / WASM_PAGE));
+    }
     const bufStart = st.dataPtr + STRUCT_SIZE;
     writeU32(st.memory, st.dataPtr + 0, bufStart);
     writeU32(st.memory, st.dataPtr + 4, bufStart + BUF_SIZE);

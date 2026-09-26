@@ -465,6 +465,62 @@ tables keep `EFAULT`, because there it is the correct answer. `vumap` still read
 its input vector before refusing, because that transfer is real and is what the M2
 harness pins.
 
+### 5.4 The static image is bigger than the layout assumes
+
+The user-VA layout in §5 (`user_heap_base` 2 MiB, `user_heap_limit`/`mmap_base`
+6 MiB, `user_stack_base` 14 MiB) reads as though the module's own statics live
+below `user_heap_base`. They do not. On wasm the *linker* decides where the data
+segments and `.bss` go: `--stack-first` puts the 1 MiB stack in `[0, 1 MiB)`,
+data starts right after it, and `__heap_base` marks the end of everything static.
+Measured on the servers module, `__heap_base` is `0xfab8a0` — the static image is
+~15.7 MiB and nearly fills the 16 MiB instance — because the one module carries
+every server's tables at once: the window server's ~3 MiB surface, `arch-wasm32`'s
+2 MiB `PHYS_ARENA` (§5.3), the VM server's `Vmproc` table, the kernel tables the
+`servers` crate links for its HAL, and so on. The fixed layout constants do not
+move when that image does, so the two overlap.
+
+**The consequence is that an allocator can overwrite a static.**
+`minix_rt::minix_alloc_zeroed` — the direct bump heap the libminixfs block cache
+allocates from — starts at the constant `HEAP_BASE` and grows up, with no idea
+where `.bss` ended; the mmap-backed global allocator does the same from
+`mmap_base`. Whatever the linker happened to place in `[HEAP_BASE, HEAP_BASE + 1
+MiB)` (2–3 MiB) is written over by the cache, and the same for `[mmap_base, …)`
+by any server that allocates. It works at all because each instance runs one
+server and so does not *use* the other servers' statics it clobbers — the failure
+is invisible until a static the running server depends on lands in a window.
+
+That is exactly what happened to the Asyncify buffer. It was a `#[no_mangle]`
+static whose address the host read from `asyncify_scratch_ptr()`, and in the
+layout CI built it landed at `0x294000` — inside the block cache's own range. MFS
+allocated its first file reads for `/bin/echo` over the scratch, then unwound into
+a corrupted `asyncify_data` struct and died with `memory access out of bounds`.
+The same commit built on a dev machine passed the identical harness, because that
+layout put the scratch one page lower (`0x293000`) — just under the last block the
+cache allocated — and the four commits that followed moved it to `0x328000`, past
+the cache's reach. A one-page margin is all that separated a green run from a trap,
+which is the shape of a bug nobody chose to have. The buffer is no longer a
+static: `crates/wasm-servers/src/lib.rs` and `crates/wasm-program/src/lib.rs`
+return the linker's `__heap_base`, so it sits past the whole image by
+construction, and the hosts grow the instance if it would not fit
+(`tools/wasm-servers/boot.cjs`, `tools/wasm-browser/host.js`).
+
+> A static must not assume an address inside a window an allocator owns; a buffer
+> that has to be out of every allocator's reach belongs at `__heap_base`.
+
+**The overlap itself is not fixed**, only the one victim every server shares.
+Any static a cache-using server reads — MFS's or VFS's own globals, the
+libminixfs cache tables, the inode table — is still corrupted if the linker places
+it in 2–3 MiB, and whether it does is a code-size question no one is checking.
+`crates/wasm-servers/.cargo/config.toml` states the requirement plainly — the
+heap window "(2..6 MiB) and declared stack region (14..16 MiB) have to stay clear
+of the image" — and says the boot log reports where the module ends. Nothing in
+the harnesses does, and by the numbers above that check could not pass today. A
+real fix is one of: shrink the module's statics below `user_heap_base` (the
+multi-megabyte buffers above are the bulk, and several could be allocated rather
+than static), or move the layout — and grow the instance — so the windows start
+above `__heap_base`. Either is a change to how a wasm instance is sized, not a
+drop-in.
+
 ## 6. Privilege, traps, signals
 
 ### 6.1 No rings
@@ -1260,11 +1316,17 @@ true of each of the three however much work its init did — and PM's copies are
 identified by process rather than by position in the log, because the handshake
 now interleaves with them.
 
-The `__heap_base` fallback M2 used does not hold here — lld does not export it for
-this module — so the module names its own Asyncify scratch region with an
-exported static instead of the host inferring one. Given §12's note that an
-Asyncify overflow corrupts memory silently, having the host told where to put the
-buffer is the sturdier arrangement of the two.
+The `__heap_base` fallback M2 used does not hold here unamended — lld does not
+*export* it for this module — so the module names its own Asyncify scratch region
+with an exported function instead of the host inferring one. What that function
+returns is `__heap_base` itself, rounded up to 16 bytes: a *static* is not safe for
+this buffer, because the port's direct bump heap is a fixed window at `HEAP_BASE`
+(2 MiB) while the linker places `.bss` wherever it likes, and a build whose statics
+ran past that window put the scratch at 0x294000 — inside the block cache's own
+range — where MFS's first file read allocated over it and the next unwind trapped.
+The end of the static image is the one address no allocator reaches. Given §12's
+note that an Asyncify overflow corrupts memory silently, the host is still told
+where to put the buffer rather than inferring it.
 
 **The servers talk to one another now.** RS registers a read-only grant over its
 public process table, tells the kernel about it (`SYS_SETGRANT`), and sends DS an
