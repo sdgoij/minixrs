@@ -84,7 +84,9 @@ maps every `DT_NEEDED` object at a base from a deterministic allocator (there is
 loader failure is reproducible), applies each object's `RELATIVE` fixups, resolves `GLOB_DAT`,
 `JUMP_SLOT` and `COPY` **eagerly** — an unresolved symbol fails the load rather than faulting
 on the first call — follows the dependency graph depth-first, runs the objects' initialisers
-in dependency order, and installs the one static TLS module the port's runtime can hold. One
+in dependency order, and lays out every module of thread-local storage against the thread
+pointer, so a library that keeps `__thread` state — and a second one loaded later — each get
+their own storage. One
 file is one mapping however it is named: the check is the file (`st_dev`/`st_ino`), not the
 spelling, so a soname and a path to the same object do not become two copies. The crate is
 new rather than a port of `ld.elf_so`, but the rules are the reference's — `search.c`'s "a name
@@ -93,14 +95,16 @@ containing a slash is a path", and `load.c`'s path-then-inode "already loaded".
 A program can also `dlopen` a shared object at run time and reach its symbols with `dlsym` —
 the loader answers the family for `libc.so`, so a C program links nothing extra for it — and
 `RTLD_LOCAL`/`RTLD_GLOBAL` scope a load, with `dlclose` accepted and nothing unloaded. What it
-does not do yet, each a deferral rather than a stub: unload an object, place a second
-thread-local module (an object carrying `PT_TLS` is refused by name), `LD_LIBRARY_PATH`, auxv
-(the loader uses a fixed 4 KiB page), and MINIX's soname/versioned-symlink scheme, so the search
-is literal — `/lib/`, `/usr/lib/`, or the name itself when it contains a `/`. A dynamically
-linked program can carry **18** shared objects: an address space holds 64 regions, the two
-images plus the stack and the heap take 8, and an object costs one region per `PT_LOAD` — three,
-now that the `GNU_RELRO` segment nothing reads is not linked; the nineteenth fails the load with
-a message that says so.
+does not do yet, each a deferral rather than a stub: unload an object, `LD_LIBRARY_PATH`,
+auxv (the loader uses a fixed 4 KiB page), and MINIX's soname/versioned-symlink scheme, so the
+search is literal — `/lib/`, `/usr/lib/`, or the name itself when it contains a `/`. Two
+*measured* limits bound what can be loaded: a program can carry **18** shared objects, and
+**8** of them can bring thread-local storage (`TLS_SLOTS`), the ones it starts with plus a
+surplus of 2 KiB slices for later ones — an object past either is refused with a message that
+names it. A dynamically linked program is bounded in address space rather than memory: an
+address space holds 64 regions, the two images plus the stack and the heap take 8, and an
+object costs one region per `PT_LOAD` — three, now that the `GNU_RELRO` segment nothing reads
+is not linked.
 
 Building anything dynamic goes through the fork's `-elf` (position-independent) targets, which
 `just bootstrap` builds. `tools/build-dynlibc.py` builds `libc.so` and `dynclib` with them

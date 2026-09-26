@@ -16,8 +16,9 @@
  *   global   the same object loaded with `RTLD_GLOBAL`, then looked up through
  *            `dlsym(RTLD_DEFAULT, …)`, i.e. the global scope and *not* the handle.
  *   missing  a `dlopen` of a path that does not exist fails, and `dlerror` says so.
- *   tls      a `dlopen` of an object with a thread-local is refused — the loader places one
- *            TLS module, at startup — and `dlerror` names that limit.
+ *   tls      a `dlopen` of an object with a thread-local, which takes a module slot the
+ *            layout reserved: the value read back is the object's own init image, and
+ *            `libc.so`'s `errno` — the other module — does not move.
  *   close    `dlclose` accepts the handle and the object stays usable: nothing is unloaded.
  *
  * One line per run, because the smoke harness matches whole lines anywhere in the log: a
@@ -37,6 +38,8 @@ extern void *dlopen(const char *filename, c_int flags);
 extern void *dlsym(void *handle, const char *symbol);
 extern char *dlerror(void);
 extern c_int dlclose(void *handle);
+extern c_int open(const char *path, c_int flags, c_int mode);
+extern c_int *__errno_location(void);
 
 #define RTLD_NOW 0x00002
 #define RTLD_GLOBAL 0x00100
@@ -106,10 +109,37 @@ int main(c_int argc, char **argv) {
     const char *mode = argc > 1 ? argv[1] : "load";
     void *h;
 
-    if (same(mode, "missing") || same(mode, "tls")) {
-        const char *path = same(mode, "tls") ? TLS_LIB : "/no/such-object.so";
-        out(same(mode, "tls") ? "dynopen-tls " : "dynopen-missing ");
-        h = dlopen(path, RTLD_NOW);
+    if (same(mode, "tls")) {
+        /* The object the loader used to refuse: it brings a `PT_TLS`, and there is now a module
+         * slot for it. What the line asserts is that the slot is *this module's* own storage. The
+         * counter's first value comes from the object's init image — 7, not 0 — and `errno`, a
+         * thread-local in `libc.so`, i.e. the other module, is untouched by it. */
+        out("dynopen-tls ");
+        h = dlopen(TLS_LIB, RTLD_NOW);
+        if (h == RTLD_DEFAULT) {
+            return load_failed();
+        }
+        c_int (*read)(void) = (c_int(*)(void))dlsym(h, "tls_read");
+        c_int (*bump)(void) = (c_int(*)(void))dlsym(h, "tls_bump");
+        if (read == (c_int(*)(void))0 || bump == (c_int(*)(void))0) {
+            out("dlsym-null\n");
+            return 1;
+        }
+        out("init=");
+        num(read());
+        /* libc.so's own thread-local, set by a call that fails. */
+        (void)open("/no-such-file", 0, 0);
+        out(" errno=");
+        num(*__errno_location());
+        out(" bump=");
+        num(bump());
+        out("\n");
+        return 0;
+    }
+
+    if (same(mode, "missing")) {
+        out("dynopen-missing ");
+        h = dlopen("/no/such-object.so", RTLD_NOW);
         if (h != RTLD_DEFAULT) {
             out("loaded=1\n");
             return 1;

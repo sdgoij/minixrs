@@ -1,7 +1,7 @@
 # Dynamic linking for minixrs — implementation proposal
 
 Status: **proposal — design settled, Phases 0–3 built, Phase 4 decided (dropped), Phase 5
-measured and passing on x86_64 and riscv64, Phase 7 done** (on
+measured and passing on x86_64 and riscv64, Phase 6 built, Phases 7 and 8 done** (on
 `feature/ldso`). Every claim
 below about the port was read out of the tree at the time of writing; every claim about
 MINIX 3.3.0 comes from `.refs/minix-3.3.0/` and is cited by file. Sections marked *as
@@ -44,6 +44,12 @@ toolchain this has to extend), `.agents/skills/minix-kernel-boundary` and
 - **Phase 3 is a dynamic C library.** `minix-libc` builds as `libc.so`, and a C program
   linked against it runs — which needed the loader to place thread-local storage, since
   the library has `#[thread_local]` statics of its own (§6.6, D8).
+- **`dlopen` landed, and so did multi-module TLS.** A program can load an object at run time
+  and reach it with `dlsym` (Phase 6), which is what a driver lookup needs — the loader answers
+  the family for `libc.so` instead of exporting a `.dynsym` of its own. And an object that
+  brings `PT_TLS` is no longer the only one that can: the loader lays the modules out against
+  the thread pointer, numbers them, and places a module loaded later in a reserved slice, so
+  `xkbcommon`, `libinput` and Mesa can each keep `__thread` state (§6.9, Phase 8).
 
 ## 1. Goal
 
@@ -291,9 +297,20 @@ the loader now:
   (§6.6);
 - resolves `DTPMOD64` to a constant module id.
 
-Out of scope, and refused rather than mishandled: two modules with TLS (the second's
-storage would alias the first's), and `DT_TLSDESC`/`TPOFF64` (neither object needs them,
-and initial-exec would be a second relocation path to maintain).
+Out of scope for that phase, and refused rather than mishandled: two modules with TLS (the
+second's storage would alias the first's), and `DT_TLSDESC`/`TPOFF64` (neither object needs
+them, and initial-exec would be a second relocation path to maintain).
+
+**As built (Phase 8) — modules, not a module.** The refusal is gone: `tls_layout`
+(`layout.rs`) gives module *k* a displacement `D[k]` from the thread pointer
+(`address = TP + D[k] + offset`), the walk writes the *owner's* module id into a `tls_index`
+and `D[owner] + addend` into a `TLSDESC` argument, and the loader — not `minix-libc` — builds
+every thread's block, so a `pthread_create`d thread gets one sized for every module. A module
+`dlopen`ed after a thread exists lands in a slice the layout reserved, and that thread
+initialises its copy on first touch, gated by a generation word beside the block. `TPOFF64`
+stays unimplemented. Phase 8 records the two traps this uncovered — a target-specific bias in
+riscv64's offset word, and the register contract aarch64's `TLSDESC` resolver has to honour;
+neither is visible on x86_64.
 
 ### D9 — Auxv: registers first, auxv only when a consumer needs it
 
@@ -935,7 +952,81 @@ As built — riscv64 first, then aarch64, in that order:
   *not* being executable, and the loader filling a DSO's `.bss` tail from the file.
 
 Gate: `just test-dynlink-riscv64` and `just test-dynlink-aarch64`, the same arch-neutral
-`tools/smoke/dyn.tsv` as x86_64 — four steps each, green.
+`tools/smoke/dyn.tsv` as x86_64 — nine steps each, green.
+
+### Phase 8 — multi-module TLS — **done**
+
+The last thing between this and a C graphics stack (§6.9): `xkbcommon`, `libinput` and Mesa
+all keep `__thread` state, and the loader placed *one* module, refusing any object whose
+`PT_TLS` would be a second.
+
+**What it is.** Each module keeps the placement it was linked for — the offsets its own code
+carries (`DTPOFF`-style constants, a descriptor's argument) are untouched, so its storage is
+still reachable from its own image. What becomes per-module is the **base** a lookup returns:
+module *k*'s storage starts at a fixed displacement `D[k]` from the thread pointer, so
+
+    address = TP + D[k] + offset
+
+`tls_layout` (`layout.rs`) computes `D` from the modules' `p_memsz` as a pure rule with its own
+host tests, and it is the one thing that has to be known **before** relocations run, because a
+`tls_index`'s module word and a `TLSDESC`'s argument are relocation values: `run` now numbers
+and lays the startup graph's modules out, *then* relocates. `TP` is per-thread, so each
+thread's copy is made on first touch, gated by a generation word beside the block — which is
+what lets a module loaded *after* a thread exists reach that thread too, rather than a thread
+reading zeros for the rest of its life.
+
+Both halves of the block move to the loader, because only it knows every module's storage:
+`__rtld_tls_alloc_thread` is loader-defined and `minix-libc`'s `tls_block_alloc` calls it in
+the shared build — while keeping the linker-script path a static program uses. That removes a
+duplication that existed: two implementations of "the same block", kept in agreement by two
+copies of one rounding rule.
+
+**Costs, as built.** Eight slots (`TLS_SLOTS`): the modules a program starts with plus a
+surplus for the ones it loads later, where a slice is `TLS_SURPLUS_SLOT` = 2 KiB rounded the
+way the target rounds (16 bytes). Both bounds are refusals with names rather than
+overwrites — a module that does not fit its slice (`TlsModuleTooBig`) and one past the eighth
+(`TooManyTlsModules`) — because the block a thread already has cannot grow, so the choice is a
+refused load or a neighbour's storage. A static program is untouched. `TPOFF64`/
+initial-exec stays unimplemented: nothing the port builds asks for it, and it would be a
+second relocation path to maintain.
+
+**Gate.** `tools/smoke/dyn.tsv`'s `tls` step is the opposite of what it was. `tools/libtls1.so`
+is `dlopen`ed and never `DT_NEEDED`, its `__thread` counter is read — which must say the
+initialiser, 7, *before* anything writes it, so a zero is a slot that was never initialised —
+then bumped and read again, and `errno` is read in the same run: a thread-local that belongs to
+*another* module (`libc.so`, which has been loaded all along) and must not move when this one
+is. Three fields, each the one thing a different part of the mechanism could get wrong: the
+init image (a copy from the wrong place, or none), the other module's storage (a displacement
+that collided with it), and a write that comes back (the storage is the thread's, not shared).
+Same step, same line, all three arches.
+
+**Two traps, both found by that gate and neither visible on x86_64.**
+
+- **riscv64 states a `tls_index`'s offset *biased*.** The offset word is the variable's
+distance from its module's storage on x86_64 and aarch64, and `0x800` less than that on
+riscv64: the psABI's `DTPREL = TPREL - DTP_OFFSET`, which LLD implements as
+`const uint64_t dtpOffset = 0x800` and subtracts for `R_RISCV_TLS_DTPREL64`
+(`lld/ELF/Arch/RISCV.cpp`). Nothing in the object adds it back — the access is `auipc`/`addi`
+to the `tls_index`, `jal __tls_get_addr`, then a load at offset zero of what came back — and
+the local-dynamic form carries that value as a *file* constant, with no relocation the loader
+could rewrite. So the whole of the bias is the reader's: `layout::DTV_OFFSET` is `0x800` on
+riscv64 and 0 elsewhere, and `__tls_get_addr` adds it to the word before using it. Without it
+a thread reads the 2048 bytes *below* its module's storage. Which is why this was invisible at
+first: `errno`'s writer and reader were both displaced the same way, so it round-tripped and
+that step passed — the `PT_TLS` init image, which the *loader* copies to the undisplaced
+address, is what exposed it (`init=0`).
+- **aarch64's `TLSDESC` resolver must preserve every register but `x0`.** The compiler may
+schedule the `mrs x8, TPIDR_EL0` that consumes a descriptor's answer on either side of the
+call: LLVM models `TLSDESC_CALLSEQ` as defining only `NZCV`, `LR`, `X0` and `X1`
+(`AArch64InstrInfo.td`, which carries its own `FIXME` about the scratch register), and
+`libc.so` has it hoisted — `cwd_walk` reads `mrs x8, TPIDR_EL0` above the `blr` and does
+`add x24, x8, x0` below it. So the register is the *resolver's* to keep. The single-module
+resolver was a `ldr x0, [x0, #8]; ret` and got away with it by touching nothing else; the
+moment this phase's version walked the module table it clobbered `x8`, and callers added their
+result to garbage — addresses they then *wrote* through, which is why the symptom was a
+`libc.so` internal failing with a different errno each run rather than a fault. `__tlsdesc_static`
+is now assembly that saves `x1`–`x18`, calls the Rust half (`tlsdesc_ensure`) and restores
+them.
 
 ## 8. Risks and traps
 

@@ -32,17 +32,16 @@ use crate::elf::{
     PF_X, PT_LOAD, RELA_SIZE, Rela, SYM_SIZE, Sym,
 };
 use crate::layout::{
-    BaseAlloc, TP_IS_PAST_THE_BLOCK, image_extent, page_down, page_up, tls_block_size,
+    BaseAlloc, DTV_OFFSET, TLS_SLOTS, TLS_SURPLUS_SLOT, TP_IS_PAST_THE_BLOCK, TlsLayout,
+    image_extent, page_down, page_up, tls_block_size, tls_layout,
 };
 use crate::reloc::{
-    Def, RelocError, RelocImage, SYMNAME_MAX, Scope, SymError, SymName, TLS_MODULE_ID, apply_table,
-    lookup_pass,
+    Def, RelocError, RelocImage, SYMNAME_MAX, Scope, SymError, SymName, apply_table, lookup_pass,
 };
 use crate::search::{PATH_MAX, SEARCH_PATH, names_a_path, search_path_join};
 use core::arch::asm;
 use core::cell::UnsafeCell;
 use core::ptr;
-use core::sync::atomic::{AtomicU64, Ordering};
 
 /// What a header page that is not this loader's machine is reported as.
 ///
@@ -84,11 +83,14 @@ enum LoadError {
     NotElf,
     NotObject,
     NoDynamic,
-    TwoTlsModules,
-    /// A `dlopen`'d object brings `PT_TLS`. The one thread-local module the loader places
-    /// is laid out at startup, before any thread exists; a second would leave every
-    /// thread's block sized for one image (`DYNAMIC_LINKING.md` D8).
-    RuntimeTls,
+    /// A `dlopen`'d object brings a `PT_TLS` and there are no slots left
+    /// (`layout::TLS_SLOTS`): every thread's block was sized for that many modules, so there is
+    /// nowhere for another one's storage to go.
+    TooManyTlsModules,
+    /// A `dlopen`'d object's thread-locals need more than the room a reserved slot holds
+    /// (`layout::TLS_SURPLUS_SLOT`). Its storage cannot be made bigger now: the block every
+    /// thread already has is fixed.
+    TlsModuleTooBig,
     NoTlsSpace,
     TooManyObjects,
     CannotLoad,
@@ -186,12 +188,11 @@ fn set_error(e: &LoadError) -> &'static [u8] {
         LoadError::NotElf => w.put(NOT_ELF),
         LoadError::NotObject => w.put(b"ld.so: a DT_NEEDED is not a PIC object\n"),
         LoadError::NoDynamic => w.put(b"ld.so: no PT_DYNAMIC\n"),
-        LoadError::TwoTlsModules => {
-            w.put(b"ld.so: more than one loaded object has thread-local storage\n")
+        LoadError::TooManyTlsModules => {
+            w.put(b"ld.so: too many objects with thread-local storage\n")
         }
-        LoadError::RuntimeTls => {
-            w.put(b"ld.so: a dlopen'd object has thread-local storage, and the loader");
-            w.put(b" places one module\n");
+        LoadError::TlsModuleTooBig => {
+            w.put(b"ld.so: a dlopen'd object's thread-locals do not fit the reserved slot\n")
         }
         LoadError::NoTlsSpace => w.put(b"ld.so: no room for a thread-local block\n"),
         LoadError::TooManyObjects => w.put(b"ld.so: too many objects\n"),
@@ -406,6 +407,12 @@ struct Object {
     /// wins over a global one, and a `RTLD_LOCAL` object is reachable by the objects loaded
     /// with it.
     group: u16,
+    /// Its thread-local module number (0 when it brought no `PT_TLS`) and where its storage
+    /// sits relative to the thread pointer. Both are the layout's to set *before* the object is
+    /// relocated, because a `tls_index`'s module word and a `TLSDESC`'s argument are relocation
+    /// values rather than anything the object's own code states.
+    tls_module: u32,
+    tls_disp: i64,
 }
 
 impl Object {
@@ -422,6 +429,8 @@ impl Object {
         identity: None,
         global: false,
         group: 0,
+        tls_module: 0,
+        tls_disp: 0,
     };
 
     /// The name of dynamic symbol `idx`, if it is a defined global or weak.
@@ -545,6 +554,14 @@ fn loader_defined(objects: &[Object], owner: usize, name: &[u8]) -> Option<Def> 
             size: 0,
         });
     }
+    // A thread `pthread_create` is starting gets its block from here, because only the loader
+    // knows the layout every module was numbered against (`tls_alloc_thread`).
+    if name == b"__rtld_tls_alloc_thread" {
+        return Some(Def {
+            addr: tls_alloc_thread as *const () as u64,
+            size: 0,
+        });
+    }
     // The `dlopen` family, for the same reason: nothing a `cdylib` links against defines
     // them, so the loader answers — and the loader is the object that can load one.
     // `minix-libc`'s shared build calls through these names
@@ -586,6 +603,8 @@ struct GuestImage {
     nsym: usize,
     start: u64,
     end: u64,
+    tls_module: u64,
+    tls_disp: i64,
 }
 
 impl GuestImage {
@@ -597,6 +616,8 @@ impl GuestImage {
             nsym: obj.nsym,
             start: obj.img_start,
             end: obj.img_end,
+            tls_module: obj.tls_module as u64,
+            tls_disp: obj.tls_disp,
         }
     }
 }
@@ -662,6 +683,14 @@ impl RelocImage for GuestImage {
 
     fn tlsdesc_static(&self) -> u64 {
         __tlsdesc_static as *const () as u64
+    }
+
+    fn tls_module(&self) -> u64 {
+        self.tls_module
+    }
+
+    fn tls_disp(&self) -> i64 {
+        self.tls_disp
     }
 }
 
@@ -774,11 +803,14 @@ fn read_and_map(
         tls,
         name: LibName::EMPTY,
         identity: Some(identity),
-        // Both of these are the caller's to set: the startup walk makes every object it
-        // adds global (`load_dependencies`), and a `dlopen` gives the object the scope of
-        // the call that made it (`load_now`).
+        // The scope and the thread-local slot are the caller's to set: the startup walk makes
+        // every object it adds global (`load_dependencies`) and the layout numbers the modules
+        // (`layout_and_number_tls`); a `dlopen` gives the object the scope of the call that made
+        // it (`load_now`).
         global: false,
         group: 0,
+        tls_module: 0,
+        tls_disp: 0,
     };
     if !obj.name.set(path) {
         return Err(LoadError::CannotLoad);
@@ -1020,13 +1052,150 @@ unsafe fn run_initialisers(obj: &Object, ctx: &InitCtx) {
     }
 }
 
-/// The size of the thread-local block `__tls_get_addr` stands on, or 0 when no
-/// object brought thread-local storage.
+/// One thread-local module: what a thread's copy of it needs.
+struct TlsEntry {
+    /// The initialised image a thread's copy is made from — `PT_TLS`'s `p_vaddr`/`p_filesz` at
+    /// the address the loader mapped the object to.
+    init: u64,
+    init_len: u64,
+    /// What every thread's copy needs, rounded the way [`tls_block_size`] rounds.
+    size: u64,
+    /// The serial this module was added at, from 1. A thread whose slot word does not hold this
+    /// has not initialised this module's copy yet.
+    generation: u64,
+}
+
+impl TlsEntry {
+    const EMPTY: Self = Self {
+        init: 0,
+        init_len: 0,
+        size: 0,
+        generation: 0,
+    };
+}
+
+/// The thread-local modules this process holds, and the layout they share.
 ///
-/// Written once before any object code can run and read by every thread's TLS
-/// access, so it is an atomic rather than a plain static: the store is a load-
-/// time event and the loads are arbitrary program points.
-static TLS_BLOCK_SIZE: AtomicU64 = AtomicU64::new(0);
+/// [`crate::layout::tls_layout`] fixes where each module's storage sits relative to the thread
+/// pointer, and reserves room for [`TLS_SLOTS`] of them: the ones the program started with plus
+/// a surplus. That reservation is what lets a module loaded later take a slot *every thread
+/// already has*, so nothing moves — a displacement is not a per-thread address, and no thread's
+/// storage has to be found and changed when another object arrives.
+struct TlsState {
+    modules: [TlsEntry; TLS_SLOTS],
+    /// Slots in use. Module numbers are `1..=count`: ELF numbers modules from 1, and 0 is "no
+    /// module".
+    count: usize,
+    /// How many modules the layout was computed from. A slot at or past this one belongs to the
+    /// reserved surplus, so whatever lands there has to fit a surplus slot.
+    live: usize,
+    /// The next serial, which is what a module's `generation` gets.
+    added: u64,
+    layout: TlsLayout,
+    /// Total bytes a thread's block needs, or 0 when nothing brought a `PT_TLS` at all.
+    bytes: u64,
+}
+
+impl TlsState {
+    const fn new() -> Self {
+        Self {
+            modules: [TlsEntry::EMPTY; TLS_SLOTS],
+            count: 0,
+            live: 0,
+            added: 0,
+            layout: tls_layout(&[]),
+            bytes: 0,
+        }
+    }
+}
+
+/// [`TlsState`] behind the `UnsafeCell` a `static` needs.
+struct TlsCell(UnsafeCell<TlsState>);
+
+// SAFETY: the loader is one thread's program - see the note on `State`.
+unsafe impl Sync for TlsCell {}
+
+static TLS: TlsCell = TlsCell(UnsafeCell::new(TlsState::new()));
+
+/// The loader's thread-local state. Every caller is the loader's own code.
+unsafe fn tls_state() -> &'static mut TlsState {
+    unsafe { &mut *TLS.0.get() }
+}
+
+/// Fix the layout the startup graph's modules share, and number them.
+///
+/// One pass, after the dependency walk and before anything is relocated. Object order decides
+/// slot order, so a program's modules get the same numbers however it was linked. A module
+/// loaded later takes a slot this layout reserved and does *not* come through here: the layout
+/// is fixed for the life of the process, which is what keeps every thread's storage where it
+/// was.
+unsafe fn layout_and_number_tls(objects: &mut [Object], count: usize) -> Result<(), LoadError> {
+    let st = unsafe { tls_state() };
+    let mut sizes = [0u64; TLS_SLOTS];
+    let mut n = 0usize;
+    for o in objects[..count].iter() {
+        if let Some(tls) = o.tls {
+            if n == TLS_SLOTS {
+                return Err(LoadError::TooManyTlsModules);
+            }
+            sizes[n] = tls.memsz;
+            n += 1;
+        }
+    }
+    st.layout = tls_layout(&sizes[..n]);
+    st.bytes = st.layout.block;
+    st.live = n;
+    for o in objects[..count].iter_mut() {
+        if let Some(tls) = o.tls {
+            let slot = st.count;
+            o.tls_module = (slot + 1) as u32;
+            o.tls_disp = st.layout.disp[slot];
+            st.added += 1;
+            st.modules[slot] = TlsEntry {
+                init: tls.init,
+                init_len: tls.init_len,
+                size: tls_block_size(tls.memsz),
+                generation: st.added,
+            };
+            st.count = slot + 1;
+        }
+    }
+    Ok(())
+}
+
+/// Give `obj` the next thread-local slot, if it brought a `PT_TLS`.
+///
+/// Called before the object is relocated, never after: the slot's number and displacement *are*
+/// relocation values (a `tls_index`'s module word, a `TLSDESC`'s argument). A module that lands
+/// in the reserved surplus has to fit a surplus slot — the block every thread already has is
+/// fixed, so a bigger module is refused rather than placed over its neighbour.
+unsafe fn assign_tls_slot(obj: &mut Object) -> Result<(), LoadError> {
+    let Some(tls) = obj.tls else {
+        obj.tls_module = 0;
+        obj.tls_disp = 0;
+        return Ok(());
+    };
+    let st = unsafe { tls_state() };
+    if st.count == TLS_SLOTS {
+        return Err(LoadError::TooManyTlsModules);
+    }
+    let slot = st.count;
+    let size = tls_block_size(tls.memsz);
+    if slot >= st.live && size > tls_block_size(TLS_SURPLUS_SLOT) {
+        return Err(LoadError::TlsModuleTooBig);
+    }
+    obj.tls_module = (slot + 1) as u32;
+    obj.tls_disp = st.layout.disp[slot];
+    st.added += 1;
+    st.modules[slot] = TlsEntry {
+        init: tls.init,
+        init_len: tls.init_len,
+        size,
+        generation: st.added,
+    };
+    st.count = slot + 1;
+    Ok(())
+}
 
 /// The pair the general- and local-dynamic TLS models hand to `__tls_get_addr`:
 /// which module, and where in it.
@@ -1092,103 +1261,272 @@ fn read_tp() -> u64 {
     tp
 }
 
+/// The calling thread's storage for module `slot`, initialised if this is the first
+/// time the thread has touched it.
+///
+/// The copy is made on first touch rather than when the thread's block was allocated,
+/// because a module can be loaded *after* the thread exists: the alternative is a
+/// thread reading zeros, or a neighbour's storage, for the rest of its life. The
+/// word beside the block says whose copy is there, so a thread that has already
+/// touched the module pays a load and a compare.
+///
+/// `at` is the module's own storage, `tp + disp[slot]` — where the object's
+/// link-time offsets expect it, whatever side of the pointer this machine puts it
+/// on.
+///
+/// Two callers need this, and they arrive by different routes: [`__tls_get_addr`],
+/// which is told the module, and [`__tlsdesc_static`], which is not.
+unsafe fn slot_storage(tp: u64, slot: usize) -> *mut u8 {
+    let st = unsafe { tls_state() };
+    let at = (tp as i64 + st.layout.disp[slot]) as *mut u8;
+    let entry = &st.modules[slot];
+    let seen = (tp as i64 + st.layout.table + (slot as i64) * 8) as *mut u64;
+    if unsafe { *seen } != entry.generation {
+        unsafe {
+            ptr::copy_nonoverlapping(entry.init as *const u8, at, entry.init_len as usize);
+            ptr::write_bytes(
+                at.add(entry.init_len as usize),
+                0,
+                (entry.size - entry.init_len) as usize,
+            );
+            *seen = entry.generation;
+        }
+    }
+    at
+}
+
 /// `__tls_get_addr`: the storage base of the module `ti` names, for *this*
 /// thread.
 ///
 /// A position-independent object reaches its thread-locals through this call in
 /// the general- and local-dynamic models, because the answer depends on which
-/// thread is asking. `ti.offset` is zero in the local-dynamic form — the object
-/// adds the variable's offset itself, through a `DTPOFF32` the static linker
-/// resolved — so adding it is what makes the general-dynamic form work too.
+/// thread is asking. `ti.offset` is where in the module the variable is, which is
+/// zero in the local-dynamic form when the variable is the module's first — the
+/// linker resolved it, and `DTPOFF`-style constants the object adds itself work the
+/// same way — so adding it is what makes the general-dynamic form work too.
+///
+/// [`DTV_OFFSET`] is the part of that word the linker did not state plainly: on
+/// riscv64 the psABI's `DTPREL` is the distance less `0x800`, so the word cannot be
+/// used as it stands. Adding it back here is what makes the loader's own init copy
+/// (`tp + disp`, unbiased) land where the object will look for it.
 #[unsafe(no_mangle)]
 unsafe extern "C" fn __tls_get_addr(ti: *const TlsIndex) -> *mut u8 {
-    let size = TLS_BLOCK_SIZE.load(Ordering::Relaxed);
-    if size == 0 {
+    let st = unsafe { tls_state() };
+    if st.bytes == 0 {
         return ptr::null_mut();
     }
     let Some(ti) = (unsafe { ti.as_ref() }) else {
         return ptr::null_mut();
     };
-    if ti.module != TLS_MODULE_ID {
+    // Module numbers are 1-based, and a request for one this load did not place is a
+    // relocation the loader wrote wrongly. Naming it is the point: silence would read
+    // another module's storage, which is the failure this whole mechanism exists to avoid.
+    if ti.module == 0 || ti.module as usize > st.count {
         die(b"ld.so: __tls_get_addr asked for a module this load did not place\n");
     }
-    // The storage starts at the thread pointer itself on aarch64/riscv64, and one
-    // block-length below it on x86_64. See `layout::TP_IS_PAST_THE_BLOCK`.
-    let base = if TP_IS_PAST_THE_BLOCK {
-        read_tp().wrapping_sub(size)
-    } else {
-        read_tp()
-    };
-    base.wrapping_add(ti.offset) as *mut u8
+    let slot = ti.module as usize - 1;
+    let tp = read_tp();
+    let at = unsafe { slot_storage(tp, slot) };
+    // The word the object carries is the variable's distance from this module's storage —
+    // possibly stated the way its psABI states it, which is [`DTV_OFFSET`] short of the
+    // distance — so the storage base above is what it is relative to.
+    let offset = (ti.offset as i64).wrapping_add(DTV_OFFSET);
+    at.wrapping_offset(offset as isize) as *mut u8
 }
 
-/// The `TLSDESC` resolver a descriptor this load wrote points at: the "static"
-/// one, whose whole answer is its argument — the variable's offset from the thread
-/// pointer, which the linker resolved into the relocation's addend because the
-/// variable is the one object's own. The storage is the same single block
-/// [`install_tls`] placed, so an access through this and one through
-/// `__tls_get_addr` reach the same address.
+// The resolver whose register contract the declaration below documents. Its body has to be
+// assembly; the documentation sits on the declaration because rustdoc does not document a
+// macro invocation.
+#[cfg(target_arch = "aarch64")]
+core::arch::global_asm!(
+    ".globl __tlsdesc_static",
+    ".type __tlsdesc_static, %function",
+    "__tlsdesc_static:",
+    // Everything the contract leaves to the caller, then our own return address and
+    // the answer. Ten pairs, so the stack stays 16-byte aligned for the call.
+    "stp x1, x2, [sp, #-16]!",
+    "stp x3, x4, [sp, #-16]!",
+    "stp x5, x6, [sp, #-16]!",
+    "stp x7, x8, [sp, #-16]!",
+    "stp x9, x10, [sp, #-16]!",
+    "stp x11, x12, [sp, #-16]!",
+    "stp x13, x14, [sp, #-16]!",
+    "stp x15, x16, [sp, #-16]!",
+    "stp x17, x18, [sp, #-16]!",
+    // x1 is free here: the caller's `ldr x1, [x0, ...]` has already been consumed by the
+    // `blr`, so the descriptor's second word — the answer — is what goes in its place.
+    "ldr x1, [x0, #8]",
+    "stp x30, x1, [sp, #-16]!",
+    "bl tlsdesc_ensure",
+    "ldp x30, x0, [sp], #16",
+    "ldp x17, x18, [sp], #16",
+    "ldp x15, x16, [sp], #16",
+    "ldp x13, x14, [sp], #16",
+    "ldp x11, x12, [sp], #16",
+    "ldp x9, x10, [sp], #16",
+    "ldp x7, x8, [sp], #16",
+    "ldp x5, x6, [sp], #16",
+    "ldp x3, x4, [sp], #16",
+    "ldp x1, x2, [sp], #16",
+    "ret",
+);
+
+#[cfg(target_arch = "aarch64")]
+unsafe extern "C" {
+    /// The `TLSDESC` resolver a descriptor this load wrote points at: the "static" one,
+    /// whose answer is its argument — the variable's offset from the thread pointer, which
+    /// the linker resolved into the relocation's addend because the variable is the one
+    /// object's own. The storage is the same block [`install_tls`] placed, so an access
+    /// through this and one through `__tls_get_addr` reach the same address.
+    ///
+    /// The dialect's other resolver — the one that looks a module up, for a symbol another
+    /// object defines — is not reachable: the port refuses a descriptor that names a symbol
+    /// before this can be called with one.
+    ///
+    /// A descriptor says *where* a variable is but not *which module's* storage holds it,
+    /// and the offset cannot be turned back into one — it is the module's distance plus the
+    /// variable's own, and the second is not in the descriptor either. So this brings
+    /// *every* module's storage for the calling thread up to date instead
+    /// ([`tlsdesc_ensure`]): the same set [`__tls_get_addr`] would have initialised had the
+    /// access arrived through it. It has to do that much because an access arriving here is
+    /// the thread's first touch of the module just as often as one arriving there is — and a
+    /// slot left uninitialised is a `PT_TLS` initial value read as zero.
+    ///
+    /// # The register contract, and why its body is assembly
+    ///
+    /// A `TLSDESC` access is
+    ///
+    /// ```text
+    ///     adrp x0, :tlsdesc:var
+    ///     ldr  x1, [x0, :tlsdesc_lo12:var]
+    ///     add  x0, x0, :tlsdesc_lo12:var
+    ///     blr  x1
+    ///     mrs  x8, TPIDR_EL0
+    ///     add  x24, x8, x0
+    /// ```
+    ///
+    /// and the `mrs` is an ordinary instruction the scheduler may move. LLVM models the call
+    /// as defining `NZCV`, `LR`, `X0` and `X1` and nothing else (`TLSDESC_CALLSEQ` in
+    /// `AArch64InstrInfo.td`, which carries the `FIXME: maybe the scratch register used
+    /// shouldn't be fixed to X1?` its own author left there), so a `mrs` *hoisted above* the
+    /// call is legal — and then it is the *resolver* that has to have left that register
+    /// alone. `libc.so` does exactly that: in `cwd_walk` the `mrs x8, TPIDR_EL0` sits above
+    /// the `blr` and the `add x24, x8, x0` that consumes it below. So the resolver must
+    /// preserve every register but `x0`.
+    ///
+    /// Which a Rust function cannot promise: it clobbers what it likes. The one this
+    /// replaces was small enough to get away with it — a `ldr x0, [x0, #8]; ret` touches
+    /// nothing else — and the moment it had to walk the module table, save the generation
+    /// words and copy, it clobbered `x8`, and the caller added its result to garbage. That is
+    /// not a wrong pointer in an error path: the caller *writes* through it. Hence the
+    /// assembly, which saves what the contract leaves to the caller and restores it before
+    /// returning.
+    fn __tlsdesc_static(desc: *const TlsDesc) -> usize;
+}
+
+/// What [`__tlsdesc_static`] does before it answers: make the calling thread's copy
+/// of every live module exist.
 ///
-/// The dialect's other resolver — the one that looks a module up, for a symbol
-/// another object defines — is not reachable: the port places one object's
-/// thread-local storage, and the walk refuses a descriptor that names a symbol
-/// before this can be called with one.
+/// Called from that resolver's assembly, which has already saved what it has to, so
+/// this may clobber anything — preserving registers is the wrapper's business, not a
+/// Rust function's. Hence the `no_mangle`: the name is what the assembly's `bl` asks
+/// the linker for.
+#[cfg(target_arch = "aarch64")]
+#[unsafe(no_mangle)]
+unsafe extern "C" fn tlsdesc_ensure() {
+    let st = unsafe { tls_state() };
+    if st.bytes == 0 {
+        return;
+    }
+    let tp = read_tp();
+    let mut slot = 0;
+    while slot < st.count {
+        unsafe { slot_storage(tp, slot) };
+        slot += 1;
+    }
+}
+
+/// The same resolver on a target whose code has no `TLSDESC` at all.
+/// `Relocs::tlsdesc` is each of those targets' `None` type, which the walk answers
+/// [`Action::Skip`] for before it looks at a descriptor, so no descriptor is ever
+/// written and this is never called: the answer is here because the trait asks every
+/// target for one, and because RISC-V's psABI does define the dialect — should a
+/// RISC-V object ever carry one, this is the half that answers, and the register
+/// contract the assembly above is written around is AArch64's alone.
+#[cfg(not(target_arch = "aarch64"))]
 #[unsafe(no_mangle)]
 unsafe extern "C" fn __tlsdesc_static(desc: *const TlsDesc) -> usize {
     let Some(desc) = (unsafe { desc.as_ref() }) else {
         return 0;
     };
+    let st = unsafe { tls_state() };
+    if st.bytes != 0 {
+        let tp = read_tp();
+        let mut slot = 0;
+        while slot < st.count {
+            unsafe { slot_storage(tp, slot) };
+            slot += 1;
+        }
+    }
     desc.arg as usize
 }
 
-/// Install the calling thread's storage for the loaded objects' thread-locals.
+/// Allocate a thread's block for every module, and hand back the thread pointer.
 ///
-/// The port has one thread pointer with one block behind it — the runtime's
-/// `tls_block_alloc` builds the same block for a thread `pthread_create` starts,
-/// and that is what makes the two agree: the loader hands the block size to
-/// `__tls_get_addr` through [`TLS_BLOCK_SIZE`], and the runtime reaches the same
-/// addresses by rounding the object's `p_memsz` the same way.
-///
-/// One object can be placed, at `tp - align16(p_memsz)`. That is where a non-PIE
-/// program's `%fs`-relative offsets already expect its own thread-locals to be,
-/// which is why the program is placed like any other object rather than treated
-/// as a special case. Two objects with thread-locals cannot be: the loader gives
-/// `__tls_get_addr` one offset to work from, so a second module's storage would
-/// alias the first's — refused rather than allowed to read the wrong storage.
-unsafe fn install_tls(objects: &[Object]) -> Result<(), LoadError> {
-    let mut slot = None;
-    for o in objects {
-        let Some(tls) = o.tls else { continue };
-        if slot.is_some() {
-            return Err(LoadError::TwoTlsModules);
-        }
-        slot = Some(tls);
+/// One allocation, sized for all [`TLS_SLOTS`] slots, so a module loaded later needs nothing
+/// here. The generation words start at zero, which is what makes every slot initialise on the
+/// thread's first access to it rather than here — so the same code path serves a module that
+/// arrived long after this thread did.
+unsafe fn new_thread_pointer() -> Result<u64, LoadError> {
+    let st = unsafe { tls_state() };
+    if st.bytes == 0 {
+        return Ok(0);
     }
-    let Some(tls) = slot else { return Ok(()) };
-
-    let size = tls_block_size(tls.memsz);
-    // Room for the block and for the word the thread pointer sits on, which is
-    // at its 16-aligned end.
-    let alloc = unsafe { minix_rt::sbrk((size + 32) as isize) };
+    // Room for the block and for the word the thread pointer sits on, at its 16-aligned end.
+    let alloc = unsafe { minix_rt::sbrk((st.bytes + 32) as isize) };
     if alloc < 0 {
         return Err(LoadError::NoTlsSpace);
     }
     let block = ((alloc as u64) + 15) & !15;
+    let tp = thread_pointer_for(block, st.bytes);
+    // No thread has initialised any of it yet.
     unsafe {
-        ptr::copy_nonoverlapping(
-            tls.init as *const u8,
-            block as *mut u8,
-            tls.init_len as usize,
-        );
         ptr::write_bytes(
-            (block + tls.init_len) as *mut u8,
+            (tp as i64 + st.layout.table) as *mut u8,
             0,
-            (size - tls.init_len) as usize,
-        );
+            (TLS_SLOTS * 8) as usize,
+        )
+    };
+    Ok(tp)
+}
+
+/// Install the calling thread's storage for every module.
+///
+/// The main thread's, once, before any initialiser runs — an initialiser may touch a
+/// thread-local. Every other thread's comes from [`tls_alloc_thread`], because the runtime
+/// cannot build the block itself: only the loader knows the layout every module was numbered
+/// against.
+unsafe fn install_tls() -> Result<(), LoadError> {
+    let tp = unsafe { new_thread_pointer() }?;
+    if tp != 0 {
+        minix_rt::thread_set_tls(tp as usize);
     }
-    TLS_BLOCK_SIZE.store(size, Ordering::Relaxed);
-    minix_rt::thread_set_tls(thread_pointer_for(block, size) as usize);
     Ok(())
+}
+
+/// `__rtld_tls_alloc_thread`: a block for a thread the runtime is starting, which the runtime
+/// installs on that thread.
+///
+/// A `pthread_create` in a dynamically linked program comes here rather than building the block
+/// itself (`crates/minix-libc/src/lib.rs`): the layout is the loader's, and a second
+/// implementation of it would be a second place the two could disagree — which is what they did
+/// while there was one module to agree about. 0 on failure, which the runtime reports as a
+/// thread with no thread-local storage.
+unsafe extern "C" fn tls_alloc_thread() -> usize {
+    match unsafe { new_thread_pointer() } {
+        Ok(tp) => tp as usize,
+        Err(_) => 0,
+    }
 }
 
 /// The thread pointer for a block of `size` bytes at `block`.
@@ -1304,9 +1642,6 @@ unsafe fn load_now(name: &[u8], global: bool) -> Result<usize, LoadError> {
         Candidate::Loaded(i) => return Ok(i),
         Candidate::Absent => return Err(LoadError::CannotLoad),
         Candidate::Fresh(obj) => {
-            if obj.tls.is_some() {
-                return Err(LoadError::RuntimeTls);
-            }
             if st.count == MAX_OBJECTS {
                 return Err(LoadError::TooManyObjects);
             }
@@ -1334,11 +1669,15 @@ unsafe fn load_now(name: &[u8], global: bool) -> Result<usize, LoadError> {
         st.count = first;
         return Err(e);
     }
-    // A dependency may be the one that brought thread-local storage, and the loader places
-    // one module for the whole process (`install_tls`): refused before anything runs.
-    if st.objects[first..st.count].iter().any(|o| o.tls.is_some()) {
-        st.count = first;
-        return Err(LoadError::RuntimeTls);
+    // Every object in the group that brought thread-locals takes a *reserved* slot, before
+    // anything is relocated, because the number and the displacement are relocation values. A
+    // dependency can be the one that brought them, so this is a pass over the group and not
+    // over its first object.
+    for i in first..st.count {
+        if let Err(e) = unsafe { assign_tls_slot(&mut st.objects[i]) } {
+            st.count = first;
+            return Err(e);
+        }
     }
 
     // Dependencies first: a `COPY` reads the source object's bytes, and the source has to
@@ -1526,9 +1865,13 @@ pub unsafe fn run(argc: u64, argv: u64, envp: u64, main_hdr: u64) -> u64 {
         // path either.
         identity: None,
         // The main program is the first thing in the global scope, and every lookup's
-        // second pass can reach it.
+        // second pass can reach it. Its thread-local slot is the layout's to give
+        // (`layout_and_number_tls`): a non-PIE program's own `%fs`-relative offsets expect its
+        // storage where the first module goes.
         global: true,
         group: 0,
+        tls_module: 0,
+        tls_disp: 0,
     };
     main.symtab = match unsafe { main.dyn_tag(DT_SYMTAB) } {
         Some(v) => v,
@@ -1559,6 +1902,12 @@ pub unsafe fn run(argc: u64, argv: u64, envp: u64, main_hdr: u64) -> u64 {
         die_load(e);
     }
 
+    // The thread-local modules are laid out before anything is relocated: a module's slot
+    // number and its displacement *are* relocation values (`tls_index`'s module word, a
+    // `TLSDESC`'s argument), so the layout cannot wait until the block is allocated.
+    if let Err(e) = unsafe { layout_and_number_tls(&mut st.objects, st.count) } {
+        die_load(e);
+    }
     let loaded = &st.objects[..st.count];
     // Objects first (their own RELATIVE fixups), then the main program's PLT.
     for i in 1..st.count {
@@ -1570,10 +1919,9 @@ pub unsafe fn run(argc: u64, argv: u64, envp: u64, main_hdr: u64) -> u64 {
         die_load(e);
     }
 
-    // A thread-local has to be reachable before any initialiser runs, because an
-    // initialiser may touch one; the block is installed once, here, for this
-    // thread.
-    if let Err(e) = unsafe { install_tls(loaded) } {
+    // The block itself, before any initialiser runs: an initialiser may touch a thread-local,
+    // and `__tls_get_addr` needs a thread pointer to answer with.
+    if let Err(e) = unsafe { install_tls() } {
         die_load(e);
     }
 

@@ -15,14 +15,6 @@ use crate::elf::{
     R_X86_64_JUMP_SLOT, R_X86_64_NONE, R_X86_64_RELATIVE, RELA_SIZE, Rela,
 };
 
-/// The module id the loader fills a shared object's `tls_index` with.
-///
-/// `ti_module` only has to tell one module from another, and the port places a
-/// single one (the runtime's TLS block has no room for a second), so the value
-/// is a constant rather than something allocated per object. ELF numbers
-/// modules from 1; 0 means "no module".
-pub const TLS_MODULE_ID: u64 = 1;
-
 /// One target's relocation numbering.
 ///
 /// ELF gives every machine its own type numbers, so which numbers mean "a
@@ -52,7 +44,8 @@ pub struct Relocs {
     pub jump_slot: u32,
     /// Move the definition's bytes into the executable's reservation.
     pub copy: u32,
-    /// Fill a `tls_index`'s module number (see [`TLS_MODULE_ID`]).
+    /// Fill a `tls_index`'s module number, which is the loader's to say rather than the
+    /// relocation's (see [`RelocImage::tls_module`]).
     pub dtpmod64: u32,
     /// A `TLSDESC` descriptor: a *pair* of words, the resolver and its argument,
     /// which a thread-local access calls instead of `__tls_get_addr` (AArch64's
@@ -116,6 +109,10 @@ pub enum Action {
     Skip,
     /// Store this at `r_offset`.
     Write(u64),
+    /// Fill a `tls_index`'s module number with the *owner's* ([`RelocImage::tls_module`]) —
+    /// the one value in a thread-local access the layout decides rather than the object's own
+    /// code.
+    WriteModule,
     /// A byte copy (`COPY`): the walk resolves the symbol with
     /// [`Scope::ExcludeSelf`] and moves the definition's bytes to `r_offset`.
     Copy,
@@ -158,7 +155,7 @@ pub fn action(r: Relocs, typ: u32, base: u64, sym_value: u64, addend: i64) -> Ac
     // the only one that can say which module that is. The symbol's *address* is
     // not what goes here.
     if typ == r.dtpmod64 {
-        return Action::Write(TLS_MODULE_ID);
+        return Action::WriteModule;
     }
     if typ == r.tlsdesc {
         // A thread-local access in the `TLSDESC` dialect asks a per-descriptor
@@ -341,6 +338,19 @@ pub trait RelocImage {
     /// thread-local it placed: the "static" one, which returns the descriptor's
     /// argument — the variable's offset from the thread pointer.
     fn tlsdesc_static(&self) -> u64;
+    /// The module number this object's thread-locals belong to, which is what a `tls_index`'s
+    /// module word has to name for `__tls_get_addr` to find the right storage. ELF numbers
+    /// modules from 1; 0 means "no module", which is what an object with no `PT_TLS` answers.
+    ///
+    /// It is not the relocation's to state: the number depends on where the object was placed
+    /// against the modules already loaded, so the walk defers to the image
+    /// ([`Action::WriteModule`]).
+    fn tls_module(&self) -> u64;
+    /// Where this object's storage starts relative to the thread pointer — the layout's
+    /// decision (`crate::layout::tls_layout`), which a `TLSDESC` argument needs because it is
+    /// thread-pointer-relative while the offsets an object's own code carries are relative to
+    /// its own storage.
+    fn tls_disp(&self) -> i64;
 }
 
 /// Apply every relocation in the `RELA` table at link-time VA `table_va` spanning
@@ -386,6 +396,13 @@ where
                     return Err(RelocError::OutOfRange(at));
                 }
             }
+            Action::WriteModule => {
+                let at = base.wrapping_add(r.r_offset);
+                let module = img.tls_module();
+                if !img.store(at, module) {
+                    return Err(RelocError::OutOfRange(at));
+                }
+            }
             Action::Copy => {
                 img.sym_name(r.sym(), &mut name)
                     .map_err(|e| RelocError::BadSymbol(r.sym(), e))?;
@@ -397,17 +414,21 @@ where
                 }
             }
             Action::TlsDesc(offset) => {
-                // The symbol's form needs the defining object's thread-local
-                // block to turn the definition into an offset, and the port
-                // places one object's — the same limit `__tls_get_addr` refuses a
-                // second module for. Naming it is the point: a descriptor written
-                // with an offset into the wrong block is a wrong read much later.
+                // The symbol's form needs the defining object's storage, which a descriptor
+                // does not carry — and it is the dialect this port's compiler does not emit for
+                // a thread-local the object defines itself. Refused rather than half-answered.
                 if r.sym() != 0 {
                     return Err(RelocError::TlsDescForASymbol);
                 }
                 let resolver = img.tlsdesc_static();
+                // The linker's addend is the variable's offset from the thread pointer on the
+                // assumption that the module starts *there* — module 0's placement. Every other
+                // module's storage begins `disp` bytes along, so the descriptor has to say so.
+                // This is the one relocation whose value the layout decides, which is why the
+                // layout is computed before the walk.
+                let arg = (offset as i64).wrapping_add(img.tls_disp()) as u64;
                 let at = base.wrapping_add(r.r_offset);
-                if !img.store(at, resolver) || !img.store(at + 8, offset) {
+                if !img.store(at, resolver) || !img.store(at + 8, arg) {
                     return Err(RelocError::OutOfRange(at));
                 }
             }
@@ -456,6 +477,9 @@ mod tests {
     /// Where the walk's `TLSDESC` resolver stands in for the loader's: the test
     /// image has no loader, so this is the address a descriptor must name.
     const TLS_RESOLVER: u64 = 0x99_0000;
+    /// The module number the test image claims, and the placement it claims: the *first*
+    /// module, at the thread pointer, which is what an object's own code assumes.
+    const TLS_MODULE: u64 = 1;
     const SENTINEL: u8 = 0xaa;
 
     fn wr16(b: &mut [u8], o: usize, v: u16) {
@@ -617,6 +641,17 @@ mod tests {
         fn tlsdesc_static(&self) -> u64 {
             self.base + TLS_RESOLVER
         }
+
+        /// The test image is the *first* module, at the thread pointer — the placement the
+        /// single-module loader had, so the values these tests expect are the ones an object's
+        /// own code would carry.
+        fn tls_module(&self) -> u64 {
+            TLS_MODULE
+        }
+
+        fn tls_disp(&self) -> i64 {
+            0
+        }
     }
 
     fn resolve(name: &[u8], _scope: Scope) -> Option<Def> {
@@ -708,10 +743,11 @@ mod tests {
     #[test]
     fn dtpmod_fills_the_module_id_not_the_symbol_value() {
         // The symbol's address, passed in as if the walk had resolved one, must
-        // not reach the store: `__tls_get_addr` is asked for a module.
+        // not reach the store: `__tls_get_addr` is asked for a module, and which module is
+        // the image's to say, not the relocation's.
         assert_eq!(
             reloc_action(R_X86_64_DTPMOD64, BASE, 0x201_0000, 0),
-            Action::Write(TLS_MODULE_ID)
+            Action::WriteModule
         );
     }
 
@@ -747,7 +783,7 @@ mod tests {
             }
             assert_eq!(
                 action(r, r.dtpmod64, BASE, 0x2004, 0),
-                Action::Write(TLS_MODULE_ID),
+                Action::WriteModule,
                 "{}",
                 r.name
             );

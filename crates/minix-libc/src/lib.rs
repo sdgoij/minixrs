@@ -77,7 +77,7 @@ pub(crate) fn set_errno(e: i32) {
     #[cfg(target_os = "minix")]
     {
         // SAFETY: only this thread touches its own TLS errno slot.
-        unsafe { *ERRNO.get() = e };
+        unsafe { *ERRNO.get() = e }
     }
     #[cfg(not(target_os = "minix"))]
     ERRNO.store(e, core::sync::atomic::Ordering::Relaxed);
@@ -102,7 +102,12 @@ unsafe extern "C" {
 /// Runs on the main thread — the C heap is single-threaded and worker
 /// threads must not call `sbrk` — so `pthread_create` prepares the block
 /// here and the trampoline only issues the `thread_set_tls` syscall.
-#[cfg(target_os = "minix")]
+///
+/// This is the *static* program's path, whose block is the one image the linker script
+/// describes. A shared build asks the loader instead ([`tls_block_alloc`]'s other definition):
+/// the block has to hold every module the process loaded, and the layout they are numbered
+/// against is the loader's, not this object's.
+#[cfg(all(target_os = "minix", not(feature = "so")))]
 pub(crate) fn tls_block_alloc() -> usize {
     unsafe {
         let start = core::ptr::addr_of!(__tls_start).addr();
@@ -144,6 +149,18 @@ pub(crate) fn tls_block_alloc() -> usize {
         let tp = block;
         tp
     }
+}
+
+/// The shared build's `tls_block_alloc`: one call into the loader. A block for a thread here
+/// has to cover every module the process holds — this object's, another library's, a driver
+/// `dlopen`'d later — and those are laid out and numbered by the loader, so it is the only side
+/// that can build one. Doing it here would be a second implementation of a layout that has to
+/// agree to the byte.
+#[cfg(all(target_os = "minix", feature = "so"))]
+pub(crate) fn tls_block_alloc() -> usize {
+    // SAFETY: the loader supplies this name (`crates/ldso/src/rtld.rs`), it reads no state of
+    // the caller's, and it is called with the C heap quiescent (see above).
+    unsafe { __rtld_tls_alloc_thread() }
 }
 
 /// Initialize the calling thread's TLS block and thread pointer. Called by
@@ -1527,14 +1544,17 @@ const POLLOUT: i16 = 0x004;
 // them with the loader's own `dlopen` and friends. A *static* program has no loader in its
 // address space at all (no `PT_INTERP`, nothing to ask), and says so.
 
-/// The loader's `dlopen` family. Nothing defines these: a `libc.so` is linked with them
-/// undefined, exactly as it is with `__tls_get_addr`.
+// The loader's `dlopen` family and its thread-block allocator. Nothing defines these: a
+// `libc.so` is linked with them undefined, exactly as it is with `__tls_get_addr`.
 #[cfg(all(target_os = "minix", feature = "so"))]
 unsafe extern "C" {
     fn __rtld_dlopen(path: *const c_char, flags: c_int) -> *mut c_void;
     fn __rtld_dlsym(handle: *mut c_void, name: *const c_char) -> *mut c_void;
     fn __rtld_dlclose(handle: *mut c_void) -> c_int;
     fn __rtld_dlerror() -> *mut c_char;
+    /// A thread's thread-local block, which only the loader can lay out
+    /// (`tls_block_alloc`).
+    fn __rtld_tls_alloc_thread() -> usize;
 }
 
 /// `dlopen(3)`: load a shared object now, and return a handle for `dlsym`.

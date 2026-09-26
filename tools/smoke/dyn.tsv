@@ -88,10 +88,14 @@
 # `dlsym(RTLD_DEFAULT)` with no handle at all. `close` is this port's `dlclose` contract:
 # accepted, and the object stays usable, because nothing is unloaded.
 #
-# The two failures are asserted on the loader's *own* message, because "it failed" is worth
-# little. `missing` fails at the open. `tls` fails at the limit that is real: the loader
-# places one thread-local module, at startup, so an object carrying `PT_TLS` cannot be
-# `dlopen`'d at all (`DYNAMIC_LINKING.md` D8, `tools/libtls1.c`).
+# `missing` asserts the loader's *own* message, because "it failed" is worth little.
+#
+# `tls` is the multi-module case (`DYNAMIC_LINKING.md` Phase 8): the object carries a `PT_TLS`
+# and gets a module of its own, in a slot the layout reserved before any thread existed. The
+# three fields are what makes that an assertion rather than a hope. `init` is read back before
+# anything writes it, so it can only be the object's init image (7, not 0, and not a
+# neighbour's). `errno` is `libc.so`'s own thread-local — the *other* module — and must not
+# have moved. `bump` writes this module's storage and reads it back.
 #
 # `dynopen-text` is `libdlopen.so`'s read-only data and `3` is its code. The gate fails if
 # the program itself contains the text, so the string can only have come from the object.
@@ -99,4 +103,4 @@
 /bin/dynopen global	dynopen-global 3 dynopen-text
 /bin/dynopen close	dynopen-close 0 3 dynopen-text
 /bin/dynopen missing	dynopen-missing null=1 msg=ld.so: cannot load a shared object
-/bin/dynopen tls	dynopen-tls null=1 msg=ld.so: a dlopen'd object has thread-local storage, and the loader places one module
+/bin/dynopen tls	dynopen-tls init=7 errno=2 bump=8
