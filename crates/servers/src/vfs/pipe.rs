@@ -109,6 +109,11 @@ pub fn rw_pipe(filp: &Filp, rw_flag: i32, user_e: i32, buf: u64, req_size: usize
         }
         // C caches the pipe size from the reply's seek_pos.
         (*vp).v_size = new_pos;
+        // The pipe's readiness changed — a read freed space for a writer, a write gave
+        // a reader something. Nothing else reports that (this port's drivers notify for
+        // character devices; a pipe is VFS's own), so a suspended wait watching a pipe
+        // is completed here or waits for its deadline.
+        crate::vfs::select::wake_pipes();
         r2
     }
 }

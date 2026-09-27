@@ -7,8 +7,9 @@
 # whole line its output must produce.
 #
 # `seltest` is non-interactive — every step is a pipe it made itself — so the one line
-# below is printed only after select/poll readiness, both poll timeouts, and (the point
-# of the change) a real select timeout all passed. The timeout steps assert an elapsed
-# window too; a deadline that never fires would hang instead of failing.
+# below is printed only after select/poll readiness, both poll timeouts, a real select timeout,
+# and (the last step, and the one that used to hang) a poll on a pipe carrying no deadline that
+# a forked child's write has to wake. The timeout steps assert an elapsed window too; a deadline
+# that never fires would hang instead of failing.
 
 /bin/seltest	seltest: PASS

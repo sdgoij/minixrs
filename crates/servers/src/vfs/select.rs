@@ -944,6 +944,59 @@ pub unsafe fn wake_timerfd(id: u32) {
     unsafe { wake_object(R_TIMERFD, id, ops) };
 }
 
+/// Re-check the **pipe** descriptors of every suspended wait, and complete the ones
+/// that are now satisfiable.
+///
+/// A pipe has no driver to report readiness to — VFS *is* the device, with the data
+/// in PFS and the size cached on the vnode — so there is nothing to notify and
+/// nothing to re-ask over IPC. The read or write that changed the pipe calls this,
+/// and the wait completes here, the way `wake_eventfd` completes a counter's waiter.
+/// Only FIFO descriptors are re-evaluated: a pipe read or write must not drag the
+/// sockets in the same wait through another `CDEV_SELECT`.
+///
+/// The reference records the watcher on the *filp* instead
+/// (`filp_pipe_select_ops`/`filp_pipe_select_ep`, `select.c:501-502`) and walks the
+/// filp table calling `select_callback` when a read or write completes
+/// (`pipe.c:386-401`). Those fields stay unused here: they carry specific ready ops
+/// to one watcher, and this port's waits are level-triggered and re-evaluated, which
+/// also lets more than one wait watch the same pipe.
+///
+/// # Safety
+///
+/// Must be called from VFS dispatch.
+pub unsafe fn wake_pipes() {
+    use crate::vfs::glo::vfs_global;
+    let glob = unsafe { &mut *vfs_global() };
+    let filp_arr = core::ptr::addr_of_mut!(glob.filp) as *mut Filp;
+
+    for i in 0..MAX_WAITS {
+        let e = unsafe { se_slot(i) };
+        let fp = e.requestor;
+        if fp.is_null() {
+            continue;
+        }
+        for fd in 0..e.n as usize {
+            if e.got[fd] != 0 || e.want[fd] == 0 || e.fds[fd] < 0 {
+                continue;
+            }
+            // The same resolution `scan` uses, narrowed to one fd and one mode.
+            let idx = unsafe { (*fp).fp_filp[e.fds[fd] as usize] };
+            if idx < 0 {
+                continue;
+            }
+            let filp = unsafe { &*filp_arr.add(idx as usize) };
+            let vp = filp.filp_vno;
+            if vp.is_null() || unsafe { (*vp).v_mode } & S_IFIFO == 0 {
+                continue;
+            }
+            e.got[fd] |= select_request_pipe(filp, e.want[fd]);
+        }
+        if count_ready(e) > 0 {
+            unsafe { complete_and_reply(e) };
+        }
+    }
+}
+
 /// The `CLOCK` alarm fired: complete every suspended wait whose deadline has
 /// passed (the ready sets hold whatever became ready, often nothing), then
 /// re-arm for the next-earliest deadline. Called from the VFS main loop's

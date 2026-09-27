@@ -2452,6 +2452,48 @@ pub fn seltest(_args: &[&str]) -> i32 {
     }
     write_out(b"seltest: poll-timeout=0\r\n");
 
+    // The property an event loop needs from a pipe, and the one this port lacked: a
+    // poll with no deadline must come back when *another* process writes. A pipe
+    // registered no late watch, so a blocking poll on one sat until its deadline — and
+    // with none, forever (`KNOWN_ISSUES` 31).
+    let (br, bwr) = match minix_std::fs::pipe() {
+        Ok(p) => p,
+        Err(_) => return fail(b"seltest: blocking-pipe failed\r\n"),
+    };
+    let pid = match unsafe { minix_std::process::fork() } {
+        Ok(0) => {
+            // Child: give the parent time to block, then write one byte and go.
+            for _ in 0..500_000 {
+                core::hint::spin_loop();
+            }
+            let _ = unsafe { minix_std::fs::write(bwr, b"z") };
+            minix_std::process::exit(0);
+        }
+        Ok(p) => p,
+        Err(_) => return fail(b"seltest: blocking-pipe fork failed\r\n"),
+    };
+    let _ = minix_std::fs::close(bwr);
+
+    let mut pf = [minix_std::fs::PollFd {
+        fd: br,
+        events: POLLIN,
+        revents: 0,
+    }];
+    // A long deadline rather than none, so a wake that never comes fails the gate
+    // instead of hanging it. A real wake returns long before it does.
+    match minix_std::fs::poll(&mut pf, 5000) {
+        Ok(n) if n > 0 && pf[0].revents & POLLIN != 0 => {}
+        _ => return fail(b"seltest: blocking poll was never woken FAIL\r\n"),
+    }
+    let mut b = [0u8; 1];
+    match unsafe { minix_std::fs::read(br, &mut b) } {
+        Ok(1) if b[0] == b'z' => {}
+        _ => return fail(b"seltest: blocking poll read FAIL\r\n"),
+    }
+    let _ = minix_std::process::waitpid(pid, 0);
+    let _ = minix_std::fs::close(br);
+    write_out(b"seltest: blocking-poll-woken=1\r\n");
+
     let _ = minix_std::fs::close(rd);
     let _ = minix_std::fs::close(wr);
     write_out(b"seltest: PASS\r\n");

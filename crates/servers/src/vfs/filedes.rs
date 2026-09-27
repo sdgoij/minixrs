@@ -191,11 +191,19 @@ pub unsafe fn close_filp(filp_idx: i32) -> i32 {
         }
         // Release the vnode reference the filp held (C close_filp: the
         // open-time vnode reference is consumed here, sending req_putnode
-        // so the FS server can free the inode).
+        // so the FS server can free the inode). The mode is read first: the
+        // release may free the vnode.
+        let is_fifo = !vp.is_null() && ((*vp).v_mode & S_IFMT) == S_IFIFO;
         if !vp.is_null() {
             mount::put_vnode(vp);
         }
         *f = Filp::default();
+        // A pipe end going away changes the *other* end's readiness — a reader sees
+        // EOF, a writer EPIPE — and nothing else reports that, so a suspended wait on
+        // that pipe is completed here rather than left for its deadline.
+        if is_fifo {
+            unsafe { crate::vfs::select::wake_pipes() };
+        }
     }
 
     OK

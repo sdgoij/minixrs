@@ -1275,18 +1275,29 @@ are arch-specific, `[env]` is tooling/platform, not kernel.
     recorded rather than synthesized — a ported binary that `utimes` or `fsync`es a memfd gets a
     failing call rather than a wrong answer. (`crates/servers/src/vfs/memfd.rs`,
     `crates/servers/src/vfs/call.rs`)
-31. **A blocking `select`/`poll` on a pipe never wakes without a timeout (2026-09-28, open).**
+31. **A blocking `select`/`poll` on a pipe never wakes without a timeout (2026-09-28, FIXED).**
     The readiness engine (`crates/servers/src/vfs/select.rs`) asks `pipe_check` whether a pipe fd
-    is ready, and a character device registers a late watch (`CDEV_SELECT` → `CDEV_SEL2_REPLY`),
-    but a pipe registers nothing: a blocking `select`/`poll` on a pipe with no timeout sits until
-    its deadline — and with none, forever — even after the other end writes. The reference wires
-    this up: `select_request_pipe` sets `f->filp_pipe_select_ops |= ops` when nothing is ready and
-    blocking (`select.c:501-502`), and a completed pipe read/write walks the filp table calling
-    `select_callback` for each watcher (`pipe.c:386-401`). The port's `Filp` already carries
-    `filp_pipe_select_ops`/`filp_pipe_select_ep`, so the fields exist and are unused. Nothing on
-    the current Wayland path polls a bare pipe without a deadline (sockets are character devices
-    and do wake), so it is recorded rather than fixed. (`crates/servers/src/vfs/select.rs`,
-    `crates/servers/src/vfs/pipe.rs`, `crates/servers/src/vfs/types.rs`)
+    is ready, and a character device registers a late watch (`CDEV_SELECT`), but a pipe registered
+    nothing: a blocking `select`/`poll` on a pipe with no timeout sat until its deadline — and
+    with none, forever — even after the other end wrote. Nothing on the Wayland path polled a
+    bare pipe, so it was recorded rather than fixed; closing it removed the last wake in the
+    engine that could be lost.
+    A pipe has no driver to report readiness to, because VFS *is* the device (the data is in PFS
+    and the size is cached on the vnode), so there is nothing to notify and nothing to re-ask over
+    IPC: the read, write or close that changed the pipe calls `vfs::select::wake_pipes`, which
+    re-evaluates the FIFO descriptors of every suspended wait and completes the ones now
+    satisfiable. Only FIFOs, deliberately — a pipe read must not drag the sockets in the same wait
+    through another `CDEV_SELECT`. Closing is hooked too: a reader sees EOF, and a writer `EPIPE`,
+    only when the *other* end goes away, and nothing else reports that.
+    The reference instead records the watcher on the filp (`filp_pipe_select_ops`/
+    `filp_pipe_select_ep`, `select.c:501-502`) and walks the filp table calling `select_callback`
+    when a read or write completes (`pipe.c:386-401`). Those two fields stay unused here: they
+    carry specific ready ops to *one* watcher, and this port's waits are level-triggered and
+    re-evaluated, which also lets more than one wait watch the same pipe.
+    Gate: `just test-select-x86` (`/bin/seltest`), which ends with a poll on a pipe that carries
+    no deadline: a forked child writes, and the poll must come back with the byte.
+    (`crates/servers/src/vfs/select.rs`, `crates/servers/src/vfs/pipe.rs`,
+    `crates/servers/src/vfs/filedes.rs`, `crates/userland/src/lib.rs`)
 32. **`read` never blocks in VFS, so an `eventfd`/`timerfd` read on a zero count returns
     `EAGAIN` (2026-09-28, open, deliberate).** The port has no suspend/revive for reads
     (item 31's sibling: `vfs::pipe` reads return `EAGAIN` rather than suspending), and
