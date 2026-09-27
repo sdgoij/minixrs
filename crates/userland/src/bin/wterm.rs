@@ -398,64 +398,93 @@ pub unsafe fn main(_argc: i32, _argv: *const *const u8) -> i32 {
         }
     };
 
-    // 5. Main loop: poll the pty master (output) and the key pipe (input).
+    // 5. Main loop: wait for the pty master (shell output) or the key pipe, then
+    //    drain both. `POLLIN` on the master is a readiness the tty server has to
+    //    *report* — a wake nothing sent before, which is why this loop used to
+    //    spin on `EAGAIN` instead of polling.
+    const POLLIN: i16 = 0x001;
     let mut term = Term::new();
     let mut rbuf = [0u8; 64];
     let mut kbuf = [0u8; 8];
+    let mut fds = [
+        minix_std::fs::PollFd {
+            fd: master,
+            events: POLLIN,
+            revents: 0,
+        },
+        minix_std::fs::PollFd {
+            fd: key_r,
+            events: POLLIN,
+            revents: 0,
+        },
+    ];
     let mut gone = false;
     while !gone {
+        fds[0].revents = 0;
+        fds[1].revents = 0;
+        // No deadline: every readiness change on either fd wakes this, and a slave
+        // that has gone away reports EOF on the next read rather than blocking.
+        if minix_std::fs::poll(&mut fds, -1).is_err() {
+            break;
+        }
+
         // Drain shell output.
-        loop {
-            match unsafe { minix_std::fs::read(master, &mut rbuf) } {
-                Ok(0) => {
-                    // EOF: the slave closed — the shell is gone.
-                    gone = true;
-                    break;
-                }
-                Ok(n) => {
-                    for &b in &rbuf[..n as usize] {
-                        term.feed(b);
+        if fds[0].revents & POLLIN != 0 {
+            loop {
+                match unsafe { minix_std::fs::read(master, &mut rbuf) } {
+                    Ok(0) => {
+                        // EOF: the slave closed — the shell is gone.
+                        gone = true;
+                        break;
                     }
-                    flush(&mut term, wid);
-                }
-                Err(e) if e.0 == -minix_std::EAGAIN => break,
-                Err(_) => {
-                    gone = true;
-                    break;
+                    Ok(n) => {
+                        for &b in &rbuf[..n as usize] {
+                            term.feed(b);
+                        }
+                        flush(&mut term, wid);
+                    }
+                    Err(e) if e.0 == -minix_std::EAGAIN => break,
+                    Err(_) => {
+                        gone = true;
+                        break;
+                    }
                 }
             }
         }
         if gone {
             break;
         }
+
         // Drain keys into the pty.
-        loop {
-            match unsafe { minix_std::fs::read(key_r, &mut kbuf) } {
-                Ok(0) => {
-                    gone = true;
-                    break;
-                }
-                Ok(n) => {
-                    for &ch in &kbuf[..n as usize] {
-                        loop {
-                            match unsafe { minix_std::fs::write(master, &[ch]) } {
-                                Ok(_) => break,
-                                Err(e) if e.0 == -minix_std::EAGAIN => {}
-                                Err(_) => {
-                                    gone = true;
-                                    break;
+        if fds[1].revents & POLLIN != 0 {
+            loop {
+                match unsafe { minix_std::fs::read(key_r, &mut kbuf) } {
+                    Ok(0) => {
+                        gone = true;
+                        break;
+                    }
+                    Ok(n) => {
+                        for &ch in &kbuf[..n as usize] {
+                            loop {
+                                match unsafe { minix_std::fs::write(master, &[ch]) } {
+                                    Ok(_) => break,
+                                    Err(e) if e.0 == -minix_std::EAGAIN => {}
+                                    Err(_) => {
+                                        gone = true;
+                                        break;
+                                    }
                                 }
                             }
-                        }
-                        if gone {
-                            break;
+                            if gone {
+                                break;
+                            }
                         }
                     }
-                }
-                Err(e) if e.0 == -minix_std::EAGAIN => break,
-                Err(_) => {
-                    gone = true;
-                    break;
+                    Err(e) if e.0 == -minix_std::EAGAIN => break,
+                    Err(_) => {
+                        gone = true;
+                        break;
+                    }
                 }
             }
         }

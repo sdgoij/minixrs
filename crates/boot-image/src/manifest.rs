@@ -131,6 +131,9 @@ pub const BOOT_BINS: &[(&str, &str)] = &[
     // set, level-triggered readiness, and a blocked epoll_wait woken by a child
     // process.
     ("/bin/epolltest", "epolltest"),
+    // `/bin/ptytest` polls a pty master and must be woken by the slave's write:
+    // the terminal path's readiness, which the tty server reports.
+    ("/bin/ptytest", "ptytest"),
     // `/bin/waylandtest` is the Wayland Phase 1a smoke test: the protocol
     // handshake (registry + sync) over `/dev/uds`.
     ("/bin/waylandtest", "waylandtest"),

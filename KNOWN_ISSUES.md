@@ -1362,12 +1362,19 @@ are arch-specific, `[env]` is tooling/platform, not kernel.
     readiness gates. (`crates/servers/src/vfs/select.rs`, `crates/servers/src/uds.rs`,
     `crates/servers/src/vfs/main.rs`, `crates/userland/src/lib.rs`)
 
-    One sibling of (c) is left as it was, and should be fixed the same way when a terminal on a
-    readiness path needs it: the tty still *pushes* its report with `SENDNB`
-    (`crates/servers/src/tty.rs::chardriver_reply_select`), so a `select`/`poll` on a tty can
-    still lose a wake the way the socket did. Nothing on the Wayland path polls a tty —
-    `/sbin/wlserver` polls a socket and takes input by IPC — so it is recorded rather than
-    changed.
+    The same trap on the terminal path is fixed with it: `tty.rs`'s line `select_retry` used to
+    *push* its report with `SENDNB` (C's `chardriver_reply_select`); it now notifies
+    (`tty_notify_select`) and lets VFS re-ask, so a `select`/`poll` on a tty line cannot lose a
+    wake either. VFS still consumes a `CDEV_SEL1_REPLY`/`CDEV_SEL2_REPLY` as the reference ABI,
+    but no driver in the port sends one. The pty master's half is wired as well, and it shows the
+    same lesson in the hook's shape: `PtyHost::reply_select(minor, ops)` became
+    `select_wake(proc)`, because what a driver can honestly report is *that* readiness changed —
+    not what changed, which VFS asks for itself. The pty wakes from `slave_write`/`slave_echo`,
+    and the TTY server from `pty_slave_close`, since a closed slave makes its master readable
+    (EOF). Gate: `just test-pty-x86` (`/bin/ptytest` opens a master, forks a slave, and must come
+    back from a `poll` on the master when the slave writes). `Pty::select_retry` had no caller at
+    all before this, so a master's armed interest was never reported — and `/bin/wterm` drained
+    the master in an `EAGAIN` loop instead of polling, which is what hid it. It polls now.
 
 ---
 

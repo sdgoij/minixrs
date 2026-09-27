@@ -1523,7 +1523,7 @@ fn select_retry(tp: &mut Tty) -> i32 {
     if tp.tty_select_ops != 0 {
         let ops = select_try(tp, tp.tty_select_ops);
         if ops != 0 {
-            chardriver_reply_select(tp.tty_select_proc as i32, tp.tty_select_minor, ops as i32);
+            tty_notify_select(tp.tty_select_proc);
             tp.tty_select_ops &= !ops;
         }
     }
@@ -1746,6 +1746,10 @@ impl PtyHost for Tty {
     fn handle_events(&mut self) {
         handle_events(self);
     }
+
+    fn select_wake(&mut self, proc: u32) {
+        tty_notify_select(proc);
+    }
 }
 
 /// PTY index for a pty slave line (derived from the line's minor).
@@ -1822,6 +1826,9 @@ fn pty_slave_open(tp: &mut Tty, _try_only: i32) -> i32 {
 fn pty_slave_close(tp: &mut Tty, _try_only: i32) -> i32 {
     let pty = unsafe { pty_by_index(pty_slave_idx(tp)) };
     pty.slave_close();
+    // The slave going away makes its master readable (EOF), so a reader waiting
+    // on the master has to be woken here — it will never see another byte.
+    pty.select_retry(tp);
     0
 }
 
@@ -2575,28 +2582,32 @@ pub fn chardriver_reply_task(endpt: i32, id: u32, status: i32) -> i32 {
     0
 }
 
-/// Reply to a select request with a status update (`CDEV_SEL2_REPLY`).
+/// Tell the process waiting on this line (VFS) to re-ask it, instead of pushing
+/// a `CDEV_SEL2_REPLY` at it the way C's `chardriver_reply_select` does.
 ///
-/// Message layout matches the C `m_lchardriver_vfs_sel2`: status at
-/// payload offset 0, minor at payload offset 4.
-pub fn chardriver_reply_select(endpt: i32, minor: u32, status: i32) -> i32 {
-    let mut reply = arch_common::ipc::Message {
-        m_source: 0,
-        m_type: arch_common::com::CDEV_SEL2_REPLY as i32,
-        m_payload: unsafe { core::mem::zeroed() },
-    };
-    unsafe {
-        reply.m_payload.m2.m2i1 = status;
-        reply.m_payload.m2.m2i2 = minor as i32;
+/// VFS's `cdev_reply` still *consumes* such a reply, but a push cannot be relied
+/// on: `SENDNB` only lands while VFS is blocked in `RECEIVE`, so a report raised
+/// while VFS is busy is refused (`ENOTREADY`) and lost — measured on the socket
+/// path in `KNOWN_ISSUES` 36, and the same window exists here. A *notification*
+/// is remembered by the kernel for a destination that is not receiving and handed
+/// over on its next `RECEIVE`; VFS then re-asks every suspended wait, and the
+/// re-ask recomputes readiness through `do_select`, so the notification carries
+/// nothing — only `tty_select_proc` has to be right.
+fn tty_notify_select(endpt: u32) {
+    #[cfg(target_os = "minix")]
+    {
+        let ep = endpt as i32;
+        if ep >= 0 {
+            let mut buf = [0u8; 8];
+            unsafe {
+                minix_rt::syscall2(minix_rt::NOTIFY_CALL, ep as u64, buf.as_mut_ptr() as u64);
+            }
+        }
     }
-    let _ = unsafe {
-        minix_rt::syscall2(
-            minix_rt::SENDNB_CALL,
-            endpt as u64,
-            &mut reply as *mut arch_common::ipc::Message as u64,
-        )
-    };
-    0
+    #[cfg(not(target_os = "minix"))]
+    {
+        let _ = endpt;
+    }
 }
 
 // Server main loop stub
@@ -4129,27 +4140,6 @@ mod tests {
         assert_eq!(i32::from_ne_bytes(bytes[4..8].try_into().unwrap()), 0x480);
         assert_eq!(i32::from_ne_bytes(bytes[8..12].try_into().unwrap()), 7);
         assert_eq!(i32::from_ne_bytes(bytes[12..16].try_into().unwrap()), 42);
-    }
-
-    #[test]
-    fn test_chardriver_reply_select_layout() {
-        // C mess_lchardriver_vfs_sel2: status @ payload 0, minor @ payload 4;
-        // m_type = CDEV_SEL2_REPLY.
-        let mut reply = arch_common::ipc::Message {
-            m_source: 0,
-            m_type: arch_common::com::CDEV_SEL2_REPLY as i32,
-            m_payload: unsafe { core::mem::zeroed() },
-        };
-        unsafe {
-            reply.m_payload.m2.m2i1 = 3;
-            reply.m_payload.m2.m2i2 = 5;
-        }
-        let bytes = unsafe {
-            core::slice::from_raw_parts(&reply as *const arch_common::ipc::Message as *const u8, 64)
-        };
-        assert_eq!(i32::from_ne_bytes(bytes[4..8].try_into().unwrap()), 0x482);
-        assert_eq!(i32::from_ne_bytes(bytes[8..12].try_into().unwrap()), 3);
-        assert_eq!(i32::from_ne_bytes(bytes[12..16].try_into().unwrap()), 5);
     }
 
     #[test]

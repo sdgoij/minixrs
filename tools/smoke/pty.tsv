@@ -1,0 +1,15 @@
+# The `just test-pty-x86` scenario: readiness on the terminal path, driven by
+# `/bin/ptytest`.
+#
+#   FEED_SCENARIO=tools/smoke/pty.tsv sh tools/smoke/feed.sh <log> <seconds> <qemu command…>
+#
+# One step per line, as `tools/smoke/scenario.tsv` documents: the command, a tab, and the
+# whole line its output must produce.
+#
+# `ptytest` opens `/dev/ptyp0`, forks a child that opens `/dev/ttyp0`, and polls the master
+# with a deadline. The line below is printed only if that poll came back with data — the
+# wake the tty server has to report for a master, which nothing sent before it was wired.
+# A missing wake costs the gate its deadline (five seconds) and then a named failure code,
+# not a hang.
+
+/bin/ptytest	ptytest: PASS

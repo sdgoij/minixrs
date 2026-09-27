@@ -287,6 +287,14 @@ name = "epolltest"
 path = "src/bin/epolltest.rs"
 test = false
 
+# ptytest is the pty-master readiness gate: a blocking poll on /dev/ptyp0 must be
+# woken by a write on /dev/ttyp0, the wake the tty server reports for a master.
+# Embedded as /bin/ptytest and driven by `just test-pty-x86`.
+[[bin]]
+name = "ptytest"
+path = "src/bin/ptytest.rs"
+test = false
+
 [[bin]]
 name = "waylandtest"
 path = "src/bin/waylandtest.rs"

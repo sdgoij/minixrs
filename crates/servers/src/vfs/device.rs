@@ -541,9 +541,12 @@ pub fn cdev_reply() -> i32 {
     match call_nr {
         arch_common::com::CDEV_SEL1_REPLY | arch_common::com::CDEV_SEL2_REPLY => {
             // Select notification: status (the ops now ready) @ payload 0
-            // (m_in[8..12]), minor @ payload 4 (m_in[12..16]) — the layout
-            // chardriver_reply_select builds. Route to the select machinery,
-            // which sends the final reply to the blocked caller.
+            // (m_in[8..12]), minor @ payload 4 (m_in[12..16]) — C's
+            // `mess_lchardriver_vfs_sel2`, the layout `chardriver_reply_select`
+            // builds. No driver in the port sends one today: a driver cannot rely
+            // on VFS being in `RECEIVE` to receive it, so a driver that has news
+            // notifies instead and VFS re-asks (`select::rescan_suspended`,
+            // `KNOWN_ISSUES` 36). Kept because it is the reference ABI.
             let status = i32::from_le_bytes(m_in[8..12].try_into().unwrap_or([0; 4]));
             let minor = u32::from_le_bytes(m_in[12..16].try_into().unwrap_or([0; 4]));
             unsafe { crate::vfs::select::select_driver_reply(minor, status) }

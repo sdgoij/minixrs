@@ -462,6 +462,18 @@ test-memfd-x86 boot-timeout="40": build-x86
     FEED_SCENARIO=tools/smoke/memfd.tsv sh tools/smoke/feed.sh target/test-memfd-x86.log {{boot-timeout}} qemu-system-x86_64 -nographic -m 256M -no-reboot -vga none -device bochs-display,id=fb0 -kernel target/images/x86_64-pc-minix/minix-x86.elf -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0 -device virtio-tablet-pci,display=fb0
     @echo "memfd: one object mapped twice and across a fork, read/write agreeing (x86_64)"
 
+# The terminal path's readiness: /bin/ptytest opens a pty master, forks a slave,
+# and must come back from a `poll` on the master when the slave writes. Nothing
+# woke a master poller before the tty server reported it, which is why /bin/wterm
+# drained the master in an EAGAIN loop instead of polling. build-x86 embeds the
+# binary.
+test-pty-x86 boot-timeout="40": build-x86
+    mkdir -p target/images/x86_64-pc-minix
+    cp target/trampoline.elf target/images/x86_64-pc-minix/minix-x86.elf
+    @just _assert-qemu-version qemu-system-x86_64
+    FEED_SCENARIO=tools/smoke/pty.tsv sh tools/smoke/feed.sh target/test-pty-x86.log {{boot-timeout}} qemu-system-x86_64 -nographic -m 256M -no-reboot -vga none -device bochs-display,id=fb0 -kernel target/images/x86_64-pc-minix/minix-x86.elf -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0 -device virtio-tablet-pci,display=fb0
+    @echo "pty: a poll on a pty master is woken by the slave's write (x86_64)"
+
 # Readiness primitives: /bin/seltest drives select(2) and poll(2) over pipes and
 # checks a real timeout on each — Phase 0 of WAYLAND.md. build-x86 embeds the
 # binary; the scenario types the command into the shell and wants the whole line back.

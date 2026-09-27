@@ -79,12 +79,17 @@ pub trait PtyHost {
         None
     }
 
-    /// Send a select reply to a waiting process.
+    /// Wake `proc` because a pty master's readiness changed.
     ///
-    /// On the real TTY server, this builds a `CDEV_SEL2_REPLY` message
-    /// and sends it via the kernel's SENDNB syscall to `select_proc`.
-    /// On the host (test environment), this is a no-op.
-    fn reply_select(&mut self, _minor: u32, _ops: u32) {}
+    /// `proc` is the endpoint waiting in `select`/`poll`/`epoll` — VFS — and the
+    /// wake must be a *notification*, not a send: a non-blocking send only lands
+    /// while the destination is blocked in `RECEIVE`, so a busy VFS refuses it and
+    /// the wake is gone (`KNOWN_ISSUES` 36). The kernel remembers a notification for
+    /// a destination that is not receiving and hands it over on its next `RECEIVE`,
+    /// and the destination re-asks for readiness then, so nothing but the endpoint
+    /// needs to travel. C's pty driver replies with the ready ops instead —
+    /// `reply_select` — which is the form that can be refused.
+    fn select_wake(&mut self, _proc: u32) {}
 }
 
 /// No-op host implementation for use before the TTY server is wired.
@@ -373,7 +378,9 @@ impl Pty {
     /// The TTY (slave) side has been closed.
     ///
     /// If the master is still active, pending requests are cancelled
-    /// and the state is marked TTY_CLOSED.
+    /// and the state is marked TTY_CLOSED. The caller wakes any waiting master
+    /// reader (its `select_try` is ready then, as EOF) — this takes no host because
+    /// everything that would be needed is on the server side of the call.
     pub fn slave_close(&mut self) {
         if (self.state & PTY_ACTIVE) == 0 {
             self.reset();
@@ -505,6 +512,9 @@ impl Pty {
             self.start_transfer();
         }
 
+        // The output buffer gained bytes: a master waiting to read is now ready.
+        self.select_retry(host);
+
         true
     }
 
@@ -526,6 +536,8 @@ impl Pty {
         self.ocount += ocount;
         self.ohead = (self.ohead + ocount) % TTY_OUT_BYTES;
         self.start_transfer();
+        // Echoed bytes landed in the output buffer: wake a waiting master reader.
+        self.select_retry(host);
     }
 
     /// Cancel pending input (called by TTY icancel hook).
@@ -588,18 +600,19 @@ impl Pty {
         ready
     }
 
-    /// Re-evaluate select for the slave side and notify if ready.
+    /// Re-evaluate the master's select interest and wake its waiter if any of it
+    /// is now ready.
     ///
-    /// Computes ready ops and clears them from the interest set.
-    /// Sends the select reply via `host.reply_select()`.
-    pub fn select_retry(&mut self, minor: u32, host: &mut dyn PtyHost) -> u32 {
+    /// The ops found ready are cleared; the caller's next `CDEV_SELECT` re-arms
+    /// whatever is still pending, so dropping them here loses nothing.
+    pub fn select_retry(&mut self, host: &mut dyn PtyHost) -> u32 {
         if self.select_ops == 0 {
             return 0;
         }
         let r = self.select_try(self.select_ops);
         if r != 0 {
             self.select_ops &= !r;
-            host.reply_select(minor, r);
+            host.select_wake(self.select_proc);
         }
         r
     }
@@ -767,9 +780,8 @@ mod tests {
         grant_data: [u8; 64],
         grant_len: usize,
         grant_pos: usize,
-        reply_select_count: usize,
-        reply_select_last_ops: u32,
-        reply_select_last_minor: u32,
+        select_wake_count: usize,
+        select_wake_last_proc: u32,
     }
 
     impl MockHost {
@@ -784,9 +796,8 @@ mod tests {
                 grant_data: [0u8; 64],
                 grant_len: 0,
                 grant_pos: 0,
-                reply_select_count: 0,
-                reply_select_last_ops: 0,
-                reply_select_last_minor: 0,
+                select_wake_count: 0,
+                select_wake_last_proc: 0,
             }
         }
 
@@ -829,10 +840,9 @@ mod tests {
             }
         }
 
-        fn reply_select(&mut self, minor: u32, ops: u32) {
-            self.reply_select_count += 1;
-            self.reply_select_last_minor = minor;
-            self.reply_select_last_ops = ops;
+        fn select_wake(&mut self, proc: u32) {
+            self.select_wake_count += 1;
+            self.select_wake_last_proc = proc;
         }
     }
 
@@ -1220,8 +1230,8 @@ mod tests {
     fn test_select_retry_no_ops() {
         let mut p = Pty::new();
         let mut host = MockHost::new();
-        assert_eq!(p.select_retry(PTYPX_MINOR, &mut host), 0);
-        assert_eq!(host.reply_select_count, 0);
+        assert_eq!(p.select_retry(&mut host), 0);
+        assert_eq!(host.select_wake_count, 0);
     }
 
     #[test]
@@ -1415,7 +1425,7 @@ mod tests {
     }
 
     #[test]
-    fn test_select_retry_sends_reply() {
+    fn test_select_retry_wakes_the_waiter() {
         let mut p = Pty::new();
         let mut host = MockHost::new();
 
@@ -1426,17 +1436,16 @@ mod tests {
         p.select_ops = 3; // RD | WR
         p.select_proc = 100;
 
-        let r = p.select_retry(PTYPX_MINOR, &mut host);
+        let r = p.select_retry(&mut host);
         // WR is ready (slave active), RD is not (no data in output buffer)
         assert_eq!(r, 2);
-        assert_eq!(host.reply_select_count, 1);
-        assert_eq!(host.reply_select_last_minor, PTYPX_MINOR);
-        assert_eq!(host.reply_select_last_ops, 2);
+        assert_eq!(host.select_wake_count, 1);
+        assert_eq!(host.select_wake_last_proc, 100);
         assert_eq!(p.select_ops, 1); // RD still pending
     }
 
     #[test]
-    fn test_select_retry_without_ops_no_reply() {
+    fn test_select_retry_without_interest_is_silent() {
         let mut p = Pty::new();
         let mut host = MockHost::new();
 
@@ -1447,13 +1456,13 @@ mod tests {
         p.select_ops = 0;
         p.select_proc = 100;
 
-        let r = p.select_retry(PTYPX_MINOR, &mut host);
+        let r = p.select_retry(&mut host);
         assert_eq!(r, 0);
-        assert_eq!(host.reply_select_count, 0);
+        assert_eq!(host.select_wake_count, 0);
     }
 
     #[test]
-    fn test_select_retry_only_sends_ready_ops() {
+    fn test_select_retry_wakes_only_when_ready() {
         let mut p = Pty::new();
         let mut host = MockHost::new();
 
@@ -1464,9 +1473,9 @@ mod tests {
         p.select_ops = 3; // RD | WR
         p.select_proc = 100;
 
-        let r = p.select_retry(PTYPX_MINOR, &mut host);
+        let r = p.select_retry(&mut host);
         assert_eq!(r, 2); // only WR ready
-        assert_eq!(host.reply_select_last_ops, 2);
+        assert_eq!(host.select_wake_count, 1);
         assert_eq!(p.select_ops, 1); // RD still pending
     }
 
@@ -1481,23 +1490,27 @@ mod tests {
         // First retry: WR is ready
         p.select_ops = 3;
         p.select_proc = 100;
-        let r = p.select_retry(PTYPX_MINOR, &mut host);
+        let r = p.select_retry(&mut host);
         assert_eq!(r, 2);
-        assert_eq!(host.reply_select_count, 1);
+        assert_eq!(host.select_wake_count, 1);
 
         // Second retry: RD still pending (no data yet)
-        let r = p.select_retry(PTYPX_MINOR, &mut host);
+        let r = p.select_retry(&mut host);
         assert_eq!(r, 0);
-        assert_eq!(host.reply_select_count, 1); // no new reply
+        assert_eq!(host.select_wake_count, 1); // no new wake
 
-        // Add data, now RD should be ready
+        // Add data: the write itself wakes the waiter, since the output buffer is
+        // what a master reader waits on.
         let mut host2 = MockHost::new();
         p.slave_write(false, b"data", &mut host2);
+        assert_eq!(host2.select_wake_count, 1);
+        assert_eq!(p.select_ops, 0, "the write satisfied the pending read");
+
+        // And a fresh interest in RD is ready at once.
         p.select_ops = 1; // RD only
-        let r = p.select_retry(PTYPX_MINOR, &mut host);
+        let r = p.select_retry(&mut host);
         assert_eq!(r, 1);
-        assert_eq!(host.reply_select_count, 2);
-        assert_eq!(host.reply_select_last_ops, 1);
+        assert_eq!(host.select_wake_count, 2);
     }
 
     #[test]
@@ -1508,9 +1521,9 @@ mod tests {
         assert!(p.master_open().is_ok());
         p.slave_open();
 
-        // NoopHost's reply_select is a no-op; just verify it doesn't crash
+        // NoopHost's select_wake is a no-op; just verify it doesn't crash
         p.select_ops = 3;
-        let r = p.select_retry(PTYPX_MINOR, &mut host);
+        let r = p.select_retry(&mut host);
         assert_eq!(r, 2);
         assert_eq!(p.select_ops, 1);
     }
