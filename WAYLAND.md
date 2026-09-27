@@ -267,7 +267,8 @@ Organised by critical path. Each is a real gap, with evidence.
       a client) are in. Phase 2a (the seat's keymap, §6.12), 2b (`xdg_shell`:
       `xdg_wm_base`/`xdg_surface`/`xdg_toplevel`) and 2c (several clients at once,
       with per-surface focus) are in too, as is 2d (damage tracking and the pointer's
-      cursor). Still open: popups, `layer_shell` and decorations (2e).
+      cursor) and 2e (popups, `layer_shell` and decorations, §6.12). No Phase 2 stage
+      is open; the remaining Wayland work is Phase 3's GL path (§6.10).
 
 ---
 
@@ -1035,7 +1036,7 @@ per-seat keymaps would make possible and 2a does not have.
 | **2b** | **Landed** (`just test-wlx-x86`). `xdg_wm_base`/`xdg_surface`/`xdg_toplevel`: bind, `get_xdg_surface`, `get_toplevel`, `set_title`/`set_app_id`, the server's `configure` (surface serial, toplevel size, `ping`) answered by `ack_configure`/`pong`, and `destroy`. `/bin/wlx` is the gate's client | A client maps a toplevel, receives a configure, acks it, commits, and its frame reaches `/dev/fb` at the configured size |
 | **2c** | **Landed** (`just test-wlfocus-x86`). Several clients at once: `wlserver` polls the listener and every connection together, one `Server` (and pool table) per connection. Focus is per surface — a surface's *first* commit asks for it, the server says `leave` to the connection that held it and `enter` to the one that takes it, and input is routed only to the focused connection. Per-connection buffer release falls out of the per-connection `Server`. `/bin/wlx2` is the gate's two-connection client | Two clients each map a surface; keys go to the focused one and move on request |
 | **2d** | **Landed** (`just test-wlxd-x86`). Damage: `wl_surface.damage`/`damage_buffer` accumulate into the bounding rectangle of everything marked since the last commit, a commit carries it, and only that part is recomposited (a commit naming no damage takes the whole buffer, so a client that forgets `damage` is never left stale). Cursor: `wl_pointer.set_cursor` names the surface whose commit is the pointer image, and the compositor draws it, hotspot-offset, over each presented frame. `/bin/wlxd` is the gate's client. `close` still has nothing to trigger it | Only the damaged rect is recomposited; the pointer's cursor image is drawn |
-| **2e** | `xdg_popup`/`xdg_positioner`, `zwlr_layer_shell_v1`, and `zxdg_decoration_manager_v1` (or CSD), which is where `set_title`/`set_app_id` and `set_window_geometry` start being read | A panel layer-surface and a popup map |
+| **2e** | **Landed** (`just test-wlxe-x86`). `xdg_popup`/`xdg_positioner`, `zwlr_layer_shell_v1` and `zxdg_decoration_manager_v1`: a positioner's `set_size` becomes the popup's configure, a layer surface is configured from its own `set_size`, and a decoration is answered client-side the moment it is asked for. `set_window_geometry` and a popup's `grab`/`reposition` are accepted. `/bin/wlxe` is the gate's client | A panel layer-surface and a popup map, and the decoration manager answers client-side |
 
 2a and 2b are **independent of each other**: 2a is exactly the keymap transport, and
 2b is where the server stops being "one surface, full-screen". A stock client needs
@@ -1076,22 +1077,37 @@ would smear until the next commit. A fully transparent pixel is skipped (a shape
 cursor works); a partly transparent one is copied rather than blended.
 - **`set_cursor`'s serial is not validated** against a recent pointer `enter`.
 - **`close` is declared and never sent.** `xdg_surface.close`/`xdg_toplevel.close`
-need a window-management action (a titlebar button, a task switcher) to produce one,
-which is 2d/2e.
+need a window-management action (a titlebar button, a task switcher) this port does
+not have; the decorations here are client-side, so nothing produces one yet.
 - **`set_title`/`set_app_id` are accepted and dropped**, as are the window-management
 requests (`set_maximized`, `move`, `resize`, …): there is no window table for them
-to act on, and decorations (2e) are what will read the first two.
-- **`set_window_geometry` is accepted and ignored**: a toplevel fills the output,
-so there is no subrect to record yet.
-- **`get_popup` is still unimplemented** and reaches the server's
-"unimplemented" error; popups are 2e.
+to act on, and the decorations this phase answers are client-side, so a title is the
+client's to draw.
+- **`set_window_geometry` is accepted and ignored**: a toplevel fills the output and
+a popup is placed at the output's origin, so there is no subrect to record.
+- **A panel and a popup are presented at the output's origin.** `wlserver`
+composites every commit at (0,0) with the buffer's own geometry, so a layer
+surface's anchor, margins, exclusive zone and keyboard interactivity are accepted
+and ignored, and a popup's parent-relative placement is not applied. `set_layer`,
+`grab` and `reposition` are accepted too. Position is the window-table work a real
+compositor needs.
+- **A popup is configured but not positioned.** It has no toplevel, so its configure
+is the `xdg_surface.configure` alone (plus the `ping`); the serial it carries is the
+whole event, which is what the gate's client acks.
+- **`xdg_positioner` keeps only its size.** `set_anchor_rect`, `set_anchor`,
+`set_gravity`, `set_constraint_adjustment` and `set_offset` are accepted and ignored;
+only `set_size` reaches the popup's configure.
+- **A layer surface is configured from its own `set_size`**, and a zero dimension
+means the compositor defers to the client, which is what the gate's client is
+answered.
 - **`wl_pointer.set_cursor` is accepted and dropped** (Phase 1c), and stays
 dropped until 2d.
 - **There is no cursor theming**: 2d draws whatever image the client passed, with
 no theme lookup.
-- **Decorations default to client-side.** `zxdg_decoration_manager_v1` advertises
-client-side and refuses server-side until the window-table work SSD needs
-exists, so a toolkit with CSD is unblocked without it.
+- **Decorations are client-side.** `zxdg_decoration_manager_v1` answers
+`get_toplevel_decoration` immediately with client-side and refuses server-side
+(`set_mode`/`unset_mode` are accepted and ignored), so a toolkit with CSD is
+unblocked without the window-table work SSD needs.
 - **A stock client needs the keymap *and* `xdg_shell`**, not either alone: 2a
 alone makes the keymap available but a toolkit still cannot map a window; 2b
 alone gives it a window but hands it keycodes it cannot turn into text.
@@ -1104,7 +1120,7 @@ alone gives it a window but hands it keycodes it cannot turn into text.
 |---|---|---|
 | **0** | AF_UNIX server + `socketpair` + `sendmsg`/`recvmsg` + `SCM_RIGHTS`/`SO_PEERCRED`; native `poll`/`epoll`/`eventfd`/`timerfd`; `memfd_create` + `ftruncate` + anonymous shared frames; `mprotect`; `select` timeouts. **Landed:** sockets + fd passing (`test-uds-x86`), memfd (`test-memfd-x86`), `mprotect`, `select`/native `poll` with real deadlines (`test-select-x86`), `eventfd` (`test-eventfd-x86`), `timerfd` (`test-timerfd-x86`), `epoll` (`test-epoll-x86`). **Open:** none. | Two processes connect over the socket and **pass an fd**; a third `epoll_wait`s on it. Host + QEMU test |
 | **1** | In-house Wayland server, scoped in **§6.11**. **Landed:** 1a — the wire/interface crate and the registry + `sync` handshake over `/dev/uds` (`test-wayland-x86`); 1b — the `wl_shm` present path: `/sbin/wlserver` (boot proc 20) maps `/dev/fb`, `/bin/wlclient` draws into a memfd pool and commits a surface, and the frame is read back from `/dev/fb` (`test-wlshm-x86`); 1c — input: `wl_seat` keyboard/pointer, focus and `enter`, and a key routed from the device to a client (`test-wlkey-x86`), over an input-server ring that keeps a cursor per consumer and a terminal readiness path that reports instead of pushing (`KNOWN_ISSUES` 36, `test-pty-x86`). **Open:** none. | A `wl_shm` client renders through the server to `/dev/fb`, driven by a QEMU smoke scenario (same shape as `tools/smoke/`); a **ported stock** client later, on the same protocol |
-| **2** | `xdg_shell`, decorations, `layer_shell`, popups, damage tracking, cursor, keymaps, multi-output — scoped in **§6.12**. **Landed:** 2a — the seat's keymap, compiled into `wlserver` and served over an fd (`test-wlkey-x86`); 2b — `xdg_shell`: `xdg_wm_base`/`xdg_surface`/`xdg_toplevel`, `configure`/`ack_configure`, `ping`/`pong`, and a toplevel presented at the configured size (`test-wlx-x86`); 2c — several clients at once and per-surface focus, with input routed to the focused connection (`test-wlfocus-x86`); 2d — damage tracking, so only the damaged rectangle is recomposited, and the pointer's cursor image (`test-wlxd-x86`). **Open:** 2e. | A real toolkit client runs a window with chrome and input |
+| **2** | `xdg_shell`, decorations, `layer_shell`, popups, damage tracking, cursor, keymaps, multi-output — scoped in **§6.12**. **Landed:** 2a — the seat's keymap, compiled into `wlserver` and served over an fd (`test-wlkey-x86`); 2b — `xdg_shell`: `xdg_wm_base`/`xdg_surface`/`xdg_toplevel`, `configure`/`ack_configure`, `ping`/`pong`, and a toplevel presented at the configured size (`test-wlx-x86`); 2c — several clients at once and per-surface focus, with input routed to the focused connection (`test-wlfocus-x86`); 2d — damage tracking, so only the damaged rectangle is recomposited, and the pointer's cursor image (`test-wlxd-x86`); 2e — popups, `zwlr_layer_shell_v1` and client-side decorations (`test-wlxe-x86`). **Open:** multi-output. | A real toolkit client runs a window with chrome and input |
 | **3** | GL rendering, scoped in **§6.10** — virgl over `virtio-gpu` first: 3D transport, a `virtgpu` render node, Mesa + `libdrm` as DSOs; llvmpipe kept as the fallback | The compositor renders GL content |
 | **4** | smithay port; `cosmic-comp` against our backends; `cosmic-session` + D-Bus | `cosmic-comp` on screen; a `libcosmic` app connects |
 | **5** | Portals, fonts, the `libcosmic` suite | A usable session |

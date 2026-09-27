@@ -172,6 +172,48 @@ pub static XDG_TOPLEVEL: Interface = Interface {
     events: &["iia", ""],
 };
 
+/// `xdg_popup`: `destroy`, `grab`, `reposition`; events `configure`, `popup_done`,
+/// `repositioned` (2e).
+pub static XDG_POPUP: Interface = Interface {
+    name: "xdg_popup",
+    version: 1,
+    requests: &["", "ou", "ou"],
+    events: &["iiii", "", "u"],
+};
+
+/// `zwlr_layer_shell_v1`: `get_layer_surface`, `destroy`; no events (2e).
+pub static LAYER_SHELL: Interface = Interface {
+    name: "zwlr_layer_shell_v1",
+    version: 1,
+    requests: &["noous", ""],
+    events: &[],
+};
+
+/// `zwlr_layer_surface_v1`: the panel requests of 2e; events `configure`, `closed`.
+pub static LAYER_SURFACE: Interface = Interface {
+    name: "zwlr_layer_surface_v1",
+    version: 1,
+    requests: &["uu", "u", "i", "iiii", "u", "o", "u", "", "u", "u"],
+    events: &["uuu", ""],
+};
+
+/// `zxdg_decoration_manager_v1`: `destroy`, `get_toplevel_decoration` (2e).
+pub static DECORATION_MANAGER: Interface = Interface {
+    name: "zxdg_decoration_manager_v1",
+    version: 1,
+    requests: &["", "no"],
+    events: &[],
+};
+
+/// `zxdg_toplevel_decoration_v1`: `destroy`, `set_mode`, `unset_mode`; event
+/// `configure` (2e).
+pub static TOPLEVEL_DECORATION: Interface = Interface {
+    name: "zxdg_toplevel_decoration_v1",
+    version: 1,
+    requests: &["", "u", ""],
+    events: &["u"],
+};
+
 /// Every interface this crate knows, by protocol name.
 pub static ALL: &[&Interface] = &[
     &DISPLAY,
@@ -191,6 +233,11 @@ pub static ALL: &[&Interface] = &[
     &XDG_POSITIONER,
     &XDG_SURFACE,
     &XDG_TOPLEVEL,
+    &XDG_POPUP,
+    &LAYER_SHELL,
+    &LAYER_SURFACE,
+    &DECORATION_MANAGER,
+    &TOPLEVEL_DECORATION,
 ];
 
 /// The interface with this protocol name, or `None`.
@@ -227,6 +274,11 @@ pub enum Kind {
     XdgPositioner,
     XdgSurface,
     XdgToplevel,
+    XdgPopup,
+    LayerShell,
+    LayerSurface,
+    DecorationManager,
+    ToplevelDecoration,
 }
 
 impl Kind {
@@ -250,6 +302,11 @@ impl Kind {
             Kind::XdgPositioner => &XDG_POSITIONER,
             Kind::XdgSurface => &XDG_SURFACE,
             Kind::XdgToplevel => &XDG_TOPLEVEL,
+            Kind::XdgPopup => &XDG_POPUP,
+            Kind::LayerShell => &LAYER_SHELL,
+            Kind::LayerSurface => &LAYER_SURFACE,
+            Kind::DecorationManager => &DECORATION_MANAGER,
+            Kind::ToplevelDecoration => &TOPLEVEL_DECORATION,
         }
     }
 
@@ -270,6 +327,11 @@ impl Kind {
             b"xdg_positioner" => Kind::XdgPositioner,
             b"xdg_surface" => Kind::XdgSurface,
             b"xdg_toplevel" => Kind::XdgToplevel,
+            b"xdg_popup" => Kind::XdgPopup,
+            b"zwlr_layer_shell_v1" => Kind::LayerShell,
+            b"zwlr_layer_surface_v1" => Kind::LayerSurface,
+            b"zxdg_decoration_manager_v1" => Kind::DecorationManager,
+            b"zxdg_toplevel_decoration_v1" => Kind::ToplevelDecoration,
             _ => return None,
         })
     }
@@ -301,6 +363,16 @@ pub static GLOBALS: &[Global] = &[
     Global {
         name: 5,
         interface: "xdg_wm_base",
+        version: 1,
+    },
+    Global {
+        name: 6,
+        interface: "zwlr_layer_shell_v1",
+        version: 1,
+    },
+    Global {
+        name: 7,
+        interface: "zxdg_decoration_manager_v1",
         version: 1,
     },
 ];
@@ -392,6 +464,36 @@ pub mod xdg_toplevel_req {
     pub const UNSET_FULLSCREEN: u16 = 12;
     pub const SET_MINIMIZED: u16 = 13;
 }
+pub mod xdg_popup_req {
+    pub const DESTROY: u16 = 0;
+    pub const GRAB: u16 = 1;
+    pub const REPOSITION: u16 = 2;
+}
+pub mod layer_shell_req {
+    pub const GET_LAYER_SURFACE: u16 = 0;
+    pub const DESTROY: u16 = 1;
+}
+pub mod layer_surface_req {
+    pub const SET_SIZE: u16 = 0;
+    pub const SET_ANCHOR: u16 = 1;
+    pub const SET_EXCLUSIVE_ZONE: u16 = 2;
+    pub const SET_MARGIN: u16 = 3;
+    pub const SET_KEYBOARD_INTERACTIVITY: u16 = 4;
+    pub const GET_POPUP: u16 = 5;
+    pub const ACK_CONFIGURE: u16 = 6;
+    pub const DESTROY: u16 = 7;
+    pub const SET_LAYER: u16 = 8;
+    pub const SET_EXCLUSIVE_EDGE: u16 = 9;
+}
+pub mod decoration_manager_req {
+    pub const DESTROY: u16 = 0;
+    pub const GET_TOPLEVEL_DECORATION: u16 = 1;
+}
+pub mod toplevel_decoration_req {
+    pub const DESTROY: u16 = 0;
+    pub const SET_MODE: u16 = 1;
+    pub const UNSET_MODE: u16 = 2;
+}
 
 // Event opcodes.
 pub mod display_ev {
@@ -452,6 +554,18 @@ pub mod xdg_toplevel_ev {
     pub const CONFIGURE: u16 = 0;
     pub const CLOSE: u16 = 1;
 }
+pub mod xdg_popup_ev {
+    pub const CONFIGURE: u16 = 0;
+    pub const POPUP_DONE: u16 = 1;
+    pub const REPOSITIONED: u16 = 2;
+}
+pub mod layer_surface_ev {
+    pub const CONFIGURE: u16 = 0;
+    pub const CLOSED: u16 = 1;
+}
+pub mod toplevel_decoration_ev {
+    pub const CONFIGURE: u16 = 0;
+}
 
 // Enums.
 /// `wl_shm.format`.
@@ -468,6 +582,19 @@ pub const WL_SEAT_CAPABILITY_TOUCH: u32 = 4;
 /// `wl_keyboard.keymap_format`.
 pub const WL_KEYBOARD_KEYMAP_FORMAT_NO_KEYMAP: u32 = 0;
 pub const WL_KEYBOARD_KEYMAP_FORMAT_XKB_V1: u32 = 1;
+/// `zwlr_layer_shell_v1.layer`.
+pub const LAYER_BACKGROUND: u32 = 0;
+pub const LAYER_BOTTOM: u32 = 1;
+pub const LAYER_TOP: u32 = 2;
+pub const LAYER_OVERLAY: u32 = 3;
+/// `zwlr_layer_surface_v1.anchor` bits.
+pub const LAYER_ANCHOR_TOP: u32 = 1;
+pub const LAYER_ANCHOR_BOTTOM: u32 = 2;
+pub const LAYER_ANCHOR_LEFT: u32 = 4;
+pub const LAYER_ANCHOR_RIGHT: u32 = 8;
+/// `zxdg_toplevel_decoration_v1.mode`.
+pub const DECORATION_MODE_CLIENT_SIDE: u32 = 1;
+pub const DECORATION_MODE_SERVER_SIDE: u32 = 2;
 /// `wl_output.subpixel`.
 pub const WL_OUTPUT_SUBPIXEL_UNKNOWN: i32 = 0;
 /// `wl_output.transform`.
@@ -567,13 +694,15 @@ mod tests {
 
     #[test]
     fn globals_are_the_factories_a_client_binds() {
-        assert_eq!(GLOBALS.len(), 5);
-        let names: [&str; 5] = [
+        assert_eq!(GLOBALS.len(), 7);
+        let names: [&str; 7] = [
             GLOBALS[0].interface,
             GLOBALS[1].interface,
             GLOBALS[2].interface,
             GLOBALS[3].interface,
             GLOBALS[4].interface,
+            GLOBALS[5].interface,
+            GLOBALS[6].interface,
         ];
         assert_eq!(
             names,
@@ -582,7 +711,9 @@ mod tests {
                 "wl_shm",
                 "wl_output",
                 "wl_seat",
-                "xdg_wm_base"
+                "xdg_wm_base",
+                "zwlr_layer_shell_v1",
+                "zxdg_decoration_manager_v1"
             ]
         );
         // Every advertised interface must exist in the table.
@@ -616,5 +747,33 @@ mod tests {
         assert_eq!(XDG_TOPLEVEL.event(xdg_toplevel_ev::CONFIGURE), Some("iia"));
         // 14 toplevel requests, so `set_minimized` is not one short of its opcode.
         assert_eq!(XDG_TOPLEVEL.requests.len(), 14);
+    }
+
+    #[test]
+    fn protocol_2e_interface_shapes() {
+        assert_eq!(XDG_POPUP.request(xdg_popup_req::GRAB), Some("ou"));
+        assert_eq!(XDG_POPUP.event(xdg_popup_ev::CONFIGURE), Some("iiii"));
+        assert_eq!(
+            LAYER_SHELL.request(layer_shell_req::GET_LAYER_SURFACE),
+            Some("noous")
+        );
+        assert_eq!(
+            LAYER_SURFACE.request(layer_surface_req::SET_SIZE),
+            Some("uu")
+        );
+        assert_eq!(
+            LAYER_SURFACE.event(layer_surface_ev::CONFIGURE),
+            Some("uuu")
+        );
+        // Ten requests, so `set_exclusive_edge` is not one short of its opcode.
+        assert_eq!(LAYER_SURFACE.requests.len(), 10);
+        assert_eq!(
+            DECORATION_MANAGER.request(decoration_manager_req::GET_TOPLEVEL_DECORATION),
+            Some("no")
+        );
+        assert_eq!(
+            TOPLEVEL_DECORATION.event(toplevel_decoration_ev::CONFIGURE),
+            Some("u")
+        );
     }
 }

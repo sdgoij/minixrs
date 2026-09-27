@@ -53,10 +53,14 @@ pub struct Obj {
     /// rectangle. `wl_surface.damage`/`damage_buffer` grow it (2d).
     pub damage: Option<crate::shm::Rect>,
     /// `wl_surface`: the `xdg_surface` bound to it (0 = none). `xdg_toplevel`: the
-    /// `xdg_surface` it belongs to.
+    /// `xdg_surface` it belongs to. `xdg_popup`: its own `xdg_surface`.
     pub xdg_surface: u32,
-    /// `xdg_surface`: the `wl_surface` it is for.
+    /// `xdg_surface`: the `wl_surface` it is for. `xdg_popup`: the *parent*
+    /// `xdg_surface`. `zwlr_layer_surface_v1`: the `wl_surface` it is for.
+    /// `zxdg_toplevel_decoration_v1`: the `xdg_toplevel` it decorates.
     pub surface: u32,
+    /// `wl_surface`: the `zwlr_layer_surface_v1` bound to it (0 = none) (2e).
+    pub layer: u32,
     /// `xdg_surface`: a `configure` has gone out (2b).
     pub configured: bool,
     /// `xdg_surface`: the client has acked the latest `configure`.
@@ -83,6 +87,7 @@ impl Obj {
             damage: None,
             xdg_surface: 0,
             surface: 0,
+            layer: 0,
             configured: false,
             acked: false,
             configure_serial: 0,
@@ -318,7 +323,12 @@ impl Server {
             | (Kind::XdgWmBase, protocol::xdg_wm_base_req::DESTROY)
             | (Kind::XdgPositioner, protocol::xdg_positioner_req::DESTROY)
             | (Kind::XdgSurface, protocol::xdg_surface_req::DESTROY)
-            | (Kind::XdgToplevel, protocol::xdg_toplevel_req::DESTROY) => {
+            | (Kind::XdgToplevel, protocol::xdg_toplevel_req::DESTROY)
+            | (Kind::XdgPopup, protocol::xdg_popup_req::DESTROY)
+            | (Kind::LayerShell, protocol::layer_shell_req::DESTROY)
+            | (Kind::LayerSurface, protocol::layer_surface_req::DESTROY)
+            | (Kind::DecorationManager, protocol::decoration_manager_req::DESTROY)
+            | (Kind::ToplevelDecoration, protocol::toplevel_decoration_req::DESTROY) => {
                 self.remove(object_id);
                 Ok(())
             }
@@ -428,12 +438,27 @@ impl Server {
                 self.create_callback(arg(n, &args, 0)?, out)
             }
             (Kind::Surface, protocol::surface_req::COMMIT) => {
+                let layer = self.obj(object_id).map_or(0, |o| o.layer);
                 if object_id == self.cursor_surface && self.cursor_surface != 0 {
                     // A cursor surface's commit supplies the pointer image; it is not
                     // a window, so it is neither presented nor focused.
                     self.cursor = self.cursor_of(object_id);
+                } else if layer != 0 {
+                    // A layer surface (a panel) is configured like an `xdg_surface`,
+                    // but it never takes focus: a panel is not where input goes (2e).
+                    if !self.obj(layer).is_some_and(|o| o.configured) {
+                        self.configure_layer(layer, out)?;
+                    } else if self.obj(layer).is_some_and(|o| o.acked)
+                        && self.obj(object_id).is_some_and(|o| o.attached != 0)
+                    {
+                        let c = self.commit_of(object_id);
+                        self.pending = c;
+                    }
                 } else {
                     let xdg = self.obj(object_id).map_or(0, |o| o.xdg_surface);
+                    // A popup is transient: configured like an `xdg_surface`, but it
+                    // does not take focus either.
+                    let transient = xdg != 0 && self.popup_of(xdg).is_some();
                     if xdg != 0 && !self.obj(xdg).is_some_and(|o| o.configured) {
                         // An `xdg_surface`'s first commit is the client saying "I am
                         // ready": the server answers with the configuration it wants, and
@@ -450,7 +475,7 @@ impl Server {
                     // nothing, or a client that draws often would take focus from the one
                     // the user is looking at. The loop arbitrates between connections,
                     // which is what `focus_request` is for.
-                    let first = self.obj(object_id).is_some_and(|o| !o.committed);
+                    let first = !transient && self.obj(object_id).is_some_and(|o| !o.committed);
                     if let Some(o) = self.obj_mut(object_id) {
                         o.committed = true;
                     }
@@ -489,6 +514,16 @@ impl Server {
             (Kind::XdgWmBase, protocol::xdg_wm_base_req::CREATE_POSITIONER) => {
                 self.add(arg(n, &args, 0)?, Kind::XdgPositioner)
             }
+            // The positioner's size is the one part of it a popup's configure needs.
+            (Kind::XdgPositioner, protocol::xdg_positioner_req::SET_SIZE) => {
+                let w = iarg(n, &args, 0)?;
+                let h = iarg(n, &args, 1)?;
+                if let Some(o) = self.obj_mut(object_id) {
+                    o.width = w;
+                    o.height = h;
+                }
+                Ok(())
+            }
             // The client's answer to a `ping`; nothing waits on it yet.
             (Kind::XdgWmBase, protocol::xdg_wm_base_req::PONG) => Ok(()),
             (Kind::XdgSurface, protocol::xdg_surface_req::GET_TOPLEVEL) => {
@@ -498,7 +533,30 @@ impl Server {
                     ..Obj::new(id, Kind::XdgToplevel)
                 })
             }
-            (Kind::XdgSurface, protocol::xdg_surface_req::ACK_CONFIGURE) => {
+            (Kind::XdgSurface, protocol::xdg_surface_req::GET_POPUP) => {
+                let id = arg(n, &args, 0)?;
+                let parent = arg(n, &args, 1)?;
+                let positioner = arg(n, &args, 2)?;
+                if self.kind(positioner) != Some(Kind::XdgPositioner) {
+                    error(
+                        out,
+                        id,
+                        protocol::WL_DISPLAY_ERROR_INVALID_OBJECT,
+                        b"popup needs a positioner",
+                    )?;
+                    return Ok(outcome);
+                }
+                let (pw, ph) = self.obj(positioner).map_or((0, 0), |o| (o.width, o.height));
+                self.add_obj(Obj {
+                    xdg_surface: object_id,
+                    surface: parent,
+                    width: pw,
+                    height: ph,
+                    ..Obj::new(id, Kind::XdgPopup)
+                })
+            }
+            (Kind::XdgSurface, protocol::xdg_surface_req::ACK_CONFIGURE)
+            | (Kind::LayerSurface, protocol::layer_surface_req::ACK_CONFIGURE) => {
                 let serial = arg(n, &args, 0)?;
                 if let Some(o) = self.obj_mut(object_id) {
                     // A serial that does not name the latest configure is a client
@@ -509,14 +567,76 @@ impl Server {
                 }
                 Ok(())
             }
-            // Geometry is unused while a toplevel fills the output; popups are 2e,
-            // which is why `get_popup` still reaches the unimplemented arm.
-            (Kind::XdgSurface, protocol::xdg_surface_req::SET_WINDOW_GEOMETRY) => Ok(()),
+            // Geometry is unused while a toplevel fills the output, and a popup's grab
+            // is accepted without dismissing it (2e).
+            (Kind::XdgSurface, protocol::xdg_surface_req::SET_WINDOW_GEOMETRY)
+            | (Kind::XdgPopup, protocol::xdg_popup_req::GRAB)
+            | (Kind::XdgPopup, protocol::xdg_popup_req::REPOSITION) => Ok(()),
             // The toplevel's window-management requests have nothing to act on until
-            // there is window management, and title/app_id wait for decorations (2e):
-            // accepted, so a toolkit's mapping sequence runs to completion.
+            // there is window management, and title/app_id are the client's business
+            // under the client-side decorations this phase asks for: accepted, so a
+            // toolkit's mapping sequence runs to completion.
             (Kind::XdgToplevel, _) => Ok(()),
             (Kind::XdgPositioner, _) => Ok(()),
+            (Kind::LayerShell, protocol::layer_shell_req::GET_LAYER_SURFACE) => {
+                let id = arg(n, &args, 0)?;
+                let surface = arg(n, &args, 1)?;
+                let _output = arg(n, &args, 2)?;
+                let layer = arg(n, &args, 3)?;
+                let _namespace = str_arg(&args, 4)?;
+                if self.kind(surface) != Some(Kind::Surface) {
+                    error(
+                        out,
+                        id,
+                        protocol::WL_DISPLAY_ERROR_INVALID_OBJECT,
+                        b"layer surface needs a wl_surface",
+                    )?;
+                    return Ok(outcome);
+                }
+                self.add_obj(Obj {
+                    surface,
+                    format: layer,
+                    ..Obj::new(id, Kind::LayerSurface)
+                })?;
+                if let Some(s) = self.obj_mut(surface) {
+                    s.layer = id;
+                }
+                Ok(())
+            }
+            (Kind::LayerSurface, protocol::layer_surface_req::SET_SIZE) => {
+                let w = arg(n, &args, 0)? as i32;
+                let h = arg(n, &args, 1)? as i32;
+                if let Some(o) = self.obj_mut(object_id) {
+                    o.width = w;
+                    o.height = h;
+                }
+                Ok(())
+            }
+            // Anchors, margins, exclusive zones and keyboard interactivity have
+            // nothing to act on while a layer surface is placed at the output's
+            // origin: accepted and ignored (2e).
+            (Kind::LayerSurface, _) => Ok(()),
+            (
+                Kind::DecorationManager,
+                protocol::decoration_manager_req::GET_TOPLEVEL_DECORATION,
+            ) => {
+                let id = arg(n, &args, 0)?;
+                let toplevel = arg(n, &args, 1)?;
+                self.add_obj(Obj {
+                    surface: toplevel,
+                    ..Obj::new(id, Kind::ToplevelDecoration)
+                })?;
+                // This port draws no decorations, so the only honest answer is
+                // client-side, and it goes out as soon as the object exists.
+                out.event(id, protocol::toplevel_decoration_ev::CONFIGURE, |w| {
+                    w.uint(protocol::DECORATION_MODE_CLIENT_SIDE)
+                })?;
+                Ok(())
+            }
+            // A mode the client asks for is not honoured: the compositor decides, and
+            // it has already said so.
+            (Kind::ToplevelDecoration, protocol::toplevel_decoration_req::SET_MODE)
+            | (Kind::ToplevelDecoration, protocol::toplevel_decoration_req::UNSET_MODE) => Ok(()),
             // 1c (input) and later; a client that reaches them is answered the
             // same way an unknown opcode is.
             _ => error(
@@ -666,6 +786,15 @@ impl Server {
             .map(|o| o.id)
     }
 
+    /// The `xdg_popup` belonging to an `xdg_surface`, if there is one. A popup is
+    /// transient, and this is what tells the commit path not to focus it (2e).
+    fn popup_of(&self, xdg: u32) -> Option<u32> {
+        self.objs[..self.n]
+            .iter()
+            .find(|o| o.kind == Kind::XdgPopup && o.xdg_surface == xdg)
+            .map(|o| o.id)
+    }
+
     /// Answer an `xdg_surface`'s first commit: the surface's `configure` (whose
     /// serial the client acks), the toplevel's size, and a `ping` so the client can
     /// prove it is still reading.
@@ -688,6 +817,29 @@ impl Server {
             out.event(wm, protocol::xdg_wm_base_ev::PING, |w| w.uint(serial))?;
         }
         if let Some(o) = self.obj_mut(xdg) {
+            o.configured = true;
+            o.configure_serial = serial;
+        }
+        Ok(())
+    }
+
+    /// Answer a layer surface's first commit. It has no toplevel and no ping, so the
+    /// one event owed is `zwlr_layer_surface_v1.configure`; a zero size is the
+    /// compositor deferring to the client, which is what the surface asked for.
+    fn configure_layer(
+        &mut self,
+        layer: u32,
+        out: &mut DispatchBuf<'_>,
+    ) -> Result<(), DispatchError> {
+        let (width, height) = self.obj(layer).map_or((0, 0), |o| (o.width, o.height));
+        self.serial += 1;
+        let serial = self.serial;
+        out.event(layer, protocol::layer_surface_ev::CONFIGURE, |w| {
+            w.uint(serial)?;
+            w.uint(width as u32)?;
+            w.uint(height as u32)
+        })?;
+        if let Some(o) = self.obj_mut(layer) {
             o.configured = true;
             o.configure_serial = serial;
         }
@@ -1835,5 +1987,155 @@ mod tests {
         assert_eq!(cur.pool, 9);
         assert_eq!((cur.hotspot_x, cur.hotspot_y), (1, 1));
         assert_eq!((cur.buffer.width, cur.buffer.height), (8, 8));
+    }
+
+    /// Phase 2e in the pure layer: a layer surface's first commit is answered with
+    /// `zwlr_layer_surface_v1.configure`, a popup's with `xdg_surface.configure`,
+    /// neither takes focus, and a decoration manager answers client-side as soon as
+    /// a decoration is asked for.
+    #[test]
+    fn layer_popup_and_decoration_configure_without_focus() {
+        let mut s = Server::new(1024, 768);
+        let (a, an) = req(DISPLAY_ID, protocol::display_req::GET_REGISTRY, |w| {
+            w.new_id(2)
+        });
+        let (b, bn) = req(2, protocol::registry_req::BIND, |w| {
+            w.uint(1)?;
+            w.string(b"wl_compositor")?;
+            w.uint(1)?;
+            w.new_id(3)
+        });
+        let (c, cn) = req(2, protocol::registry_req::BIND, |w| {
+            w.uint(5)?;
+            w.string(b"xdg_wm_base")?;
+            w.uint(1)?;
+            w.new_id(4)
+        });
+        let (d, dn) = req(2, protocol::registry_req::BIND, |w| {
+            w.uint(6)?;
+            w.string(b"zwlr_layer_shell_v1")?;
+            w.uint(1)?;
+            w.new_id(5)
+        });
+        let (e, en) = req(2, protocol::registry_req::BIND, |w| {
+            w.uint(7)?;
+            w.string(b"zxdg_decoration_manager_v1")?;
+            w.uint(1)?;
+            w.new_id(6)
+        });
+        // The toplevel the popup will hang off.
+        let (f, fs) = req(3, protocol::compositor_req::CREATE_SURFACE, |w| w.new_id(7));
+        let (g, gs) = req(4, protocol::xdg_wm_base_req::GET_XDG_SURFACE, |w| {
+            w.new_id(8)?;
+            w.object(7)
+        });
+        let (h, hs) = req(8, protocol::xdg_surface_req::GET_TOPLEVEL, |w| w.new_id(9));
+        let (i, i_n) = req(
+            6,
+            protocol::decoration_manager_req::GET_TOPLEVEL_DECORATION,
+            |w| {
+                w.new_id(10)?;
+                w.object(9)
+            },
+        );
+        let out = run_msgs(
+            &mut s,
+            &[
+                &a[..an],
+                &b[..bn],
+                &c[..cn],
+                &d[..dn],
+                &e[..en],
+                &f[..fs],
+                &g[..gs],
+                &h[..hs],
+                &i[..i_n],
+            ],
+        );
+        // Seven globals, then the decoration answered at once: this port draws none,
+        // so the only honest answer is client-side.
+        let (d0, d0b) = event(&out, protocol::GLOBALS.len());
+        assert_eq!(d0.object_id, 10, "toplevel decoration");
+        assert_eq!(d0.opcode, protocol::toplevel_decoration_ev::CONFIGURE);
+        assert_eq!(
+            u32::from_le_bytes(d0b[0..4].try_into().unwrap()),
+            protocol::DECORATION_MODE_CLIENT_SIDE
+        );
+
+        // A layer surface: its first commit configures it at the size it asked for,
+        // and a panel is not where input goes, so it must not take focus (2e).
+        let (j, j_n) = req(3, protocol::compositor_req::CREATE_SURFACE, |w| {
+            w.new_id(11)
+        });
+        let (k, k_n) = req(5, protocol::layer_shell_req::GET_LAYER_SURFACE, |w| {
+            w.new_id(12)?;
+            w.object(11)?;
+            w.object(0)?;
+            w.uint(protocol::LAYER_TOP)?;
+            w.string(b"panel")
+        });
+        let (l, l_n) = req(12, protocol::layer_surface_req::SET_SIZE, |w| {
+            w.uint(200)?;
+            w.uint(32)
+        });
+        let (m, m_n) = req(11, protocol::surface_req::COMMIT, |_w| Ok(()));
+        let out = run_msgs(&mut s, &[&j[..j_n], &k[..k_n], &l[..l_n], &m[..m_n]]);
+        let (l0, l0b) = event(&out, 0);
+        assert_eq!(l0.object_id, 12, "layer surface configure");
+        assert_eq!(l0.opcode, protocol::layer_surface_ev::CONFIGURE);
+        let serial = u32::from_le_bytes(l0b[0..4].try_into().unwrap());
+        assert_eq!(u32::from_le_bytes(l0b[4..8].try_into().unwrap()), 200);
+        assert_eq!(u32::from_le_bytes(l0b[8..12].try_into().unwrap()), 32);
+        assert!(
+            s.take_focus_request().is_none(),
+            "a panel does not take focus"
+        );
+
+        // A popup over the toplevel: a positioner sizes it, and its first commit is
+        // answered with the `xdg_surface.configure` a transient surface gets — again
+        // without taking focus.
+        let (n_, n_n) = req(3, protocol::compositor_req::CREATE_SURFACE, |w| {
+            w.new_id(13)
+        });
+        let (o, o_n) = req(4, protocol::xdg_wm_base_req::GET_XDG_SURFACE, |w| {
+            w.new_id(14)?;
+            w.object(13)
+        });
+        let (p, p_n) = req(4, protocol::xdg_wm_base_req::CREATE_POSITIONER, |w| {
+            w.new_id(15)
+        });
+        let (q, q_n) = req(15, protocol::xdg_positioner_req::SET_SIZE, |w| {
+            w.int(8)?;
+            w.int(8)
+        });
+        let (r, r_n) = req(14, protocol::xdg_surface_req::GET_POPUP, |w| {
+            w.new_id(16)?;
+            w.object(8)?;
+            w.object(15)
+        });
+        let (t, t_n) = req(13, protocol::surface_req::COMMIT, |_w| Ok(()));
+        let out = run_msgs(
+            &mut s,
+            &[
+                &n_[..n_n],
+                &o[..o_n],
+                &p[..p_n],
+                &q[..q_n],
+                &r[..r_n],
+                &t[..t_n],
+            ],
+        );
+        let (p0, p0b) = event(&out, 0);
+        assert_eq!(p0.object_id, 14, "popup xdg_surface configure");
+        assert_eq!(p0.opcode, protocol::xdg_surface_ev::CONFIGURE);
+        let popup_serial = u32::from_le_bytes(p0b[0..4].try_into().unwrap());
+        assert!(popup_serial > serial, "serials move forward");
+        let (p1, _) = event(&out, 1);
+        assert_eq!(p1.object_id, 4, "wm_base ping follows the configure");
+        assert_eq!(p1.opcode, protocol::xdg_wm_base_ev::PING);
+        assert!(
+            s.take_focus_request().is_none(),
+            "a popup does not take focus"
+        );
     }
 }

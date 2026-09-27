@@ -155,6 +155,10 @@ pub const BOOT_BINS: &[(&str, &str)] = &[
     // `/bin/wlxd` is the Wayland Phase 2d damage and cursor client: it damages part
     // of a frame and checks the rest survives, then gives the pointer an image.
     ("/bin/wlxd", "wlxd"),
+    // `/bin/wlxe` is the Wayland Phase 2e panel, popup and decoration client: it
+    // maps a layer-shell panel and an xdg_popup over a window, and checks both are
+    // composited where they asked and no wider.
+    ("/bin/wlxe", "wlxe"),
     // `/bin/wterm` is the terminal window client (M3): a pty with /bin/sh
     // on the slave, its output rendered (VT subset) into a wserver window.
     ("/bin/wterm", "wterm"),

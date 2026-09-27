@@ -316,5 +316,29 @@ name = "wlkey"
 path = "src/bin/wlkey.rs"
 test = false
 
+# The Phase 2 gate clients are, like wlclient and wlkey, `#![no_main]` binaries
+# whose `main` is the entry point even when compiled for `cargo test`. They need
+# /dev/fb and /sbin/wlserver, so `test = false` keeps the host suite from trying
+# to run them as if they were test harnesses.
+[[bin]]
+name = "wlx"
+path = "src/bin/wlx.rs"
+test = false
+
+[[bin]]
+name = "wlx2"
+path = "src/bin/wlx2.rs"
+test = false
+
+[[bin]]
+name = "wlxd"
+path = "src/bin/wlxd.rs"
+test = false
+
+[[bin]]
+name = "wlxe"
+path = "src/bin/wlxe.rs"
+test = false
+
 [lints]
 workspace = true

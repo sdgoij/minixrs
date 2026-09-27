@@ -102,6 +102,10 @@ struct Globals {
     seat: u32,
     /// `xdg_wm_base` — 0 if the server does not offer it (2b).
     wm_base: u32,
+    /// `zwlr_layer_shell_v1` — 0 if the server does not offer it (2e).
+    layer_shell: u32,
+    /// `zxdg_decoration_manager_v1` — 0 if the server does not offer it (2e).
+    decoration_manager: u32,
 }
 
 /// Read registry events until the factories a client may bind are known.
@@ -115,6 +119,8 @@ fn find_globals(
     let mut compositor = None;
     let mut seat = None;
     let mut wm_base = None;
+    let mut layer_shell = None;
+    let mut decoration_manager = None;
     while shm.is_none() || compositor.is_none() || seat.is_none() || wm_base.is_none() {
         if !fill(conn, inbuf, chunk, 2000) {
             return Err(fail(6, b"wlclient: registry went quiet\n"));
@@ -148,6 +154,10 @@ fn find_globals(
                     seat = Some(name);
                 } else if interface == b"xdg_wm_base" {
                     wm_base = Some(name);
+                } else if interface == b"zwlr_layer_shell_v1" {
+                    layer_shell = Some(name);
+                } else if interface == b"zxdg_decoration_manager_v1" {
+                    decoration_manager = Some(name);
                 }
             }
             inbuf.consume(h.size as usize);
@@ -159,6 +169,8 @@ fn find_globals(
         compositor: compositor.unwrap_or(0),
         seat: seat.unwrap_or(0),
         wm_base: wm_base.unwrap_or(0),
+        layer_shell: layer_shell.unwrap_or(0),
+        decoration_manager: decoration_manager.unwrap_or(0),
     })
 }
 
@@ -1359,6 +1371,452 @@ fn run_damage() -> Result<(), i32> {
     let _ = unsafe { vmem::munmap(cmap, csize as usize) };
     let _ = uds::close_fd(conn);
     Ok(())
+}
+
+/// `/bin/wlxe`: the Phase 2e gate's client — panels, popups and decorations.
+///
+/// It maps an opaque window, then a `zwlr_layer_shell_v1` panel 200x32 and an
+/// `xdg_popup` 8x8 over it, and requires each to be composited where the layer
+/// surface asked and no wider: a panel that covered the whole output, or a popup
+/// that did, would fail the rows below them. It also requires the decoration
+/// manager to answer client-side, which is the only decoration this port draws.
+pub fn wl_layer_popup_decoration(_args: &[&str]) -> i32 {
+    match run_extra() {
+        Ok(()) => {
+            write_out(b"wlxe: PASS\n");
+            0
+        }
+        Err(code) => code,
+    }
+}
+
+/// The base window's colour (XRGB8888 opaque red, LE bytes B,G,R,0 = 00,00,FF,00).
+const BASE_COLOR: u32 = 0x00FF_0000;
+/// The panel's colour (opaque green).
+const PANEL_COLOR: u32 = 0x0000_FF00;
+/// The popup's colour (opaque blue).
+const POPUP_COLOR: u32 = 0x0000_00FF;
+const PANEL_W: i32 = 200;
+const PANEL_H: i32 = 32;
+const POPUP_W: i32 = 8;
+const POPUP_H: i32 = 8;
+
+/// Map a fresh pool of `size` bytes read-write, for a client to draw into.
+fn map_pool(fd: i32, size: i32, code: i32, msg: &[u8]) -> Result<*mut u8, i32> {
+    let p = unsafe {
+        vmem::mmap(
+            core::ptr::null_mut(),
+            size as usize,
+            vmem::PROT_READ | vmem::PROT_WRITE,
+            vmem::MAP_SHARED,
+            fd,
+            0,
+        )
+    };
+    if p == vmem::MAP_FAILED {
+        return Err(fail(code, msg));
+    }
+    Ok(p)
+}
+
+fn run_extra() -> Result<(), i32> {
+    let fb = map_fb()?;
+    let conn = connect()?;
+    let mut client = Client::new();
+    let mut req = [0u8; 512];
+    let mut inbuf = MessageBuffer::new();
+    let mut chunk = [0u8; 512];
+
+    let registry = send_req(conn, &mut req, |q| client.get_registry(q))?;
+    let g = find_globals(conn, &client, &mut inbuf, &mut chunk)?;
+    if g.wm_base == 0 {
+        return Err(fail(160, b"wlxe: no xdg_wm_base global\n"));
+    }
+    if g.layer_shell == 0 {
+        return Err(fail(161, b"wlxe: no zwlr_layer_shell_v1 global\n"));
+    }
+    if g.decoration_manager == 0 {
+        return Err(fail(162, b"wlxe: no zxdg_decoration_manager_v1 global\n"));
+    }
+    let compositor = send_req(conn, &mut req, |q| {
+        client.bind(
+            registry,
+            g.compositor,
+            b"wl_compositor",
+            1,
+            Kind::Compositor,
+            q,
+        )
+    })?;
+    let shm = send_req(conn, &mut req, |q| {
+        client.bind(registry, g.shm, b"wl_shm", 1, Kind::Shm, q)
+    })?;
+    let wm_base = send_req(conn, &mut req, |q| {
+        client.bind(registry, g.wm_base, b"xdg_wm_base", 1, Kind::XdgWmBase, q)
+    })?;
+    let layer_shell = send_req(conn, &mut req, |q| {
+        client.bind(
+            registry,
+            g.layer_shell,
+            b"zwlr_layer_shell_v1",
+            1,
+            Kind::LayerShell,
+            q,
+        )
+    })?;
+    let decorations = send_req(conn, &mut req, |q| {
+        client.bind(
+            registry,
+            g.decoration_manager,
+            b"zxdg_decoration_manager_v1",
+            1,
+            Kind::DecorationManager,
+            q,
+        )
+    })?;
+
+    // The base window: a full-screen opaque frame, so the panel and the popup have
+    // something distinct to be drawn over.
+    let surface = send_req(conn, &mut req, |q| client.create_surface(compositor, q))?;
+    let xdg_surface = send_req(conn, &mut req, |q| {
+        client.get_xdg_surface(wm_base, surface, q)
+    })?;
+    let toplevel = send_req(conn, &mut req, |q| client.get_toplevel(xdg_surface, q))?;
+    send_req(conn, &mut req, |q| client.commit(surface, q))?;
+    let (serial, width, height) = await_configure(
+        conn,
+        &client,
+        xdg_surface,
+        toplevel,
+        wm_base,
+        &mut inbuf,
+        &mut chunk,
+    )?;
+    if width <= 0 || height <= 0 {
+        return Err(fail(163, b"wlxe: the base window configured no size\n"));
+    }
+    send_req(conn, &mut req, |q| {
+        client.ack_configure(xdg_surface, serial, q)
+    })?;
+    let barrier = send_req(conn, &mut req, |q| client.sync(q))?;
+    await_callback(conn, &client, barrier, &mut inbuf, &mut chunk)?;
+
+    let stride = width * 4;
+    let size = stride * height;
+    let pool_fd = fs::memfd_create(0).map_err(|_| fail(164, b"wlxe: memfd_create failed\n"))?;
+    fs::truncate(pool_fd, size as i64).map_err(|_| fail(165, b"wlxe: truncate failed\n"))?;
+    let pool = map_pool(pool_fd, size, 166, b"wlxe: mmap of the pool failed\n")?;
+    fill_pool(pool, width * height, BASE_COLOR);
+    uds::send_fds(conn, &[pool_fd]).map_err(|_| fail(167, b"wlxe: send_fds failed\n"))?;
+    let pool_obj = send_req(conn, &mut req, |q| client.create_pool(shm, 0, size, q))?;
+    let buffer = send_req(conn, &mut req, |q| {
+        client.create_buffer(
+            pool_obj,
+            0,
+            width,
+            height,
+            stride,
+            protocol::WL_SHM_FORMAT_XRGB8888,
+            q,
+        )
+    })?;
+    send_req(conn, &mut req, |q| client.attach(surface, buffer, 0, 0, q))?;
+    send_req(conn, &mut req, |q| {
+        client.damage(surface, 0, 0, width, height, q)
+    })?;
+    send_req(conn, &mut req, |q| client.commit(surface, q))?;
+    await_release(conn, &client, buffer, &mut inbuf, &mut chunk)?;
+    if read_px(fb, 4, 4) != BASE_COLOR {
+        return Err(fail(168, b"wlxe: the base window is not on /dev/fb\n"));
+    }
+
+    // The decoration: this port draws none, so the manager must answer client-side
+    // the moment it is asked.
+    let decoration = send_req(conn, &mut req, |q| {
+        client.get_toplevel_decoration(decorations, toplevel, q)
+    })?;
+    await_decoration(conn, &client, decoration, &mut inbuf, &mut chunk)?;
+
+    // A panel: a layer surface, 200x32, anchored top. It is placed at the output's
+    // origin, so it must cover the top-left pixel and leave the rows below it alone.
+    let panel_surface = send_req(conn, &mut req, |q| client.create_surface(compositor, q))?;
+    let panel = send_req(conn, &mut req, |q| {
+        client.get_layer_surface(
+            layer_shell,
+            panel_surface,
+            0,
+            protocol::LAYER_TOP,
+            b"wlxe-panel",
+            q,
+        )
+    })?;
+    send_req(conn, &mut req, |q| {
+        client.set_layer_size(panel, PANEL_W as u32, PANEL_H as u32, q)
+    })?;
+    send_req(conn, &mut req, |q| {
+        client.set_anchor(panel, protocol::LAYER_ANCHOR_TOP, q)
+    })?;
+    send_req(conn, &mut req, |q| client.commit(panel_surface, q))?;
+    let (p_serial, p_w, p_h) = await_layer_configure(conn, &client, panel, &mut inbuf, &mut chunk)?;
+    if p_w != PANEL_W as u32 || p_h != PANEL_H as u32 {
+        return Err(fail(
+            169,
+            b"wlxe: the panel was configured the wrong size\n",
+        ));
+    }
+    send_req(conn, &mut req, |q| {
+        client.ack_layer_configure(panel, p_serial, q)
+    })?;
+    let barrier = send_req(conn, &mut req, |q| client.sync(q))?;
+    await_callback(conn, &client, barrier, &mut inbuf, &mut chunk)?;
+
+    let pstride = PANEL_W * 4;
+    let psize = pstride * PANEL_H;
+    let pfd = fs::memfd_create(0).map_err(|_| fail(170, b"wlxe: panel memfd failed\n"))?;
+    fs::truncate(pfd, psize as i64).map_err(|_| fail(171, b"wlxe: panel truncate failed\n"))?;
+    let pmap = map_pool(pfd, psize, 172, b"wlxe: mmap of the panel pool failed\n")?;
+    fill_pool(pmap, PANEL_W * PANEL_H, PANEL_COLOR);
+    uds::send_fds(conn, &[pfd]).map_err(|_| fail(173, b"wlxe: panel send_fds failed\n"))?;
+    let ppool = send_req(conn, &mut req, |q| client.create_pool(shm, 0, psize, q))?;
+    let pbuf = send_req(conn, &mut req, |q| {
+        client.create_buffer(
+            ppool,
+            0,
+            PANEL_W,
+            PANEL_H,
+            pstride,
+            protocol::WL_SHM_FORMAT_XRGB8888,
+            q,
+        )
+    })?;
+    send_req(conn, &mut req, |q| {
+        client.attach(panel_surface, pbuf, 0, 0, q)
+    })?;
+    send_req(conn, &mut req, |q| {
+        client.damage(panel_surface, 0, 0, PANEL_W, PANEL_H, q)
+    })?;
+    send_req(conn, &mut req, |q| client.commit(panel_surface, q))?;
+    await_release(conn, &client, pbuf, &mut inbuf, &mut chunk)?;
+    if read_px(fb, 4, 4) != PANEL_COLOR {
+        return Err(fail(174, b"wlxe: the panel is not on /dev/fb\n"));
+    }
+    if read_px(fb, 4, PANEL_H + 8) != BASE_COLOR {
+        return Err(fail(175, b"wlxe: the panel covered more than its size\n"));
+    }
+
+    // A popup: positioner-sized at 8x8, over the base window. Drawn after the panel,
+    // so it must cover the panel's top-left corner and no more.
+    let popup_surface = send_req(conn, &mut req, |q| client.create_surface(compositor, q))?;
+    let popup_xdg = send_req(conn, &mut req, |q| {
+        client.get_xdg_surface(wm_base, popup_surface, q)
+    })?;
+    let positioner = send_req(conn, &mut req, |q| client.create_positioner(wm_base, q))?;
+    send_req(conn, &mut req, |q| {
+        client.set_positioner_size(positioner, POPUP_W, POPUP_H, q)
+    })?;
+    send_req(conn, &mut req, |q| {
+        client.get_popup(popup_xdg, xdg_surface, positioner, q)
+    })?;
+    send_req(conn, &mut req, |q| client.commit(popup_surface, q))?;
+    let popup_serial =
+        await_popup_configure(conn, &client, popup_xdg, wm_base, &mut inbuf, &mut chunk)?;
+    send_req(conn, &mut req, |q| {
+        client.ack_configure(popup_xdg, popup_serial, q)
+    })?;
+    let barrier = send_req(conn, &mut req, |q| client.sync(q))?;
+    await_callback(conn, &client, barrier, &mut inbuf, &mut chunk)?;
+
+    let ustride = POPUP_W * 4;
+    let usize_ = ustride * POPUP_H;
+    let ufd = fs::memfd_create(0).map_err(|_| fail(176, b"wlxe: popup memfd failed\n"))?;
+    fs::truncate(ufd, usize_ as i64).map_err(|_| fail(177, b"wlxe: popup truncate failed\n"))?;
+    let umap = map_pool(ufd, usize_, 178, b"wlxe: mmap of the popup pool failed\n")?;
+    fill_pool(umap, POPUP_W * POPUP_H, POPUP_COLOR);
+    uds::send_fds(conn, &[ufd]).map_err(|_| fail(179, b"wlxe: popup send_fds failed\n"))?;
+    let upool = send_req(conn, &mut req, |q| client.create_pool(shm, 0, usize_, q))?;
+    let ubuf = send_req(conn, &mut req, |q| {
+        client.create_buffer(
+            upool,
+            0,
+            POPUP_W,
+            POPUP_H,
+            ustride,
+            protocol::WL_SHM_FORMAT_XRGB8888,
+            q,
+        )
+    })?;
+    send_req(conn, &mut req, |q| {
+        client.attach(popup_surface, ubuf, 0, 0, q)
+    })?;
+    send_req(conn, &mut req, |q| {
+        client.damage(popup_surface, 0, 0, POPUP_W, POPUP_H, q)
+    })?;
+    send_req(conn, &mut req, |q| client.commit(popup_surface, q))?;
+    await_release(conn, &client, ubuf, &mut inbuf, &mut chunk)?;
+    if read_px(fb, 4, 4) != POPUP_COLOR {
+        return Err(fail(180, b"wlxe: the popup is not on /dev/fb\n"));
+    }
+    if read_px(fb, 4, POPUP_H + 4) != PANEL_COLOR {
+        return Err(fail(181, b"wlxe: the popup covered more than its size\n"));
+    }
+
+    let _ = unsafe { vmem::munmap(pool, size as usize) };
+    let _ = unsafe { vmem::munmap(pmap, psize as usize) };
+    let _ = unsafe { vmem::munmap(umap, usize_ as usize) };
+    let _ = uds::close_fd(conn);
+    Ok(())
+}
+
+/// Wait for a layer surface's `configure`. Returns its serial and its size.
+fn await_layer_configure(
+    conn: i32,
+    client: &Client,
+    layer_surface: u32,
+    inbuf: &mut MessageBuffer,
+    chunk: &mut [u8; 512],
+) -> Result<(u32, u32, u32), i32> {
+    loop {
+        if !fill(conn, inbuf, chunk, 4000) {
+            return Err(fail(185, b"wlxe: no layer configure arrived\n"));
+        }
+        loop {
+            let msg = match inbuf.next() {
+                Ok(Some(m)) => m,
+                Ok(None) => break,
+                Err(_) => return Err(fail(186, b"wlxe: bad frame\n")),
+            };
+            let h = match Header::parse(msg) {
+                Ok(h) => h,
+                Err(_) => return Err(fail(187, b"wlxe: bad header\n")),
+            };
+            let mut args = [Arg::Uint(0); MAX_ARGS];
+            let (kind, argc) = match client.decode(msg, &mut args) {
+                Ok((_, k, n)) => (k, n),
+                Err(_) => return Err(fail(188, b"wlxe: undecodable event\n")),
+            };
+            if kind == Kind::Display && h.opcode == protocol::display_ev::ERROR {
+                return Err(fail(189, b"wlxe: server sent wl_display.error\n"));
+            }
+            let vals = if kind == Kind::LayerSurface
+                && h.object_id == layer_surface
+                && h.opcode == protocol::layer_surface_ev::CONFIGURE
+                && argc == 3
+            {
+                Some((
+                    args[0].as_uint().unwrap_or(0),
+                    args[1].as_uint().unwrap_or(0),
+                    args[2].as_uint().unwrap_or(0),
+                ))
+            } else {
+                None
+            };
+            inbuf.consume(h.size as usize);
+            if let Some(v) = vals {
+                return Ok(v);
+            }
+        }
+    }
+}
+
+/// Wait for a popup's `xdg_surface.configure`, answering the server's `ping`.
+///
+/// A popup has no toplevel, so unlike a window's configure there is no size to
+/// collect — the serial the server expects to be acked is the whole event.
+fn await_popup_configure(
+    conn: i32,
+    client: &Client,
+    xdg_surface: u32,
+    wm_base: u32,
+    inbuf: &mut MessageBuffer,
+    chunk: &mut [u8; 512],
+) -> Result<u32, i32> {
+    loop {
+        if !fill(conn, inbuf, chunk, 4000) {
+            return Err(fail(190, b"wlxe: no popup configure arrived\n"));
+        }
+        loop {
+            let msg = match inbuf.next() {
+                Ok(Some(m)) => m,
+                Ok(None) => break,
+                Err(_) => return Err(fail(191, b"wlxe: bad frame\n")),
+            };
+            let h = match Header::parse(msg) {
+                Ok(h) => h,
+                Err(_) => return Err(fail(192, b"wlxe: bad header\n")),
+            };
+            let mut args = [Arg::Uint(0); MAX_ARGS];
+            let kind = match client.decode(msg, &mut args) {
+                Ok((_, k, _)) => k,
+                Err(_) => return Err(fail(193, b"wlxe: undecodable event\n")),
+            };
+            let a0u = args[0].as_uint();
+            inbuf.consume(h.size as usize);
+            if kind == Kind::Display && h.opcode == protocol::display_ev::ERROR {
+                return Err(fail(194, b"wlxe: server sent wl_display.error\n"));
+            }
+            if kind == Kind::XdgSurface
+                && h.object_id == xdg_surface
+                && h.opcode == protocol::xdg_surface_ev::CONFIGURE
+            {
+                return Ok(a0u.unwrap_or(0));
+            }
+            if kind == Kind::XdgWmBase && h.opcode == protocol::xdg_wm_base_ev::PING {
+                let mut pong = [0u8; 64];
+                let mut q = DispatchBuf::new(&mut pong);
+                client
+                    .pong(wm_base, a0u.unwrap_or(0), &mut q)
+                    .map_err(|_| fail(195, b"wlxe: pong encode failed\n"))?;
+                if uds::send(conn, q.bytes()).is_err() {
+                    return Err(fail(196, b"wlxe: pong send failed\n"));
+                }
+            }
+        }
+    }
+}
+
+/// Wait for the decoration manager's answer and require client-side decoration.
+fn await_decoration(
+    conn: i32,
+    client: &Client,
+    decoration: u32,
+    inbuf: &mut MessageBuffer,
+    chunk: &mut [u8; 512],
+) -> Result<(), i32> {
+    loop {
+        if !fill(conn, inbuf, chunk, 2000) {
+            return Err(fail(197, b"wlxe: no decoration answer arrived\n"));
+        }
+        loop {
+            let msg = match inbuf.next() {
+                Ok(Some(m)) => m,
+                Ok(None) => break,
+                Err(_) => return Err(fail(198, b"wlxe: bad frame\n")),
+            };
+            let h = match Header::parse(msg) {
+                Ok(h) => h,
+                Err(_) => return Err(fail(199, b"wlxe: bad header\n")),
+            };
+            let mut args = [Arg::Uint(0); MAX_ARGS];
+            let kind = match client.decode(msg, &mut args) {
+                Ok((_, k, _)) => k,
+                Err(_) => return Err(fail(200, b"wlxe: undecodable event\n")),
+            };
+            let mode = if kind == Kind::ToplevelDecoration
+                && h.object_id == decoration
+                && h.opcode == protocol::toplevel_decoration_ev::CONFIGURE
+            {
+                args[0].as_uint()
+            } else {
+                None
+            };
+            inbuf.consume(h.size as usize);
+            match mode {
+                Some(m) if m == protocol::DECORATION_MODE_CLIENT_SIDE => return Ok(()),
+                Some(_) => return Err(fail(201, b"wlxe: the manager chose server-side\n")),
+                None => {}
+            }
+        }
+    }
 }
 
 /// Run the client: `PASS` on success, otherwise the failing step's code.

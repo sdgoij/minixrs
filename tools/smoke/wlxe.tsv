@@ -1,0 +1,19 @@
+# The `just test-wlxe-x86` scenario: the Wayland Phase 2e panels, popups and decorations.
+#
+#   FEED_SCENARIO=tools/smoke/wlxe.tsv sh tools/smoke/feed.sh <log> <seconds> <qemu command…>
+#
+# One step per line, as `tools/smoke/scenario.tsv` documents: the command, a tab, and the
+# whole line its output must produce.
+#
+# `/bin/wlxe` connects to `/sbin/wlserver`, maps an opaque window, then a
+# `zwlr_layer_shell_v1` panel 200x32 anchored top and an `xdg_popup` 8x8 over it. It
+# requires the decoration manager to answer client-side, the panel and the popup each to
+# be composited at the output's origin, and neither to cover more of the frame than its
+# own size — a panel or popup that painted the whole output would fail the rows below it.
+# It prints the line below only if all of that holds; a stopped scenario is a failure.
+#
+# This gate needs a guest whose compositor places layer surfaces and popups at the
+# origin; the server does so deliberately (2e), so the check is about the commit
+# reaching the display, not about placement policy.
+
+/bin/wlxe	wlxe: PASS

@@ -268,6 +268,163 @@ impl Client {
         out.event(wm_base, protocol::xdg_wm_base_req::PONG, |w| w.uint(serial))
     }
 
+    /// `xdg_wm_base.create_positioner`. Returns the positioner id.
+    pub fn create_positioner(
+        &mut self,
+        wm_base: u32,
+        out: &mut DispatchBuf<'_>,
+    ) -> Result<u32, WireError> {
+        let id = self.alloc(Kind::XdgPositioner)?;
+        out.event(wm_base, protocol::xdg_wm_base_req::CREATE_POSITIONER, |w| {
+            w.new_id(id)
+        })?;
+        Ok(id)
+    }
+
+    /// `xdg_positioner.set_size`.
+    pub fn set_positioner_size(
+        &self,
+        positioner: u32,
+        width: i32,
+        height: i32,
+        out: &mut DispatchBuf<'_>,
+    ) -> Result<(), WireError> {
+        out.event(positioner, protocol::xdg_positioner_req::SET_SIZE, |w| {
+            w.int(width)?;
+            w.int(height)
+        })
+    }
+
+    /// `xdg_surface.get_popup`. `parent` is the parent `xdg_surface` (0 = none).
+    pub fn get_popup(
+        &mut self,
+        xdg_surface: u32,
+        parent: u32,
+        positioner: u32,
+        out: &mut DispatchBuf<'_>,
+    ) -> Result<u32, WireError> {
+        let id = self.alloc(Kind::XdgPopup)?;
+        out.event(xdg_surface, protocol::xdg_surface_req::GET_POPUP, |w| {
+            w.new_id(id)?;
+            w.object(parent)?;
+            w.object(positioner)
+        })?;
+        Ok(id)
+    }
+
+    /// `zwlr_layer_shell_v1.get_layer_surface`. `output` of 0 means the compositor's
+    /// choice; `layer` is one of the `LAYER_*` constants.
+    pub fn get_layer_surface(
+        &mut self,
+        layer_shell: u32,
+        surface: u32,
+        output: u32,
+        layer: u32,
+        namespace: &[u8],
+        out: &mut DispatchBuf<'_>,
+    ) -> Result<u32, WireError> {
+        let id = self.alloc(Kind::LayerSurface)?;
+        out.event(
+            layer_shell,
+            protocol::layer_shell_req::GET_LAYER_SURFACE,
+            |w| {
+                w.new_id(id)?;
+                w.object(surface)?;
+                w.object(output)?;
+                w.uint(layer)?;
+                w.string(namespace)
+            },
+        )?;
+        Ok(id)
+    }
+
+    /// `zwlr_layer_surface_v1.set_size`. A zero dimension defers to the compositor.
+    pub fn set_layer_size(
+        &self,
+        layer_surface: u32,
+        width: u32,
+        height: u32,
+        out: &mut DispatchBuf<'_>,
+    ) -> Result<(), WireError> {
+        out.event(layer_surface, protocol::layer_surface_req::SET_SIZE, |w| {
+            w.uint(width)?;
+            w.uint(height)
+        })
+    }
+
+    /// `zwlr_layer_surface_v1.set_anchor`. `anchor` is a bitmask of `LAYER_ANCHOR_*`.
+    pub fn set_anchor(
+        &self,
+        layer_surface: u32,
+        anchor: u32,
+        out: &mut DispatchBuf<'_>,
+    ) -> Result<(), WireError> {
+        out.event(
+            layer_surface,
+            protocol::layer_surface_req::SET_ANCHOR,
+            |w| w.uint(anchor),
+        )
+    }
+
+    /// `zwlr_layer_surface_v1.set_layer`.
+    pub fn set_layer(
+        &self,
+        layer_surface: u32,
+        layer: u32,
+        out: &mut DispatchBuf<'_>,
+    ) -> Result<(), WireError> {
+        out.event(layer_surface, protocol::layer_surface_req::SET_LAYER, |w| {
+            w.uint(layer)
+        })
+    }
+
+    /// `zwlr_layer_surface_v1.ack_configure`.
+    pub fn ack_layer_configure(
+        &self,
+        layer_surface: u32,
+        serial: u32,
+        out: &mut DispatchBuf<'_>,
+    ) -> Result<(), WireError> {
+        out.event(
+            layer_surface,
+            protocol::layer_surface_req::ACK_CONFIGURE,
+            |w| w.uint(serial),
+        )
+    }
+
+    /// `zxdg_decoration_manager_v1.get_toplevel_decoration`. Returns the decoration id.
+    pub fn get_toplevel_decoration(
+        &mut self,
+        decoration_manager: u32,
+        toplevel: u32,
+        out: &mut DispatchBuf<'_>,
+    ) -> Result<u32, WireError> {
+        let id = self.alloc(Kind::ToplevelDecoration)?;
+        out.event(
+            decoration_manager,
+            protocol::decoration_manager_req::GET_TOPLEVEL_DECORATION,
+            |w| {
+                w.new_id(id)?;
+                w.object(toplevel)
+            },
+        )?;
+        Ok(id)
+    }
+
+    /// `zxdg_toplevel_decoration_v1.set_mode`.
+    pub fn set_decoration_mode(
+        &self,
+        decoration: u32,
+        mode: u32,
+        out: &mut DispatchBuf<'_>,
+    ) -> Result<(), WireError> {
+        out.event(
+            decoration,
+            protocol::toplevel_decoration_req::SET_MODE,
+            |w| w.uint(mode),
+        )
+    }
+
     /// `wl_shm.create_pool`. `fd_index` refers to a descriptor sent with this
     /// message by `SCM_RIGHTS`, not to a descriptor the caller already holds.
     pub fn create_pool(
@@ -701,5 +858,133 @@ mod tests {
         // The client frees the spent callback.
         client.free(callback);
         assert_eq!(client.kind(callback), None);
+    }
+
+    /// Phase 2e through both halves: the client builds a layer surface, a popup and a
+    /// decoration request, and the server answers each with the event the client
+    /// decodes. Neither a panel nor a popup takes focus.
+    #[test]
+    fn layer_popup_and_decoration_round_trip() {
+        let mut server = Server::new(1024, 768);
+        let mut client = Client::new();
+        let mut w = Wire::new();
+        let mut events = [0u8; 8192];
+
+        let registry = w.build(|o| client.get_registry(o));
+        to_server(&mut server, w.bytes(), &mut events);
+        let compositor =
+            w.build(|o| client.bind(registry, 1, b"wl_compositor", 1, Kind::Compositor, o));
+        to_server(&mut server, w.bytes(), &mut events);
+        let wm_base = w.build(|o| client.bind(registry, 5, b"xdg_wm_base", 1, Kind::XdgWmBase, o));
+        to_server(&mut server, w.bytes(), &mut events);
+        let layer_shell =
+            w.build(|o| client.bind(registry, 6, b"zwlr_layer_shell_v1", 1, Kind::LayerShell, o));
+        to_server(&mut server, w.bytes(), &mut events);
+        let decorations = w.build(|o| {
+            client.bind(
+                registry,
+                7,
+                b"zxdg_decoration_manager_v1",
+                1,
+                Kind::DecorationManager,
+                o,
+            )
+        });
+        to_server(&mut server, w.bytes(), &mut events);
+
+        // A toplevel, so there is something to decorate and to parent a popup.
+        let toplevel_surface = w.build(|o| client.create_surface(compositor, o));
+        to_server(&mut server, w.bytes(), &mut events);
+        let toplevel_xdg = w.build(|o| client.get_xdg_surface(wm_base, toplevel_surface, o));
+        to_server(&mut server, w.bytes(), &mut events);
+        let toplevel = w.build(|o| client.get_toplevel(toplevel_xdg, o));
+        to_server(&mut server, w.bytes(), &mut events);
+
+        // The decoration is answered the moment it is asked for.
+        w.build(|o| client.get_toplevel_decoration(decorations, toplevel, o));
+        let en = to_server(&mut server, w.bytes(), &mut events);
+        let mut mb = MessageBuffer::new();
+        mb.push(&events[..en]).unwrap();
+        let msg = mb.next().unwrap().unwrap();
+        let mut args = [Arg::Uint(0); MAX_ARGS];
+        let (h, kind, argc) = client.decode(msg, &mut args).unwrap();
+        assert_eq!(kind, Kind::ToplevelDecoration);
+        assert_eq!(h.opcode, protocol::toplevel_decoration_ev::CONFIGURE);
+        assert_eq!(argc, 1);
+        assert_eq!(
+            args[0].as_uint(),
+            Some(protocol::DECORATION_MODE_CLIENT_SIDE)
+        );
+        mb.consume(h.size as usize);
+        assert!(mb.next().unwrap().is_none());
+
+        // A layer surface: sized, committed, configured at that size, then acked.
+        let panel_surface = w.build(|o| client.create_surface(compositor, o));
+        to_server(&mut server, w.bytes(), &mut events);
+        let panel = w.build(|o| {
+            client.get_layer_surface(
+                layer_shell,
+                panel_surface,
+                0,
+                protocol::LAYER_TOP,
+                b"panel",
+                o,
+            )
+        });
+        to_server(&mut server, w.bytes(), &mut events);
+        w.build(|o| client.set_layer_size(panel, 200, 32, o));
+        to_server(&mut server, w.bytes(), &mut events);
+        w.build(|o| client.set_anchor(panel, protocol::LAYER_ANCHOR_TOP, o));
+        to_server(&mut server, w.bytes(), &mut events);
+        w.build(|o| client.commit(panel_surface, o));
+        let en = to_server(&mut server, w.bytes(), &mut events);
+
+        let mut mb = MessageBuffer::new();
+        mb.push(&events[..en]).unwrap();
+        let msg = mb.next().unwrap().unwrap();
+        let mut args = [Arg::Uint(0); MAX_ARGS];
+        let (h, kind, argc) = client.decode(msg, &mut args).unwrap();
+        assert_eq!(kind, Kind::LayerSurface);
+        assert_eq!(h.object_id, panel);
+        assert_eq!(h.opcode, protocol::layer_surface_ev::CONFIGURE);
+        assert_eq!(argc, 3);
+        let serial = args[0].as_uint().unwrap();
+        assert_eq!(args[1].as_uint(), Some(200));
+        assert_eq!(args[2].as_uint(), Some(32));
+        mb.consume(h.size as usize);
+        assert!(mb.next().unwrap().is_none());
+        assert!(
+            server.take_focus_request().is_none(),
+            "a panel takes no focus"
+        );
+
+        w.build(|o| client.ack_layer_configure(panel, serial, o));
+        to_server(&mut server, w.bytes(), &mut events);
+
+        // A popup: positioner-sized, over the toplevel.
+        let popup_surface = w.build(|o| client.create_surface(compositor, o));
+        to_server(&mut server, w.bytes(), &mut events);
+        let popup_xdg = w.build(|o| client.get_xdg_surface(wm_base, popup_surface, o));
+        to_server(&mut server, w.bytes(), &mut events);
+        let positioner = w.build(|o| client.create_positioner(wm_base, o));
+        to_server(&mut server, w.bytes(), &mut events);
+        w.build(|o| client.set_positioner_size(positioner, 8, 8, o));
+        to_server(&mut server, w.bytes(), &mut events);
+        w.build(|o| client.get_popup(popup_xdg, toplevel_xdg, positioner, o));
+        to_server(&mut server, w.bytes(), &mut events);
+        w.build(|o| client.commit(popup_surface, o));
+        let en = to_server(&mut server, w.bytes(), &mut events);
+        let mut mb = MessageBuffer::new();
+        mb.push(&events[..en]).unwrap();
+        let msg = mb.next().unwrap().unwrap();
+        let mut args = [Arg::Uint(0); MAX_ARGS];
+        let (h, kind, _) = client.decode(msg, &mut args).unwrap();
+        assert_eq!(kind, Kind::XdgSurface);
+        assert_eq!(h.object_id, popup_xdg);
+        assert_eq!(h.opcode, protocol::xdg_surface_ev::CONFIGURE);
+        assert!(
+            server.take_focus_request().is_none(),
+            "a popup takes no focus"
+        );
     }
 }

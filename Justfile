@@ -580,6 +580,17 @@ test-wlxd-x86 boot-timeout="40": build-x86
     FEED_SCENARIO=tools/smoke/wlxd.tsv sh tools/smoke/feed.sh target/test-wlxd-x86.log {{boot-timeout}} qemu-system-x86_64 -nographic -m 256M -no-reboot -vga none -device bochs-display,id=fb0 -kernel target/images/x86_64-pc-minix/minix-x86.elf -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0 -device virtio-tablet-pci,display=fb0
     @echo "wlxd: damage and the pointer's cursor (x86_64)"
 
+
+# wlxe: /bin/wlxe drives the Phase 2e panel, popup and decoration path — it maps an
+# opaque window, then a zwlr_layer_shell_v1 panel and an xdg_popup over it, requires
+# the decoration manager to answer client-side, and checks both are composited where
+# they asked and no wider — WAYLAND.md §6.12.
+test-wlxe-x86 boot-timeout="40": build-x86
+    mkdir -p target/images/x86_64-pc-minix
+    cp target/trampoline.elf target/images/x86_64-pc-minix/minix-x86.elf
+    @just _assert-qemu-version qemu-system-x86_64
+    FEED_SCENARIO=tools/smoke/wlxe.tsv sh tools/smoke/feed.sh target/test-wlxe-x86.log {{boot-timeout}} qemu-system-x86_64 -nographic -m 256M -no-reboot -vga none -device bochs-display,id=fb0 -kernel target/images/x86_64-pc-minix/minix-x86.elf -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0 -device virtio-tablet-pci,display=fb0
+    @echo "wlxe: layer-shell panel, xdg_popup and client-side decoration (x86_64)"
 # Measure whether two processes that map one object through the loader share its
 # physical frames — Phase 5 of DYNAMIC_LINKING.md. `tools/dso_share_probe.py` boots
 # the dynamic image, runs `/bin/dynclib hold | /bin/dynclib hold` (two lives of the
