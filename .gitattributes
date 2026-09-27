@@ -1,0 +1,3 @@
+# `wl_keyboard.keymap` serves these bytes verbatim, and the keymap gate checks
+# their length — an EOL conversion would change every byte count (WAYLAND.md §6.12).
+crates/servers/data/*.xkb binary

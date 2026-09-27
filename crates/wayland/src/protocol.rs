@@ -71,11 +71,11 @@ pub static REGION: Interface = Interface {
 };
 
 /// `wl_surface`: `destroy`, `attach`, `damage`, `frame`, `set_opaque_region`,
-/// `set_input_region`, `commit`; events `enter`, `leave`.
+/// `set_input_region`, `commit`, `damage_buffer`; events `enter`, `leave`.
 pub static SURFACE: Interface = Interface {
     name: "wl_surface",
     version: 1,
-    requests: &["", "oii", "iiii", "n", "o", "o", ""],
+    requests: &["", "oii", "iiii", "n", "o", "o", "", "iiii"],
     events: &["o", "o"],
 };
 
@@ -136,6 +136,42 @@ pub static KEYBOARD: Interface = Interface {
     events: &["uhu", "uoa", "uo", "uuuu", "uuuuu", "ii"],
 };
 
+/// `xdg_wm_base`: `destroy`, `create_positioner`, `get_xdg_surface`, `pong`;
+/// event `ping`. Version 1, so no `configure_bounds`/`wm_capabilities`.
+pub static XDG_WM_BASE: Interface = Interface {
+    name: "xdg_wm_base",
+    version: 1,
+    requests: &["", "n", "no", "u"],
+    events: &["u"],
+};
+
+/// `xdg_positioner`: the sizing requests a popup needs (2e); no events.
+pub static XDG_POSITIONER: Interface = Interface {
+    name: "xdg_positioner",
+    version: 1,
+    requests: &["", "ii", "iiii", "u", "u", "u", "ii"],
+    events: &[],
+};
+
+/// `xdg_surface`: `destroy`, `get_toplevel`, `get_popup`, `set_window_geometry`,
+/// `ack_configure`; events `configure`, `close`.
+pub static XDG_SURFACE: Interface = Interface {
+    name: "xdg_surface",
+    version: 1,
+    requests: &["", "n", "noo", "iiii", "u"],
+    events: &["u", ""],
+};
+
+/// `xdg_toplevel`: the window requests of 2b; events `configure`, `close`.
+pub static XDG_TOPLEVEL: Interface = Interface {
+    name: "xdg_toplevel",
+    version: 1,
+    requests: &[
+        "", "o", "s", "s", "ouii", "ou", "ouu", "ii", "ii", "", "", "o", "", "",
+    ],
+    events: &["iia", ""],
+};
+
 /// Every interface this crate knows, by protocol name.
 pub static ALL: &[&Interface] = &[
     &DISPLAY,
@@ -151,6 +187,10 @@ pub static ALL: &[&Interface] = &[
     &SEAT,
     &POINTER,
     &KEYBOARD,
+    &XDG_WM_BASE,
+    &XDG_POSITIONER,
+    &XDG_SURFACE,
+    &XDG_TOPLEVEL,
 ];
 
 /// The interface with this protocol name, or `None`.
@@ -183,6 +223,10 @@ pub enum Kind {
     Seat,
     Pointer,
     Keyboard,
+    XdgWmBase,
+    XdgPositioner,
+    XdgSurface,
+    XdgToplevel,
 }
 
 impl Kind {
@@ -202,6 +246,10 @@ impl Kind {
             Kind::Seat => &SEAT,
             Kind::Pointer => &POINTER,
             Kind::Keyboard => &KEYBOARD,
+            Kind::XdgWmBase => &XDG_WM_BASE,
+            Kind::XdgPositioner => &XDG_POSITIONER,
+            Kind::XdgSurface => &XDG_SURFACE,
+            Kind::XdgToplevel => &XDG_TOPLEVEL,
         }
     }
 
@@ -218,13 +266,17 @@ impl Kind {
             b"wl_seat" => Kind::Seat,
             b"wl_pointer" => Kind::Pointer,
             b"wl_keyboard" => Kind::Keyboard,
+            b"xdg_wm_base" => Kind::XdgWmBase,
+            b"xdg_positioner" => Kind::XdgPositioner,
+            b"xdg_surface" => Kind::XdgSurface,
+            b"xdg_toplevel" => Kind::XdgToplevel,
             _ => return None,
         })
     }
 }
 
-/// The globals `/sbin/wlserver` offers. `wl_compositor`, `wl_shm`, one
-/// `wl_output` and one `wl_seat` — the factories a Phase 1 client binds.
+/// The globals `/sbin/wlserver` offers: the factories a Phase 1 client binds, plus
+/// `xdg_wm_base` for the `xdg_shell` of Phase 2.
 pub static GLOBALS: &[Global] = &[
     Global {
         name: 1,
@@ -244,6 +296,11 @@ pub static GLOBALS: &[Global] = &[
     Global {
         name: 4,
         interface: "wl_seat",
+        version: 1,
+    },
+    Global {
+        name: 5,
+        interface: "xdg_wm_base",
         version: 1,
     },
 ];
@@ -273,6 +330,7 @@ pub mod surface_req {
     pub const SET_OPAQUE_REGION: u16 = 4;
     pub const SET_INPUT_REGION: u16 = 5;
     pub const COMMIT: u16 = 6;
+    pub const DAMAGE_BUFFER: u16 = 7;
 }
 pub mod shm_req {
     pub const CREATE_POOL: u16 = 0;
@@ -295,6 +353,44 @@ pub mod pointer_req {
 }
 pub mod keyboard_req {
     pub const RELEASE: u16 = 0;
+}
+pub mod xdg_wm_base_req {
+    pub const DESTROY: u16 = 0;
+    pub const CREATE_POSITIONER: u16 = 1;
+    pub const GET_XDG_SURFACE: u16 = 2;
+    pub const PONG: u16 = 3;
+}
+pub mod xdg_positioner_req {
+    pub const DESTROY: u16 = 0;
+    pub const SET_SIZE: u16 = 1;
+    pub const SET_ANCHOR_RECT: u16 = 2;
+    pub const SET_ANCHOR: u16 = 3;
+    pub const SET_GRAVITY: u16 = 4;
+    pub const SET_CONSTRAINT_ADJUSTMENT: u16 = 5;
+    pub const SET_OFFSET: u16 = 6;
+}
+pub mod xdg_surface_req {
+    pub const DESTROY: u16 = 0;
+    pub const GET_TOPLEVEL: u16 = 1;
+    pub const GET_POPUP: u16 = 2;
+    pub const SET_WINDOW_GEOMETRY: u16 = 3;
+    pub const ACK_CONFIGURE: u16 = 4;
+}
+pub mod xdg_toplevel_req {
+    pub const DESTROY: u16 = 0;
+    pub const SET_PARENT: u16 = 1;
+    pub const SET_TITLE: u16 = 2;
+    pub const SET_APP_ID: u16 = 3;
+    pub const SHOW_WINDOW_MENU: u16 = 4;
+    pub const MOVE: u16 = 5;
+    pub const RESIZE: u16 = 6;
+    pub const SET_MAX_SIZE: u16 = 7;
+    pub const SET_MIN_SIZE: u16 = 8;
+    pub const SET_MAXIMIZED: u16 = 9;
+    pub const UNSET_MAXIMIZED: u16 = 10;
+    pub const SET_FULLSCREEN: u16 = 11;
+    pub const UNSET_FULLSCREEN: u16 = 12;
+    pub const SET_MINIMIZED: u16 = 13;
 }
 
 // Event opcodes.
@@ -345,6 +441,17 @@ pub mod keyboard_ev {
     pub const MODIFIERS: u16 = 4;
     pub const REPEAT_INFO: u16 = 5;
 }
+pub mod xdg_wm_base_ev {
+    pub const PING: u16 = 0;
+}
+pub mod xdg_surface_ev {
+    pub const CONFIGURE: u16 = 0;
+    pub const CLOSE: u16 = 1;
+}
+pub mod xdg_toplevel_ev {
+    pub const CONFIGURE: u16 = 0;
+    pub const CLOSE: u16 = 1;
+}
 
 // Enums.
 /// `wl_shm.format`.
@@ -358,6 +465,9 @@ pub const WL_SHM_ERROR_INVALID_FD: u32 = 2;
 pub const WL_SEAT_CAPABILITY_POINTER: u32 = 1;
 pub const WL_SEAT_CAPABILITY_KEYBOARD: u32 = 2;
 pub const WL_SEAT_CAPABILITY_TOUCH: u32 = 4;
+/// `wl_keyboard.keymap_format`.
+pub const WL_KEYBOARD_KEYMAP_FORMAT_NO_KEYMAP: u32 = 0;
+pub const WL_KEYBOARD_KEYMAP_FORMAT_XKB_V1: u32 = 1;
 /// `wl_output.subpixel`.
 pub const WL_OUTPUT_SUBPIXEL_UNKNOWN: i32 = 0;
 /// `wl_output.transform`.
@@ -449,23 +559,62 @@ mod tests {
 
     #[test]
     fn surface_request_count_matches_opcodes() {
-        assert_eq!(SURFACE.requests.len(), 7);
+        assert_eq!(SURFACE.requests.len(), 8);
         assert_eq!(SURFACE.request(surface_req::COMMIT), Some(""));
         assert_eq!(SURFACE.request(surface_req::ATTACH), Some("oii"));
+        assert_eq!(SURFACE.request(surface_req::DAMAGE_BUFFER), Some("iiii"));
     }
 
     #[test]
-    fn globals_are_the_four_factories() {
-        let names: [&str; 4] = [
+    fn globals_are_the_factories_a_client_binds() {
+        assert_eq!(GLOBALS.len(), 5);
+        let names: [&str; 5] = [
             GLOBALS[0].interface,
             GLOBALS[1].interface,
             GLOBALS[2].interface,
             GLOBALS[3].interface,
+            GLOBALS[4].interface,
         ];
-        assert_eq!(names, ["wl_compositor", "wl_shm", "wl_output", "wl_seat"]);
+        assert_eq!(
+            names,
+            [
+                "wl_compositor",
+                "wl_shm",
+                "wl_output",
+                "wl_seat",
+                "xdg_wm_base"
+            ]
+        );
         // Every advertised interface must exist in the table.
         for g in GLOBALS {
             assert!(by_name(g.interface.as_bytes()).is_some(), "{}", g.interface);
         }
+    }
+
+    #[test]
+    fn xdg_shell_interface_shapes() {
+        // The server dispatches these by opcode, and the client encodes against the
+        // same signatures, so a wrong one is a silent mismatch.
+        assert_eq!(
+            XDG_WM_BASE.request(xdg_wm_base_req::GET_XDG_SURFACE),
+            Some("no")
+        );
+        assert_eq!(
+            XDG_SURFACE.request(xdg_surface_req::GET_TOPLEVEL),
+            Some("n")
+        );
+        assert_eq!(
+            XDG_SURFACE.request(xdg_surface_req::ACK_CONFIGURE),
+            Some("u")
+        );
+        assert_eq!(XDG_SURFACE.event(xdg_surface_ev::CONFIGURE), Some("u"));
+        assert_eq!(XDG_TOPLEVEL.request(xdg_toplevel_req::SET_TITLE), Some("s"));
+        assert_eq!(
+            XDG_TOPLEVEL.request(xdg_toplevel_req::SET_APP_ID),
+            Some("s")
+        );
+        assert_eq!(XDG_TOPLEVEL.event(xdg_toplevel_ev::CONFIGURE), Some("iia"));
+        // 14 toplevel requests, so `set_minimized` is not one short of its opcode.
+        assert_eq!(XDG_TOPLEVEL.requests.len(), 14);
     }
 }

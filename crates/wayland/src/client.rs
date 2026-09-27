@@ -194,6 +194,80 @@ impl Client {
         Ok(id)
     }
 
+    /// `xdg_wm_base.get_xdg_surface`. Returns the `xdg_surface` id.
+    pub fn get_xdg_surface(
+        &mut self,
+        wm_base: u32,
+        surface: u32,
+        out: &mut DispatchBuf<'_>,
+    ) -> Result<u32, WireError> {
+        let id = self.alloc(Kind::XdgSurface)?;
+        out.event(wm_base, protocol::xdg_wm_base_req::GET_XDG_SURFACE, |w| {
+            w.new_id(id)?;
+            w.object(surface)
+        })?;
+        Ok(id)
+    }
+
+    /// `xdg_surface.get_toplevel`. Returns the `xdg_toplevel` id.
+    pub fn get_toplevel(
+        &mut self,
+        xdg_surface: u32,
+        out: &mut DispatchBuf<'_>,
+    ) -> Result<u32, WireError> {
+        let id = self.alloc(Kind::XdgToplevel)?;
+        out.event(xdg_surface, protocol::xdg_surface_req::GET_TOPLEVEL, |w| {
+            w.new_id(id)
+        })?;
+        Ok(id)
+    }
+
+    /// `xdg_toplevel.set_title`.
+    pub fn set_title(
+        &self,
+        toplevel: u32,
+        title: &[u8],
+        out: &mut DispatchBuf<'_>,
+    ) -> Result<(), WireError> {
+        out.event(toplevel, protocol::xdg_toplevel_req::SET_TITLE, |w| {
+            w.string(title)
+        })
+    }
+
+    /// `xdg_toplevel.set_app_id`.
+    pub fn set_app_id(
+        &self,
+        toplevel: u32,
+        app_id: &[u8],
+        out: &mut DispatchBuf<'_>,
+    ) -> Result<(), WireError> {
+        out.event(toplevel, protocol::xdg_toplevel_req::SET_APP_ID, |w| {
+            w.string(app_id)
+        })
+    }
+
+    /// `xdg_surface.ack_configure`.
+    pub fn ack_configure(
+        &self,
+        xdg_surface: u32,
+        serial: u32,
+        out: &mut DispatchBuf<'_>,
+    ) -> Result<(), WireError> {
+        out.event(xdg_surface, protocol::xdg_surface_req::ACK_CONFIGURE, |w| {
+            w.uint(serial)
+        })
+    }
+
+    /// `xdg_wm_base.pong`.
+    pub fn pong(
+        &self,
+        wm_base: u32,
+        serial: u32,
+        out: &mut DispatchBuf<'_>,
+    ) -> Result<(), WireError> {
+        out.event(wm_base, protocol::xdg_wm_base_req::PONG, |w| w.uint(serial))
+    }
+
     /// `wl_shm.create_pool`. `fd_index` refers to a descriptor sent with this
     /// message by `SCM_RIGHTS`, not to a descriptor the caller already holds.
     pub fn create_pool(
@@ -267,6 +341,43 @@ impl Client {
             w.int(y)?;
             w.int(width)?;
             w.int(height)
+        })
+    }
+
+    /// `wl_surface.damage_buffer`. This port's surfaces are scale 1 and untransformed,
+    /// so buffer coordinates are surface coordinates.
+    pub fn damage_buffer(
+        &self,
+        surface: u32,
+        x: i32,
+        y: i32,
+        width: i32,
+        height: i32,
+        out: &mut DispatchBuf<'_>,
+    ) -> Result<(), WireError> {
+        out.event(surface, protocol::surface_req::DAMAGE_BUFFER, |w| {
+            w.int(x)?;
+            w.int(y)?;
+            w.int(width)?;
+            w.int(height)
+        })
+    }
+
+    /// `wl_pointer.set_cursor`. `surface` of 0 unsets the cursor.
+    pub fn set_cursor(
+        &self,
+        pointer: u32,
+        serial: u32,
+        surface: u32,
+        hotspot_x: i32,
+        hotspot_y: i32,
+        out: &mut DispatchBuf<'_>,
+    ) -> Result<(), WireError> {
+        out.event(pointer, protocol::pointer_req::SET_CURSOR, |w| {
+            w.uint(serial)?;
+            w.object(surface)?;
+            w.int(hotspot_x)?;
+            w.int(hotspot_y)
         })
     }
 

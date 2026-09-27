@@ -10,7 +10,9 @@
 //! Phase 1 scope (`WAYLAND.md` §6.11): the core handshake (`wl_display.sync`,
 //! `wl_registry`), the factories a client binds (`wl_compositor`, `wl_shm`,
 //! `wl_output`, `wl_seat`), and object creation for surfaces and regions.
-//! `wl_shm` pools/buffers and input events are 1b/1c.
+//! `wl_shm` pools/buffers and input events are 1b/1c; the keymap event is 2a
+//! (`WAYLAND.md` §6.12), whose bytes the caller supplies — nothing here touches
+//! an fd.
 
 use crate::protocol;
 use crate::wire::{Arg, DispatchBuf, MAX_ARGS, WireError};
@@ -44,6 +46,23 @@ pub struct Obj {
     pub format: u32,
     /// `wl_surface`: the buffer most recently attached (0 = none).
     pub attached: u32,
+    /// `wl_surface`: it has been committed at least once. A surface's *first*
+    /// commit is a window appearing, which is what asks for focus (2c).
+    pub committed: bool,
+    /// `wl_surface`: the damage accumulated since the last commit, as its bounding
+    /// rectangle. `wl_surface.damage`/`damage_buffer` grow it (2d).
+    pub damage: Option<crate::shm::Rect>,
+    /// `wl_surface`: the `xdg_surface` bound to it (0 = none). `xdg_toplevel`: the
+    /// `xdg_surface` it belongs to.
+    pub xdg_surface: u32,
+    /// `xdg_surface`: the `wl_surface` it is for.
+    pub surface: u32,
+    /// `xdg_surface`: a `configure` has gone out (2b).
+    pub configured: bool,
+    /// `xdg_surface`: the client has acked the latest `configure`.
+    pub acked: bool,
+    /// `xdg_surface`: the serial a client must ack.
+    pub configure_serial: u32,
 }
 
 impl Obj {
@@ -60,6 +79,13 @@ impl Obj {
             stride: 0,
             format: 0,
             attached: 0,
+            committed: false,
+            damage: None,
+            xdg_surface: 0,
+            surface: 0,
+            configured: false,
+            acked: false,
+            configure_serial: 0,
         }
     }
 }
@@ -80,6 +106,9 @@ pub struct Commit {
     pub format: u32,
     /// The pool's size, so the bytes can be re-validated at blit time.
     pub pool_size: i32,
+    /// The damage this commit carried, if the client named any. `None` means "take
+    /// the whole buffer", which is what a client that never calls `damage` gets.
+    pub damage: Option<crate::shm::Rect>,
 }
 
 impl Commit {
@@ -94,6 +123,17 @@ impl Commit {
             pool_size: self.pool_size,
         }
     }
+}
+
+/// A cursor image a client handed the pointer: the surface's buffer, and where its
+/// top-left sits relative to the pointer (2d).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CursorImage {
+    pub buffer: crate::shm::Buffer,
+    pub pool: u32,
+    pub fd_index: u32,
+    pub hotspot_x: i32,
+    pub hotspot_y: i32,
 }
 
 /// What `dispatch` did that the caller must act on next.
@@ -134,6 +174,20 @@ pub struct Server {
     focus: u32,
     /// Whether the `enter` events for `focus` have been sent.
     entered: bool,
+    /// The surface whose *first* commit should take focus. The loop reads it with
+    /// [`Server::take_focus_request`] to arbitrate between connections (2c).
+    focus_request: Option<u32>,
+    /// The keymap's byte length as the caller knows it (0 = none to serve). The
+    /// bytes never pass through here: the caller holds them and sends the fd.
+    keymap_size: u32,
+    /// A `wl_keyboard.keymap` was emitted and its fd still owes the caller an
+    /// out-of-band send ([`Server::take_keymap`]).
+    keymap_owed: bool,
+    /// The surface the client set as the pointer's image, and its hotspot (2d).
+    cursor_surface: u32,
+    cursor_hotspot: (i32, i32),
+    /// The cursor image from that surface's latest commit.
+    cursor: Option<CursorImage>,
 }
 
 impl Server {
@@ -151,6 +205,12 @@ impl Server {
             pending: None,
             focus: 0,
             entered: false,
+            focus_request: None,
+            keymap_size: 0,
+            keymap_owed: false,
+            cursor_surface: 0,
+            cursor_hotspot: (0, 0),
+            cursor: None,
         }
     }
 
@@ -254,13 +314,27 @@ impl Server {
             | (Kind::ShmPool, protocol::shm_pool_req::DESTROY)
             | (Kind::Buffer, protocol::buffer_req::DESTROY)
             | (Kind::Pointer, protocol::pointer_req::RELEASE)
-            | (Kind::Keyboard, protocol::keyboard_req::RELEASE) => {
+            | (Kind::Keyboard, protocol::keyboard_req::RELEASE)
+            | (Kind::XdgWmBase, protocol::xdg_wm_base_req::DESTROY)
+            | (Kind::XdgPositioner, protocol::xdg_positioner_req::DESTROY)
+            | (Kind::XdgSurface, protocol::xdg_surface_req::DESTROY)
+            | (Kind::XdgToplevel, protocol::xdg_toplevel_req::DESTROY) => {
                 self.remove(object_id);
                 Ok(())
             }
             (Kind::Pointer, protocol::pointer_req::SET_CURSOR) => {
-                // No cursor surfaces in Phase 1, so nothing to draw; accepted and
-                // dropped rather than answered with an error.
+                // `set_cursor(serial, surface, hotspot_x, hotspot_y)`; surface 0 unsets.
+                // The serial is not checked against a recent `enter` (2d).
+                let surface = arg(n, &args, 1)?;
+                let hx = iarg(n, &args, 2)?;
+                let hy = iarg(n, &args, 3)?;
+                if surface == 0 {
+                    self.cursor_surface = 0;
+                    self.cursor = None;
+                } else if self.kind(surface) == Some(Kind::Surface) {
+                    self.cursor_surface = surface;
+                    self.cursor_hotspot = (hx, hy);
+                }
                 Ok(())
             }
             (Kind::Seat, protocol::seat_req::GET_POINTER) => {
@@ -271,6 +345,9 @@ impl Server {
             }
             (Kind::Seat, protocol::seat_req::GET_KEYBOARD) => {
                 self.add(arg(n, &args, 0)?, Kind::Keyboard)?;
+                // The keymap precedes any key event, so it goes out with the object
+                // that will carry them.
+                self.emit_keymap(out)?;
                 self.ensure_entered(out)
             }
             (Kind::Shm, protocol::shm_req::CREATE_POOL) => {
@@ -325,8 +402,25 @@ impl Server {
                 Ok(())
             }
             (Kind::Surface, protocol::surface_req::DAMAGE) => {
-                // Accepted and ignored: a Phase 1b commit presents the whole
-                // surface.
+                let x = iarg(n, &args, 0)?;
+                let y = iarg(n, &args, 1)?;
+                let w = iarg(n, &args, 2)?;
+                let h = iarg(n, &args, 3)?;
+                if let Some(o) = self.obj_mut(object_id) {
+                    grow_damage(&mut o.damage, x, y, w, h);
+                }
+                Ok(())
+            }
+            (Kind::Surface, protocol::surface_req::DAMAGE_BUFFER) => {
+                // Buffer coordinates, and this port's buffers are scale 1 with no
+                // transform, so they are the surface's own coordinates (2d).
+                let x = iarg(n, &args, 0)?;
+                let y = iarg(n, &args, 1)?;
+                let w = iarg(n, &args, 2)?;
+                let h = iarg(n, &args, 3)?;
+                if let Some(o) = self.obj_mut(object_id) {
+                    grow_damage(&mut o.damage, x, y, w, h);
+                }
                 Ok(())
             }
             (Kind::Surface, protocol::surface_req::FRAME) => {
@@ -334,18 +428,95 @@ impl Server {
                 self.create_callback(arg(n, &args, 0)?, out)
             }
             (Kind::Surface, protocol::surface_req::COMMIT) => {
-                if let Some(c) = self.commit_of(object_id) {
-                    self.pending = Some(c);
+                if object_id == self.cursor_surface && self.cursor_surface != 0 {
+                    // A cursor surface's commit supplies the pointer image; it is not
+                    // a window, so it is neither presented nor focused.
+                    self.cursor = self.cursor_of(object_id);
+                } else {
+                    let xdg = self.obj(object_id).map_or(0, |o| o.xdg_surface);
+                    if xdg != 0 && !self.obj(xdg).is_some_and(|o| o.configured) {
+                        // An `xdg_surface`'s first commit is the client saying "I am
+                        // ready": the server answers with the configuration it wants, and
+                        // the buffer is not shown until the client has acked it.
+                        self.configure(xdg, out)?;
+                    } else if (xdg == 0 || self.obj(xdg).is_some_and(|o| o.acked))
+                        && self.obj(object_id).is_some_and(|o| o.attached != 0)
+                    {
+                        let c = self.commit_of(object_id);
+                        self.pending = c;
+                    }
+                    // A surface's *first* commit is a window appearing, and is how a
+                    // client asks for focus; later commits are redraws and must move
+                    // nothing, or a client that draws often would take focus from the one
+                    // the user is looking at. The loop arbitrates between connections,
+                    // which is what `focus_request` is for.
+                    let first = self.obj(object_id).is_some_and(|o| !o.committed);
+                    if let Some(o) = self.obj_mut(object_id) {
+                        o.committed = true;
+                    }
+                    if first {
+                        self.set_focus(object_id, out)?;
+                        self.focus_request = Some(object_id);
+                    }
                 }
-                // The first surface to commit is the one input goes to: there is no
-                // window management to choose another yet, and a client that has not
-                // drawn anything should not be given keys.
-                if self.focus != object_id {
-                    self.focus = object_id;
-                    self.entered = false;
+                // The damage belongs to the commit that carried it, shown or not.
+                if let Some(o) = self.obj_mut(object_id) {
+                    o.damage = None;
                 }
-                self.ensure_entered(out)
+                Ok(())
             }
+            (Kind::XdgWmBase, protocol::xdg_wm_base_req::GET_XDG_SURFACE) => {
+                let id = arg(n, &args, 0)?;
+                let surface = arg(n, &args, 1)?;
+                if self.kind(surface) != Some(Kind::Surface) {
+                    error(
+                        out,
+                        id,
+                        protocol::WL_DISPLAY_ERROR_INVALID_OBJECT,
+                        b"xdg_surface needs a wl_surface",
+                    )?;
+                    return Ok(outcome);
+                }
+                self.add_obj(Obj {
+                    surface,
+                    ..Obj::new(id, Kind::XdgSurface)
+                })?;
+                if let Some(s) = self.obj_mut(surface) {
+                    s.xdg_surface = id;
+                }
+                Ok(())
+            }
+            (Kind::XdgWmBase, protocol::xdg_wm_base_req::CREATE_POSITIONER) => {
+                self.add(arg(n, &args, 0)?, Kind::XdgPositioner)
+            }
+            // The client's answer to a `ping`; nothing waits on it yet.
+            (Kind::XdgWmBase, protocol::xdg_wm_base_req::PONG) => Ok(()),
+            (Kind::XdgSurface, protocol::xdg_surface_req::GET_TOPLEVEL) => {
+                let id = arg(n, &args, 0)?;
+                self.add_obj(Obj {
+                    xdg_surface: object_id,
+                    ..Obj::new(id, Kind::XdgToplevel)
+                })
+            }
+            (Kind::XdgSurface, protocol::xdg_surface_req::ACK_CONFIGURE) => {
+                let serial = arg(n, &args, 0)?;
+                if let Some(o) = self.obj_mut(object_id) {
+                    // A serial that does not name the latest configure is a client
+                    // bug; the surface then stays unacked and is never shown.
+                    if serial == o.configure_serial {
+                        o.acked = true;
+                    }
+                }
+                Ok(())
+            }
+            // Geometry is unused while a toplevel fills the output; popups are 2e,
+            // which is why `get_popup` still reaches the unimplemented arm.
+            (Kind::XdgSurface, protocol::xdg_surface_req::SET_WINDOW_GEOMETRY) => Ok(()),
+            // The toplevel's window-management requests have nothing to act on until
+            // there is window management, and title/app_id wait for decorations (2e):
+            // accepted, so a toolkit's mapping sequence runs to completion.
+            (Kind::XdgToplevel, _) => Ok(()),
+            (Kind::XdgPositioner, _) => Ok(()),
             // 1c (input) and later; a client that reaches them is answered the
             // same way an unknown opcode is.
             _ => error(
@@ -374,7 +545,35 @@ impl Server {
             stride: b.stride,
             format: b.format,
             pool_size: pool.pool_size,
+            damage: s.damage,
         })
+    }
+
+    /// The cursor image a surface supplies, from its attached buffer.
+    fn cursor_of(&self, surface: u32) -> Option<CursorImage> {
+        let s = self.obj(surface)?;
+        let b = self.obj(s.attached)?;
+        let pool = self.obj(b.pool)?;
+        Some(CursorImage {
+            buffer: crate::shm::Buffer {
+                offset: b.offset,
+                width: b.width,
+                height: b.height,
+                stride: b.stride,
+                format: b.format,
+                pool_size: pool.pool_size,
+            },
+            pool: b.pool,
+            fd_index: pool.fd_index,
+            hotspot_x: self.cursor_hotspot.0,
+            hotspot_y: self.cursor_hotspot.1,
+        })
+    }
+
+    /// The pointer's cursor image, if a client set one and committed it (2d). The
+    /// caller composites it; nothing here touches pixels.
+    pub fn cursor(&self) -> Option<CursorImage> {
+        self.cursor
     }
 
     /// The next surface commit awaiting presentation, cleared by the call.
@@ -409,9 +608,127 @@ impl Server {
             .map(|o| o.id)
     }
 
+    /// Tell the server a keymap of `size` bytes is available to serve. The bytes
+    /// live with the caller, which resolves the fd; a size of 0 disables the event.
+    pub fn set_keymap(&mut self, size: u32) {
+        self.keymap_size = size;
+    }
+
+    /// Whether a `wl_keyboard.keymap` was emitted and its fd must go out of band
+    /// with the events of this batch. Clears the flag.
+    pub fn take_keymap(&mut self) -> bool {
+        core::mem::take(&mut self.keymap_owed)
+    }
+
+    /// The surface whose first commit should take focus, if one happened since the
+    /// last call. Clears the request; the loop between connections reads it.
+    pub fn take_focus_request(&mut self) -> Option<u32> {
+        self.focus_request.take()
+    }
+
+    /// Emit `wl_keyboard.keymap` for the client's keyboard, if there is both a
+    /// keyboard and a keymap. The `fd` argument is the index 0 the caller resolves.
+    fn emit_keymap(&mut self, out: &mut DispatchBuf<'_>) -> Result<(), DispatchError> {
+        if self.keymap_size == 0 {
+            return Ok(());
+        }
+        let Some(kb) = self.keyboard() else {
+            return Ok(());
+        };
+        let size = self.keymap_size;
+        out.event(kb, protocol::keyboard_ev::KEYMAP, |w| {
+            w.uint(protocol::WL_KEYBOARD_KEYMAP_FORMAT_XKB_V1)?;
+            w.fd(0)?;
+            w.uint(size)
+        })?;
+        self.keymap_owed = true;
+        Ok(())
+    }
+
     /// The surface input is focused on (0 = none).
     pub fn focus(&self) -> u32 {
         self.focus
+    }
+
+    /// The client's `xdg_wm_base`, if it bound one.
+    fn wm_base(&self) -> Option<u32> {
+        self.objs[..self.n]
+            .iter()
+            .find(|o| o.kind == Kind::XdgWmBase)
+            .map(|o| o.id)
+    }
+
+    /// The `xdg_toplevel` belonging to an `xdg_surface`, if it made one.
+    fn toplevel_of(&self, xdg: u32) -> Option<u32> {
+        self.objs[..self.n]
+            .iter()
+            .find(|o| o.kind == Kind::XdgToplevel && o.xdg_surface == xdg)
+            .map(|o| o.id)
+    }
+
+    /// Answer an `xdg_surface`'s first commit: the surface's `configure` (whose
+    /// serial the client acks), the toplevel's size, and a `ping` so the client can
+    /// prove it is still reading.
+    ///
+    /// With no window management the toplevel fills the output, so this is the one
+    /// size a client is ever offered (2b).
+    fn configure(&mut self, xdg: u32, out: &mut DispatchBuf<'_>) -> Result<(), DispatchError> {
+        self.serial += 1;
+        let serial = self.serial;
+        let (width, height) = (self.width, self.height);
+        out.event(xdg, protocol::xdg_surface_ev::CONFIGURE, |w| w.uint(serial))?;
+        if let Some(top) = self.toplevel_of(xdg) {
+            out.event(top, protocol::xdg_toplevel_ev::CONFIGURE, |w| {
+                w.int(width)?;
+                w.int(height)?;
+                w.array(&[])
+            })?;
+        }
+        if let Some(wm) = self.wm_base() {
+            out.event(wm, protocol::xdg_wm_base_ev::PING, |w| w.uint(serial))?;
+        }
+        if let Some(o) = self.obj_mut(xdg) {
+            o.configured = true;
+            o.configure_serial = serial;
+        }
+        Ok(())
+    }
+
+    /// Move this connection's focus to `surface` (0 = none), emitting the `leave`
+    /// and `enter` events the change owes.
+    ///
+    /// This is the only place `leave` is produced. Within a connection a surface's
+    /// first commit calls it; between connections the loop calls it —
+    /// `set_focus(0, …)` on the connection that lost the focus, `set_focus(surface,
+    /// …)` on the one that took it.
+    pub fn set_focus(
+        &mut self,
+        surface: u32,
+        out: &mut DispatchBuf<'_>,
+    ) -> Result<(), DispatchError> {
+        if self.focus == surface && self.entered {
+            return Ok(());
+        }
+        let old = self.focus;
+        if old != 0 && self.entered {
+            self.serial += 1;
+            let serial = self.serial;
+            if let Some(kb) = self.keyboard() {
+                out.event(kb, protocol::keyboard_ev::LEAVE, |w| {
+                    w.uint(serial)?;
+                    w.object(old)
+                })?;
+            }
+            if let Some(pt) = self.pointer() {
+                out.event(pt, protocol::pointer_ev::LEAVE, |w| {
+                    w.uint(serial)?;
+                    w.object(old)
+                })?;
+            }
+        }
+        self.focus = surface;
+        self.entered = false;
+        self.ensure_entered(out)
     }
 
     /// Emit the `enter` events the focused surface is owed, once per focus change.
@@ -679,6 +996,30 @@ fn iarg(count: usize, args: &[Arg<'_>], i: usize) -> Result<i32, DispatchError> 
     args[i]
         .as_int()
         .ok_or(DispatchError::Wire(WireError::BadSignature))
+}
+
+/// Grow a damage rectangle to cover another, which is how a surface's damage
+/// accumulates between two commits (2d).
+fn grow_damage(slot: &mut Option<crate::shm::Rect>, x: i32, y: i32, w: i32, h: i32) {
+    if w <= 0 || h <= 0 {
+        return;
+    }
+    let r = crate::shm::Rect { x, y, w, h };
+    *slot = Some(match *slot {
+        None => r,
+        Some(p) => {
+            let x0 = p.x.min(r.x);
+            let y0 = p.y.min(r.y);
+            let x1 = (p.x + p.w).max(r.x + r.w);
+            let y1 = (p.y + p.h).max(r.y + r.h);
+            crate::shm::Rect {
+                x: x0,
+                y: y0,
+                w: x1 - x0,
+                h: y1 - y0,
+            }
+        }
+    });
 }
 
 /// Write a `wl_display.error` event.
@@ -1120,5 +1461,379 @@ mod tests {
             u32::from_le_bytes(b3[8..12].try_into().unwrap()),
             crate::input::BTN_LEFT
         );
+    }
+
+    /// Phase 2a in the pure layer: a keymap, once set, is served to the client's
+    /// keyboard as `wl_keyboard.keymap` — XKB_V1, fd index 0 — and the caller is
+    /// told the fd owes one out-of-band send.
+    #[test]
+    fn a_keymap_is_served_to_the_keyboard() {
+        let mut s = Server::new(1280, 1024);
+        s.set_keymap(64757);
+        let (a, an) = req(DISPLAY_ID, protocol::display_req::GET_REGISTRY, |w| {
+            w.new_id(2)
+        });
+        let (b, bn) = req(2, protocol::registry_req::BIND, |w| {
+            w.uint(4)?;
+            w.string(b"wl_seat")?;
+            w.uint(1)?;
+            w.new_id(3)
+        });
+        let (c, cn) = req(3, protocol::seat_req::GET_KEYBOARD, |w| w.new_id(4));
+        let out = run_msgs(&mut s, &[&a[..an], &b[..bn], &c[..cn]]);
+
+        // Four globals and the seat's capabilities, then the keymap.
+        let (h, body) = event(&out, protocol::GLOBALS.len() + 1);
+        assert_eq!(h.object_id, 4, "keyboard keymap");
+        assert_eq!(h.opcode, protocol::keyboard_ev::KEYMAP);
+        assert_eq!(
+            u32::from_le_bytes(body[0..4].try_into().unwrap()),
+            protocol::WL_KEYBOARD_KEYMAP_FORMAT_XKB_V1
+        );
+        assert_eq!(
+            u32::from_le_bytes(body[4..8].try_into().unwrap()),
+            0,
+            "the fd is at index 0"
+        );
+        assert_eq!(u32::from_le_bytes(body[8..12].try_into().unwrap()), 64757);
+
+        assert!(s.take_keymap(), "the fd owes an out-of-band send");
+        assert!(!s.take_keymap(), "and only once");
+    }
+
+    /// With no keymap set, the keyboard is created without a `keymap` event: a guest
+    /// that cannot serve one still reaches a client (degrade, do not gate).
+    #[test]
+    fn no_keymap_means_no_keymap_event() {
+        let mut s = Server::new(1280, 1024);
+        let (a, an) = req(DISPLAY_ID, protocol::display_req::GET_REGISTRY, |w| {
+            w.new_id(2)
+        });
+        let (b, bn) = req(2, protocol::registry_req::BIND, |w| {
+            w.uint(4)?;
+            w.string(b"wl_seat")?;
+            w.uint(1)?;
+            w.new_id(3)
+        });
+        let (c, cn) = req(3, protocol::seat_req::GET_KEYBOARD, |w| w.new_id(4));
+        let out = run_msgs(&mut s, &[&a[..an], &b[..bn], &c[..cn]]);
+
+        assert!(!s.take_keymap());
+        // The trailing buffer is zeroed, so the walk stops at the capabilities event.
+        let mut off = 0usize;
+        let mut count = 0usize;
+        while let Ok(h) = Header::parse(&out[off..]) {
+            off += h.size as usize;
+            count += 1;
+        }
+        assert_eq!(
+            count,
+            protocol::GLOBALS.len() + 1,
+            "capabilities and no more"
+        );
+    }
+
+    /// Phase 2b in the pure layer: an `xdg_surface`'s first commit is answered with a
+    /// `configure` (surface serial, toplevel size, a ping), and a buffer is only
+    /// presentable once the client has acked that serial.
+    #[test]
+    fn an_xdg_toplevel_configures_acks_and_then_presents() {
+        let mut s = Server::new(1024, 768);
+        let (a, an) = req(DISPLAY_ID, protocol::display_req::GET_REGISTRY, |w| {
+            w.new_id(2)
+        });
+        let (b, bn) = req(2, protocol::registry_req::BIND, |w| {
+            w.uint(1)?;
+            w.string(b"wl_compositor")?;
+            w.uint(1)?;
+            w.new_id(3)
+        });
+        let (c, cn) = req(2, protocol::registry_req::BIND, |w| {
+            w.uint(5)?;
+            w.string(b"xdg_wm_base")?;
+            w.uint(1)?;
+            w.new_id(4)
+        });
+        let (d, dn) = req(3, protocol::compositor_req::CREATE_SURFACE, |w| w.new_id(5));
+        let (e, en) = req(4, protocol::xdg_wm_base_req::GET_XDG_SURFACE, |w| {
+            w.new_id(6)?;
+            w.object(5)
+        });
+        let (f, fs) = req(6, protocol::xdg_surface_req::GET_TOPLEVEL, |w| w.new_id(7));
+        let (g, gs) = req(7, protocol::xdg_toplevel_req::SET_TITLE, |w| {
+            w.string(b"wlx")
+        });
+        let (h, hs) = req(5, protocol::surface_req::COMMIT, |_w| Ok(()));
+        let out = run_msgs(
+            &mut s,
+            &[
+                &a[..an],
+                &b[..bn],
+                &c[..cn],
+                &d[..dn],
+                &e[..en],
+                &f[..fs],
+                &g[..gs],
+                &h[..hs],
+            ],
+        );
+
+        // Five globals, then the configure the initial commit earned.
+        let (h0, b0) = event(&out, protocol::GLOBALS.len());
+        assert_eq!(h0.object_id, 6, "xdg_surface configure");
+        assert_eq!(h0.opcode, protocol::xdg_surface_ev::CONFIGURE);
+        let serial = u32::from_le_bytes(b0[0..4].try_into().unwrap());
+        let (h1, b1) = event(&out, protocol::GLOBALS.len() + 1);
+        assert_eq!(h1.object_id, 7, "xdg_toplevel configure");
+        assert_eq!(h1.opcode, protocol::xdg_toplevel_ev::CONFIGURE);
+        assert_eq!(i32::from_le_bytes(b1[0..4].try_into().unwrap()), 1024);
+        assert_eq!(i32::from_le_bytes(b1[4..8].try_into().unwrap()), 768);
+        assert_eq!(
+            i32::from_le_bytes(b1[8..12].try_into().unwrap()),
+            0,
+            "no states"
+        );
+        let (h2, b2) = event(&out, protocol::GLOBALS.len() + 2);
+        assert_eq!(h2.object_id, 4, "wm_base ping");
+        assert_eq!(h2.opcode, protocol::xdg_wm_base_ev::PING);
+        assert_eq!(u32::from_le_bytes(b2[0..4].try_into().unwrap()), serial);
+
+        // A pool, a buffer and an attach, so a commit has pixels to offer.
+        let (i, i_n) = req(2, protocol::registry_req::BIND, |w| {
+            w.uint(2)?;
+            w.string(b"wl_shm")?;
+            w.uint(1)?;
+            w.new_id(8)
+        });
+        let (j, j_n) = req(8, protocol::shm_req::CREATE_POOL, |w| {
+            w.new_id(9)?;
+            w.fd(0)?;
+            w.int(1024 * 768 * 4)
+        });
+        let (k, k_n) = req(9, protocol::shm_pool_req::CREATE_BUFFER, |w| {
+            w.new_id(10)?;
+            w.int(0)?;
+            w.int(1024)?;
+            w.int(768)?;
+            w.int(4096)?;
+            w.uint(protocol::WL_SHM_FORMAT_XRGB8888)
+        });
+        let (l, l_n) = req(5, protocol::surface_req::ATTACH, |w| {
+            w.object(10)?;
+            w.int(0)?;
+            w.int(0)
+        });
+        let (m, m_n) = req(5, protocol::surface_req::COMMIT, |_w| Ok(()));
+        run_msgs(
+            &mut s,
+            &[&i[..i_n], &j[..j_n], &k[..k_n], &l[..l_n], &m[..m_n]],
+        );
+        assert!(
+            s.take_commit().is_none(),
+            "a buffer committed before ack is not presentable"
+        );
+
+        // Ack the configure; the same commit is now presentable, at the size the
+        // toplevel was configured with.
+        let (n_, n_n) = req(6, protocol::xdg_surface_req::ACK_CONFIGURE, |w| {
+            w.uint(serial)
+        });
+        let (o, o_n) = req(5, protocol::surface_req::COMMIT, |_w| Ok(()));
+        run_msgs(&mut s, &[&n_[..n_n], &o[..o_n]]);
+        let c = s.take_commit().expect("an acked commit is presentable");
+        assert_eq!(c.surface, 5);
+        assert_eq!(c.buffer, 10);
+        assert_eq!(c.width, 1024);
+        assert_eq!(c.height, 768);
+    }
+
+    /// Focus moving between a client's own surfaces says `leave` for the surface it
+    /// left and `enter` for the one it moved to (2c) — which is the machinery the loop
+    /// uses when the move is between *connections* instead.
+    #[test]
+    fn focus_moves_emit_leave_then_enter() {
+        let mut s = Server::new(1024, 768);
+        let (a, an) = req(DISPLAY_ID, protocol::display_req::GET_REGISTRY, |w| {
+            w.new_id(2)
+        });
+        let (b, bn) = req(2, protocol::registry_req::BIND, |w| {
+            w.uint(4)?;
+            w.string(b"wl_seat")?;
+            w.uint(1)?;
+            w.new_id(3)
+        });
+        let (c, cn) = req(3, protocol::seat_req::GET_KEYBOARD, |w| w.new_id(4));
+        let (d, dn) = req(3, protocol::seat_req::GET_POINTER, |w| w.new_id(5));
+        let (e, en) = req(2, protocol::registry_req::BIND, |w| {
+            w.uint(1)?;
+            w.string(b"wl_compositor")?;
+            w.uint(1)?;
+            w.new_id(6)
+        });
+        let (f, fs) = req(6, protocol::compositor_req::CREATE_SURFACE, |w| w.new_id(7));
+        let (g, gs) = req(6, protocol::compositor_req::CREATE_SURFACE, |w| w.new_id(8));
+        let (h, hs) = req(7, protocol::surface_req::COMMIT, |_w| Ok(()));
+        let (i, i_n) = req(8, protocol::surface_req::COMMIT, |_w| Ok(()));
+        let out = run_msgs(
+            &mut s,
+            &[
+                &a[..an],
+                &b[..bn],
+                &c[..cn],
+                &d[..dn],
+                &e[..en],
+                &f[..fs],
+                &g[..gs],
+                &h[..hs],
+                &i[..i_n],
+            ],
+        );
+
+        // Globals, the seat's capabilities, then enter(7) on both, then leave(7) on
+        // both and enter(8) on both.
+        assert_eq!(s.focus(), 8);
+        let (l0, b0) = event(&out, protocol::GLOBALS.len() + 3);
+        assert_eq!(l0.object_id, 4, "keyboard leave");
+        assert_eq!(l0.opcode, protocol::keyboard_ev::LEAVE);
+        assert_eq!(u32::from_le_bytes(b0[4..8].try_into().unwrap()), 7);
+        let (l1, _) = event(&out, protocol::GLOBALS.len() + 4);
+        assert_eq!(l1.object_id, 5, "pointer leave");
+        assert_eq!(l1.opcode, protocol::pointer_ev::LEAVE);
+        let (e0, e0b) = event(&out, protocol::GLOBALS.len() + 5);
+        assert_eq!(e0.object_id, 4, "keyboard enter");
+        assert_eq!(e0.opcode, protocol::keyboard_ev::ENTER);
+        assert_eq!(u32::from_le_bytes(e0b[4..8].try_into().unwrap()), 8);
+        let (e1, _) = event(&out, protocol::GLOBALS.len() + 6);
+        assert_eq!(e1.object_id, 5, "pointer enter");
+        assert_eq!(e1.opcode, protocol::pointer_ev::ENTER);
+    }
+
+    /// Phase 2d in the pure layer: damage accumulates into the bounding rectangle of
+    /// everything marked since the last commit, and is consumed by that commit; and a
+    /// `set_cursor` surface's commit is taken as the pointer image instead of being
+    /// presented as a window.
+    #[test]
+    fn damage_accumulates_and_a_cursor_surface_is_not_a_window() {
+        let mut s = Server::new(1024, 768);
+        let (a, an) = req(DISPLAY_ID, protocol::display_req::GET_REGISTRY, |w| {
+            w.new_id(2)
+        });
+        let (b, bn) = req(2, protocol::registry_req::BIND, |w| {
+            w.uint(1)?;
+            w.string(b"wl_compositor")?;
+            w.uint(1)?;
+            w.new_id(3)
+        });
+        let (c, cn) = req(2, protocol::registry_req::BIND, |w| {
+            w.uint(2)?;
+            w.string(b"wl_shm")?;
+            w.uint(1)?;
+            w.new_id(4)
+        });
+        let (d, dn) = req(2, protocol::registry_req::BIND, |w| {
+            w.uint(4)?;
+            w.string(b"wl_seat")?;
+            w.uint(1)?;
+            w.new_id(5)
+        });
+        let (e, en) = req(5, protocol::seat_req::GET_POINTER, |w| w.new_id(6));
+        let (f, fs) = req(3, protocol::compositor_req::CREATE_SURFACE, |w| w.new_id(7));
+        let (g, gs) = req(3, protocol::compositor_req::CREATE_SURFACE, |w| w.new_id(8));
+        let (h, hs) = req(4, protocol::shm_req::CREATE_POOL, |w| {
+            w.new_id(9)?;
+            w.fd(0)?;
+            w.int(4096)
+        });
+        let (i, i_n) = req(9, protocol::shm_pool_req::CREATE_BUFFER, |w| {
+            w.new_id(10)?;
+            w.int(0)?;
+            w.int(4)?;
+            w.int(4)?;
+            w.int(16)?;
+            w.uint(protocol::WL_SHM_FORMAT_XRGB8888)
+        });
+        let (j, j_n) = req(9, protocol::shm_pool_req::CREATE_BUFFER, |w| {
+            w.new_id(11)?;
+            w.int(64)?;
+            w.int(8)?;
+            w.int(8)?;
+            w.int(32)?;
+            w.uint(protocol::WL_SHM_FORMAT_ARGB8888)
+        });
+        let (k, k_n) = req(7, protocol::surface_req::ATTACH, |w| {
+            w.object(10)?;
+            w.int(0)?;
+            w.int(0)
+        });
+        let (l, l_n) = req(7, protocol::surface_req::DAMAGE, |w| {
+            w.int(0)?;
+            w.int(0)?;
+            w.int(4)?;
+            w.int(4)
+        });
+        let (m, m_n) = req(7, protocol::surface_req::DAMAGE_BUFFER, |w| {
+            w.int(10)?;
+            w.int(10)?;
+            w.int(4)?;
+            w.int(4)
+        });
+        let (n_, n_n) = req(7, protocol::surface_req::COMMIT, |_w| Ok(()));
+        run_msgs(
+            &mut s,
+            &[
+                &a[..an],
+                &b[..bn],
+                &c[..cn],
+                &d[..dn],
+                &e[..en],
+                &f[..fs],
+                &g[..gs],
+                &h[..hs],
+                &i[..i_n],
+                &j[..j_n],
+                &k[..k_n],
+                &l[..l_n],
+                &m[..m_n],
+                &n_[..n_n],
+            ],
+        );
+        // (0,0,4,4) grown by (10,10,4,4) is the box between them.
+        let commit = s.take_commit().expect("the window commit is presentable");
+        assert_eq!(
+            commit.damage,
+            Some(crate::shm::Rect {
+                x: 0,
+                y: 0,
+                w: 14,
+                h: 14
+            })
+        );
+        // And the damage is spent: a second commit carries none of it.
+        let (o, o_n) = req(7, protocol::surface_req::COMMIT, |_w| Ok(()));
+        run_msgs(&mut s, &[&o[..o_n]]);
+        assert_eq!(s.take_commit().unwrap().damage, None);
+
+        // A cursor surface: `set_cursor` names it, and its commit is the image.
+        let (p, p_n) = req(6, protocol::pointer_req::SET_CURSOR, |w| {
+            w.uint(0)?;
+            w.object(8)?;
+            w.int(1)?;
+            w.int(1)
+        });
+        let (q, q_n) = req(8, protocol::surface_req::ATTACH, |w| {
+            w.object(11)?;
+            w.int(0)?;
+            w.int(0)
+        });
+        let (r, r_n) = req(8, protocol::surface_req::COMMIT, |_w| Ok(()));
+        run_msgs(&mut s, &[&p[..p_n], &q[..q_n], &r[..r_n]]);
+        assert!(
+            s.take_commit().is_none(),
+            "a cursor surface is not presented as a window"
+        );
+        let cur = s.cursor().expect("the cursor image was taken");
+        assert_eq!(cur.pool, 9);
+        assert_eq!((cur.hotspot_x, cur.hotspot_y), (1, 1));
+        assert_eq!((cur.buffer.width, cur.buffer.height), (8, 8));
     }
 }

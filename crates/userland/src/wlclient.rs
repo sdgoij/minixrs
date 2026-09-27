@@ -37,6 +37,12 @@ const COLOR: u32 = 0x00FF_00FF;
 /// 1024x768, so reading the first pixel needs only a page.
 const FB_MAP_LEN: usize = 4 * 1024 * 1024;
 
+/// The output's geometry, which every backend this port has adopts (2d reads the
+/// framebuffer back at these coordinates).
+const FB_WIDTH: usize = 1024;
+const FB_HEIGHT: usize = 768;
+const FB_PITCH: usize = FB_WIDTH * 4;
+
 const POLLIN: i16 = 0x001;
 
 fn fail(code: i32, msg: &[u8]) -> i32 {
@@ -89,21 +95,27 @@ fn connect() -> Result<i32, i32> {
     Err(fail(5, b"wlclient: connect failed\n"))
 }
 
+/// The registry names of the globals this client may bind.
+struct Globals {
+    shm: u32,
+    compositor: u32,
+    seat: u32,
+    /// `xdg_wm_base` — 0 if the server does not offer it (2b).
+    wm_base: u32,
+}
+
 /// Read registry events until the factories a client may bind are known.
-///
-/// Returns the registry names of `wl_shm`, `wl_compositor` and `wl_seat`; a client
-/// uses the ones it needs (the `wl_shm` client the first two, the input client the
-/// last two).
 fn find_globals(
     conn: i32,
     client: &Client,
     inbuf: &mut MessageBuffer,
     chunk: &mut [u8; 512],
-) -> Result<(u32, u32, u32), i32> {
+) -> Result<Globals, i32> {
     let mut shm = None;
     let mut compositor = None;
     let mut seat = None;
-    while shm.is_none() || compositor.is_none() || seat.is_none() {
+    let mut wm_base = None;
+    while shm.is_none() || compositor.is_none() || seat.is_none() || wm_base.is_none() {
         if !fill(conn, inbuf, chunk, 2000) {
             return Err(fail(6, b"wlclient: registry went quiet\n"));
         }
@@ -134,13 +146,20 @@ fn find_globals(
                     compositor = Some(name);
                 } else if interface == b"wl_seat" {
                     seat = Some(name);
+                } else if interface == b"xdg_wm_base" {
+                    wm_base = Some(name);
                 }
             }
             inbuf.consume(h.size as usize);
         }
     }
-    // All three are set by the loop's exit condition.
-    Ok((shm.unwrap_or(0), compositor.unwrap_or(0), seat.unwrap_or(0)))
+    // All four are set by the loop's exit condition.
+    Ok(Globals {
+        shm: shm.unwrap_or(0),
+        compositor: compositor.unwrap_or(0),
+        seat: seat.unwrap_or(0),
+        wm_base: wm_base.unwrap_or(0),
+    })
 }
 
 /// Wait for a one-shot callback's `done`, so the server has drained every request
@@ -272,13 +291,12 @@ fn run() -> Result<(), i32> {
     let mut chunk = [0u8; 512];
 
     let registry = send_req(conn, &mut req, |q| client.get_registry(q))?;
-    let (shm_name, compositor_name, _seat_name) =
-        find_globals(conn, &client, &mut inbuf, &mut chunk)?;
+    let g = find_globals(conn, &client, &mut inbuf, &mut chunk)?;
 
     let compositor = send_req(conn, &mut req, |q| {
         client.bind(
             registry,
-            compositor_name,
+            g.compositor,
             b"wl_compositor",
             1,
             Kind::Compositor,
@@ -286,7 +304,7 @@ fn run() -> Result<(), i32> {
         )
     })?;
     let shm = send_req(conn, &mut req, |q| {
-        client.bind(registry, shm_name, b"wl_shm", 1, Kind::Shm, q)
+        client.bind(registry, g.shm, b"wl_shm", 1, Kind::Shm, q)
     })?;
     let surface = send_req(conn, &mut req, |q| client.create_surface(compositor, q))?;
 
@@ -360,6 +378,104 @@ fn put_dec(mut n: u32) {
     write_out(&buf[i..]);
 }
 
+/// Wait for `wl_keyboard.keymap`, resolve the fd it named, and check the bytes it
+/// carries. Returns the size the server advertised.
+///
+/// The fd arrives by `SCM_RIGHTS` with the message, not in it (Phase 2a). The
+/// control is lifted as soon as the event is seen, the way the server lifts a pool
+/// fd — and, for the same reason, before any later read can claim it.
+fn await_keymap(
+    conn: i32,
+    client: &Client,
+    inbuf: &mut MessageBuffer,
+    chunk: &mut [u8; 512],
+) -> Result<u32, i32> {
+    loop {
+        if !fill(conn, inbuf, chunk, 4000) {
+            return Err(fail(34, b"wlkey: no keymap arrived\n"));
+        }
+        loop {
+            let msg = match inbuf.next() {
+                Ok(Some(m)) => m,
+                Ok(None) => break,
+                Err(_) => return Err(fail(35, b"wlkey: bad frame\n")),
+            };
+            let h = match Header::parse(msg) {
+                Ok(h) => h,
+                Err(_) => return Err(fail(36, b"wlkey: bad header\n")),
+            };
+            let mut args = [Arg::Uint(0); MAX_ARGS];
+            let (kind, argc) = match client.decode(msg, &mut args) {
+                Ok((_, k, n)) => (k, n),
+                Err(_) => return Err(fail(37, b"wlkey: undecodable event\n")),
+            };
+            let is_keymap = kind == Kind::Keyboard && h.opcode == protocol::keyboard_ev::KEYMAP;
+            let format = args[0].as_uint();
+            let size = args[2].as_uint();
+            inbuf.consume(h.size as usize);
+            if !is_keymap {
+                continue;
+            }
+            if argc != 3 {
+                return Err(fail(38, b"wlkey: keymap arity\n"));
+            }
+            if format.unwrap_or(u32::MAX) != protocol::WL_KEYBOARD_KEYMAP_FORMAT_XKB_V1 {
+                return Err(fail(39, b"wlkey: keymap is not XKB_V1\n"));
+            }
+            let size = size.unwrap_or(0);
+            let mut fds = [-1i32; 1];
+            if uds::recv_fds(conn, &mut fds).unwrap_or(0) != 1 || fds[0] < 0 {
+                return Err(fail(40, b"wlkey: keymap fd did not arrive\n"));
+            }
+            let km = fds[0];
+            let checked = check_keymap(km, size);
+            let _ = uds::close_fd(km);
+            checked?;
+            return Ok(size);
+        }
+    }
+}
+
+/// Read a keymap fd whole: NUL-terminated XKB text whose length is `size`.
+fn check_keymap(fd: i32, size: u32) -> Result<(), i32> {
+    const PREFIX: &[u8] = b"xkb_keymap {";
+    let mut first = [0u8; PREFIX.len()];
+    let mut got = 0usize;
+    while got < first.len() {
+        let n = match unsafe { fs::read(fd, &mut first[got..]) } {
+            Ok(0) => break,
+            Ok(n) => n as usize,
+            Err(_) => return Err(fail(41, b"wlkey: keymap read failed\n")),
+        };
+        got += n;
+    }
+    if &first[..got] != PREFIX {
+        return Err(fail(
+            42,
+            b"wlkey: keymap does not start with xkb_keymap {\n",
+        ));
+    }
+    let mut total = got as u32;
+    let mut last = first[got - 1];
+    let mut buf = [0u8; 4096];
+    loop {
+        let n = match unsafe { fs::read(fd, &mut buf) } {
+            Ok(n) if n > 0 => n as usize,
+            Ok(_) => break,
+            Err(_) => return Err(fail(41, b"wlkey: keymap read failed\n")),
+        };
+        last = buf[n - 1];
+        total += n as u32;
+    }
+    if total != size {
+        return Err(fail(43, b"wlkey: keymap size mismatch\n"));
+    }
+    if last != 0 {
+        return Err(fail(44, b"wlkey: keymap is not NUL-terminated\n"));
+    }
+    Ok(())
+}
+
 /// `/bin/wlkey`: bind `wl_seat`'s keyboard, commit a surface so it is entered, and
 /// print each key the server sends. The Phase 1c gate's client.
 ///
@@ -380,13 +496,12 @@ fn run_key() -> Result<(), i32> {
     let mut chunk = [0u8; 512];
 
     let registry = send_req(conn, &mut req, |q| client.get_registry(q))?;
-    let (_shm_name, compositor_name, seat_name) =
-        find_globals(conn, &client, &mut inbuf, &mut chunk)?;
+    let g = find_globals(conn, &client, &mut inbuf, &mut chunk)?;
 
     let compositor = send_req(conn, &mut req, |q| {
         client.bind(
             registry,
-            compositor_name,
+            g.compositor,
             b"wl_compositor",
             1,
             Kind::Compositor,
@@ -394,13 +509,21 @@ fn run_key() -> Result<(), i32> {
         )
     })?;
     let seat = send_req(conn, &mut req, |q| {
-        client.bind(registry, seat_name, b"wl_seat", 1, Kind::Seat, q)
+        client.bind(registry, g.seat, b"wl_seat", 1, Kind::Seat, q)
     })?;
     let _keyboard = send_req(conn, &mut req, |q| client.get_keyboard(seat, q))?;
     let surface = send_req(conn, &mut req, |q| client.create_surface(compositor, q))?;
     // A commit is what focuses the surface and makes the server send `enter`; no
     // buffer is needed for that, so this client draws nothing.
     send_req(conn, &mut req, |q| client.commit(surface, q))?;
+
+    // The seat's keymap rides with the keyboard object (Phase 2a): resolve the fd
+    // and check the bytes before announcing readiness, so `ready` means "the
+    // keyboard is usable", not merely "the requests went out".
+    let size = await_keymap(conn, &client, &mut inbuf, &mut chunk)?;
+    write_out(b"wlkey: keymap ");
+    put_dec(size);
+    write_out(b" ok\n");
     write_out(b"wlkey: ready\n");
 
     loop {
@@ -451,6 +574,791 @@ fn run_key() -> Result<(), i32> {
             inbuf.consume(h.size as usize);
         }
     }
+}
+
+/// One connection's state for the two-client focus gate (2c).
+struct Peer {
+    conn: i32,
+    client: Client,
+    inbuf: MessageBuffer,
+    chunk: [u8; 512],
+    req: [u8; 512],
+    compositor: u32,
+    wm_base: u32,
+    shm: u32,
+    /// The window this connection currently has mapped.
+    surface: u32,
+    xdg_surface: u32,
+    toplevel: u32,
+    /// What the server has said so far.
+    configure: Option<u32>,
+    size: Option<(i32, i32)>,
+    enters: u32,
+    leaves: u32,
+    releases: u32,
+    keys: u32,
+    last_key: u32,
+    callbacks: u32,
+}
+
+/// Connect one peer: bind the factories, make a keyboard (so an `enter` has
+/// somewhere to land), and map its first window.
+fn peer_connect() -> Result<Peer, i32> {
+    let conn = connect()?;
+    let mut p = Peer {
+        conn,
+        client: Client::new(),
+        inbuf: MessageBuffer::new(),
+        chunk: [0u8; 512],
+        req: [0u8; 512],
+        compositor: 0,
+        wm_base: 0,
+        shm: 0,
+        surface: 0,
+        xdg_surface: 0,
+        toplevel: 0,
+        configure: None,
+        size: None,
+        enters: 0,
+        leaves: 0,
+        releases: 0,
+        keys: 0,
+        last_key: 0,
+        callbacks: 0,
+    };
+    let registry = send_req(conn, &mut p.req, |q| p.client.get_registry(q))?;
+    let g = find_globals(conn, &p.client, &mut p.inbuf, &mut p.chunk)?;
+    if g.wm_base == 0 {
+        return Err(fail(80, b"wlx2: no xdg_wm_base global\n"));
+    }
+    p.compositor = send_req(conn, &mut p.req, |q| {
+        p.client.bind(
+            registry,
+            g.compositor,
+            b"wl_compositor",
+            1,
+            Kind::Compositor,
+            q,
+        )
+    })?;
+    p.shm = send_req(conn, &mut p.req, |q| {
+        p.client.bind(registry, g.shm, b"wl_shm", 1, Kind::Shm, q)
+    })?;
+    let seat = send_req(conn, &mut p.req, |q| {
+        p.client
+            .bind(registry, g.seat, b"wl_seat", 1, Kind::Seat, q)
+    })?;
+    p.wm_base = send_req(conn, &mut p.req, |q| {
+        p.client
+            .bind(registry, g.wm_base, b"xdg_wm_base", 1, Kind::XdgWmBase, q)
+    })?;
+    send_req(conn, &mut p.req, |q| p.client.get_keyboard(seat, q))?;
+    peer_map_window(&mut p)?;
+    Ok(p)
+}
+
+/// Map one window on a peer and commit it. A surface's *first* commit is what the
+/// server configures, and (2c) what asks it for focus.
+fn peer_map_window(p: &mut Peer) -> Result<(), i32> {
+    let (conn, compositor, wm_base) = (p.conn, p.compositor, p.wm_base);
+    let (surface, xdg_surface, toplevel) = {
+        let client = &mut p.client;
+        let req = &mut p.req;
+        let surface = send_req(conn, req, |q| client.create_surface(compositor, q))?;
+        let xdg_surface = send_req(conn, req, |q| client.get_xdg_surface(wm_base, surface, q))?;
+        let toplevel = send_req(conn, req, |q| client.get_toplevel(xdg_surface, q))?;
+        send_req(conn, req, |q| {
+            client.set_app_id(toplevel, b"minixrs.wlx2", q)
+        })?;
+        send_req(conn, req, |q| client.commit(surface, q))?;
+        (surface, xdg_surface, toplevel)
+    };
+    p.surface = surface;
+    p.xdg_surface = xdg_surface;
+    p.toplevel = toplevel;
+    p.configure = None;
+    p.size = None;
+    Ok(())
+}
+
+/// Read every complete message available on one peer and count it. `false` when the
+/// connection ended.
+fn read_peer(p: &mut Peer) -> bool {
+    let n = match uds::recv(p.conn, &mut p.chunk) {
+        Ok(n) if n > 0 => n as usize,
+        _ => return false,
+    };
+    if p.inbuf.push(&p.chunk[..n]).is_err() {
+        return false;
+    }
+    loop {
+        let msg = match p.inbuf.next() {
+            Ok(Some(m)) => m,
+            Ok(None) => break,
+            Err(_) => return false,
+        };
+        let h = match Header::parse(msg) {
+            Ok(h) => h,
+            Err(_) => return false,
+        };
+        let mut args = [Arg::Uint(0); MAX_ARGS];
+        let (kind, argc) = match p.client.decode(msg, &mut args) {
+            Ok((_, k, n)) => (k, n),
+            Err(_) => return false,
+        };
+        let a0 = args[0].as_uint();
+        let i0 = args[0].as_int();
+        let i1 = args[1].as_int();
+        let a2 = args[2].as_uint();
+        p.inbuf.consume(h.size as usize);
+        match (kind, h.opcode) {
+            (Kind::XdgSurface, protocol::xdg_surface_ev::CONFIGURE) if argc == 1 => {
+                p.configure = a0;
+            }
+            (Kind::XdgToplevel, protocol::xdg_toplevel_ev::CONFIGURE) if argc == 3 => {
+                p.size = Some((i0.unwrap_or(0), i1.unwrap_or(0)));
+            }
+            (Kind::Keyboard, protocol::keyboard_ev::ENTER) => p.enters += 1,
+            (Kind::Keyboard, protocol::keyboard_ev::LEAVE) => p.leaves += 1,
+            (Kind::Keyboard, protocol::keyboard_ev::KEY) if argc == 4 => {
+                p.keys += 1;
+                p.last_key = a2.unwrap_or(0);
+            }
+            (Kind::Buffer, protocol::buffer_ev::RELEASE) => p.releases += 1,
+            (Kind::Callback, protocol::callback_ev::DONE) => p.callbacks += 1,
+            (Kind::XdgWmBase, protocol::xdg_wm_base_ev::PING) => {
+                // A ping is answered `pong` with the same serial.
+                let mut buf = [0u8; 64];
+                let mut q = DispatchBuf::new(&mut buf);
+                if p.client.pong(p.wm_base, a0.unwrap_or(0), &mut q).is_ok() {
+                    let _ = uds::send(p.conn, q.bytes());
+                }
+            }
+            _ => {}
+        }
+    }
+    true
+}
+
+/// Drain whichever peer is readable. A poll timeout is not a failure; a dropped
+/// connection is.
+fn pump_peers(peers: &mut [Peer; 2], ms: i32) -> bool {
+    let mut pf = [
+        PollFd {
+            fd: peers[0].conn,
+            events: POLLIN,
+            revents: 0,
+        },
+        PollFd {
+            fd: peers[1].conn,
+            events: POLLIN,
+            revents: 0,
+        },
+    ];
+    match fs::poll(&mut pf, ms) {
+        Ok(n) if n > 0 => {}
+        _ => return true,
+    }
+    for i in 0..2 {
+        if pf[i].revents & POLLIN != 0 && !read_peer(&mut peers[i]) {
+            return false;
+        }
+    }
+    true
+}
+
+/// Drain both peers until `done` holds, for up to `tries` polls of 10 ms.
+fn wait_peers(
+    peers: &mut [Peer; 2],
+    tries: i32,
+    done: impl Fn(&[Peer; 2]) -> bool,
+) -> Result<(), i32> {
+    for _ in 0..tries {
+        if done(&*peers) {
+            return Ok(());
+        }
+        if !pump_peers(peers, 10) {
+            return Err(fail(70, b"wlx2: a connection dropped\n"));
+        }
+    }
+    if done(&*peers) {
+        return Ok(());
+    }
+    Err(fail(71, b"wlx2: timed out waiting for the server\n"))
+}
+
+/// Ack the configure, then put a barrier after it so the pool fd's control message
+/// cannot share a read with a request sent before it.
+fn peer_ack(p: &mut Peer) -> Result<(), i32> {
+    let serial = p
+        .configure
+        .ok_or_else(|| fail(72, b"wlx2: no configure serial\n"))?;
+    let (conn, xdg_surface) = (p.conn, p.xdg_surface);
+    let client = &mut p.client;
+    let req = &mut p.req;
+    send_req(conn, req, |q| client.ack_configure(xdg_surface, serial, q))?;
+    send_req(conn, req, |q| client.sync(q))?;
+    Ok(())
+}
+
+/// Present a full buffer at the configured size on one peer.
+fn peer_map_buffer(p: &mut Peer) -> Result<(), i32> {
+    let (w, h) = p
+        .size
+        .ok_or_else(|| fail(73, b"wlx2: no configured size\n"))?;
+    if w <= 0 || h <= 0 {
+        return Err(fail(74, b"wlx2: the server configured no size\n"));
+    }
+    let stride = w * 4;
+    let size = stride * h;
+    let conn = p.conn;
+    let pool_fd = fs::memfd_create(0).map_err(|_| fail(75, b"wlx2: memfd_create failed\n"))?;
+    fs::truncate(pool_fd, size as i64).map_err(|_| fail(76, b"wlx2: ftruncate failed\n"))?;
+    let pool = unsafe {
+        vmem::mmap(
+            core::ptr::null_mut(),
+            size as usize,
+            vmem::PROT_READ | vmem::PROT_WRITE,
+            vmem::MAP_SHARED,
+            pool_fd,
+            0,
+        )
+    };
+    if pool == vmem::MAP_FAILED {
+        return Err(fail(77, b"wlx2: mmap of the pool failed\n"));
+    }
+    for i in 0..(w * h) as usize {
+        unsafe { core::ptr::write_volatile(pool.add(i * 4).cast::<u32>(), COLOR) };
+    }
+    uds::send_fds(conn, &[pool_fd]).map_err(|_| fail(78, b"wlx2: send_fds failed\n"))?;
+    {
+        let (shm, surface) = (p.shm, p.surface);
+        let client = &mut p.client;
+        let req = &mut p.req;
+        let pool_obj = send_req(conn, req, |q| client.create_pool(shm, 0, size, q))?;
+        let buffer = send_req(conn, req, |q| {
+            client.create_buffer(
+                pool_obj,
+                0,
+                w,
+                h,
+                stride,
+                protocol::WL_SHM_FORMAT_ARGB8888,
+                q,
+            )
+        })?;
+        send_req(conn, req, |q| client.attach(surface, buffer, 0, 0, q))?;
+        send_req(conn, req, |q| client.damage(surface, 0, 0, w, h, q))?;
+        send_req(conn, req, |q| client.commit(surface, q))?;
+    }
+    let _ = unsafe { vmem::munmap(pool, size as usize) };
+    let _ = fs::close(pool_fd);
+    Ok(())
+}
+
+/// `/bin/wlx2`: the Phase 2c gate's client — two connections, one focus.
+///
+/// It maps a window on each; the second's appearance must take the focus, saying
+/// `leave` to the first and `enter` to the second, and each connection must then be
+/// released its own buffer. A key the host injects must reach the *focused*
+/// connection. Then the first connection maps another window, which must move the
+/// focus back, and a second key must follow it there.
+pub fn wl_focus(_args: &[&str]) -> i32 {
+    match run_focus() {
+        Ok(()) => {
+            write_out(b"wlx2: PASS\n");
+            0
+        }
+        Err(code) => code,
+    }
+}
+
+fn run_focus() -> Result<(), i32> {
+    let a = peer_connect()?;
+    let mut peers = [a, peer_connect()?];
+
+    // The second window appeared last, so it must hold the focus and the first must
+    // have been told it lost it.
+    wait_peers(&mut peers, 400, |p| {
+        p[0].configure.is_some() && p[1].configure.is_some() && p[0].leaves >= 1 && p[1].enters >= 1
+    })?;
+
+    // Present on both; each buffer must come back to the connection that owns it.
+    for i in 0..2 {
+        let before = peers[i].callbacks;
+        peer_ack(&mut peers[i])?;
+        wait_peers(&mut peers, 400, |p| p[i].callbacks > before)?;
+        peer_map_buffer(&mut peers[i])?;
+    }
+    wait_peers(&mut peers, 400, |p| {
+        p[0].releases >= 1 && p[1].releases >= 1
+    })?;
+    write_out(b"wlx2: ready\n");
+
+    // The host injects a key: it must reach the focused connection, the second.
+    let (a0, b0) = (peers[0].keys, peers[1].keys);
+    wait_peers(&mut peers, 800, |p| p[0].keys + p[1].keys > a0 + b0)?;
+    if peers[0].keys != a0 {
+        return Err(fail(81, b"wlx2: the key reached the unfocused client\n"));
+    }
+    if peers[1].keys == b0 {
+        return Err(fail(82, b"wlx2: no client got the key\n"));
+    }
+    write_out(b"wlx2: key ");
+    put_dec(peers[1].last_key);
+    write_out(b" to B\n");
+
+    // Another window on the first connection must take the focus back.
+    peer_map_window(&mut peers[0])?;
+    wait_peers(&mut peers, 400, |p| p[0].enters >= 2 && p[1].leaves >= 1)?;
+    write_out(b"wlx2: focus A\n");
+
+    // And the second key must follow the focus.
+    let (a1, b1) = (peers[0].keys, peers[1].keys);
+    wait_peers(&mut peers, 800, |p| p[0].keys + p[1].keys > a1 + b1)?;
+    if peers[1].keys != b1 {
+        return Err(fail(83, b"wlx2: the second key stayed unfocused\n"));
+    }
+    if peers[0].keys == a1 {
+        return Err(fail(84, b"wlx2: the second key went nowhere\n"));
+    }
+    write_out(b"wlx2: key ");
+    put_dec(peers[0].last_key);
+    write_out(b" to A\n");
+    Ok(())
+}
+
+/// Wait for the toplevel's `configure`, answering the server's `ping`.
+///
+/// Returns the surface's configure serial and the size the toplevel was offered.
+fn await_configure(
+    conn: i32,
+    client: &Client,
+    xdg_surface: u32,
+    toplevel: u32,
+    wm_base: u32,
+    inbuf: &mut MessageBuffer,
+    chunk: &mut [u8; 512],
+) -> Result<(u32, i32, i32), i32> {
+    let mut serial = None;
+    let mut size = None;
+    while serial.is_none() || size.is_none() {
+        if !fill(conn, inbuf, chunk, 4000) {
+            return Err(fail(58, b"wlx: no configure arrived\n"));
+        }
+        loop {
+            let msg = match inbuf.next() {
+                Ok(Some(m)) => m,
+                Ok(None) => break,
+                Err(_) => return Err(fail(59, b"wlx: bad frame\n")),
+            };
+            let h = match Header::parse(msg) {
+                Ok(h) => h,
+                Err(_) => return Err(fail(60, b"wlx: bad header\n")),
+            };
+            let mut args = [Arg::Uint(0); MAX_ARGS];
+            let (kind, argc) = match client.decode(msg, &mut args) {
+                Ok((_, k, n)) => (k, n),
+                Err(_) => return Err(fail(61, b"wlx: undecodable event\n")),
+            };
+            let opcode = h.opcode;
+            let object = h.object_id;
+            // `configure`'s serial is a uint; the toplevel's w/h are ints in args 0/1.
+            let a0u = args[0].as_uint();
+            let i0 = args[0].as_int();
+            let i1 = args[1].as_int();
+            inbuf.consume(h.size as usize);
+            match (kind, opcode) {
+                (Kind::XdgSurface, protocol::xdg_surface_ev::CONFIGURE)
+                    if object == xdg_surface =>
+                {
+                    if argc != 1 {
+                        return Err(fail(62, b"wlx: configure arity\n"));
+                    }
+                    serial = a0u;
+                }
+                (Kind::XdgToplevel, protocol::xdg_toplevel_ev::CONFIGURE) if object == toplevel => {
+                    if argc != 3 {
+                        return Err(fail(63, b"wlx: toplevel configure arity\n"));
+                    }
+                    size = Some((i0.unwrap_or(0), i1.unwrap_or(0)));
+                }
+                (Kind::XdgWmBase, protocol::xdg_wm_base_ev::PING) => {
+                    // A ping is answered `pong` with the same serial, or the server is
+                    // entitled to treat this client as gone.
+                    let mut pong = [0u8; 64];
+                    let mut q = DispatchBuf::new(&mut pong);
+                    client
+                        .pong(wm_base, a0u.unwrap_or(0), &mut q)
+                        .map_err(|_| fail(64, b"wlx: pong encode failed\n"))?;
+                    if uds::send(conn, q.bytes()).is_err() {
+                        return Err(fail(65, b"wlx: pong send failed\n"));
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    let (w, h) = size.unwrap_or((0, 0));
+    Ok((serial.unwrap_or(0), w, h))
+}
+
+/// `/bin/wlx`: the Phase 2b `xdg_shell` client.
+///
+/// It binds `xdg_wm_base`, maps an `xdg_toplevel`, waits for the `configure` the
+/// initial commit earns, acks it, draws a full frame at the configured size, and
+/// commits it. The frame must then be on `/dev/fb`.
+pub fn wl_xdg(_args: &[&str]) -> i32 {
+    match run_xdg() {
+        Ok(()) => {
+            write_out(b"wlx: PASS\n");
+            0
+        }
+        Err(code) => code,
+    }
+}
+
+fn run_xdg() -> Result<(), i32> {
+    // Map the framebuffer, so the frame can be read back the way 1b's client does.
+    let fb_fd = unsafe { fs::open(b"/dev/fb", fs::O_RDWR, 0) }
+        .map_err(|_| fail(50, b"wlx: open /dev/fb failed\n"))?;
+    let fb = unsafe {
+        vmem::mmap(
+            core::ptr::null_mut(),
+            FB_MAP_LEN,
+            vmem::PROT_READ | vmem::PROT_WRITE,
+            vmem::MAP_SHARED,
+            fb_fd,
+            0,
+        )
+    };
+    if fb == vmem::MAP_FAILED {
+        return Err(fail(51, b"wlx: mmap /dev/fb failed\n"));
+    }
+
+    let conn = connect()?;
+    let mut client = Client::new();
+    let mut req = [0u8; 512];
+    let mut inbuf = MessageBuffer::new();
+    let mut chunk = [0u8; 512];
+
+    let registry = send_req(conn, &mut req, |q| client.get_registry(q))?;
+    let g = find_globals(conn, &client, &mut inbuf, &mut chunk)?;
+    if g.wm_base == 0 {
+        return Err(fail(52, b"wlx: no xdg_wm_base global\n"));
+    }
+    let compositor = send_req(conn, &mut req, |q| {
+        client.bind(
+            registry,
+            g.compositor,
+            b"wl_compositor",
+            1,
+            Kind::Compositor,
+            q,
+        )
+    })?;
+    let shm = send_req(conn, &mut req, |q| {
+        client.bind(registry, g.shm, b"wl_shm", 1, Kind::Shm, q)
+    })?;
+    let wm_base = send_req(conn, &mut req, |q| {
+        client.bind(registry, g.wm_base, b"xdg_wm_base", 1, Kind::XdgWmBase, q)
+    })?;
+    let surface = send_req(conn, &mut req, |q| client.create_surface(compositor, q))?;
+    let xdg_surface = send_req(conn, &mut req, |q| {
+        client.get_xdg_surface(wm_base, surface, q)
+    })?;
+    let toplevel = send_req(conn, &mut req, |q| client.get_toplevel(xdg_surface, q))?;
+    send_req(conn, &mut req, |q| client.set_title(toplevel, b"wlx", q))?;
+    send_req(conn, &mut req, |q| {
+        client.set_app_id(toplevel, b"minixrs.wlx", q)
+    })?;
+
+    // The initial commit carries no buffer: it is the client saying "I am ready",
+    // and the server answers it with the configuration it wants.
+    send_req(conn, &mut req, |q| client.commit(surface, q))?;
+    let (serial, width, height) = await_configure(
+        conn,
+        &client,
+        xdg_surface,
+        toplevel,
+        wm_base,
+        &mut inbuf,
+        &mut chunk,
+    )?;
+    if width <= 0 || height <= 0 {
+        return Err(fail(66, b"wlx: the server configured no size\n"));
+    }
+    write_out(b"wlx: configure ");
+    put_dec(width as u32);
+    write_out(b"x");
+    put_dec(height as u32);
+    write_out(b"\n");
+
+    send_req(conn, &mut req, |q| {
+        client.ack_configure(xdg_surface, serial, q)
+    })?;
+    // Drain the ack before the pool fd travels, for the reason 1b's `await_callback`
+    // documents: the control message must land on the `create_pool` read.
+    let barrier = send_req(conn, &mut req, |q| client.sync(q))?;
+    await_callback(conn, &client, barrier, &mut inbuf, &mut chunk)?;
+
+    // A buffer of exactly the configured size.
+    let stride = width * 4;
+    let size = stride * height;
+    let pool_fd = fs::memfd_create(0).map_err(|_| fail(53, b"wlx: memfd_create failed\n"))?;
+    fs::truncate(pool_fd, size as i64).map_err(|_| fail(54, b"wlx: ftruncate failed\n"))?;
+    let pool = unsafe {
+        vmem::mmap(
+            core::ptr::null_mut(),
+            size as usize,
+            vmem::PROT_READ | vmem::PROT_WRITE,
+            vmem::MAP_SHARED,
+            pool_fd,
+            0,
+        )
+    };
+    if pool == vmem::MAP_FAILED {
+        return Err(fail(55, b"wlx: mmap of the pool failed\n"));
+    }
+    for i in 0..(width * height) as usize {
+        unsafe { core::ptr::write_volatile(pool.add(i * 4).cast::<u32>(), COLOR) };
+    }
+    uds::send_fds(conn, &[pool_fd]).map_err(|_| fail(56, b"wlx: send_fds failed\n"))?;
+    let pool_obj = send_req(conn, &mut req, |q| client.create_pool(shm, 0, size, q))?;
+    let buffer = send_req(conn, &mut req, |q| {
+        client.create_buffer(
+            pool_obj,
+            0,
+            width,
+            height,
+            stride,
+            protocol::WL_SHM_FORMAT_ARGB8888,
+            q,
+        )
+    })?;
+    send_req(conn, &mut req, |q| client.attach(surface, buffer, 0, 0, q))?;
+    send_req(conn, &mut req, |q| {
+        client.damage(surface, 0, 0, width, height, q)
+    })?;
+    send_req(conn, &mut req, |q| client.commit(surface, q))?;
+
+    await_release(conn, &client, buffer, &mut inbuf, &mut chunk)?;
+
+    // The frame must be on the display, at the size the toplevel asked for.
+    let px = unsafe { core::ptr::read_volatile(fb.cast::<u32>()) };
+    if px != COLOR {
+        write_err(b"wlx: framebuffer pixel is 0x");
+        print_hex(px);
+        write_err(b", wanted 0x00FF00FF\n");
+        return Err(fail(57, b"wlx: the frame did not reach /dev/fb\n"));
+    }
+
+    let _ = unsafe { vmem::munmap(pool, size as usize) };
+    let _ = uds::close_fd(conn);
+    Ok(())
+}
+
+/// Map `/dev/fb`, so a frame can be read back.
+fn map_fb() -> Result<*mut u8, i32> {
+    let fd = unsafe { fs::open(b"/dev/fb", fs::O_RDWR, 0) }
+        .map_err(|_| fail(20, b"wlclient: open /dev/fb failed\n"))?;
+    let fb = unsafe {
+        vmem::mmap(
+            core::ptr::null_mut(),
+            FB_MAP_LEN,
+            vmem::PROT_READ | vmem::PROT_WRITE,
+            vmem::MAP_SHARED,
+            fd,
+            0,
+        )
+    };
+    if fb == vmem::MAP_FAILED {
+        return Err(fail(21, b"wlclient: mmap /dev/fb failed\n"));
+    }
+    Ok(fb)
+}
+
+/// One framebuffer pixel at (x, y).
+fn read_px(fb: *mut u8, x: i32, y: i32) -> u32 {
+    let off = y as usize * FB_PITCH + x as usize * 4;
+    unsafe { core::ptr::read_volatile(fb.add(off).cast::<u32>()) }
+}
+
+/// Whether a colour appears anywhere on the framebuffer. Scanning rather than
+/// picking a coordinate keeps a gate independent of where the pointer happens to be.
+fn scan_for(fb: *mut u8, color: u32) -> bool {
+    for i in 0..FB_WIDTH * FB_HEIGHT {
+        if unsafe { core::ptr::read_volatile(fb.add(i * 4).cast::<u32>()) } == color {
+            return true;
+        }
+    }
+    false
+}
+
+/// Fill a mapped pool with one colour.
+fn fill_pool(pool: *mut u8, pixels: i32, color: u32) {
+    for i in 0..pixels as usize {
+        unsafe { core::ptr::write_volatile(pool.add(i * 4).cast::<u32>(), color) };
+    }
+}
+
+/// `/bin/wlxd`: the Phase 2d gate's client — damage and the pointer's cursor.
+///
+/// It draws a full red frame, then a blue buffer damaged only in a small rectangle:
+/// red must remain everywhere else, which is what proves the compositor recomposited
+/// only the damage. It then gives the pointer an 8x8 image and commits a window frame
+/// again, so the cursor must appear over it.
+pub fn wl_damage(_args: &[&str]) -> i32 {
+    match run_damage() {
+        Ok(()) => {
+            write_out(b"wlxd: PASS\n");
+            0
+        }
+        Err(code) => code,
+    }
+}
+
+const A_COLOR: u32 = 0x00FF_0000;
+const B_COLOR: u32 = 0x0000_00FF;
+/// Opaque green: the cursor is `ARGB8888`, and a zero alpha would be skipped as
+/// transparent by the compositor.
+const C_COLOR: u32 = 0xFF00_FF00;
+
+fn run_damage() -> Result<(), i32> {
+    let fb = map_fb()?;
+    let conn = connect()?;
+    let mut client = Client::new();
+    let mut req = [0u8; 512];
+    let mut inbuf = MessageBuffer::new();
+    let mut chunk = [0u8; 512];
+
+    let registry = send_req(conn, &mut req, |q| client.get_registry(q))?;
+    let g = find_globals(conn, &client, &mut inbuf, &mut chunk)?;
+    let compositor = send_req(conn, &mut req, |q| {
+        client.bind(
+            registry,
+            g.compositor,
+            b"wl_compositor",
+            1,
+            Kind::Compositor,
+            q,
+        )
+    })?;
+    let shm = send_req(conn, &mut req, |q| {
+        client.bind(registry, g.shm, b"wl_shm", 1, Kind::Shm, q)
+    })?;
+    let seat = send_req(conn, &mut req, |q| {
+        client.bind(registry, g.seat, b"wl_seat", 1, Kind::Seat, q)
+    })?;
+    let pointer = send_req(conn, &mut req, |q| client.get_pointer(seat, q))?;
+    let surface = send_req(conn, &mut req, |q| client.create_surface(compositor, q))?;
+
+    // The window: a full-screen buffer, so the whole output is under the client's
+    // control and a pixel outside the damage means something.
+    let stride = FB_WIDTH as i32 * 4;
+    let size = stride * FB_HEIGHT as i32;
+    let pool_fd = fs::memfd_create(0).map_err(|_| fail(95, b"wlxd: memfd_create failed\n"))?;
+    fs::truncate(pool_fd, size as i64).map_err(|_| fail(96, b"wlxd: ftruncate failed\n"))?;
+    let pool = unsafe {
+        vmem::mmap(
+            core::ptr::null_mut(),
+            size as usize,
+            vmem::PROT_READ | vmem::PROT_WRITE,
+            vmem::MAP_SHARED,
+            pool_fd,
+            0,
+        )
+    };
+    if pool == vmem::MAP_FAILED {
+        return Err(fail(97, b"wlxd: mmap of the pool failed\n"));
+    }
+    fill_pool(pool, FB_WIDTH as i32 * FB_HEIGHT as i32, A_COLOR);
+    uds::send_fds(conn, &[pool_fd]).map_err(|_| fail(98, b"wlxd: send_fds failed\n"))?;
+    let pool_obj = send_req(conn, &mut req, |q| client.create_pool(shm, 0, size, q))?;
+    let buffer = send_req(conn, &mut req, |q| {
+        client.create_buffer(
+            pool_obj,
+            0,
+            FB_WIDTH as i32,
+            FB_HEIGHT as i32,
+            stride,
+            protocol::WL_SHM_FORMAT_XRGB8888,
+            q,
+        )
+    })?;
+    send_req(conn, &mut req, |q| client.attach(surface, buffer, 0, 0, q))?;
+    send_req(conn, &mut req, |q| {
+        client.damage(surface, 0, 0, FB_WIDTH as i32, FB_HEIGHT as i32, q)
+    })?;
+    send_req(conn, &mut req, |q| client.commit(surface, q))?;
+    await_release(conn, &client, buffer, &mut inbuf, &mut chunk)?;
+    if read_px(fb, 0, 0) != A_COLOR {
+        return Err(fail(99, b"wlxd: the first frame is not on /dev/fb\n"));
+    }
+
+    // Second frame: the buffer is now blue, but only a small rectangle is damaged.
+    // Red must survive everywhere else — that is the whole claim of 2d.
+    fill_pool(pool, FB_WIDTH as i32 * FB_HEIGHT as i32, B_COLOR);
+    send_req(conn, &mut req, |q| {
+        client.damage_buffer(surface, 16, 16, 8, 8, q)
+    })?;
+    send_req(conn, &mut req, |q| client.commit(surface, q))?;
+    await_release(conn, &client, buffer, &mut inbuf, &mut chunk)?;
+    if read_px(fb, 0, 0) != A_COLOR {
+        return Err(fail(
+            100,
+            b"wlxd: the whole frame was recomposited, not the damage\n",
+        ));
+    }
+    if read_px(fb, 18, 18) != B_COLOR {
+        return Err(fail(101, b"wlxd: the damage was not recomposited\n"));
+    }
+
+    // The pointer's image: an 8x8 opaque green buffer on its own surface.
+    let cursurf = send_req(conn, &mut req, |q| client.create_surface(compositor, q))?;
+    let csize = 8 * 8 * 4;
+    let cfd = fs::memfd_create(0).map_err(|_| fail(102, b"wlxd: cursor memfd failed\n"))?;
+    fs::truncate(cfd, csize as i64).map_err(|_| fail(103, b"wlxd: cursor truncate failed\n"))?;
+    let cmap = unsafe {
+        vmem::mmap(
+            core::ptr::null_mut(),
+            csize as usize,
+            vmem::PROT_READ | vmem::PROT_WRITE,
+            vmem::MAP_SHARED,
+            cfd,
+            0,
+        )
+    };
+    if cmap == vmem::MAP_FAILED {
+        return Err(fail(104, b"wlxd: mmap of the cursor pool failed\n"));
+    }
+    fill_pool(cmap, 64, C_COLOR);
+    uds::send_fds(conn, &[cfd]).map_err(|_| fail(105, b"wlxd: cursor send_fds failed\n"))?;
+    let cpool = send_req(conn, &mut req, |q| client.create_pool(shm, 0, csize, q))?;
+    let cbuf = send_req(conn, &mut req, |q| {
+        client.create_buffer(cpool, 0, 8, 8, 32, protocol::WL_SHM_FORMAT_ARGB8888, q)
+    })?;
+    send_req(conn, &mut req, |q| {
+        client.set_cursor(pointer, 0, cursurf, 0, 0, q)
+    })?;
+    send_req(conn, &mut req, |q| client.attach(cursurf, cbuf, 0, 0, q))?;
+    send_req(conn, &mut req, |q| client.commit(cursurf, q))?;
+
+    // One more window frame, so the cursor is composited over it. The damage is well
+    // away from both the first pixel and the pointer.
+    send_req(conn, &mut req, |q| {
+        client.damage(surface, 100, 100, 8, 8, q)
+    })?;
+    send_req(conn, &mut req, |q| client.commit(surface, q))?;
+    await_release(conn, &client, buffer, &mut inbuf, &mut chunk)?;
+    if !scan_for(fb, C_COLOR) {
+        return Err(fail(106, b"wlxd: the cursor was not drawn\n"));
+    }
+
+    let _ = unsafe { vmem::munmap(pool, size as usize) };
+    let _ = unsafe { vmem::munmap(cmap, csize as usize) };
+    let _ = uds::close_fd(conn);
+    Ok(())
 }
 
 /// Run the client: `PASS` on success, otherwise the failing step's code.

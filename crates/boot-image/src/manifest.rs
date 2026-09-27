@@ -145,6 +145,16 @@ pub const BOOT_BINS: &[(&str, &str)] = &[
     // keyboard, commits a surface so the server sends `enter`, and prints each key
     // it receives.
     ("/bin/wlkey", "wlkey"),
+    // `/bin/wlx` is the Wayland Phase 2b `xdg_shell` client: it maps an
+    // `xdg_toplevel`, acks the configure, and presents a frame of the configured
+    // size through `/sbin/wlserver`.
+    ("/bin/wlx", "wlx"),
+    // `/bin/wlx2` is the Wayland Phase 2c focus client: two connections, each with a
+    // window, so the server has to keep per-surface focus and hand it over.
+    ("/bin/wlx2", "wlx2"),
+    // `/bin/wlxd` is the Wayland Phase 2d damage and cursor client: it damages part
+    // of a frame and checks the rest survives, then gives the pointer an image.
+    ("/bin/wlxd", "wlxd"),
     // `/bin/wterm` is the terminal window client (M3): a pty with /bin/sh
     // on the slave, its output rendered (VT subset) into a wserver window.
     ("/bin/wterm", "wterm"),

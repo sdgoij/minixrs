@@ -533,17 +533,52 @@ test-wlshm-x86 boot-timeout="40": build-x86
     FEED_SCENARIO=tools/smoke/wlshm.tsv sh tools/smoke/feed.sh target/test-wlshm-x86.log {{boot-timeout}} qemu-system-x86_64 -nographic -m 256M -no-reboot -vga none -device bochs-display,id=fb0 -kernel target/images/x86_64-pc-minix/minix-x86.elf -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0 -device virtio-tablet-pci,display=fb0
     @echo "wlshm: wl_shm buffer committed and presented to /dev/fb (x86_64)"
 
-# wlkey: tools/wlkey_probe.py drives the Phase 1c input path — /bin/wlkey binds
-# wl_seat's keyboard and commits a surface, and a key injected with QMP reaches it
-# as `wl_keyboard.key` — WAYLAND.md §6.11. A host probe rather than a tsv scenario:
-# the key has to be a real device event, and the serial console the tsv gates type
-# into is not one.
+# wlkey: tools/wlkey_probe.py drives the Phase 1c input path and the Phase 2a
+# keymap — /bin/wlkey binds wl_seat's keyboard, resolves the `keymap` event's fd
+# and checks its bytes (WAYLAND.md §6.12), commits a surface, and a key injected
+# with QMP reaches it as `wl_keyboard.key` — WAYLAND.md §6.11. A host probe rather
+# than a tsv scenario: the key has to be a real device event, and the serial console
+# the tsv gates type into is not one.
 test-wlkey-x86: build-x86
     mkdir -p target/images/x86_64-pc-minix
     cp target/trampoline.elf target/images/x86_64-pc-minix/minix-x86.elf
     @just _assert-qemu-version qemu-system-x86_64
     python tools/wlkey_probe.py
-    @echo "wlkey: wl_seat keyboard events reach a client (x86_64)"
+    @echo "wlkey: keymap served and wl_seat keyboard events reach a client (x86_64)"
+
+
+# wlx: /bin/wlx drives the Phase 2b xdg_shell path — it maps an xdg_toplevel, the
+# server sends `configure`, the client acks it and commits a frame of the configured
+# size, and the frame reaches /dev/fb — WAYLAND.md §6.12.
+test-wlx-x86 boot-timeout="40": build-x86
+    mkdir -p target/images/x86_64-pc-minix
+    cp target/trampoline.elf target/images/x86_64-pc-minix/minix-x86.elf
+    @just _assert-qemu-version qemu-system-x86_64
+    FEED_SCENARIO=tools/smoke/wlx.tsv sh tools/smoke/feed.sh target/test-wlx-x86.log {{boot-timeout}} qemu-system-x86_64 -nographic -m 256M -no-reboot -vga none -device bochs-display,id=fb0 -kernel target/images/x86_64-pc-minix/minix-x86.elf -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0 -device virtio-tablet-pci,display=fb0
+    @echo "wlx: xdg_shell toplevel configured, acked and presented (x86_64)"
+
+
+# wlfocus: tools/wlfocus_probe.py drives the Phase 2c focus path — /bin/wlx2 opens
+# two connections, maps a window on each, and a QMP key must reach the focused one as
+# the focus moves between them — WAYLAND.md §6.12. A host probe, like wlkey's: a key
+# has to be a real device event, which the serial console is not.
+test-wlfocus-x86: build-x86
+    mkdir -p target/images/x86_64-pc-minix
+    cp target/trampoline.elf target/images/x86_64-pc-minix/minix-x86.elf
+    @just _assert-qemu-version qemu-system-x86_64
+    python tools/wlfocus_probe.py
+    @echo "wlfocus: two clients, one focus, and the keys follow it (x86_64)"
+
+
+# wlxd: /bin/wlxd drives the Phase 2d damage and cursor path — it damages a small
+# rectangle and checks the rest of the frame survives, then gives the pointer an
+# image and finds it on /dev/fb — WAYLAND.md §6.12.
+test-wlxd-x86 boot-timeout="40": build-x86
+    mkdir -p target/images/x86_64-pc-minix
+    cp target/trampoline.elf target/images/x86_64-pc-minix/minix-x86.elf
+    @just _assert-qemu-version qemu-system-x86_64
+    FEED_SCENARIO=tools/smoke/wlxd.tsv sh tools/smoke/feed.sh target/test-wlxd-x86.log {{boot-timeout}} qemu-system-x86_64 -nographic -m 256M -no-reboot -vga none -device bochs-display,id=fb0 -kernel target/images/x86_64-pc-minix/minix-x86.elf -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0 -device virtio-tablet-pci,display=fb0
+    @echo "wlxd: damage and the pointer's cursor (x86_64)"
 
 # Measure whether two processes that map one object through the loader share its
 # physical frames — Phase 5 of DYNAMIC_LINKING.md. `tools/dso_share_probe.py` boots

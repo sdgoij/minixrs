@@ -1,21 +1,20 @@
 #!/usr/bin/env python3
-"""Phase 1c/2a gate: a host key reaches a Wayland client, and the client gets its keymap.
+"""Phase 2c gate: two Wayland clients, one focus, and the keys that follow it.
 
 Boots x86 with a QMP socket and the bochs display, waits for `/sbin/wlserver`, then
-runs `/bin/wlkey` — which binds `wl_seat`'s keyboard, resolves the `keymap` event's
-fd and checks its bytes (Phase 2a), commits a surface so the server sends `enter`,
-and prints each key it receives — and injects `a` with QMP `input-send-event`.
+runs `/bin/wlx2` — which opens *two* connections, maps a window on each, and prints
+where the focus went — and injects keys with QMP `input-send-event`.
 
-The acceptance is the line `wlkey: key 30 pressed`. 30 is evdev's `KEY_A`, so a
-match proves the whole path: the PS/2 controller queues an HID usage, the input
-server's ring hands it to a *reader of its own* (wlserver, alongside wserver), wlserver
-translates the usage to a keycode, and `wl_keyboard.key` carries it to the client.
-`wlkey: keymap <n> ok` before it proves the keymap event's fd carried the committed
-XKB text.
+The second window appears last, so it must take the focus: the first connection is told
+`leave` and the second `enter`, and each is released its own buffer. A key must then
+reach the *second*, focused connection only. Next the first connection maps another
+window; that must move the focus back (`leave` on the second, `enter` on the first), and
+the second key must follow it to the first connection. A key that reaches the wrong
+client fails the gate, which is what turns "input goes to the focused surface" from an
+inference into a measurement.
 
-Unlike the tsv gates this cannot be driven through the shell's stdin: that is the
-serial console, and the input server never sees it. The key has to be a real device
-event, which is what QMP injects.
+Unlike the tsv gates this cannot be driven through the shell's stdin: that is the serial
+console, and the input server never sees it. The keys have to be real device events.
 
 Exit 0 on success, 1 otherwise.
 """
@@ -26,7 +25,7 @@ import sys
 import threading
 import time
 
-QMP_PORT = 4470
+QMP_PORT = 4471
 
 QEMU = [
     "qemu-system-x86_64", "-nographic", "-monitor", "none", "-display", "none",
@@ -115,37 +114,42 @@ def main():
     q = socket.create_connection(("127.0.0.1", QMP_PORT), timeout=5)
     qmp_cmd(q, {"execute": "qmp_capabilities"})
 
-    send_paced("/bin/wlkey")
-    if not wait_for(lambda: b"wlkey: keymap 64757 ok" in out, 30):
-        print("[1] wlkey keymap 64757 ok (Phase 2a): FAIL", flush=True)
-        ok = False
-    else:
-        print("[1] wlkey keymap 64757 ok (Phase 2a): ok", flush=True)
+    send_paced("/bin/wlx2")
 
-    if not wait_for(lambda: b"wlkey: ready" in out, 30):
-        print("[2] wlkey ready: FAIL", flush=True)
-        ok = False
-    else:
-        print("[2] wlkey ready: ok", flush=True)
+    def step(n, name, pred, timeout=40):
+        nonlocal ok
+        if not ok:
+            return
+        if wait_for(pred, timeout):
+            print("[%d] %s: ok" % (n, name), flush=True)
+        else:
+            print("[%d] %s: FAIL" % (n, name), flush=True)
+            ok = False
+
+    step(1, "two clients mapped, focus moved to the second", lambda: b"wlx2: ready" in out)
 
     if ok:
-        # Press then release, the way a keyboard sends a key.
         key(q, True)
         time.sleep(0.2)
         key(q, False)
+        step(2, "the first key reached the focused client", lambda: b"wlx2: key 30 to B" in out)
 
-        if wait_for(lambda: b"wlkey: key 30 pressed" in out, 30):
-            print("[3] key 30 pressed reached the client: ok", flush=True)
-        else:
-            print("[3] key 30 pressed reached the client: FAIL", flush=True)
-            ok = False
+    step(3, "a second window moved the focus back", lambda: b"wlx2: focus A" in out)
+
+    if ok:
+        key(q, True)
+        time.sleep(0.2)
+        key(q, False)
+        step(4, "the second key followed the focus", lambda: b"wlx2: key 30 to A" in out)
+
+    step(5, "the client finished", lambda: b"wlx2: PASS" in out, 20)
 
     q.close()
     if not ok:
         with lock:
-            print(bytes(out[-1500:]).decode(errors="replace"), file=sys.stderr)
+            print(bytes(out[-2000:]).decode(errors="replace"), file=sys.stderr)
     qemu.kill()
-    print("wlkey probe: %s" % ("PASS" if ok else "FAIL"), flush=True)
+    print("wlfocus probe: %s" % ("PASS" if ok else "FAIL"), flush=True)
     return 0 if ok else 1
 
 

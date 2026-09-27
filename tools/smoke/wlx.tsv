@@ -1,0 +1,15 @@
+# The `just test-wlx-x86` scenario: the Wayland Phase 2b `xdg_shell` path.
+#
+#   FEED_SCENARIO=tools/smoke/wlx.tsv sh tools/smoke/feed.sh <log> <seconds> <qemu command…>
+#
+# One step per line, as `tools/smoke/scenario.tsv` documents: the command, a tab, and the
+# whole line its output must produce.
+#
+# `/bin/wlx` connects to `/sbin/wlserver`, binds `wl_compositor`, `wl_shm` and `xdg_wm_base`,
+# maps an `xdg_toplevel`, and commits once with no buffer. The server answers with the
+# configuration it wants (`xdg_surface.configure`, `xdg_toplevel.configure`, a `ping`); the
+# client acks the serial, pongs, draws a full frame at that size, and commits it, and the
+# frame must reach `/dev/fb`. It prints the line below only if all of that happened; a
+# configure that never arrives, an unaccepted ack, or a missing frame each stop it first.
+
+/bin/wlx	wlx: PASS

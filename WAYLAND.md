@@ -239,8 +239,10 @@ Organised by critical path. Each is a real gap, with evidence.
       equivalent). We have an input *server* with HID records — good raw
       material, no consumer interface for a compositor.
 - [ ] **Device enumeration** (udev/sysfs equivalent) if we ever want libinput.
-- [ ] **Keymaps** (`xkbcommon` or equivalent). Ours is hand-rolled shift/ctrl
-      handling in `wserver`.
+- [ ] **Keymaps.** A *server-side* keymap is a committed US/evdev XKB text
+      artifact compiled into `wlserver` and served on `wl_keyboard.keymap` (Phase
+      2a, §6.12); a *client* that parses it still needs `xkbcommon`. Ours today is
+      hand-rolled shift/ctrl handling in `wserver`.
 
 **Tier 3 — session and desktop**
 
@@ -262,7 +264,10 @@ Organised by critical path. Each is a real gap, with evidence.
       serving side is the `/sbin/wlserver` boot proc (20), and Phase 1a (registry +
       `wl_display.sync`), 1b (the `wl_shm` present path to `/dev/fb`) and 1c (input:
       `wl_seat` keyboard/pointer, focus/`enter`, and a key routed from the console to
-      a client) are in. Still open: `xdg_shell` (Phase 2).
+      a client) are in. Phase 2a (the seat's keymap, §6.12), 2b (`xdg_shell`:
+      `xdg_wm_base`/`xdg_surface`/`xdg_toplevel`) and 2c (several clients at once,
+      with per-surface focus) are in too, as is 2d (damage tracking and the pointer's
+      cursor). Still open: popups, `layer_shell` and decorations (2e).
 
 ---
 
@@ -589,7 +594,8 @@ A compositor input backend fed by our input server's HID records (pointer
 absolute/relative + buttons, keyboard usages), producing `wl_seat`
 keyboard/pointer events. This avoids porting `libinput`/`evdev`/`udev`
 entirely. Keymaps start with a US layout plus modifier state (what `wserver`
-does now); `xkbcommon` becomes a port item only if a real keymap is needed.
+does now); Phase 2a serves a real XKB keymap as a committed artifact (§6.12),
+while `xkbcommon` remains a port item for the client side that parses it.
 
 ### 6.7 Compositor strategy: two tracks
 
@@ -949,7 +955,8 @@ arrive with 1c.
 real keymap is an XKB blob a client feeds to `xkbcommon` — a port item §6.6 defers.
 Phase 1's in-house client interprets keycodes with `input.rs`'s US table, and the
 missing `keymap` is a deviation a *stock* client would notice (it would be handed
-keycodes it cannot map).
+keycodes it cannot map). Phase 2a serves one (§6.12), which is what removes this as
+the blocker for a stock client.
 - ~~**The input server is single-consumer.**~~ **Fixed with 1c.** The ring used to be
 popped destructively (`CDEV_READ` advanced one `EV_HEAD`, and `INPUT_REG_CONSUMER` kept
 one `CONSUMER_EP`), so only one process could read the HID stream — and with `wserver`
@@ -960,13 +967,144 @@ reader that never registered is added on its first read, because VFS relays
 
 ---
 
+### 6.12 Phase 2 — the seat's keymap, and `xdg_shell`
+
+Phase 2 is what turns the Phase 1 server into something a *toolkit* can use. A
+toolkit asks two things Phase 1 does not answer: for the keyboard's **keymap**
+(so it can turn the evdev keycodes of 1c into character input), and for
+**`xdg_shell`** (so it can map a window rather than draw into whatever surface
+the server happens to have focused). Both are on the Phase 2 row of §7;
+everything else there — decorations, popups, damage, cursor, multi-output —
+hangs off them.
+
+#### Two decisions
+
+**D1 — the keymap is a committed XKB text artifact, not a runtime compile.**
+`wl_keyboard.keymap`'s `XKB_V1` format is not a private encoding: it is the text
+`xkb_keymap_get_as_string(keymap, XKB_KEYMAP_FORMAT_TEXT_V1)` returns, written to
+a file descriptor and handed over by `SCM_RIGHTS`, with `size` counting the
+trailing `NUL`. Producing it at run time needs `xkbcommon` — a port item §6.6
+lists and this phase does not do. Instead the keymap is **generated once** and
+committed, and the server serves it verbatim:
+
+```
+xkbcli compile-keymap --layout us --model pc105 --rules evdev > us-evdev.xkb
+```
+
+(`xkb-data` 2.41-2ubuntu1.1, reproducible byte for byte.) The output is 64756
+bytes; the server appends the `NUL` and reports `size = 64757`. The bytes are
+**compiled into `wlserver`** (`include_bytes!` from `crates/servers/data/`), not
+shipped as a boot data file: a boot process's read of a regular file goes through
+VFS to MFS, and by the time `wlserver` runs the shell is parked in a console read
+that holds VFS's single worker, so the read never completes — measured, not
+assumed. The memfd is built **when the first client connects**, not at boot, for
+the same reason. `include_bytes!` also means the keymap does not depend on the
+filesystem at all, and `.gitattributes` marks the file binary so an EOL conversion
+cannot change its size. The cost is a checked-in generated artifact, recorded as a
+deviation; the alternative — compiling a keymap in the server — is a `xkbcommon`
+port, which is Phase 4 scope at the earliest.
+
+**D2 — `xdg_shell` is implemented in-house, on the standard protocol.** The same
+argument as §6.11 D2: the deliverable is the protocol, not the implementation,
+so the in-house server may speak it but not extend it. A stock toolkit that binds
+`xdg_wm_base`, gets a configure and acks it must work; our client proves it now,
+and a ported one swaps in later without a protocol change.
+
+#### The keymap event's shape, precisely
+
+`wl_keyboard.keymap` is `(format: uint, fd: fd, size: uint)` — opcode 0, the
+**fd at argument index 1**, which `protocol.rs` already declares
+(`KEYBOARD.events[0] == "uhu"`) and `keyboard_ev::KEYMAP` already numbers. What
+was missing is only the transport, in **both** directions. `send_fds`/`recv_fds`
+(`minix_std::uds`) exist and match the reference's split exactly — control by
+`NWIOSUDSCTRL` *before* the data write, lifted by `NWIOGUDSCTRL` *after* the data
+read (`lib/libc/sys/sendmsg.c`/`recvmsg.c`) — but the Phase 1 server only ever
+*sends* reply bytes and only ever *receives* the pool fd. 2a adds the server's
+outbound half and the client's inbound half.
+
+The event is sent **once**, right after the client creates its keyboard (there is
+nothing to address it to before `get_keyboard`). A compositor re-sends it only when
+the keymap changes — focus moving to a surface with a *different* keymap — which
+per-seat keymaps would make possible and 2a does not have.
+
+#### Staged, each with a gate
+
+| Stage | Deliverable | Gate |
+|---|---|---|
+| **2a** | **Landed** (`just test-wlkey-x86`). The keymap: the generated XKB text compiled into `wlserver` (`include_bytes!`); the server creates a `memfd`, writes the blob plus its `NUL`, passes it with `uds::send_fds`, and sends `wl_keyboard.keymap`; `server.rs` gains `set_keymap`/`take_keymap`/`emit_keymap`; the client resolves the fd and reads the bytes | A client receives the keymap, resolves the fd, and reads bytes whose length is `size` and whose content is the committed artifact (less the `NUL`); 1c's `key`/`modifiers` path is unchanged |
+| **2b** | **Landed** (`just test-wlx-x86`). `xdg_wm_base`/`xdg_surface`/`xdg_toplevel`: bind, `get_xdg_surface`, `get_toplevel`, `set_title`/`set_app_id`, the server's `configure` (surface serial, toplevel size, `ping`) answered by `ack_configure`/`pong`, and `destroy`. `/bin/wlx` is the gate's client | A client maps a toplevel, receives a configure, acks it, commits, and its frame reaches `/dev/fb` at the configured size |
+| **2c** | **Landed** (`just test-wlfocus-x86`). Several clients at once: `wlserver` polls the listener and every connection together, one `Server` (and pool table) per connection. Focus is per surface — a surface's *first* commit asks for it, the server says `leave` to the connection that held it and `enter` to the one that takes it, and input is routed only to the focused connection. Per-connection buffer release falls out of the per-connection `Server`. `/bin/wlx2` is the gate's two-connection client | Two clients each map a surface; keys go to the focused one and move on request |
+| **2d** | **Landed** (`just test-wlxd-x86`). Damage: `wl_surface.damage`/`damage_buffer` accumulate into the bounding rectangle of everything marked since the last commit, a commit carries it, and only that part is recomposited (a commit naming no damage takes the whole buffer, so a client that forgets `damage` is never left stale). Cursor: `wl_pointer.set_cursor` names the surface whose commit is the pointer image, and the compositor draws it, hotspot-offset, over each presented frame. `/bin/wlxd` is the gate's client. `close` still has nothing to trigger it | Only the damaged rect is recomposited; the pointer's cursor image is drawn |
+| **2e** | `xdg_popup`/`xdg_positioner`, `zwlr_layer_shell_v1`, and `zxdg_decoration_manager_v1` (or CSD), which is where `set_title`/`set_app_id` and `set_window_geometry` start being read | A panel layer-surface and a popup map |
+
+2a and 2b are **independent of each other**: 2a is exactly the keymap transport, and
+2b is where the server stops being "one surface, full-screen". A stock client needs
+both, which is why they are the two that unblock one.
+
+#### Deviations to record
+
+- **The keymap is a fixed artifact**, generated out of tree by the `xkbcli`
+command above and compiled into `wlserver`. Layout selection, per-seat keymaps and
+runtime remapping are later; a non-US user gets a US layout until they are.
+- **A toplevel fills the output.** With no window management a `configure` always
+offers the output size, and the frame is presented at (0,0); there is nothing to
+place a smaller window with until 2c.
+- **The ack is required.** A buffer committed before `ack_configure` is not shown,
+which is what the spec asks of a client and what makes 2b's gate prove the ack.
+- **`ping` rides with the configure.** Nothing yet waits on the `pong` (the
+liveness timeout a compositor would arm is 2c); the server sends one so the client
+has to answer.
+- **A surface's first commit takes focus; later commits do not.** A window appearing
+is a request for focus; a redraw is not, or a client that draws often would take focus
+from the window the user is looking at. A client asks again by mapping another window
+— which is what the gate's second key measures.
+- **Focus is one (connection, surface) pair.** Input goes there and nowhere else; with
+nothing focused, input is drained and dropped rather than queued, so the input ring
+cannot back up behind an empty screen.
+- **Damage is a bounding box.** Several `damage`/`damage_buffer` calls between two
+commits grow one rectangle rather than a region list, so damage in two distant corners
+recomposites the area between them too. A region list is later; a bounding box is what
+makes "only the damaged rect" checkable.
+- **`damage_buffer` is read as surface coordinates.** At scale 1 with no transform they
+are the same thing; a scaled or rotated surface would need the conversion.
+- **A commit that names no damage takes the whole buffer.** The spec would let a
+compositor show nothing; taking everything is the safe direction, and it keeps a client
+that never calls `damage` correct.
+- **The cursor is one image, drawn when a frame is presented.** Not per-seat, and not
+redrawn when the pointer moves — nothing redraws on motion yet, so a moving pointer
+would smear until the next commit. A fully transparent pixel is skipped (a shaped
+cursor works); a partly transparent one is copied rather than blended.
+- **`set_cursor`'s serial is not validated** against a recent pointer `enter`.
+- **`close` is declared and never sent.** `xdg_surface.close`/`xdg_toplevel.close`
+need a window-management action (a titlebar button, a task switcher) to produce one,
+which is 2d/2e.
+- **`set_title`/`set_app_id` are accepted and dropped**, as are the window-management
+requests (`set_maximized`, `move`, `resize`, …): there is no window table for them
+to act on, and decorations (2e) are what will read the first two.
+- **`set_window_geometry` is accepted and ignored**: a toplevel fills the output,
+so there is no subrect to record yet.
+- **`get_popup` is still unimplemented** and reaches the server's
+"unimplemented" error; popups are 2e.
+- **`wl_pointer.set_cursor` is accepted and dropped** (Phase 1c), and stays
+dropped until 2d.
+- **There is no cursor theming**: 2d draws whatever image the client passed, with
+no theme lookup.
+- **Decorations default to client-side.** `zxdg_decoration_manager_v1` advertises
+client-side and refuses server-side until the window-table work SSD needs
+exists, so a toolkit with CSD is unblocked without it.
+- **A stock client needs the keymap *and* `xdg_shell`**, not either alone: 2a
+alone makes the keymap available but a toolkit still cannot map a window; 2b
+alone gives it a window but hands it keycodes it cannot turn into text.
+
+---
+
 ## 7. Phased plan
 
 | Phase | Deliverable | Gate |
 |---|---|---|
 | **0** | AF_UNIX server + `socketpair` + `sendmsg`/`recvmsg` + `SCM_RIGHTS`/`SO_PEERCRED`; native `poll`/`epoll`/`eventfd`/`timerfd`; `memfd_create` + `ftruncate` + anonymous shared frames; `mprotect`; `select` timeouts. **Landed:** sockets + fd passing (`test-uds-x86`), memfd (`test-memfd-x86`), `mprotect`, `select`/native `poll` with real deadlines (`test-select-x86`), `eventfd` (`test-eventfd-x86`), `timerfd` (`test-timerfd-x86`), `epoll` (`test-epoll-x86`). **Open:** none. | Two processes connect over the socket and **pass an fd**; a third `epoll_wait`s on it. Host + QEMU test |
 | **1** | In-house Wayland server, scoped in **§6.11**. **Landed:** 1a — the wire/interface crate and the registry + `sync` handshake over `/dev/uds` (`test-wayland-x86`); 1b — the `wl_shm` present path: `/sbin/wlserver` (boot proc 20) maps `/dev/fb`, `/bin/wlclient` draws into a memfd pool and commits a surface, and the frame is read back from `/dev/fb` (`test-wlshm-x86`); 1c — input: `wl_seat` keyboard/pointer, focus and `enter`, and a key routed from the device to a client (`test-wlkey-x86`), over an input-server ring that keeps a cursor per consumer and a terminal readiness path that reports instead of pushing (`KNOWN_ISSUES` 36, `test-pty-x86`). **Open:** none. | A `wl_shm` client renders through the server to `/dev/fb`, driven by a QEMU smoke scenario (same shape as `tools/smoke/`); a **ported stock** client later, on the same protocol |
-| **2** | `xdg_shell`, decorations, `layer_shell`, popups, damage tracking, cursor, keymaps, multi-output | A real toolkit client runs a window with chrome and input |
+| **2** | `xdg_shell`, decorations, `layer_shell`, popups, damage tracking, cursor, keymaps, multi-output — scoped in **§6.12**. **Landed:** 2a — the seat's keymap, compiled into `wlserver` and served over an fd (`test-wlkey-x86`); 2b — `xdg_shell`: `xdg_wm_base`/`xdg_surface`/`xdg_toplevel`, `configure`/`ack_configure`, `ping`/`pong`, and a toplevel presented at the configured size (`test-wlx-x86`); 2c — several clients at once and per-surface focus, with input routed to the focused connection (`test-wlfocus-x86`); 2d — damage tracking, so only the damaged rectangle is recomposited, and the pointer's cursor image (`test-wlxd-x86`). **Open:** 2e. | A real toolkit client runs a window with chrome and input |
 | **3** | GL rendering, scoped in **§6.10** — virgl over `virtio-gpu` first: 3D transport, a `virtgpu` render node, Mesa + `libdrm` as DSOs; llvmpipe kept as the fallback | The compositor renders GL content |
 | **4** | smithay port; `cosmic-comp` against our backends; `cosmic-session` + D-Bus | `cosmic-comp` on screen; a `libcosmic` app connects |
 | **5** | Portals, fonts, the `libcosmic` suite | A usable session |

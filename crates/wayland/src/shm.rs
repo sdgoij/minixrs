@@ -61,6 +61,15 @@ pub struct Buffer {
     pub pool_size: i32,
 }
 
+/// A rectangle, in surface or buffer coordinates.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Rect {
+    pub x: i32,
+    pub y: i32,
+    pub w: i32,
+    pub h: i32,
+}
+
 impl Buffer {
     /// Check the buffer against its pool. A client that sends a bad buffer is
     /// told why, rather than being handed garbage.
@@ -88,6 +97,34 @@ impl Buffer {
             return Err(ShmError::Bounds);
         }
         Ok(())
+    }
+
+    /// The part of this buffer a damage rectangle covers, and where that part's
+    /// top-left sits in the buffer's own coordinates.
+    ///
+    /// `wl_surface.damage` marks what a commit changed, so a compositor has only
+    /// that much to recomposite (2d). A rectangle that misses the buffer clips to
+    /// nothing and answers `None`.
+    pub fn damage_slice(&self, r: Rect) -> Option<(Buffer, i32, i32)> {
+        let x0 = r.x.max(0);
+        let y0 = r.y.max(0);
+        let x1 = (r.x + r.w).min(self.width);
+        let y1 = (r.y + r.h).min(self.height);
+        if x0 >= x1 || y0 >= y1 {
+            return None;
+        }
+        Some((
+            Buffer {
+                offset: self.offset + y0 * self.stride + x0 * BYTES_PER_PIXEL,
+                width: x1 - x0,
+                height: y1 - y0,
+                stride: self.stride,
+                format: self.format,
+                pool_size: self.pool_size,
+            },
+            x0,
+            y0,
+        ))
     }
 
     /// How many bytes the image occupies in the pool, offset included, or `None`
@@ -353,6 +390,59 @@ mod tests {
             |_, _, _| {},
         );
         assert_eq!(r, Err(ShmError::Bounds));
+    }
+
+    #[test]
+    fn damage_slice_carries_the_offset_and_the_clipped_origin() {
+        // Rows of 8 bytes; the rect at (1,1) 2x2 covers bytes 12..16 and 20..24.
+        let buf = buffer(0, 4, 4, 16, 64);
+        let (sub, x, y) = buf
+            .damage_slice(Rect {
+                x: 1,
+                y: 1,
+                w: 2,
+                h: 2,
+            })
+            .unwrap();
+        assert_eq!((x, y), (1, 1));
+        assert_eq!(sub.offset, 16 + 4);
+        assert_eq!((sub.width, sub.height, sub.stride), (2, 2, 16));
+        assert_eq!(sub.validate(), Ok(()));
+    }
+
+    #[test]
+    fn damage_slice_clips_to_the_buffer() {
+        let buf = buffer(0, 4, 4, 16, 64);
+        // A rect hanging off the right and bottom edges keeps the part inside.
+        let (sub, x, y) = buf
+            .damage_slice(Rect {
+                x: 2,
+                y: 2,
+                w: 10,
+                h: 10,
+            })
+            .unwrap();
+        assert_eq!((x, y), (2, 2));
+        assert_eq!((sub.width, sub.height), (2, 2));
+        // And one that shares no pixel with the buffer answers nothing at all.
+        assert!(
+            buf.damage_slice(Rect {
+                x: 9,
+                y: 9,
+                w: 4,
+                h: 4
+            })
+            .is_none()
+        );
+        assert!(
+            buf.damage_slice(Rect {
+                x: 0,
+                y: 0,
+                w: 0,
+                h: 0
+            })
+            .is_none()
+        );
     }
 
     #[test]
