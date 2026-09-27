@@ -254,6 +254,11 @@ pub struct Dmap {
     pub dmap_driver: i32,
     pub dmap_ep: i32,
     pub dmap_style: i32,
+    /// The device's ioctl request numbers follow Linux's encoding
+    /// (`asm-generic/ioctl.h`), not MINIX's. The two agree on the size field only up to
+    /// 12 bits, and their direction bits are each other's opposite, so VFS has to be told
+    /// which one a request number is in rather than assuming either.
+    pub dmap_linux_ioctl: bool,
     pub dmap_label: [u8; LABEL_MAX],
 }
 
@@ -263,6 +268,7 @@ impl Default for Dmap {
             dmap_driver: -1,
             dmap_ep: -1,
             dmap_style: 0,
+            dmap_linux_ioctl: false,
             dmap_label: [0u8; LABEL_MAX],
         }
     }

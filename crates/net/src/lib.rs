@@ -86,6 +86,29 @@ pub const fn ioc_is_in(request: u32) -> bool {
     request & 0xC000_0000 == ioc::IOC_IN || request & 0xC000_0000 == ioc::IOC_INOUT
 }
 
+/// Byte size of the arg struct in a request whose numbers are **Linux's**
+/// (`asm-generic/ioctl.h`), whose size field is 14 bits rather than
+/// [`ioc::IOCPARM_MASK`]'s 13.
+pub const fn ioc_size_linux(request: u32) -> usize {
+    ((request >> 16) & 0x3fff) as usize
+}
+
+/// True for a **Linux**-encoded `_IOW`: data travels *from* the caller, so the driver reads
+/// the buffer.
+///
+/// This is MINIX's [`ioc_is_out`] bit, and that is the whole difficulty: the two encodings
+/// put the same two bits in the same two places with the opposite meaning. A request number
+/// alone cannot say which encoding it is in, which is why the device's dmap entry does.
+pub const fn ioc_linux_copies_in(request: u32) -> bool {
+    request & 0x4000_0000 != 0
+}
+
+/// True for a **Linux**-encoded `_IOR`: data travels *to* the caller, so the driver writes
+/// the buffer. MINIX's [`ioc_is_in`] bit.
+pub const fn ioc_linux_copies_out(request: u32) -> bool {
+    request & 0x8000_0000 != 0
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

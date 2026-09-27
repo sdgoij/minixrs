@@ -2903,7 +2903,7 @@ pub fn do_vm_call() -> i32 {
                     // IS_DEVICE + dev + phys + len; VM builds a VR_DIRECT
                     // region instead of a file region.
                     let dev = (*vp).v_dev;
-                    let (r, phys, len) = crate::vfs::device::cdev_map_phys(dev);
+                    let (r, phys, len) = crate::vfs::device::cdev_map_phys(dev, offset as u64);
                     if r != OK {
                         return vm_call_reply(ep, r, req_id);
                     }

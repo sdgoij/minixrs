@@ -208,6 +208,7 @@ const fn new_dmap_array() -> [Dmap; NR_DEVICES] {
         dmap_driver: -1,
         dmap_ep: -1,
         dmap_style: 0,
+        dmap_linux_ioctl: false,
         dmap_label: [0u8; LABEL_MAX],
     }; NR_DEVICES]
 }
@@ -355,15 +356,11 @@ mod tests {
         // probe anchors; keep in sync with the struct). Filp gained
         // filp_dev/filp_dgram (8 bytes × NR_FILPS = 8192 shift); Vnode
         // gained the mapped-FS fields (v_mapfs_e/v_mapinode_nr/v_mapfs_count
-        // → 88-byte stride, 8 bytes × NR_VNODES = 8192 more).
-        // Byte offsets of protocol fields inside VfsGlobal (QEMU-monitor
-        // probe anchors; keep in sync with the struct). Filp gained
-        // filp_dev/filp_dgram (8 bytes × NR_FILPS = 8192 shift); Vnode
-        // gained the mapped-FS fields (v_mapfs_e/v_mapinode_nr/v_mapfs_count
         // → 88-byte stride, 8 bytes × NR_VNODES = 8192 more). Fproc's
         // fp_sgroups shrank to the port's NGROUPS_MAX of 32 (64 bytes × 256
-        // fprocs = 16384 the other way).
-        assert_eq!(core::mem::offset_of!(VfsGlobal, err_code), 312384);
-        assert_eq!(core::mem::offset_of!(VfsGlobal, fs_m_in), 312400);
+        // fprocs = 16384 the other way). Dmap gained dmap_linux_ioctl
+        // (1 byte × NR_DEVICES = 256 the other way).
+        assert_eq!(core::mem::offset_of!(VfsGlobal, err_code), 312640);
+        assert_eq!(core::mem::offset_of!(VfsGlobal, fs_m_in), 312656);
     }
 }

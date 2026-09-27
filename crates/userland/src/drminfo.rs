@@ -11,7 +11,7 @@
 //! is no 3D on this host — is printed, so a boot with no GL shows what a client *sees*
 //! rather than only that it saw nothing.
 
-use crate::{write_err, write_out};
+use crate::{Decimal as Dec, append, write_err, write_out};
 
 /// The render node. A render node is what a client that draws without a display uses, and
 /// DRM numbers them from 128 so a `cardN` and a `renderDN` never collide.
@@ -113,41 +113,6 @@ fn getparam(fd: i32, param: u64) -> Result<i32, i32> {
         core::ptr::addr_of_mut!(arg) as *mut u8,
     )?;
     Ok(value)
-}
-
-/// A `u32` in decimal, so the line needs no formatting machinery.
-struct Dec {
-    buf: [u8; 10],
-    at: usize,
-}
-
-impl Dec {
-    fn of(mut v: u32) -> Self {
-        let mut buf = [b'0'; 10];
-        let mut at = buf.len();
-        loop {
-            at -= 1;
-            buf[at] = b'0' + (v % 10) as u8;
-            v /= 10;
-            if v == 0 {
-                break;
-            }
-        }
-        Self { buf, at }
-    }
-
-    fn bytes(&self) -> &[u8] {
-        &self.buf[self.at..]
-    }
-}
-
-/// Append to a line buffer, dropping what does not fit — the same helper shape the boot
-/// logs use, so the line can be built without allocating.
-fn append(line: &mut [u8], at: &mut usize, text: &[u8]) {
-    let end = (*at + text.len()).min(line.len());
-    let n = end - *at;
-    line[*at..end].copy_from_slice(&text[..n]);
-    *at = end;
 }
 
 /// Append a written `Ok`/`Err` pair as two fields: the value and the errno. Both are

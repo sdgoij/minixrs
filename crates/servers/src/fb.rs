@@ -57,6 +57,46 @@ static FB_BUF: FbBufCell = FbBufCell::new();
 /// Scratch space for ioctl arg structs and inline write data.
 static mut FB_SCRATCH: [u8; 128] = [0; 128];
 
+/// The backing the render node's memory objects come from (`WAYLAND.md` §6.10, stage 3b-3).
+///
+/// A DRM object's memory is guest memory this server owns: a client's `mmap` of one maps
+/// these very frames (the same K3 path `/dev/fb` uses), so each object needs one
+/// page-aligned, physically contiguous range. A static arena gives that for nothing, at the
+/// cost of a fixed capacity — which is why this is a bring-up answer. The modern path is a
+/// blob the *client* supplies (3b-4), whose size is the client's business and not a
+/// constant here.
+///
+/// 8 slots of 1 MiB: a 1024×256 RGBA surface, or many small objects, which is what a first
+/// GL triangle and a compositor's buffers need. A full-screen surface waits for blobs.
+///
+/// x86-only, like the probe that fills it: it is the arch where the render device is a
+/// device of its own rather than the one already presenting (D3), so it is the only one with
+/// a node to back — and 8 MiB of `.bss` is not something another arch should carry for
+/// nothing.
+#[cfg(target_arch = "x86_64")]
+const GEM_OBJECT_LEN: u32 = 1024 * 1024;
+
+/// One slot per object the node's table can hold, so the two cannot drift apart.
+#[cfg(target_arch = "x86_64")]
+const GEM_ARENA_LEN: usize = GEM_OBJECT_LEN as usize * drivers::video::drm::MAX_OBJECTS;
+
+#[cfg(target_arch = "x86_64")]
+#[repr(align(4096))]
+struct GemArenaCell(core::cell::UnsafeCell<[u8; GEM_ARENA_LEN]>);
+#[cfg(target_arch = "x86_64")]
+unsafe impl Sync for GemArenaCell {}
+#[cfg(target_arch = "x86_64")]
+impl GemArenaCell {
+    const fn new() -> Self {
+        Self(core::cell::UnsafeCell::new([0u8; GEM_ARENA_LEN]))
+    }
+    fn get(&self) -> u64 {
+        self.0.get() as u64
+    }
+}
+#[cfg(target_arch = "x86_64")]
+static GEM_ARENA: GemArenaCell = GemArenaCell::new();
+
 /// The minor the DRM render node answers on (`WAYLAND.md` §6.10, stage 3b).
 ///
 /// VFS routes a `CDEV_*` request by *major* and sends only the *minor*, so the two
@@ -426,8 +466,14 @@ pub fn fb_server_main() {
         {
             let backend = unsafe { &*core::ptr::addr_of!(FB_BACKEND) };
             if !matches!(backend, FbBackend::VirtioGpu(_)) {
-                let (gpu, node) = drivers::video::virtio_gpu::probe_render_node();
+                let (gpu, mut node) = drivers::video::virtio_gpu::probe_render_node();
                 report_gpu3d(&gpu);
+                // The objects the node hands out live in this server's arena, so it is
+                // named here rather than inside the node: the node owns the layout, this
+                // process owns the bytes (and the VA→PA translation a mapping needs).
+                if let Some(node) = node.as_mut() {
+                    node.set_gem_arena(GEM_ARENA.get(), GEM_OBJECT_LEN);
+                }
                 // The node is kept for the DRM render node's clients. `None` means this
                 // machine has no `virtio-gpu` device, and then `/dev/dri/renderD128`
                 // refuses to open rather than answering for a device that is not there.
@@ -738,10 +784,10 @@ fn safecopy_to(_grantee: i32, _grant: u32, _data: &[u8]) -> i32 {
 /// Answer a `/dev/dri/renderD128` request: the DRM render node's `CDEV_*` surface
 /// (`WAYLAND.md` §6.10, stage 3b).
 ///
-/// Three of the ops are refusals, and deliberately so. A DRM render node is an `ioctl`
-/// interface: `read`/`write` have no data stream and no event queue yet, and `mmap` has
-/// nothing to map until the node has GEM objects (3b-3) — answering it with the
-/// framebuffer's range would hand a client a view of memory it did not ask for.
+/// `read` and `write` are refusals, and deliberately so: a DRM render node is an `ioctl`
+/// interface, with no data stream and no event queue yet. `mmap` is answered only for a
+/// token that names an object the node holds — never with the framebuffer's range, which
+/// would hand a client a view of memory it did not ask for.
 ///
 /// # Safety
 ///
@@ -769,8 +815,37 @@ unsafe fn handle_drm_request(
             let user = unsafe { msg.m_payload.m2.m2l1 } as i32;
             drm_ioctl(request, who_e, grant, user)
         }
+        CDEV_MAP => {
+            // The offset is the token `VIRTGPU_MAP` handed out, not a byte offset (Linux's
+            // is a fake offset of the same kind). The reply is the framebuffer's shape:
+            // guest-physical base and length in the payload's first two u64s.
+            #[cfg(target_arch = "wasm32")]
+            {
+                // No page tables to map a physical range through, and no render node
+                // either: the device is the host's canvas (`ARCH_WASM32.md` §9.2).
+                -95 // EOPNOTSUPP
+            }
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                let offset = unsafe { msg.m_payload.m2.m2l1 as u64 };
+                let node = unsafe { &*core::ptr::addr_of!(RENDER_NODE) };
+                let Some(node) = node else {
+                    return -6; // ENXIO: no render node on this machine
+                };
+                match node.map_range(offset) {
+                    Ok((va, len)) => {
+                        let phys = va.wrapping_add(virtio::virtio_phys_delta() as u64);
+                        unsafe {
+                            msg.m_payload.raw[0..8].copy_from_slice(&phys.to_le_bytes());
+                            msg.m_payload.raw[8..16].copy_from_slice(&len.to_le_bytes());
+                        }
+                        0
+                    }
+                    Err(e) => e,
+                }
+            }
+        }
         CDEV_READ | CDEV_WRITE => -22, // EINVAL
-        CDEV_MAP => -22,               // EINVAL
         _ => -38,                      // ENOSYS
     }
 }

@@ -2309,11 +2309,20 @@ fn start_mmap_file(ep: i32, fd: i32, map_flags: u32, msg: &mut Message) -> i32 {
         );
     }
     let job = crate::vm::vfs_request::Job::Mmap { ep, caller_msg };
+    // The caller's offset travels to VFS, which is the only one who can tell what the fd is:
+    // for a regular file it is a file offset, and for a char device it is whatever the device
+    // said its `mmap` offset means — for a DRM render node, which object to map. Dropping it
+    // here (it used to be a hardcoded 0) makes every object map the device's first one.
+    let file_offset = i64::from_ne_bytes(
+        unsafe { &msg.m_payload.raw }[MMAP_OFFSET..MMAP_OFFSET + 8]
+            .try_into()
+            .unwrap_or([0; 8]),
+    );
     match crate::vm::vfs_request::send(
         arch_common::com::VMVFSREQ_FDLOOKUP as i32,
         fd,
         ep,
-        0,
+        file_offset.max(0) as u64,
         0,
         0,
         job,

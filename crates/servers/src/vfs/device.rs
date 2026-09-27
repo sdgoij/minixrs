@@ -298,13 +298,33 @@ pub fn cdev_io(op: i32, dev: u32, proc_e: i32, buf: u64, pos: i64, bytes: u64, _
     // reads): m2_i1 = minor, m2_i2 = request, m2_i3 = grant,
     // m2_l1 = user endpoint, m2_l2 = flags, m2_l3 = id.
     let request = bytes as u32;
-    let arg_size = net::ioc_size(request);
+    // Which way the argument travels, and how long it is. Two conventions are in play and a
+    // request number cannot say which it is in: MINIX's own numbers put "copy out" in
+    // `IOC_OUT`, while a Linux-encoded `_IOW` — data *in* — sits in that same bit. The
+    // device's dmap entry is what says which, so a driver whose ABI is Linux's is decoded
+    // the other way round. Getting this wrong is an `EFAULT` on the first unidirectional
+    // request, not a wrong answer.
+    let linux_abi = unsafe { (*dp).dmap_linux_ioctl };
+    let arg_size = if linux_abi {
+        net::ioc_size_linux(request)
+    } else {
+        net::ioc_size(request)
+    };
     let mut grant_access = 0;
-    if net::ioc_is_out(request) {
-        grant_access |= CPF_WRITE;
-    }
-    if net::ioc_is_in(request) {
-        grant_access |= CPF_READ;
+    if linux_abi {
+        if net::ioc_linux_copies_in(request) {
+            grant_access |= CPF_READ;
+        }
+        if net::ioc_linux_copies_out(request) {
+            grant_access |= CPF_WRITE;
+        }
+    } else {
+        if net::ioc_is_out(request) {
+            grant_access |= CPF_WRITE;
+        }
+        if net::ioc_is_in(request) {
+            grant_access |= CPF_READ;
+        }
     }
     let mut grant = GRANT_INVALID;
     if arg_size > 0 {
@@ -449,7 +469,7 @@ pub fn cdev_select(dev: u32, ops: i32) -> i32 {
 /// and length in the payload (u64 each).
 ///
 /// Returns `(status, phys, len)`; on error phys/len are 0.
-pub fn cdev_map_phys(dev: u32) -> (i32, u64, u64) {
+pub fn cdev_map_phys(dev: u32, offset: u64) -> (i32, u64, u64) {
     let dp = dmap::get_dmap_by_major((dev >> 16) as i32);
     if dp.is_null() {
         return (ENXIO, 0, 0);
@@ -458,7 +478,7 @@ pub fn cdev_map_phys(dev: u32) -> (i32, u64, u64) {
     if drv_e < 0 {
         return (ENXIO, 0, 0);
     }
-    let mut msg = build_cdev_map_msg((dev & 0xFFFF) as i32);
+    let mut msg = build_cdev_map_msg((dev & 0xFFFF) as i32, offset);
     let r = unsafe { request::fs_sendrec(drv_e, &mut msg) };
     if r < 0 {
         return (r, 0, 0);
@@ -466,12 +486,17 @@ pub fn cdev_map_phys(dev: u32) -> (i32, u64, u64) {
     parse_cdev_map_reply(&msg)
 }
 
-/// Build a CDEV_MAP request message (m_type @ 4, minor @ 8, flags @ 12).
-fn build_cdev_map_msg(minor: i32) -> [u8; 56] {
+/// Build a CDEV_MAP request message (m_type @ 4, minor @ 8, flags @ 12, offset @ 24).
+///
+/// The offset is the caller's `mmap` offset, passed through untouched: what it means is the
+/// device's business. `/dev/fb` ignores it (it has one range), and a DRM render node reads it
+/// as the token `VIRTGPU_MAP` handed out for one object.
+fn build_cdev_map_msg(minor: i32, offset: u64) -> [u8; 56] {
     let mut msg = [0u8; 56];
     request::w_i32(&mut msg, 4, CDEV_MAP as i32);
     request::w_i32(&mut msg, CDEV_MINOR_OFF, minor);
     request::w_i32(&mut msg, CDEV_FLAGS_OFF, 0);
+    request::w_i64(&mut msg, CDEV_POS_OFF, offset as i64);
     msg
 }
 
@@ -812,12 +837,18 @@ mod tests {
 
     #[test]
     fn test_build_cdev_map_msg_layout() {
-        // CDEV_MAP: m_type @ 4, minor @ 8, flags @ 12 — the fb server's
-        // handle_cdev_request reads m2_i1/m2_i2 at those payload offsets.
-        let msg = build_cdev_map_msg(0);
+        // CDEV_MAP: m_type @ 4, minor @ 8, flags @ 12, offset @ 24 — the fb server's
+        // handle_cdev_request reads m2_i1/m2_i2 at those payload offsets, and the DRM node's
+        // map arm reads the offset from m2_l1.
+        let msg = build_cdev_map_msg(0, 0);
         assert_eq!(request::r_i32(&msg, 4), CDEV_MAP as i32);
         assert_eq!(request::r_i32(&msg, CDEV_MINOR_OFF), 0);
         assert_eq!(request::r_i32(&msg, CDEV_FLAGS_OFF), 0);
+        assert_eq!(request::r_i64(&msg, CDEV_POS_OFF), 0);
+
+        let msg = build_cdev_map_msg(128, 0x2000);
+        assert_eq!(request::r_i32(&msg, CDEV_MINOR_OFF), 128);
+        assert_eq!(request::r_i64(&msg, CDEV_POS_OFF), 0x2000);
     }
 
     #[test]

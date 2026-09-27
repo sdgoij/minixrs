@@ -41,6 +41,11 @@ path = "src/bin/drminfo.rs"
 test = false
 
 [[bin]]
+name = "drmmap"
+path = "src/bin/drmmap.rs"
+test = false
+
+[[bin]]
 name = "init"
 path = "src/bin/init.rs"
 test = false

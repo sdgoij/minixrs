@@ -1,0 +1,27 @@
+# The `just test-drmmap-x86` scenario: the render node's memory objects, created and mapped
+# by a client (`WAYLAND.md` §6.10, stage 3b-3). One step, because the proof is one program's
+# whole session — create, map, write through one mapping and read through another, then close
+# — and no single call of it says anything on its own.
+#
+# The device is the plain `virtio-gpu-pci` that `drminfo.tsv` uses, for its reason and one
+# more. Its reason is that this gate types into the guest, and a GL device needs a GL display
+# backend whose host workload drops serial bytes (measured). The extra one is that
+# `RESOURCE_CREATE` on a device without GL takes the 2D path — `RESOURCE_CREATE_2D` and
+# `ATTACH_BACKING`, the same two commands the scanout resource is made with — and that is the
+# path a client meets on any machine whose host has no GL.
+#
+# The expected line is the whole session's verdict, so each field is a claim:
+#
+#   h=1 res=1        the object the node made, named the way it named it
+#   size=16384       the length `RESOURCE_INFO` reports for it (64×64×4, already a whole
+#                    number of pages)
+#   alias=16384      every byte of the object carried between two mappings of one offset —
+#                    only one set of frames can do that
+#   apart=16384      every byte of a second object differing from the first one's pattern:
+#                    distinct objects are distinct memory
+#   close=err 2      `ENOENT` from `VIRTGPU_MAP` of the handle `GEM_CLOSE` took away
+#
+# A `mmap` of an offset belonging to no object is covered by the same field: the token is what
+# names memory here, and a closed object's token stops naming any.
+
+/bin/drmmap	drmmap: h=1 res=1 size=16384 alias=16384 apart=16384 close=err 2

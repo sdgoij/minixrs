@@ -12,7 +12,8 @@ use crate::{Message, MinixErr, VM_PROC_NR, sendrec};
 
 pub use minix_rt::vmem::{
     MAP_ANONYMOUS, MAP_FAILED, MAP_FIXED, MAP_PRIVATE, MAP_SHARED, PROT_EXEC, PROT_NONE,
-    PROT_PREFAULT, PROT_READ, PROT_WRITE, VM_MMAP, VM_MPROTECT, VM_MUNMAP, mmap, mprotect, munmap,
+    PROT_PREFAULT, PROT_READ, PROT_WRITE, VM_MMAP, VM_MPROTECT, VM_MUNMAP, mmap, mmap_status,
+    mprotect, munmap,
 };
 
 pub const VM_RQ_BASE: u32 = 0xC00;

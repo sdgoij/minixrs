@@ -197,6 +197,9 @@ pub const BOOT_BINS: &[(&str, &str)] = &[
     // says it is (`WAYLAND.md` §6.10, stage 3b). It is also a second, independent
     // statement of the render node's ABI — see the module's own comment.
     ("/bin/drminfo", "drminfo"),
+    // `/bin/drmmap` makes a render node memory object, maps it, and proves the mapping is
+    // that object's memory (§6.10, stage 3b-3).
+    ("/bin/drmmap", "drmmap"),
 ];
 
 /// Programs a **wasm32** image carries: destination path → module file name in the target's

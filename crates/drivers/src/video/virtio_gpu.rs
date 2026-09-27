@@ -830,6 +830,26 @@ impl VirtioGpuArch {
         self.send_cmd(struct_bytes(&cmd))
     }
 
+    /// `RESOURCE_CREATE_2D`: a resource whose contents are guest pages — the shape a device
+    /// with no GL has, and the one the scanout resource is made with. It carries no target,
+    /// so the geometry it can express is a plain 2D surface.
+    fn resource_create_2d(
+        &mut self,
+        resource_id: u32,
+        format: u32,
+        width: u32,
+        height: u32,
+    ) -> Result<(), DriverError> {
+        let cmd = ResourceCreate2D {
+            hdr: CtrlHdr::new(CMD_RESOURCE_CREATE_2D),
+            resource_id,
+            format,
+            width,
+            height,
+        };
+        self.send_cmd(struct_bytes(&cmd))
+    }
+
     /// `RESOURCE_CREATE_3D`: a resource whose contents are a *host-side* texture rather
     /// than the guest's pages. That distinction is the whole point of the round-trip: a
     /// resource is only transferred to and from, where a resource that merely *is* guest
@@ -837,6 +857,7 @@ impl VirtioGpuArch {
     fn resource_create_3d(
         &mut self,
         resource_id: u32,
+        target: u32,
         width: u32,
         height: u32,
         format: u32,
@@ -845,7 +866,7 @@ impl VirtioGpuArch {
         let cmd = ResourceCreate3D {
             hdr: CtrlHdr::new(CMD_RESOURCE_CREATE_3D),
             resource_id,
-            target: PIPE_TEXTURE_2D,
+            target,
             format,
             bind,
             width,
@@ -990,6 +1011,7 @@ impl VirtioGpuArch {
         }
         self.resource_create_3d(
             RES,
+            PIPE_TEXTURE_2D,
             PROBE_TEX_W,
             PROBE_TEX_H,
             VIRGL_FORMAT_B8G8R8A8_UNORM,
@@ -1067,9 +1089,45 @@ pub struct DrmNode {
     virgl: bool,
     blob: bool,
     context_init: bool,
+    /// The objects this node has handed out.
+    gems: drm::GemTable,
+    /// Image VA of slot 0 of the backing the objects come from. Slot `i` is at
+    /// `gem_arena + i * slot_len`; the server that owns the memory names it here, so the
+    /// node owns the layout and the server owns the bytes.
+    gem_arena: u64,
 }
 
 impl DrmNode {
+    /// Hand the node the backing its objects come from: the image VA of slot 0, and how
+    /// many bytes one slot holds. The *server* owns the memory (it is the one that can name
+    /// a guest-physical address and hand a client a mapping of it), so the node is told
+    /// rather than given it. Until this is called the node has no backing and refuses every
+    /// create.
+    pub fn set_gem_arena(&mut self, va: u64, slot_len: u32) {
+        self.gem_arena = va;
+        self.gems = drm::GemTable::new(slot_len);
+    }
+
+    /// The image VA of slot `slot` of the backing. Which memory a slot names is this node's
+    /// layout, so the arithmetic lives here and the server owns only the arena's base and
+    /// slot size.
+    fn slot_va(&self, slot: usize) -> u64 {
+        self.gem_arena + slot as u64 * self.gems.slot_len() as u64
+    }
+
+    /// The image VA and length of the object an `mmap` offset names, or `ENOENT` for one
+    /// this node does not hold. Translating the VA to a guest-physical address is the
+    /// server's, because the VA→PA delta is its process's.
+    pub fn map_range(&self, offset: u64) -> Result<(u64, u64), i32> {
+        let Some(slot) = drm::GemTable::slot_of_offset(offset) else {
+            return Err(drm::ENOENT);
+        };
+        let Some(len) = self.gems.len_at_offset(offset) else {
+            return Err(drm::ENOENT);
+        };
+        Ok((self.slot_va(slot), len as u64))
+    }
+
     /// The capset with this id, if the host offers one.
     fn capset(&self, id: u32) -> Option<CapsetInfo> {
         self.capsets[..self.count]
@@ -1150,6 +1208,108 @@ impl drm::RenderNode for DrmNode {
             .map(|n| n as usize)
             .map_err(|_| drm::EINVAL)
     }
+
+    fn create_object(&mut self, request: drm::ResourceCreate) -> Result<drm::CreatedObject, i32> {
+        // A node with no backing can name no object. The server that owns the memory says
+        // so with a zero-length slot, and every create is then `EINVAL` rather than a
+        // mapping onto nothing.
+        if self.gems.slot_len() == 0 {
+            return Err(drm::EINVAL);
+        }
+        // Linux's re-create: a new resource attached to an existing GEM object. Refused
+        // rather than answered with a second object, which is what a client that set the
+        // field would otherwise silently get.
+        if request.bo_handle != 0 {
+            return Err(drm::EINVAL);
+        }
+        // The shape a 2D command cannot carry. Linux refuses these the same way when the
+        // device has no 3D, and the checks are on the request rather than on the device so
+        // that a client hears about them before the geometry is used.
+        if !self.virgl
+            && (request.depth > 1
+                || request.nr_samples > 1
+                || request.last_level > 1
+                || request.target != PIPE_TEXTURE_2D
+                || request.array_size > 1)
+        {
+            return Err(drm::EINVAL);
+        }
+        // The caller's own byte count: this ABI does not derive the length from the geometry,
+        // and a request that named none gets one page, which is the table's rule.
+        let object = self.gems.create(request.size)?;
+        let pa = self
+            .slot_va((object.handle - 1) as usize)
+            .wrapping_add(virtio::virtio_phys_delta() as u64);
+
+        let host = if self.virgl {
+            self.dev.resource_create_3d(
+                object.res_handle,
+                request.target,
+                request.width,
+                request.height,
+                request.format,
+                request.bind,
+            )
+        } else {
+            self.dev
+                .resource_create_2d(object.res_handle, request.format, request.width, request.height)
+        };
+        if host.is_err() {
+            // Nothing to unref: the host refused the resource itself, so the slot is all this
+            // create took, and it goes back before the failure is reported. A handle the
+            // client has but cannot use would surface at `mmap`, one call further from the
+            // cause.
+            self.gems.remove(object.handle);
+            return Err(drm::EINVAL);
+        }
+        if self
+            .dev
+            .attach_backing(object.res_handle, pa, object.size)
+            .is_err()
+        {
+            // The resource exists now. The slot is released only once the host has released
+            // the resource, so a refused unref keeps the two together: the create fails, and
+            // the next one cannot reuse an id the device never gave back.
+            if self.dev.resource_unref(object.res_handle).is_ok() {
+                self.gems.remove(object.handle);
+            }
+            return Err(drm::EINVAL);
+        }
+        Ok(object)
+    }
+
+    fn map_offset(&mut self, handle: u32) -> Result<u64, i32> {
+        let Some((slot, _)) = self.gems.lookup(handle) else {
+            return Err(drm::ENOENT);
+        };
+        Ok(drm::GemTable::offset_of(slot))
+    }
+
+    fn resource_info(&mut self, handle: u32) -> Result<drm::ResourceInfo, i32> {
+        let Some((_, len)) = self.gems.lookup(handle) else {
+            return Err(drm::ENOENT);
+        };
+        Ok(drm::ResourceInfo {
+            res_handle: handle,
+            size: len,
+            // No blobs yet, so no object has a blob kind (3b-4).
+            blob_mem: 0,
+        })
+    }
+
+    fn close_object(&mut self, handle: u32) -> Result<(), i32> {
+        if self.gems.lookup(handle).is_none() {
+            return Err(drm::ENOENT);
+        }
+        // Unref first, and keep the slot on a refusal: the slot names memory the host still
+        // holds a resource for, so releasing it early would let the next create reuse a
+        // resource id the device never gave back.
+        if self.dev.resource_unref(handle).is_err() {
+            return Err(drm::EINVAL);
+        }
+        self.gems.remove(handle);
+        Ok(())
+    }
 }
 
 /// Negotiate the render node and take it (§6.10, stage 3b): the features, the control
@@ -1167,15 +1327,14 @@ fn open_render_node(out: &mut Gpu3d) -> Option<DrmNode> {
     out.blob = virtio::virtio_host_supports(&dev, VIRTIO_GPU_F_RESOURCE_BLOB);
     out.context_init = virtio::virtio_host_supports(&dev, VIRTIO_GPU_F_CONTEXT_INIT);
 
-    // The control queues exist for a device that can be commanded: without VIRGL the
-    // capset and context commands are answered with errors, so they are not set up and
-    // nothing below is asked.
-    if out.virgl {
-        let Ok(queues) = setup_queues(&mut dev) else {
-            return None;
-        };
-        out.queues = queues;
-    }
+    // The control queues exist for a device that can be *commanded*, which is what the 2D
+    // commands a render node serves its clients with need — GL or no GL. The capset and
+    // context commands are the ones a device without VIRGL answers with errors, so those
+    // are what the feature gates below; the queues are not.
+    let Ok(queues) = setup_queues(&mut dev) else {
+        return None;
+    };
+    out.queues = queues;
 
     let mut node = DrmNode {
         dev: VirtioGpuArch::new(),
@@ -1184,6 +1343,8 @@ fn open_render_node(out: &mut Gpu3d) -> Option<DrmNode> {
         virgl: out.virgl,
         blob: out.blob,
         context_init: out.context_init,
+        gems: drm::GemTable::new(0),
+        gem_arena: 0,
     };
     node.dev.vdev = Some(dev);
     // A device with no GL still has a *node*: a DRM render node whose driver has no 3D
@@ -1885,6 +2046,8 @@ mod tests {
             virgl,
             blob,
             context_init,
+            gems: drm::GemTable::new(0),
+            gem_arena: 0,
         };
         node.capsets[..capsets.len()].copy_from_slice(capsets);
         node

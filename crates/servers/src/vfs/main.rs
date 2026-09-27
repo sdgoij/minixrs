@@ -185,6 +185,11 @@ unsafe fn sef_cb_init_fresh() -> i32 {
             arch_common::com::DRM_MAJOR as i32,
             arch_common::com::FB_PROC_NR,
         );
+        // This device's ioctl numbers are Linux's, not MINIX's. The two encodings use the
+        // same two direction bits with the opposite meaning (`net::ioc_linux_copies_in`),
+        // and VFS builds the argument grant from them — so the one place that knows is the
+        // one place that says.
+        dmap::mark_linux_ioctl(arch_common::com::DRM_MAJOR as i32);
     }
 
     // Register the grant table with the kernel so FS servers can

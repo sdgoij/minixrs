@@ -369,6 +369,19 @@ test-gpu3d-nogl-x86 boot-timeout="20": build-x86
     @just _assert-qemu-log target/test-gpu3d-nogl-x86.log "fb: gpu3d device, no VIRTIO_GPU_F_VIRGL"
     @echo "gpu3d: a device the host gave no GL to was reported as no 3D by the fb server and by a client opening its render node (x86_64)"
 
+# The node's *memory objects*, which is 3b-3 and a different claim from 3b-2's: a client
+# creates one, maps it, and proves the mapping is that object's memory. Same device as the
+# gate above and for the same reasons (it types, so it needs the 2D-only device; and
+# `RESOURCE_CREATE` on a device without GL is the `RESOURCE_CREATE_2D` +
+# `ATTACH_BACKING` path, which a later client meets whenever the host has no GL).
+test-drmmap-x86 boot-timeout="20": build-x86
+    mkdir -p target/images/x86_64-pc-minix
+    cp target/trampoline.elf target/images/x86_64-pc-minix/minix-x86.elf
+    @just _assert-qemu-version qemu-system-x86_64
+    FEED_SCENARIO=tools/smoke/drmmap.tsv sh tools/smoke/feed.sh target/test-drmmap-x86.log {{boot-timeout}} qemu-system-x86_64 -nographic -m 256M -no-reboot -vga none -device bochs-display,id=fb0 -kernel target/images/x86_64-pc-minix/minix-x86.elf -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0 -device virtio-tablet-pci,display=fb0 -device virtio-gpu-pci
+    @just _assert-qemu-log target/test-drmmap-x86.log "fb: gpu3d device, no VIRTIO_GPU_F_VIRGL"
+    @echo "drmmap: a client created a render node memory object, mapped it twice, found one set of frames, saw a second object be other memory, and closed it (x86_64)"
+
 # Acceptance test for KNOWN_ISSUES.md 12 — `coreutils seq 3` must write its three lines and
 # the next tool must read them back. It is the gate that made the multicall wedge findable: a
 # child used to die inside `clap` on a corrupted pointer (item 12's open half), and these steps

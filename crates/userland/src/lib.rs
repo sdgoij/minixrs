@@ -27,6 +27,9 @@ pub mod wlclient;
 /// The DRM render node's client — `/bin/drminfo` (`WAYLAND.md` §6.10, stage 3b).
 pub mod drminfo;
 
+/// The DRM render node's memory objects, mapped by a client — `/bin/drmmap` (§6.10, 3b-3).
+pub mod drmmap;
+
 /// When >= 0, all `write_out` calls are routed through this fd (via VFS)
 /// instead of the kernel's serial shortcut on fd 1. Set by the shell's
 /// redirect child after `fork`, so it is process-private.
@@ -109,6 +112,44 @@ pub fn write_err(s: &[u8]) {
     unsafe {
         minix_rt::write(2, s.as_ptr(), s.len());
     }
+}
+
+/// A `u32` in decimal, so a status line needs no formatting machinery.
+///
+/// The clients that report a line of `name=value` fields (`drminfo`, `drmmap`) share this
+/// with the boot logs' own builders: a line has to be assembled in place, without an
+/// allocator, and the fields are all small numbers.
+pub(crate) struct Decimal {
+    buf: [u8; 10],
+    at: usize,
+}
+
+impl Decimal {
+    pub(crate) fn of(mut v: u32) -> Self {
+        let mut buf = [b'0'; 10];
+        let mut at = buf.len();
+        loop {
+            at -= 1;
+            buf[at] = b'0' + (v % 10) as u8;
+            v /= 10;
+            if v == 0 {
+                break;
+            }
+        }
+        Self { buf, at }
+    }
+
+    pub(crate) fn bytes(&self) -> &[u8] {
+        &self.buf[self.at..]
+    }
+}
+
+/// Append to a line buffer, dropping what does not fit.
+pub(crate) fn append(line: &mut [u8], at: &mut usize, text: &[u8]) {
+    let end = (*at + text.len()).min(line.len());
+    let n = end - *at;
+    line[*at..end].copy_from_slice(&text[..n]);
+    *at = end;
 }
 
 /// Convert a null-terminated argv pointer into a slice of string slices.

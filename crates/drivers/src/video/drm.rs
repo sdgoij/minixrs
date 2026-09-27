@@ -35,8 +35,13 @@ pub const ENOTTY: i32 = -25;
 pub const EINVAL: i32 = -22;
 /// `ENOSYS` — the node has no capsets at all, i.e. no GL on this host.
 pub const ENOSYS: i32 = -38;
+/// `ENOENT` — a handle, capset or resource this node does not hold.
+pub const ENOENT: i32 = -2;
 /// `EFAULT` — a user buffer could not be reached.
 pub const EFAULT: i32 = -14;
+/// `ENOSPC` — a request that would exceed a fixed capacity. Its own name here because it is
+/// not a malformed request: it is a caller closing an object and asking again.
+pub const ENOSPC: i32 = -28;
 
 /// `asm-generic/ioctl.h` field shifts.
 const IOC_NRSHIFT: u32 = 0;
@@ -206,6 +211,169 @@ pub trait RenderNode {
     /// return the blob's *whole* length, or `ENOSYS` when there are no capsets (no GL on
     /// the host) and `EINVAL` for an id or version the host does not have.
     fn get_caps(&mut self, capset_id: u32, version: u32, out: &mut [u8]) -> Result<usize, i32>;
+
+    /// `DRM_IOCTL_VIRTGPU_RESOURCE_CREATE`: make a memory object. A request this node
+    /// cannot honour — a re-create, a 3D shape on a device without GL, one longer than its
+    /// backing — is `EINVAL`, and a full table is `ENOSPC`.
+    fn create_object(&mut self, request: ResourceCreate) -> Result<CreatedObject, i32>;
+
+    /// `DRM_IOCTL_VIRTGPU_MAP`: the object's `mmap` offset, or `ENOENT` for a handle this
+    /// node does not hold. The offset is a page-granular token a client hands back to
+    /// `mmap`; which token names which object is the node's business, as it is the host's.
+    fn map_offset(&mut self, handle: u32) -> Result<u64, i32>;
+
+    /// `DRM_IOCTL_VIRTGPU_RESOURCE_INFO`: the object's host resource, its length and its
+    /// blob kind (0 for a plain object).
+    fn resource_info(&mut self, handle: u32) -> Result<ResourceInfo, i32>;
+
+    /// `DRM_IOCTL_GEM_CLOSE`: drop the object and release the host resource behind it.
+    /// Dropping a handle twice, or one this node never issued, is `ENOENT` — the ABI has no
+    /// "already closed".
+    fn close_object(&mut self, handle: u32) -> Result<(), i32>;
+}
+
+/// The most objects one node may hold at once. A node's backing is a fixed arena, so this
+/// count is fixed with it.
+pub const MAX_OBJECTS: usize = 8;
+
+/// `struct drm_virtgpu_resource_create`, as [`dispatch`] decoded it.
+///
+/// `bo_handle` is carried because a client may set it (Linux: "recreate a new resource
+/// attached to this bo") and a node must be able to refuse that rather than silently make
+/// a second object. `size` is the caller's own byte count, defaulting to one page — this
+/// ABI does not derive it from the geometry, which is why a client that knows its stride
+/// passes both.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct ResourceCreate {
+    pub target: u32,
+    pub format: u32,
+    pub bind: u32,
+    pub width: u32,
+    pub height: u32,
+    pub depth: u32,
+    pub array_size: u32,
+    pub last_level: u32,
+    pub nr_samples: u32,
+    pub flags: u32,
+    pub bo_handle: u32,
+    pub size: u32,
+    pub stride: u32,
+}
+
+/// What a `RESOURCE_CREATE` produced: the GEM handle a client names the object by, the host
+/// resource it is attached to, and how many bytes it holds (the request's size rounded up
+/// to a whole page, which is what a GEM object's length always is).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CreatedObject {
+    pub handle: u32,
+    pub res_handle: u32,
+    pub size: u32,
+}
+
+/// The answer to a `RESOURCE_INFO`: the object's host resource, its length, and its blob
+/// kind (0 for a plain object).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ResourceInfo {
+    pub res_handle: u32,
+    pub size: u32,
+    pub blob_mem: u32,
+}
+
+/// The objects one node hands out.
+///
+/// Slot `i` owns `[i * max_len, (i + 1) * max_len)` of whatever backing the node put behind
+/// it, and its `mmap` offset is `(i + 1) << 12` — one page number per slot, so two objects
+/// never share a token and offset 0 never names one. The table holds no *addresses*: which
+/// memory a slot names is the node's, which is what keeps this testable without a device.
+///
+/// Handles and resource ids are both `slot + 1`. The ABI has two ids because Linux's GEM
+/// handles are per open file and its resource ids per device; this node is one allocator, so
+/// numbering them alike is the honest simplification, not an accident. A client treats both
+/// as opaque, and only the resource id ever reaches the host.
+#[derive(Debug, Clone, Copy)]
+pub struct GemTable {
+    max_len: u32,
+    /// The length of the object in each slot, or `None` for a free one.
+    objects: [Option<u32>; MAX_OBJECTS],
+}
+
+impl GemTable {
+    /// A table of [`MAX_OBJECTS`] objects, none longer than `max_len` bytes.
+    pub const fn new(max_len: u32) -> Self {
+        Self {
+            max_len,
+            objects: [None; MAX_OBJECTS],
+        }
+    }
+
+    /// The object in `slot`, if it is in use.
+    fn len_of(&self, slot: usize) -> Option<u32> {
+        self.objects.get(slot).copied().flatten()
+    }
+
+    /// How much backing one slot has: the longest object this table can hold.
+    pub const fn slot_len(&self) -> u32 {
+        self.max_len
+    }
+
+    /// The `mmap` offset of the object in `slot`.
+    pub const fn offset_of(slot: usize) -> u64 {
+        ((slot as u64) + 1) << 12
+    }
+
+    /// The slot an `mmap` offset names, or `None` for one this table never issued.
+    pub fn slot_of_offset(offset: u64) -> Option<usize> {
+        let slot = (offset >> 12) as usize;
+        (1..=MAX_OBJECTS).contains(&slot).then(|| slot - 1)
+    }
+
+    /// The length of the object an `mmap` offset names, or `None` for a token no live object
+    /// holds — an object that was closed stops naming its old offset, which is what makes a
+    /// mapping of a closed object impossible rather than merely unwise.
+    pub fn len_at_offset(&self, offset: u64) -> Option<u32> {
+        self.len_of(Self::slot_of_offset(offset)?)
+    }
+
+    /// Make an object of `bytes` (one page when the caller asked for none), or `EINVAL` when
+    /// it is longer than the backing, or `ENOSPC` when every slot is taken.
+    pub fn create(&mut self, bytes: u32) -> Result<CreatedObject, i32> {
+        const PAGE: u32 = 4096;
+        // The *rounded* length is what a slot has to have room for, and what the object's
+        // `size` becomes: a GEM object's length is always a whole number of pages, and a
+        // request one byte over a page boundary is a page longer than it looks.
+        let Some(len) = bytes.max(1).div_ceil(PAGE).checked_mul(PAGE) else {
+            // `u32::MAX` rounds up out of the type. A request that large is not a request
+            // this node can answer at all, so it is refused rather than wrapped to a length
+            // that would fit.
+            return Err(EINVAL);
+        };
+        if len > self.max_len {
+            return Err(EINVAL);
+        }
+        let Some(slot) = self.objects.iter().position(|o| o.is_none()) else {
+            return Err(ENOSPC);
+        };
+        self.objects[slot] = Some(len);
+        let id = slot as u32 + 1;
+        Ok(CreatedObject {
+            handle: id,
+            res_handle: id,
+            size: len,
+        })
+    }
+
+    /// The slot and length behind `handle`, or `None`.
+    pub fn lookup(&self, handle: u32) -> Option<(usize, u32)> {
+        let slot = (handle as usize).checked_sub(1)?;
+        self.len_of(slot).map(|len| (slot, len))
+    }
+
+    /// Release `handle`, returning its slot and id, or `None` for a handle not held.
+    pub fn remove(&mut self, handle: u32) -> Option<(usize, u32)> {
+        let (slot, _) = self.lookup(handle)?;
+        self.objects[slot] = None;
+        Some((slot, handle))
+    }
 }
 
 /// The pointed-to buffers a DRM argument struct carries.
@@ -378,6 +546,77 @@ pub fn dispatch(
                 Err(e) => e,
             }
         }
+        DRM_IOCTL_VIRTGPU_RESOURCE_CREATE => {
+            if !fits(arg, request) {
+                return EINVAL;
+            }
+            let create = ResourceCreate {
+                target: rd_u32(arg, 0),
+                format: rd_u32(arg, 4),
+                bind: rd_u32(arg, 8),
+                width: rd_u32(arg, 12),
+                height: rd_u32(arg, 16),
+                depth: rd_u32(arg, 20),
+                array_size: rd_u32(arg, 24),
+                last_level: rd_u32(arg, 28),
+                nr_samples: rd_u32(arg, 32),
+                flags: rd_u32(arg, 36),
+                bo_handle: rd_u32(arg, 40),
+                size: rd_u32(arg, 48),
+                stride: rd_u32(arg, 52),
+            };
+            match node.create_object(create) {
+                Ok(o) => {
+                    wr_u32(arg, 40, o.handle);
+                    wr_u32(arg, 44, o.res_handle);
+                    // The object's length, which is the request's rounded up to a page. The
+                    // host leaves this field as the caller set it; reporting what was
+                    // actually allocated is the one number a client cannot work out itself,
+                    // and it is what `RESOURCE_INFO` reports for the same object.
+                    wr_u32(arg, 48, o.size);
+                    0
+                }
+                Err(e) => e,
+            }
+        }
+        DRM_IOCTL_VIRTGPU_MAP => {
+            if !fits(arg, request) {
+                return EINVAL;
+            }
+            let handle = rd_u32(arg, 8);
+            match node.map_offset(handle) {
+                Ok(offset) => {
+                    wr_u64(arg, 0, offset);
+                    0
+                }
+                Err(e) => e,
+            }
+        }
+        DRM_IOCTL_VIRTGPU_RESOURCE_INFO => {
+            if !fits(arg, request) {
+                return EINVAL;
+            }
+            let handle = rd_u32(arg, 0);
+            match node.resource_info(handle) {
+                Ok(i) => {
+                    wr_u32(arg, 4, i.res_handle);
+                    wr_u32(arg, 8, i.size);
+                    wr_u32(arg, 12, i.blob_mem);
+                    0
+                }
+                Err(e) => e,
+            }
+        }
+        DRM_IOCTL_GEM_CLOSE => {
+            if !fits(arg, request) {
+                return EINVAL;
+            }
+            let handle = rd_u32(arg, 0);
+            match node.close_object(handle) {
+                Ok(()) => 0,
+                Err(e) => e,
+            }
+        }
         _ => ENOTTY,
     }
 }
@@ -393,6 +632,12 @@ mod tests {
     const NAME: &str = "virtio_gpu";
     const DATE: &str = "20260101";
     const DESC: &str = "minixrs virtio-gpu render node";
+
+    // `FakeNode`'s one object: handle 7 / resource 9 / offset 0x7000, so what each request
+    // writes back is pinned without a device. A re-create is refused, as the real node does.
+    const OBJECT: u32 = 7;
+    const RESOURCE: u32 = 9;
+    const LEN: u32 = 4096;
 
     impl RenderNode for FakeNode {
         fn version(&self) -> DrmVersion {
@@ -428,6 +673,250 @@ mod tests {
             out[..n].copy_from_slice(&BLOB[..n]);
             Ok(BLOB.len())
         }
+
+        fn create_object(&mut self, request: ResourceCreate) -> Result<CreatedObject, i32> {
+            if request.bo_handle != 0 {
+                return Err(EINVAL);
+            }
+            Ok(CreatedObject {
+                handle: OBJECT,
+                res_handle: RESOURCE,
+                size: LEN,
+            })
+        }
+        fn map_offset(&mut self, handle: u32) -> Result<u64, i32> {
+            if handle != OBJECT {
+                return Err(ENOENT);
+            }
+            Ok(0x7000)
+        }
+        fn resource_info(&mut self, handle: u32) -> Result<ResourceInfo, i32> {
+            if handle != OBJECT {
+                return Err(ENOENT);
+            }
+            Ok(ResourceInfo {
+                res_handle: RESOURCE,
+                size: LEN,
+                blob_mem: 0,
+            })
+        }
+        fn close_object(&mut self, handle: u32) -> Result<(), i32> {
+            if handle != OBJECT {
+                return Err(ENOENT);
+            }
+            Ok(())
+        }
+    }
+
+    /// A `struct drm_virtgpu_resource_create`: geometry, the caller's own byte count, and
+    /// zeroes where the request will write the handles back.
+    fn resource_create_arg(size: u32, stride: u32) -> [u8; 56] {
+        let mut arg = [0u8; 56];
+        wr_u32(&mut arg, 0, 2); // target: PIPE_TEXTURE_2D
+        wr_u32(&mut arg, 4, 2); // format: B8G8R8X8
+        wr_u32(&mut arg, 8, 1 << 3); // bind: RENDER_TARGET
+        wr_u32(&mut arg, 12, 64); // width
+        wr_u32(&mut arg, 16, 64); // height
+        wr_u32(&mut arg, 20, 1); // depth
+        wr_u32(&mut arg, 24, 1); // array_size
+        wr_u32(&mut arg, 28, 0); // last_level
+        wr_u32(&mut arg, 32, 0); // nr_samples
+        wr_u32(&mut arg, 48, size);
+        wr_u32(&mut arg, 52, stride);
+        arg
+    }
+
+    /// A `struct drm_virtgpu_resource_info`: the handle in, the object's numbers out.
+    fn resource_info_arg(handle: u32) -> [u8; 16] {
+        let mut arg = [0u8; 16];
+        wr_u32(&mut arg, 0, handle);
+        arg
+    }
+
+    /// A `struct drm_virtgpu_map`: the handle in, the offset out.
+    fn map_arg(handle: u32) -> [u8; 16] {
+        let mut arg = [0u8; 16];
+        wr_u32(&mut arg, 8, handle);
+        arg
+    }
+
+    /// A `struct drm_gem_close`: the handle in and nothing else.
+    fn gem_close_arg(handle: u32) -> [u8; 8] {
+        let mut arg = [0u8; 8];
+        wr_u32(&mut arg, 0, handle);
+        arg
+    }
+
+    /// `RESOURCE_CREATE` writes the handle, the resource id and the object's length into the
+    /// fields the kernel writes them into — and leaves `stride`, which is the caller's.
+    #[test]
+    fn resource_create_writes_the_handles_and_the_object_length() {
+        let mut node = FakeNode;
+        let mut users = FakeUser::new();
+        let mut arg = resource_create_arg(16384, 256);
+        assert_eq!(
+            dispatch(
+                &mut node,
+                &mut users,
+                DRM_IOCTL_VIRTGPU_RESOURCE_CREATE,
+                &mut arg
+            ),
+            0
+        );
+        assert_eq!(rd_u32(&arg, 40), 7, "bo_handle at 40");
+        assert_eq!(rd_u32(&arg, 44), 9, "res_handle at 44");
+        assert_eq!(rd_u32(&arg, 48), 4096, "size at 48");
+        assert_eq!(rd_u32(&arg, 52), 256, "stride is the caller's");
+        assert_eq!(users.writes(), 0, "nothing is copied through a pointer");
+
+        // A re-create is refused, and the refusal is the node's to make.
+        let mut arg = resource_create_arg(4096, 0);
+        wr_u32(&mut arg, 40, 3);
+        assert_eq!(
+            dispatch(
+                &mut node,
+                &mut users,
+                DRM_IOCTL_VIRTGPU_RESOURCE_CREATE,
+                &mut arg
+            ),
+            EINVAL
+        );
+    }
+
+    /// `MAP` writes the offset and nothing else; an unknown handle is `ENOENT`.
+    #[test]
+    fn map_writes_the_offset_or_refuses_an_unknown_handle() {
+        let mut node = FakeNode;
+        let mut users = FakeUser::new();
+        let mut arg = map_arg(7);
+        assert_eq!(
+            dispatch(&mut node, &mut users, DRM_IOCTL_VIRTGPU_MAP, &mut arg),
+            0
+        );
+        assert_eq!(rd_u64(&arg, 0), 0x7000);
+        assert_eq!(rd_u32(&arg, 8), 7, "the handle is an in field");
+
+        let mut arg = map_arg(8);
+        assert_eq!(
+            dispatch(&mut node, &mut users, DRM_IOCTL_VIRTGPU_MAP, &mut arg),
+            ENOENT
+        );
+    }
+
+    /// `RESOURCE_INFO` writes the resource id, the length and the blob kind.
+    #[test]
+    fn resource_info_writes_the_object_numbers() {
+        let mut node = FakeNode;
+        let mut users = FakeUser::new();
+        let mut arg = resource_info_arg(7);
+        assert_eq!(
+            dispatch(
+                &mut node,
+                &mut users,
+                DRM_IOCTL_VIRTGPU_RESOURCE_INFO,
+                &mut arg
+            ),
+            0
+        );
+        assert_eq!(rd_u32(&arg, 4), 9);
+        assert_eq!(rd_u32(&arg, 8), 4096);
+        assert_eq!(rd_u32(&arg, 12), 0, "not a blob");
+
+        let mut arg = resource_info_arg(1);
+        assert_eq!(
+            dispatch(
+                &mut node,
+                &mut users,
+                DRM_IOCTL_VIRTGPU_RESOURCE_INFO,
+                &mut arg
+            ),
+            ENOENT
+        );
+    }
+
+    /// `GEM_CLOSE` is `_IOW`: it writes nothing back, and closing a handle twice is `ENOENT`
+    /// rather than a no-op.
+    #[test]
+    fn gem_close_writes_nothing_and_refuses_an_unknown_handle() {
+        let mut node = FakeNode;
+        let mut users = FakeUser::new();
+        let mut arg = gem_close_arg(7);
+        let before = arg;
+        assert_eq!(
+            dispatch(&mut node, &mut users, DRM_IOCTL_GEM_CLOSE, &mut arg),
+            0
+        );
+        assert_eq!(arg, before, "_IOW carries nothing out");
+
+        let mut arg = gem_close_arg(1);
+        assert_eq!(
+            dispatch(&mut node, &mut users, DRM_IOCTL_GEM_CLOSE, &mut arg),
+            ENOENT
+        );
+    }
+
+    /// The object table: lengths round up to a page, a closed handle's slot is reused, and an
+    /// offset stops naming its object the moment that object is closed.
+    #[test]
+    fn the_object_table_rounds_lengths_and_frees_slots() {
+        let mut objects = GemTable::new(64 * 1024);
+
+        let first = objects.create(1).expect("one byte is one page");
+        assert_eq!((first.handle, first.res_handle), (1, 1));
+        assert_eq!(first.size, 4096);
+        let second = objects.create(4097).expect("just over a page is two");
+        assert_eq!(second.size, 8192);
+        assert_eq!(second.handle, 2);
+
+        // Offsets are one page number per slot, and a slot's own offset names its object.
+        assert_eq!(GemTable::offset_of(0), 0x1000);
+        assert_eq!(GemTable::offset_of(1), 0x2000);
+        assert_eq!(GemTable::slot_of_offset(0x1000), Some(0));
+        assert_eq!(objects.len_at_offset(0x2000), Some(8192));
+        // Offset 0, a page past the last slot, and a non-page token name nothing.
+        assert_eq!(GemTable::slot_of_offset(0), None);
+        assert_eq!(objects.len_at_offset(0x9000), None);
+        // A token that is not page-aligned still names its slot's page.
+        assert_eq!(GemTable::slot_of_offset(0x2800), Some(1));
+
+        assert_eq!(objects.lookup(2), Some((1, 8192)));
+        assert_eq!(objects.remove(2), Some((1, 2)));
+        assert_eq!(objects.lookup(2), None, "a closed handle is gone");
+        assert_eq!(objects.remove(2), None, "and closing it twice is not an answer");
+        // The freed slot is the one reused, and its offset names the new object.
+        let third = objects.create(4096).expect("the slot is free again");
+        assert_eq!(third.handle, 2);
+        assert_eq!(objects.len_at_offset(0x2000), Some(4096));
+    }
+
+    /// The table refuses what it cannot hold: too long for a slot, no slot left, and a length
+    /// that would round up out of the type.
+    #[test]
+    fn the_object_table_refuses_more_than_its_backing() {
+        let mut objects = GemTable::new(8192);
+        assert_eq!(
+            objects.create(8193),
+            Err(EINVAL),
+            "longer than the slot's backing"
+        );
+        // The bound is on the *rounded* length: a backing of 5000 has room for one page and
+        // not for two, whatever the request says.
+        let mut odd = GemTable::new(5000);
+        assert_eq!(odd.create(4096).map(|o| o.size), Ok(4096));
+        let mut odd = GemTable::new(5000);
+        assert_eq!(odd.create(4097), Err(EINVAL));
+
+        assert_eq!(objects.create(8192).map(|o| o.size), Ok(8192));
+        // A length that rounds up past `u32::MAX` is refused rather than wrapped to one that
+        // would fit — a wrapped length is an object a client asked for and did not get.
+        let mut huge = GemTable::new(8192);
+        assert_eq!(huge.create(u32::MAX), Err(EINVAL));
+
+        let mut full = GemTable::new(4096);
+        for _ in 0..MAX_OBJECTS {
+            assert!(full.create(4096).is_ok());
+        }
+        assert_eq!(full.create(4096), Err(ENOSPC));
     }
 
     /// A client's memory, as far as these requests are concerned: a few named buffers, so

@@ -48,6 +48,7 @@ pub unsafe fn init_dmap() {
         dp.dmap_driver = -1; // NONE
         dp.dmap_ep = -1; // NONE
         dp.dmap_style = 0;
+        dp.dmap_linux_ioctl = false;
         dp.dmap_label = [0u8; LABEL_MAX];
     }
 }
@@ -74,6 +75,22 @@ pub unsafe fn map_driver(label: &[u8], major: i32, endpoint: i32) -> i32 {
     dp.dmap_label[..copy_len].copy_from_slice(&label[..copy_len]);
     dp.dmap_label[copy_len] = 0;
     OK
+}
+
+/// Record that a mapped device's ioctl request numbers are Linux's rather than MINIX's.
+///
+/// Called next to [`map_driver`] for the device that says so, so the two lines read
+/// together. A no-op for a major that is not mapped: a flag on an entry nothing routes to
+/// decides nothing.
+///
+/// # Safety
+///
+/// Requires exclusive access to the dmap table.
+pub unsafe fn mark_linux_ioctl(major: i32) {
+    let dp = get_dmap_by_major(major);
+    if !dp.is_null() {
+        (*dp).dmap_linux_ioctl = true;
+    }
 }
 
 // Lookup / matching
@@ -203,6 +220,7 @@ pub fn dmap_unmap_by_endpt(proc_nr: i32) {
                 dp.dmap_driver = -1; // NONE
                 dp.dmap_ep = -1;
                 dp.dmap_style = 0;
+                dp.dmap_linux_ioctl = false;
                 dp.dmap_label = [0u8; LABEL_MAX];
             }
         }
