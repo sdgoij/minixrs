@@ -917,19 +917,17 @@ impl VirtioGpuArch {
         self.send_cmd(struct_bytes(&cmd))
     }
 
-    /// `TRANSFER_TO_HOST_3D` / `TRANSFER_FROM_HOST_3D`: copy the whole of the resource's
-    /// attached backing to or from the host-side texture.
+    /// `TRANSFER_TO_HOST_3D` / `TRANSFER_FROM_HOST_3D`: move a box of the resource's contents
+    /// between the attached backing and the host-side texture.
     ///
-    /// `stride` and `layer_stride` are left zero, which is the protocol's "derive them
-    /// from the format and geometry". Both directions are answered `NODATA` whether or
-    /// not the host accepted the move, so only the bytes can tell a caller which happened.
+    /// `stride` and `layer_stride` are the caller's, and zero means the protocol's "derive them
+    /// from the format and geometry". Both directions are answered `NODATA` whether or not the
+    /// host accepted the move, so only the bytes can tell a caller which happened.
     fn transfer_3d(
         &mut self,
         to_host: bool,
         ctx_id: u32,
-        resource_id: u32,
-        width: u32,
-        height: u32,
+        spec: &drm::Transfer3d,
     ) -> Result<(), DriverError> {
         let mut cmd = TransferHost3D {
             hdr: CtrlHdr::new(if to_host {
@@ -938,20 +936,46 @@ impl VirtioGpuArch {
                 CMD_TRANSFER_FROM_HOST_3D
             }),
             area: Box3D {
-                x: 0,
-                y: 0,
-                z: 0,
-                w: width,
-                h: height,
-                d: 1,
+                x: spec.x,
+                y: spec.y,
+                z: spec.z,
+                w: spec.w,
+                h: spec.h,
+                d: spec.d,
+            },
+            offset: spec.offset as u64,
+            resource_id: spec.resource_id,
+            level: spec.level,
+            stride: spec.stride,
+            layer_stride: spec.layer_stride,
+        };
+        cmd.hdr.ctx_id = ctx_id;
+        self.send_cmd(struct_bytes(&cmd))
+    }
+
+    /// `TRANSFER_TO_HOST_2D`: the 2D half of the transfer ABI, which is what a device with no GL
+    /// has — the same command the scanout's flush is made of. A 2D resource's storage *is* the
+    /// guest's pages, so this is the host's copy for the display rather than a move between two.
+    fn transfer_2d(
+        &mut self,
+        resource_id: u32,
+        x: u32,
+        y: u32,
+        w: u32,
+        h: u32,
+    ) -> Result<(), DriverError> {
+        let cmd = TransferToHost2D {
+            hdr: CtrlHdr::new(CMD_TRANSFER_TO_HOST_2D),
+            r: Rect {
+                x,
+                y,
+                width: w,
+                height: h,
             },
             offset: 0,
             resource_id,
-            level: 0,
-            stride: 0,
-            layer_stride: 0,
+            padding: 0,
         };
-        cmd.hdr.ctx_id = ctx_id;
         self.send_cmd(struct_bytes(&cmd))
     }
 
@@ -989,7 +1013,11 @@ impl VirtioGpuArch {
         for b in buf.iter_mut() {
             *b = 0x5A;
         }
-        self.transfer_3d(false, ctx_id, resource_id, PROBE_TEX_W, PROBE_TEX_H)?;
+        self.transfer_3d(
+            false,
+            ctx_id,
+            &drm::Transfer3d::whole(resource_id, PROBE_TEX_W, PROBE_TEX_H),
+        )?;
         Ok(buf
             .iter()
             .enumerate()
@@ -1030,11 +1058,19 @@ impl VirtioGpuArch {
         )?;
         self.attach_backing(RES, pa, PROBE_TEX_BYTES)?;
         self.ctx_attach_resource(ctx_id, RES)?;
-        self.transfer_3d(true, ctx_id, RES, PROBE_TEX_W, PROBE_TEX_H)?;
+        self.transfer_3d(
+            true,
+            ctx_id,
+            &drm::Transfer3d::whole(RES, PROBE_TEX_W, PROBE_TEX_H),
+        )?;
         for b in buf.iter_mut() {
             *b = 0xA5;
         }
-        self.transfer_3d(false, ctx_id, RES, PROBE_TEX_W, PROBE_TEX_H)?;
+        self.transfer_3d(
+            false,
+            ctx_id,
+            &drm::Transfer3d::whole(RES, PROBE_TEX_W, PROBE_TEX_H),
+        )?;
         let matched = buf
             .iter()
             .enumerate()
@@ -1105,6 +1141,10 @@ pub struct DrmNode {
     /// The one context a client may have, once it has made one. The ABI ties this to the open
     /// file on Linux; this node is one allocator, so it is the node's (§6.10 D3).
     context: Option<u32>,
+    /// Which objects are in that context's table, one bit per slot. A duplicate
+    /// `CTX_ATTACH_RESOURCE` is not the same request as the first, and the table goes away with
+    /// the context, so the bits are cleared with it.
+    context_resources: u32,
     /// The objects this node has handed out.
     gems: drm::GemTable,
     /// Image VA of slot 0 of the backing the objects come from. Slot `i` is at
@@ -1157,7 +1197,57 @@ impl DrmNode {
         };
         if self.dev.ctx_destroy(ctx_id).is_ok() {
             self.context = None;
+            // The table went with the context, so the objects have to be attached again if a
+            // client asks for another one.
+            self.context_resources = 0;
         }
+    }
+
+    /// The context a transfer or a submit goes through, made if the client has not made one.
+    ///
+    /// Linux's `virtio_gpu_create_context` does exactly this, with no capset: a context that
+    /// renders nothing still moves bytes and runs commands that name no capset, and a client that
+    /// transferred before initialising one is not making an error.
+    fn ensure_context(&mut self) -> Result<u32, i32> {
+        match self.context {
+            Some(ctx) => Ok(ctx),
+            None => {
+                self.create_context(0)?;
+                Ok(CONTEXT_ID)
+            }
+        }
+    }
+
+    /// Make the context, with the `context_init` flags a request carried.
+    ///
+    /// `minixrs` for the debug name: Linux names a context after the calling *task*, and a
+    /// process on this port has no comm to be named by.
+    fn create_context(&mut self, flags: u32) -> Result<(), i32> {
+        self.dev
+            .ctx_create(CONTEXT_ID, flags, b"minixrs")
+            .map_err(|_| drm::EINVAL)?;
+        self.context = Some(CONTEXT_ID);
+        Ok(())
+    }
+
+    /// Put `handle`'s resource in the context's table, and remember that it is there.
+    ///
+    /// Every transfer and every command names its objects *through* the context, and a resource
+    /// the context does not hold is refused by the host with an error that never reaches this
+    /// side (`ctx_attach_resource`'s note) — so a missed attach shows as bytes that did not move,
+    /// not as a failed call. Attached once, because a duplicate attach is not the same request as
+    /// the first one.
+    fn attach_to_context(&mut self, ctx_id: u32, handle: u32) -> Result<(), i32> {
+        let Some((slot, _)) = self.gems.lookup(handle) else {
+            return Err(drm::ENOENT);
+        };
+        if self.context_resources & (1 << slot) == 0 {
+            self.dev
+                .ctx_attach_resource(ctx_id, handle)
+                .map_err(|_| drm::EINVAL)?;
+            self.context_resources |= 1 << slot;
+        }
+        Ok(())
     }
 
     /// The capset with this id, if the host offers one.
@@ -1339,7 +1429,12 @@ impl drm::RenderNode for DrmNode {
         if self.dev.resource_unref(handle).is_err() {
             return Err(drm::EINVAL);
         }
-        self.gems.remove(handle);
+        // The context's table must not be left believing it holds a slot that is about to be a
+        // different object: slot `i` is reused by the next create, and a stale bit would skip the
+        // attach that object needs.
+        if let Some((slot, _)) = self.gems.remove(handle) {
+            self.context_resources &= !(1 << slot);
+        }
         Ok(())
     }
 
@@ -1382,12 +1477,60 @@ impl drm::RenderNode for DrmNode {
                 _ => return Err(drm::EINVAL),
             }
         }
-        // `minixrs` for the debug name: Linux names a context after the calling *task*, and a
-        // process on this port has no comm to be named by.
+        self.create_context(flags)
+    }
+
+    fn transfer(&mut self, to_host: bool, request: &drm::Transfer3d) -> Result<(), i32> {
+        // The ABI names the object by its GEM handle; the host knows it by the resource id the
+        // same slot carries, which is why they are numbered alike.
+        if self.gems.lookup(request.resource_id).is_none() {
+            return Err(drm::ENOENT);
+        }
+        if !self.virgl {
+            // A device with no GL has the 2D transfer and not the 3D one, and only in the
+            // direction a display needs: the host's own driver refuses the other with `ENOSYS`
+            // (`virtio_gpu_transfer_from_host_ioctl`).
+            if !to_host {
+                return Err(drm::ENOSYS);
+            }
+            return self
+                .dev
+                .transfer_2d(request.resource_id, request.x, request.y, request.w, request.h)
+                .map_err(|_| drm::EINVAL);
+        }
+        let ctx = self.ensure_context()?;
+        // A 3D transfer is read *through* the context, so the object has to be in its table
+        // before the transfer names it — the same ordering a submit needs, and for the same
+        // silent reason.
+        self.attach_to_context(ctx, request.resource_id)?;
         self.dev
-            .ctx_create(CONTEXT_ID, flags, b"minixrs")
-            .map_err(|_| drm::EINVAL)?;
-        self.context = Some(CONTEXT_ID);
+            .transfer_3d(to_host, ctx, request)
+            .map_err(|_| drm::EINVAL)
+    }
+
+    fn submit(&mut self, command: &[u8], handles: &[u32]) -> Result<(), i32> {
+        // A submit is a virgl command buffer, so without GL there is no renderer to hand it to.
+        // `ENOSYS` for the same reason the 3D transfer is: the request is well formed and this
+        // device cannot do it.
+        if !self.virgl {
+            return Err(drm::ENOSYS);
+        }
+        let ctx = self.ensure_context()?;
+        for handle in handles {
+            self.attach_to_context(ctx, *handle)?;
+        }
+        self.dev.submit_3d(ctx, command).map_err(|_| drm::EINVAL)
+    }
+
+    fn wait(&mut self, handle: u32, _nowait: bool) -> Result<(), i32> {
+        if self.gems.lookup(handle).is_none() {
+            return Err(drm::ENOENT);
+        }
+        // Reported as done, which is why `submit` can be synchronous at all: the device answers a
+        // `SUBMIT_3D` after the renderer has run it — the boot probe reads an inline write's
+        // effect back through the transfer that follows it — so there is no queued work to wait
+        // for. `nowait` therefore changes nothing, and blocking would be a lie about work this
+        // node does not have (`WAYLAND.md` §6.10 D4: no fence objects yet).
         Ok(())
     }
 }
@@ -1424,6 +1567,7 @@ fn open_render_node(out: &mut Gpu3d) -> Option<DrmNode> {
         blob: out.blob,
         has_context_init: out.context_init,
         context: None,
+        context_resources: 0,
         gems: drm::GemTable::new(0),
         gem_arena: 0,
     };
@@ -2127,6 +2271,7 @@ mod tests {
             blob,
             has_context_init: context_init,
             context: None,
+            context_resources: 0,
             gems: drm::GemTable::new(0),
             gem_arena: 0,
         };

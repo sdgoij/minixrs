@@ -203,6 +203,9 @@ pub const BOOT_BINS: &[(&str, &str)] = &[
     // `/bin/drmctx` makes the render node's rendering context, which is what a command buffer
     // and a transfer through one hang off (§6.10, stage 3b-4).
     ("/bin/drmctx", "drmctx"),
+    // `/bin/drmexec` moves an object's contents through a transfer, submits a command that
+    // rewrites one row, and transfers the result back (§6.10, stage 3b-4).
+    ("/bin/drmexec", "drmexec"),
 ];
 
 /// Programs a **wasm32** image carries: destination path → module file name in the target's

@@ -42,7 +42,20 @@
 # says the close released it. A repeated expectation is only safe because every step's
 # expectations are anchored to what the guest printed *after* that step was sent; `feed.sh`
 # says where, and this pair of steps is what that anchoring is for.
+#
+# The fourth step is the object in motion: `/bin/drmexec` creates one, fills its pages with a
+# pattern, transfers them to the host's copy of the resource, submits a command that makes the
+# *host* overwrite the first row with the pattern's complement, transfers the result back, and
+# reports how much of each region read back as it should. A transfer alone would prove nothing
+# — it only ever moves bytes the guest already had — so the command between the two
+# transfers is the point, and the two counts are what tell the row from the rest.
+#
+# `row` is the thirty-two bytes the command wrote and `rest` is every byte it did not touch, so
+# the two numbers move in opposite directions for the two ways this can fail: a command that
+# never ran leaves `row=0 rest=16352`, and the step printed exactly that before the node was
+# made to put the object in the context's table ahead of the transfer that first names it.
 
 /bin/drminfo	drminfo: virtio_gpu 3d=1 err 0 blob=1 err 0 ctx=1 err 0 host=0 err 0 mask=3 err 0 caps=ok
 /bin/drmctx	drmctx: init=ok again=err 17
 /bin/drmctx	drmctx: init=ok again=err 17
+/bin/drmexec	drmexec: h=1 up=ok exec=ok wait=ok down=ok row=32 rest=16352

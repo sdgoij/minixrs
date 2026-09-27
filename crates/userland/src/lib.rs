@@ -33,6 +33,9 @@ pub mod drmmap;
 /// The DRM render node's rendering context — `/bin/drmctx` (§6.10, 3b-4).
 pub mod drmctx;
 
+/// The DRM render node's transfers, submit and wait — `/bin/drmexec` (§6.10, 3b-4).
+pub mod drmexec;
+
 /// When >= 0, all `write_out` calls are routed through this fd (via VFS)
 /// instead of the kernel's serial shortcut on fd 1. Set by the shell's
 /// redirect child after `fork`, so it is process-private.

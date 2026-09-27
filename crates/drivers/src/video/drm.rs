@@ -187,6 +187,35 @@ pub const VIRTGPU_CONTEXT_PARAM_DEBUG_NAME: u64 = 0x0004;
 /// at three — the number of knobs it has — before it reads any of them.
 pub const MAX_CONTEXT_PARAMS: usize = 3;
 
+/// The most bytes of virgl command buffer one submit may carry.
+///
+/// Not a policy choice: the buffer travels *after* the submit command in the same virtqueue
+/// descriptor (`virtio_gpu.rs`'s `submit_3d`), so the device's command slot is the limit, and a
+/// longer buffer has nowhere to go. This is what `dispatch` reads the caller's buffer into, so
+/// it is also the most it will copy from one.
+pub const MAX_COMMAND_BYTES: usize = 1024;
+
+/// The most handles one submit may name. The node's object table is smaller than this, so a
+/// longer list cannot be fully resolved anyway; the bound exists so that `dispatch` can read the
+/// array into a fixed buffer rather than trusting the caller's count.
+pub const MAX_BO_HANDLES: usize = 32;
+
+/// `VIRTGPU_WAIT_NOWAIT` — report the object's state rather than waiting for it.
+pub const VIRTGPU_WAIT_NOWAIT: u32 = 1;
+
+/// `VIRTGPU_EXECBUF_FENCE_FD_IN` / `_OUT` — the submit carries an input fence to wait on, or asks
+/// for an output fence fd. This node has no fence objects (`WAYLAND.md` §6.10 D4), so a request
+/// that sets either is refused rather than run without the synchronisation it asked for.
+pub const VIRTGPU_EXECBUF_FENCE_FD_IN: u32 = 0x01;
+/// See [`VIRTGPU_EXECBUF_FENCE_FD_IN`].
+pub const VIRTGPU_EXECBUF_FENCE_FD_OUT: u32 = 0x02;
+/// `VIRTGPU_EXECBUF_RING_IDX` — the submit names which command ring it goes on. This node serves
+/// one ring, so it is refused with the fences rather than ignored.
+pub const VIRTGPU_EXECBUF_RING_IDX: u32 = 0x04;
+/// The flags this ABI defines, and so the mask a request's flags are checked against.
+pub const VIRTGPU_EXECBUF_FLAGS: u32 =
+    VIRTGPU_EXECBUF_FENCE_FD_IN | VIRTGPU_EXECBUF_FENCE_FD_OUT | VIRTGPU_EXECBUF_RING_IDX;
+
 /// `DRM_CAP_DUMB_BUFFER`: the mode-setting dumb-buffer ioctl. A render node has none.
 pub const DRM_CAP_DUMB_BUFFER: u64 = 0x1;
 /// `DRM_CAP_PRIME`: dma-buf import/export. Not yet.
@@ -255,6 +284,56 @@ pub trait RenderNode {
     /// is `EEXIST`, a device with no GL or no context support is `EINVAL`, and so is a parameter
     /// this node cannot honour.
     fn context_init(&mut self, params: &[ContextParam]) -> Result<(), i32>;
+
+    /// `DRM_IOCTL_VIRTGPU_TRANSFER_TO_HOST` / `TRANSFER_FROM_HOST`: move a box of an object's
+    /// contents between the guest's pages and the host's copy of the resource.
+    fn transfer(&mut self, to_host: bool, request: &Transfer3d) -> Result<(), i32>;
+
+    /// `DRM_IOCTL_VIRTGPU_EXECBUFFER`: hand a context a virgl command buffer, with the objects it
+    /// names made visible to it. `handles` are GEM handles; a node that does not hold one is
+    /// `ENOENT`, and one whose device has no 3D is `ENOSYS`.
+    fn submit(&mut self, command: &[u8], handles: &[u32]) -> Result<(), i32>;
+
+    /// `DRM_IOCTL_VIRTGPU_WAIT`: wait for an object's work to finish, or with `nowait` report
+    /// whether it has. An unknown handle is `ENOENT`.
+    fn wait(&mut self, handle: u32, nowait: bool) -> Result<(), i32>;
+}
+
+/// `struct drm_virtgpu_3d_transfer_to_host` (and `_from_host`, which is the same shape): one box
+/// of one object, with the strides the host reads it with. Every field but the resource and the
+/// box is zero for a whole-resource transfer, which is what the boot probe does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Transfer3d {
+    pub resource_id: u32,
+    pub x: u32,
+    pub y: u32,
+    pub z: u32,
+    pub w: u32,
+    pub h: u32,
+    pub d: u32,
+    pub level: u32,
+    pub offset: u32,
+    pub stride: u32,
+    pub layer_stride: u32,
+}
+
+impl Transfer3d {
+    /// The whole of one object: the box the boot probe transfers.
+    pub const fn whole(resource_id: u32, w: u32, h: u32) -> Self {
+        Self {
+            resource_id,
+            x: 0,
+            y: 0,
+            z: 0,
+            w,
+            h,
+            d: 1,
+            level: 0,
+            offset: 0,
+            stride: 0,
+            layer_stride: 0,
+        }
+    }
 }
 
 /// The most objects one node may hold at once. A node's backing is a fixed arena, so this
@@ -687,6 +766,102 @@ pub fn dispatch(
                 Err(e) => e,
             }
         }
+        DRM_IOCTL_VIRTGPU_TRANSFER_TO_HOST | DRM_IOCTL_VIRTGPU_TRANSFER_FROM_HOST => {
+            if !fits(arg, request) {
+                return EINVAL;
+            }
+            let transfer = Transfer3d {
+                resource_id: rd_u32(arg, 0),
+                x: rd_u32(arg, 4),
+                y: rd_u32(arg, 8),
+                z: rd_u32(arg, 12),
+                w: rd_u32(arg, 16),
+                h: rd_u32(arg, 20),
+                d: rd_u32(arg, 24),
+                level: rd_u32(arg, 28),
+                offset: rd_u32(arg, 32),
+                stride: rd_u32(arg, 36),
+                layer_stride: rd_u32(arg, 40),
+            };
+            match node.transfer(request == DRM_IOCTL_VIRTGPU_TRANSFER_TO_HOST, &transfer) {
+                Ok(()) => 0,
+                Err(e) => e,
+            }
+        }
+        DRM_IOCTL_VIRTGPU_EXECBUFFER => {
+            if !fits(arg, request) {
+                return EINVAL;
+            }
+            let flags = rd_u32(arg, 0);
+            let size = rd_u32(arg, 4) as usize;
+            let command = rd_u64(arg, 8);
+            let handle_addr = rd_u64(arg, 16);
+            let count = rd_u32(arg, 24) as usize;
+            let fence_fd = rd_u32(arg, 28) as i32;
+            // A flag this ABI does not define is a request this node cannot read, and one of the
+            // three it does define is synchronisation this node does not have: a submit that
+            // asked for either is refused rather than run without it.
+            if flags & !VIRTGPU_EXECBUF_FLAGS != 0 {
+                return EINVAL;
+            }
+            if flags & VIRTGPU_EXECBUF_FLAGS != 0 || fence_fd != -1 {
+                return ENOSYS;
+            }
+            if rd_u32(arg, 36) != 0
+                || rd_u32(arg, 40) != 0
+                || rd_u32(arg, 44) != 0
+                || rd_u64(arg, 48) != 0
+                || rd_u64(arg, 56) != 0
+            {
+                return EINVAL;
+            }
+            // A command buffer is whole dwords, and it has to fit the device's command slot: the
+            // host reads it out of the same descriptor the submit command travels in.
+            if size == 0 || !size.is_multiple_of(4) || size > MAX_COMMAND_BYTES {
+                return EINVAL;
+            }
+            if count > MAX_BO_HANDLES {
+                return EINVAL;
+            }
+            if command == 0 {
+                return EFAULT;
+            }
+            let mut words = [0u8; MAX_COMMAND_BYTES];
+            if let Err(e) = users.read(command, &mut words[..size]) {
+                return e;
+            }
+            let mut handles = [0u32; MAX_BO_HANDLES];
+            if count > 0 {
+                let mut raw = [0u8; MAX_BO_HANDLES * 4];
+                if handle_addr == 0 {
+                    return EFAULT;
+                }
+                if let Err(e) = users.read(handle_addr, &mut raw[..count * 4]) {
+                    return e;
+                }
+                for (i, h) in handles.iter_mut().take(count).enumerate() {
+                    *h = rd_u32(&raw, i * 4);
+                }
+            }
+            match node.submit(&words[..size], &handles[..count]) {
+                Ok(()) => 0,
+                Err(e) => e,
+            }
+        }
+        DRM_IOCTL_VIRTGPU_WAIT => {
+            if !fits(arg, request) {
+                return EINVAL;
+            }
+            let handle = rd_u32(arg, 0);
+            let flags = rd_u32(arg, 4);
+            if flags & !VIRTGPU_WAIT_NOWAIT != 0 {
+                return EINVAL;
+            }
+            match node.wait(handle, flags & VIRTGPU_WAIT_NOWAIT != 0) {
+                Ok(()) => 0,
+                Err(e) => e,
+            }
+        }
         _ => ENOTTY,
     }
 }
@@ -797,6 +972,36 @@ mod tests {
                 _ => Err(EINVAL),
             }
         }
+
+        /// The whole of object 7 as a 64×64×1 box — the shape the transfer tests build, so a
+        /// field read from the wrong offset is an error here rather than a transfer of the wrong
+        /// region.
+        fn transfer(&mut self, _to_host: bool, request: &Transfer3d) -> Result<(), i32> {
+            if request.resource_id != OBJECT
+                || request.x != 0
+                || request.w != 64
+                || request.h != 64
+                || request.d != 1
+            {
+                return Err(EINVAL);
+            }
+            Ok(())
+        }
+
+        /// Eight bytes of command naming object 7 — the shape the submit tests build.
+        fn submit(&mut self, command: &[u8], handles: &[u32]) -> Result<(), i32> {
+            if command.len() != 8 || handles != [OBJECT] {
+                return Err(EINVAL);
+            }
+            Ok(())
+        }
+
+        fn wait(&mut self, handle: u32, _nowait: bool) -> Result<(), i32> {
+            if handle != OBJECT {
+                return Err(ENOENT);
+            }
+            Ok(())
+        }
     }
 
     /// A `struct drm_virtgpu_resource_create`: geometry, the caller's own byte count, and
@@ -838,6 +1043,37 @@ mod tests {
         wr_u64(&mut p, 0, param);
         wr_u64(&mut p, 8, value);
         p
+    }
+
+    /// A `drm_virtgpu_3d_transfer_to_host`: the resource, a box, and the strides to read it with.
+    fn transfer_arg(resource_id: u32, w: u32, h: u32) -> [u8; 44] {
+        let mut arg = [0u8; 44];
+        wr_u32(&mut arg, 0, resource_id);
+        wr_u32(&mut arg, 16, w);
+        wr_u32(&mut arg, 20, h);
+        wr_u32(&mut arg, 24, 1);
+        arg
+    }
+
+    /// A `drm_virtgpu_execbuffer`: the flags, the command buffer and its length, and the handles.
+    fn execbuffer_arg(flags: u32, size: u32, command: u64, handles: u64, count: u32) -> [u8; 64] {
+        let mut arg = [0u8; 64];
+        wr_u32(&mut arg, 0, flags);
+        wr_u32(&mut arg, 4, size);
+        wr_u64(&mut arg, 8, command);
+        wr_u64(&mut arg, 16, handles);
+        wr_u32(&mut arg, 24, count);
+        // `fence_fd` is `-1` for "none", which is what every other field of the request is 0 for.
+        wr_u32(&mut arg, 28, u32::MAX);
+        arg
+    }
+
+    /// A `drm_virtgpu_3d_wait`.
+    fn wait_arg(handle: u32, flags: u32) -> [u8; 8] {
+        let mut arg = [0u8; 8];
+        wr_u32(&mut arg, 0, handle);
+        wr_u32(&mut arg, 4, flags);
+        arg
     }
 
     /// A `struct drm_virtgpu_map`: the handle in, the offset out.
@@ -1080,6 +1316,140 @@ mod tests {
                 &mut arg
             ),
             EINVAL
+        );
+    }
+
+    /// The transfer's box: the resource at 0, and `x y z w h d` at 4, 8, 12, 16, 20 and 24, with
+    /// the level and strides after them. The fake node only accepts one box, so a field read from
+    /// the wrong offset is a refusal rather than a transfer of the wrong region.
+    #[test]
+    fn transfer_decodes_the_resource_and_the_box() {
+        let mut node = FakeNode;
+        let mut users = FakeUser::new();
+
+        for request in [
+            DRM_IOCTL_VIRTGPU_TRANSFER_TO_HOST,
+            DRM_IOCTL_VIRTGPU_TRANSFER_FROM_HOST,
+        ] {
+            let mut arg = transfer_arg(7, 64, 64);
+            assert_eq!(dispatch(&mut node, &mut users, request, &mut arg), 0);
+        }
+
+        // A `w` where `h` belongs is a different box, and the node refuses it.
+        let mut arg = transfer_arg(7, 64, 32);
+        assert_eq!(
+            dispatch(
+                &mut node,
+                &mut users,
+                DRM_IOCTL_VIRTGPU_TRANSFER_TO_HOST,
+                &mut arg
+            ),
+            EINVAL
+        );
+    }
+
+    /// A submit reads its command buffer and its handle array through pointers, both
+    /// caller-sized, and refuses the requests it cannot run: one that names synchronisation this
+    /// node does not have, one whose buffer is not whole dwords or is longer than the device's
+    /// command slot, one that names nothing, and one naming more handles than it can hold.
+    #[test]
+    fn execbuffer_reads_its_command_and_handles_and_refuses_the_rest() {
+        let mut node = FakeNode;
+        let mut users = FakeUser::new();
+        let command = [0xAAu8; 8];
+        users.seed(0x4000, &command);
+        let handle = 7u32.to_le_bytes();
+        users.seed(0x5000, &handle);
+
+        let mut arg = execbuffer_arg(0, 8, 0x4000, 0x5000, 1);
+        assert_eq!(
+            dispatch(&mut node, &mut users, DRM_IOCTL_VIRTGPU_EXECBUFFER, &mut arg),
+            0
+        );
+
+        // A buffer that is not whole dwords, an empty one, and one longer than the slot the
+        // command travels in.
+        for size in [7u32, 0, MAX_COMMAND_BYTES as u32 + 4] {
+            let mut arg = execbuffer_arg(0, size, 0x4000, 0x5000, 1);
+            assert_eq!(
+                dispatch(&mut node, &mut users, DRM_IOCTL_VIRTGPU_EXECBUFFER, &mut arg),
+                EINVAL,
+                "size {size}"
+            );
+        }
+
+        // A flag the ABI does not define, and one it does that asks for a fence or a ring this
+        // node does not have. The second is `ENOSYS` and not `EINVAL`: the request is well formed
+        // and the node simply cannot do it.
+        let mut arg = execbuffer_arg(0x80, 8, 0x4000, 0x5000, 1);
+        assert_eq!(
+            dispatch(&mut node, &mut users, DRM_IOCTL_VIRTGPU_EXECBUFFER, &mut arg),
+            EINVAL
+        );
+        let mut arg = execbuffer_arg(VIRTGPU_EXECBUF_FENCE_FD_OUT, 8, 0x4000, 0x5000, 1);
+        assert_eq!(
+            dispatch(&mut node, &mut users, DRM_IOCTL_VIRTGPU_EXECBUFFER, &mut arg),
+            ENOSYS
+        );
+
+        // Sync objects, which this node implements none of.
+        let mut arg = execbuffer_arg(0, 8, 0x4000, 0x5000, 1);
+        wr_u32(&mut arg, 40, 1);
+        assert_eq!(
+            dispatch(&mut node, &mut users, DRM_IOCTL_VIRTGPU_EXECBUFFER, &mut arg),
+            EINVAL
+        );
+
+        // Pointers that name nothing, and more handles than the node will read.
+        let mut arg = execbuffer_arg(0, 8, 0, 0x5000, 1);
+        assert_eq!(
+            dispatch(&mut node, &mut users, DRM_IOCTL_VIRTGPU_EXECBUFFER, &mut arg),
+            EFAULT
+        );
+        let mut arg = execbuffer_arg(0, 8, 0x4000, 0, 1);
+        assert_eq!(
+            dispatch(&mut node, &mut users, DRM_IOCTL_VIRTGPU_EXECBUFFER, &mut arg),
+            EFAULT
+        );
+        let mut arg = execbuffer_arg(0, 8, 0x4000, 0x5000, MAX_BO_HANDLES as u32 + 1);
+        assert_eq!(
+            dispatch(&mut node, &mut users, DRM_IOCTL_VIRTGPU_EXECBUFFER, &mut arg),
+            EINVAL
+        );
+
+        // No handles at all is a submit with nothing attached, which the node decides on.
+        let mut arg = execbuffer_arg(0, 8, 0x4000, 0, 0);
+        assert_eq!(
+            dispatch(&mut node, &mut users, DRM_IOCTL_VIRTGPU_EXECBUFFER, &mut arg),
+            EINVAL,
+            "the fake wants the one handle"
+        );
+    }
+
+    /// `WAIT` takes a handle and the `NOWAIT` flag, and nothing else; an unknown handle is
+    /// `ENOENT` and an undefined flag is `EINVAL`.
+    #[test]
+    fn wait_takes_a_handle_and_the_nowait_flag() {
+        let mut node = FakeNode;
+        let mut users = FakeUser::new();
+
+        for flags in [0, VIRTGPU_WAIT_NOWAIT] {
+            let mut arg = wait_arg(7, flags);
+            assert_eq!(
+                dispatch(&mut node, &mut users, DRM_IOCTL_VIRTGPU_WAIT, &mut arg),
+                0
+            );
+        }
+
+        let mut arg = wait_arg(7, 0x80);
+        assert_eq!(
+            dispatch(&mut node, &mut users, DRM_IOCTL_VIRTGPU_WAIT, &mut arg),
+            EINVAL
+        );
+        let mut arg = wait_arg(9, 0);
+        assert_eq!(
+            dispatch(&mut node, &mut users, DRM_IOCTL_VIRTGPU_WAIT, &mut arg),
+            ENOENT
         );
     }
 
