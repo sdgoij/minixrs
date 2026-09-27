@@ -1,5 +1,5 @@
-# The `just test-drminfo-x86` scenario: one step, because what this gate is about is the
-# DRM render node answering a client, and one client call is the whole of that.
+# The `just test-drminfo-x86` scenario: what the render node answers a client *without*
+# GL — its identity, its parameters, its refusals, and a context it cannot make.
 #
 # The device is a plain `virtio-gpu-pci`, which is a device the host enabled no GL on. That
 # is deliberate, twice over:
@@ -13,10 +13,14 @@
 #     structs point at are the same code either way. A device without GL exercises all of
 #     them and is the case a client is most likely to meet.
 #
-# So the expected line is the degraded one: the node exists, answers `VERSION` with the
+# So the expected lines are the degraded ones: the node exists, answers `VERSION` with the
 # driver's name, answers `GETPARAM` with 3D features 0, and refuses `GET_CAPS` with
 # `ENOSYS` (38) — which is what a DRM client is meant to find there rather than finding no
-# device at all. The GL device's own answers are reported by the fb server's boot line
-# (`just test-gpu3d-x86`), which needs no typing.
+# device at all. The context step is the same claim about a different request: with no
+# capset on this device there is nothing for a context to render with, so both attempts
+# are `EINVAL` (22). The GL device's own answers are reported by the fb server's boot line
+# (`just test-gpu3d-x86`) and by `tools/smoke/drmgl.tsv`, which is the same two clients
+# driven into a guest that *can* be told to type at a pace host GL tolerates.
 
 /bin/drminfo	drminfo: virtio_gpu 3d=0 err 0 blob=0 err 0 ctx=0 err 0 host=0 err 0 mask=0 err 0 caps=err 38
+/bin/drmctx	drmctx: init=err 22 again=err 22

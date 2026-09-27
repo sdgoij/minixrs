@@ -37,6 +37,9 @@ pub const EINVAL: i32 = -22;
 pub const ENOSYS: i32 = -38;
 /// `ENOENT` — a handle, capset or resource this node does not hold.
 pub const ENOENT: i32 = -2;
+/// `EEXIST` — a thing this node has already made and will not make twice, such as the one
+/// context a client may have.
+pub const EEXIST: i32 = -17;
 /// `EFAULT` — a user buffer could not be reached.
 pub const EFAULT: i32 = -14;
 /// `ENOSPC` — a request that would exceed a fixed capacity. Its own name here because it is
@@ -168,6 +171,22 @@ pub const VIRTGPU_DRM_CAPSET_VIRGL: u32 = 1;
 /// `VIRTGPU_DRM_CAPSET_VIRGL2`.
 pub const VIRTGPU_DRM_CAPSET_VIRGL2: u32 = 2;
 
+/// `VIRTGPU_CONTEXT_PARAM_CAPSET_ID` — which capset the context renders with. The one knob a
+/// context cannot be made without: a context is a rendering context *for* a capset.
+pub const VIRTGPU_CONTEXT_PARAM_CAPSET_ID: u64 = 0x0001;
+/// `VIRTGPU_CONTEXT_PARAM_NUM_RINGS` — how many command rings to make.
+pub const VIRTGPU_CONTEXT_PARAM_NUM_RINGS: u64 = 0x0002;
+/// `VIRTGPU_CONTEXT_PARAM_POLL_RINGS_MASK` — which rings deliver completion events.
+pub const VIRTGPU_CONTEXT_PARAM_POLL_RINGS_MASK: u64 = 0x0003;
+/// `VIRTGPU_CONTEXT_PARAM_DEBUG_NAME` — Linux names a context after the calling *task*, and
+/// this version of the host ABI rejects this parameter rather than reading a name from it
+/// (`virtio_gpu_context_init_ioctl` has no case for it).
+pub const VIRTGPU_CONTEXT_PARAM_DEBUG_NAME: u64 = 0x0004;
+
+/// How many `drm_virtgpu_context_set_param` entries a context request may carry. Linux caps it
+/// at three — the number of knobs it has — before it reads any of them.
+pub const MAX_CONTEXT_PARAMS: usize = 3;
+
 /// `DRM_CAP_DUMB_BUFFER`: the mode-setting dumb-buffer ioctl. A render node has none.
 pub const DRM_CAP_DUMB_BUFFER: u64 = 0x1;
 /// `DRM_CAP_PRIME`: dma-buf import/export. Not yet.
@@ -230,6 +249,12 @@ pub trait RenderNode {
     /// Dropping a handle twice, or one this node never issued, is `ENOENT` — the ABI has no
     /// "already closed".
     fn close_object(&mut self, handle: u32) -> Result<(), i32>;
+
+    /// `DRM_IOCTL_VIRTGPU_CONTEXT_INIT`: make the one rendering context a client may have, from
+    /// the `drm_virtgpu_context_set_param` array [`dispatch`] read on its behalf. A second call
+    /// is `EEXIST`, a device with no GL or no context support is `EINVAL`, and so is a parameter
+    /// this node cannot honour.
+    fn context_init(&mut self, params: &[ContextParam]) -> Result<(), i32>;
 }
 
 /// The most objects one node may hold at once. A node's backing is a fixed arena, so this
@@ -379,12 +404,24 @@ impl GemTable {
 /// The pointed-to buffers a DRM argument struct carries.
 ///
 /// The structs hold *user* addresses (`drm_version.name`, `drm_virtgpu_getparam.value`,
-/// `drm_virtgpu_get_caps.addr`), which a real node reaches with `safecopy_to`. Keeping
-/// that behind a trait is what lets the decoders be tested without a user process, and it
-/// is also the only place a request can fail with `EFAULT`.
+/// `drm_virtgpu_get_caps.addr`, `drm_virtgpu_context_init.ctx_set_params`), which a real node
+/// reaches with `safecopy_from`/`safecopy_to`. Keeping that behind a trait is what lets the
+/// decoders be tested without a user process, and it is also the only place a request can fail
+/// with `EFAULT`.
 pub trait UserBuffers {
     /// Copy `src` to the user address `addr`.
     fn write(&mut self, addr: u64, src: &[u8]) -> Result<(), i32>;
+
+    /// Copy from the user address `addr` into `dst`.
+    fn read(&mut self, addr: u64, dst: &mut [u8]) -> Result<(), i32>;
+}
+
+/// One `struct drm_virtgpu_context_set_param`: which knob, and what to set it to. Both are
+/// `u64` in the struct, not the pair of `u32`s the shape suggests.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct ContextParam {
+    pub param: u64,
+    pub value: u64,
 }
 
 /// The `u32` at `off`, or 0 when the argument is short. [`dispatch`] checks the encoded
@@ -617,6 +654,39 @@ pub fn dispatch(
                 Err(e) => e,
             }
         }
+        DRM_IOCTL_VIRTGPU_CONTEXT_INIT => {
+            if !fits(arg, request) {
+                return EINVAL;
+            }
+            let count = rd_u32(arg, 0) as usize;
+            let addr = rd_u64(arg, 8);
+            // Linux refuses an over-long list before it reads any of it, so a caller that sent
+            // more knobs than the ABI has hears about its request and not about its pointer.
+            if count > MAX_CONTEXT_PARAMS {
+                return EINVAL;
+            }
+            let mut raw = [0u8; MAX_CONTEXT_PARAMS * 16];
+            let bytes = &mut raw[..count * 16];
+            if !bytes.is_empty() {
+                // The array travels by pointer (`memdup_user` on the host), so a null one is a
+                // request that named nothing rather than an empty context.
+                if addr == 0 {
+                    return EFAULT;
+                }
+                if let Err(e) = users.read(addr, bytes) {
+                    return e;
+                }
+            }
+            let mut params = [ContextParam::default(); MAX_CONTEXT_PARAMS];
+            for (i, p) in params.iter_mut().take(count).enumerate() {
+                p.param = rd_u64(&raw, i * 16);
+                p.value = rd_u64(&raw, i * 16 + 8);
+            }
+            match node.context_init(&params[..count]) {
+                Ok(()) => 0,
+                Err(e) => e,
+            }
+        }
         _ => ENOTTY,
     }
 }
@@ -706,6 +776,27 @@ mod tests {
             }
             Ok(())
         }
+
+        /// A capset knob naming capset 2, optionally preceded by a `NUM_RINGS` of one — the only
+        /// shapes the context tests pass. A mis-decoded array is then an *error here* rather than
+        /// a context accepted with the wrong capset, which is what makes the offsets in the array
+        /// this method's business and the test's subject. Capset 2 rather than 1 because the
+        /// knob's own id and capset 1's are the same number: a swapped pair would then be
+        /// indistinguishable from a correct one.
+        fn context_init(&mut self, params: &[ContextParam]) -> Result<(), i32> {
+            let capset = |p: &ContextParam| {
+                p.param == VIRTGPU_CONTEXT_PARAM_CAPSET_ID
+                    && p.value == VIRTGPU_DRM_CAPSET_VIRGL2 as u64
+            };
+            let rings = |p: &ContextParam| {
+                p.param == VIRTGPU_CONTEXT_PARAM_NUM_RINGS && p.value == 1
+            };
+            match params {
+                [only] if capset(only) => Ok(()),
+                [first, second] if rings(first) && capset(second) => Ok(()),
+                _ => Err(EINVAL),
+            }
+        }
     }
 
     /// A `struct drm_virtgpu_resource_create`: geometry, the caller's own byte count, and
@@ -731,6 +822,22 @@ mod tests {
         let mut arg = [0u8; 16];
         wr_u32(&mut arg, 0, handle);
         arg
+    }
+
+    /// A `struct drm_virtgpu_context_init`: how many knob entries, and where the array is.
+    fn context_init_arg(count: u32, addr: u64) -> [u8; 16] {
+        let mut arg = [0u8; 16];
+        wr_u32(&mut arg, 0, count);
+        wr_u64(&mut arg, 8, addr);
+        arg
+    }
+
+    /// `drm_virtgpu_context_set_param`: the knob, then its value — two `u64`s, not a `u32` pair.
+    fn ctx_param(param: u64, value: u64) -> [u8; 16] {
+        let mut p = [0u8; 16];
+        wr_u64(&mut p, 0, param);
+        wr_u64(&mut p, 8, value);
+        p
     }
 
     /// A `struct drm_virtgpu_map`: the handle in, the offset out.
@@ -855,6 +962,127 @@ mod tests {
         );
     }
 
+    /// The context request reads its parameter array through a user pointer, and the node is
+    /// handed what that read produced — so the array's layout is the subject, and the fake node
+    /// accepts only the shapes these tests build.
+    #[test]
+    fn context_init_reads_the_parameter_array_through_the_pointer() {
+        let mut node = FakeNode;
+        let mut users = FakeUser::new();
+
+        users.seed(0x6000, &ctx_param(VIRTGPU_CONTEXT_PARAM_CAPSET_ID, 2));
+        let mut arg = context_init_arg(1, 0x6000);
+        assert_eq!(
+            dispatch(
+                &mut node,
+                &mut users,
+                DRM_IOCTL_VIRTGPU_CONTEXT_INIT,
+                &mut arg
+            ),
+            0
+        );
+
+        // Entries are 16 bytes apart, so the second is read past the first: two entries are
+        // read where one would have taken the first sixteen bytes twice.
+        let mut two = [0u8; 32];
+        two[..16].copy_from_slice(&ctx_param(VIRTGPU_CONTEXT_PARAM_NUM_RINGS, 1));
+        two[16..].copy_from_slice(&ctx_param(VIRTGPU_CONTEXT_PARAM_CAPSET_ID, 2));
+        users.seed(0x6100, &two);
+        let mut arg = context_init_arg(2, 0x6100);
+        assert_eq!(
+            dispatch(
+                &mut node,
+                &mut users,
+                DRM_IOCTL_VIRTGPU_CONTEXT_INIT,
+                &mut arg
+            ),
+            0
+        );
+
+        // `param` and `value` are not interchangeable: the entry above with its two `u64`s
+        // swapped names the `NUM_RINGS` knob — which the ABI reads as *rings* 2, not as a
+        // capset — so an array that is one swapped entry is refused. Were the decoder swapping
+        // the pair itself, this would be the valid array above and answer 0.
+        users.seed(0x6200, &ctx_param(2, VIRTGPU_CONTEXT_PARAM_CAPSET_ID));
+        let mut arg = context_init_arg(1, 0x6200);
+        assert_eq!(
+            dispatch(
+                &mut node,
+                &mut users,
+                DRM_IOCTL_VIRTGPU_CONTEXT_INIT,
+                &mut arg
+            ),
+            EINVAL
+        );
+    }
+
+    /// What a context request that cannot be read is: more knobs than the ABI has, a pointer
+    /// that names nothing, an array this side cannot reach, and no knobs at all — which the read
+    /// skips, so the answer is the node's rather than the copy's.
+    #[test]
+    fn context_init_refuses_what_it_cannot_read() {
+        let mut node = FakeNode;
+        let mut users = FakeUser::new();
+
+        let mut arg = context_init_arg(MAX_CONTEXT_PARAMS as u32 + 1, 0x6000);
+        assert_eq!(
+            dispatch(
+                &mut node,
+                &mut users,
+                DRM_IOCTL_VIRTGPU_CONTEXT_INIT,
+                &mut arg
+            ),
+            EINVAL
+        );
+
+        let mut arg = context_init_arg(1, 0);
+        assert_eq!(
+            dispatch(
+                &mut node,
+                &mut users,
+                DRM_IOCTL_VIRTGPU_CONTEXT_INIT,
+                &mut arg
+            ),
+            EFAULT
+        );
+
+        // Nothing seeded at this address, which is what a pointer into a client's unmapped
+        // memory looks like from here.
+        let mut arg = context_init_arg(1, 0x7700);
+        assert_eq!(
+            dispatch(
+                &mut node,
+                &mut users,
+                DRM_IOCTL_VIRTGPU_CONTEXT_INIT,
+                &mut arg
+            ),
+            EFAULT
+        );
+
+        let mut arg = context_init_arg(0, 0);
+        assert_eq!(
+            dispatch(
+                &mut node,
+                &mut users,
+                DRM_IOCTL_VIRTGPU_CONTEXT_INIT,
+                &mut arg
+            ),
+            EINVAL
+        );
+
+        // A short argument is refused before any field is read, as every arm does.
+        let mut arg = [0u8; 8];
+        assert_eq!(
+            dispatch(
+                &mut node,
+                &mut users,
+                DRM_IOCTL_VIRTGPU_CONTEXT_INIT,
+                &mut arg
+            ),
+            EINVAL
+        );
+    }
+
     /// The object table: lengths round up to a page, a closed handle's slot is reused, and an
     /// offset stops naming its object the moment that object is closed.
     #[test]
@@ -949,6 +1177,14 @@ mod tests {
         fn writes(&self) -> usize {
             self.count
         }
+
+        /// Put `bytes` at `addr` as if the client's own array were there, so a request that
+        /// *reads* through a pointer field has something to find.
+        fn seed(&mut self, addr: u64, bytes: &[u8]) {
+            if self.write(addr, bytes).is_err() {
+                unreachable!("the fake only fails when a test asked it to");
+            }
+        }
     }
 
     impl UserBuffers for FakeUser {
@@ -963,6 +1199,21 @@ mod tests {
                 slot.2 = n;
                 self.count += 1;
             }
+            Ok(())
+        }
+
+        fn read(&mut self, addr: u64, dst: &mut [u8]) -> Result<(), i32> {
+            if self.fail {
+                return Err(EFAULT);
+            }
+            let Some((_, buf, n)) = self.slots[..self.count]
+                .iter()
+                .find(|(a, _, _)| *a == addr)
+            else {
+                return Err(EFAULT);
+            };
+            let n = (*n).min(dst.len());
+            dst[..n].copy_from_slice(&buf[..n]);
             Ok(())
         }
     }
@@ -1038,6 +1289,7 @@ mod tests {
             DRM_IOCTL_VIRTGPU_GETPARAM,
             DRM_IOCTL_VIRTGPU_GET_CAPS,
             DRM_IOCTL_VIRTGPU_EXECBUFFER,
+            DRM_IOCTL_VIRTGPU_CONTEXT_INIT,
         ] {
             assert!(carries_in(request), "{request:#x} must carry in");
             assert!(carries_out(request), "{request:#x} must carry out");

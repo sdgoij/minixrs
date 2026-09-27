@@ -25,8 +25,24 @@
 # encodes, and `caps=ok` is the capset blob arriving through the node — the one field whose
 # value is not a small integer.
 #
-# A step's expectation must be a line no other step can produce (`silent-failure-traps`): the
-# command is `/bin/drminfo`, the answer starts `drminfo:`, and the boot line above is the fb
-# server's, so none of the three is a substring of another.
+# A step's expectation must be a line no other step can produce (`silent-failure-traps`): each
+# command starts with its own binary's name, each answer with that client's own prefix, and
+# the boot line above is the fb server's, so no one of them is a substring of another.
+#
+# The second step is the context: `init=ok` is `VIRTGPU_CONTEXT_INIT` making one, and
+# `again=err 17` is `EEXIST` from the second attempt — the one context a client may have.
+# That is also the first request whose argument the node *reads* out of the caller's memory
+# (the capset comes in an array behind a pointer), so it is the first step that could catch a
+# read direction getting the two address spaces the wrong way round.
+#
+# The third step runs the *same client* again, and its expectation is therefore the same
+# line as the step above it. That is the point: a context belongs to the client that made it,
+# and a node that kept it after the first client exited would answer the second run's first
+# call with `EEXIST` — `init=err 17` — and its second with the same. Only `init=ok` again
+# says the close released it. A repeated expectation is only safe because every step's
+# expectations are anchored to what the guest printed *after* that step was sent; `feed.sh`
+# says where, and this pair of steps is what that anchoring is for.
 
 /bin/drminfo	drminfo: virtio_gpu 3d=1 err 0 blob=1 err 0 ctx=1 err 0 host=0 err 0 mask=3 err 0 caps=ok
+/bin/drmctx	drmctx: init=ok again=err 17
+/bin/drmctx	drmctx: init=ok again=err 17

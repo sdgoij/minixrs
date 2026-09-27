@@ -808,7 +808,16 @@ unsafe fn handle_drm_request(
                 None => -6, // ENXIO
             }
         }
-        CDEV_CLOSE => 0,
+        CDEV_CLOSE => {
+            // A context belongs to the client that made it, and this is where it goes back: on
+            // Linux the file closing destroys it, and a node that kept it would refuse the next
+            // client's context with `EEXIST`.
+            let node = unsafe { &mut *core::ptr::addr_of_mut!(RENDER_NODE) };
+            if let Some(node) = node {
+                node.release_context();
+            }
+            0
+        }
         CDEV_IOCTL => {
             let request = unsafe { msg.m_payload.m2.m2i2 as u32 };
             let grant = unsafe { msg.m_payload.m2.m2i3 as u32 };
@@ -906,6 +915,24 @@ impl drivers::video::drm::UserBuffers for DrmUser {
             self.ep,
             addr,
             src.len(),
+        );
+        if r == 0 {
+            Ok(())
+        } else {
+            Err(drivers::video::drm::EFAULT)
+        }
+    }
+
+    /// The other direction, for the fields a request *points at* rather than writes
+    /// (`drm_virtgpu_context_init.ctx_set_params` is an array to read). Same mechanism, the two
+    /// address spaces swapped.
+    fn read(&mut self, addr: u64, dst: &mut [u8]) -> Result<(), i32> {
+        let r = minix_rt::sys_vircopy(
+            self.ep,
+            addr,
+            minix_rt::SELF,
+            dst.as_mut_ptr() as u64,
+            dst.len(),
         );
         if r == 0 {
             Ok(())

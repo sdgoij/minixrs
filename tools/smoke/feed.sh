@@ -112,7 +112,7 @@ wait_for_after() {
 #     slow earlier attempt produced. Taking it per attempt is how a send that arrived late gets
 #     retyped and the command runs twice.
 type_step() {
-    at=$(wc -c < "$log" 2>/dev/null || echo 0)
+    anchor=$2
     attempt=1
     while [ "$attempt" -le 4 ]; do
         attempt=$((attempt + 1))
@@ -125,7 +125,7 @@ type_step() {
             sleep "$pace"
         done
         printf '\n'
-        if wait_for_after "${1}[[:space:]]*$" "$at"; then
+        if wait_for_after "${1}[[:space:]]*$" "$anchor"; then
             return 0
         fi
         # Something shorter ran. Let the shell come back before the next attempt, or that attempt
@@ -169,28 +169,38 @@ drive() {
         send=${line%%"$tab"*}
         expect=${line#*"$tab"}
 
+        # The step's own output window starts here. `wait_for` scans the whole log, so an
+        # expectation the guest has already printed — by an earlier step, or by the same command
+        # run twice — would be satisfied before this step sent anything, and the step would pass
+        # having done nothing (`silent-failure-traps`, where a `pr` bisect went green in all five
+        # steps that way). Every wait for this step's output is anchored to this offset instead.
+        at=$(wc -c < "$log" 2>/dev/null || echo 0)
         if [ "$pace" = 0 ]; then
             printf '%s\n' "$send"
-        elif ! type_step "$send"; then
+        elif ! type_step "$send" "$at"; then
             write_status "step $steps" "never arrived whole: sent '$send' a byte at a time and the guest never echoed the whole of it"
             return 1
         fi
         if [ -n "$expect" ]; then
             # The whole line, not a substring: the guest echoes what it is sent, and for the first step
             # that echoed text contains the expectation too (TEST_GATES.md cause (h)).
-            if ! wait_for "^${expect}[[:space:]]*$"; then
+            if ! wait_for_after "^${expect}[[:space:]]*$" "$at"; then
                 write_status "step $steps" "did not answer: sent '$send', expected the line '$expect'"
                 return 1
             fi
-        elif ! wait_for "^#[[:space:]]*${send}[[:space:]]*$"; then
-            # Nothing to read back, so the echoed command is the whole of the step's evidence.
+        elif ! wait_for_after "${send}[[:space:]]*$" "$at"; then
+            # Nothing to read back, so the echoed command is the whole of the step's evidence —
+            # and only the *command* can be searched for here. The prompt in front of the echo was
+            # printed before this step's anchor, so a pattern containing it starts one character
+            # after where the window does and can never match; the end-of-line anchor is what
+            # keeps a truncated echo from passing instead.
             write_status "step $steps" "was not accepted: sent '$send'"
             return 1
         fi
         echo "  ok  $send" >&2
         # A step that answered is not yet proof the next one will be read: the shell may not be back at
         # its prompt, and input sent before then is dropped.
-        if ! wait_for "^#[[:space:]]*$"; then
+        if ! wait_for_after "^#[[:space:]]*$" "$at"; then
             write_status "step $steps" "answered, but the shell did not come back to a prompt"
             return 1
         fi

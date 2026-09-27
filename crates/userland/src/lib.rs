@@ -30,6 +30,9 @@ pub mod drminfo;
 /// The DRM render node's memory objects, mapped by a client — `/bin/drmmap` (§6.10, 3b-3).
 pub mod drmmap;
 
+/// The DRM render node's rendering context — `/bin/drmctx` (§6.10, 3b-4).
+pub mod drmctx;
+
 /// When >= 0, all `write_out` calls are routed through this fd (via VFS)
 /// instead of the kernel's serial shortcut on fd 1. Set by the shell's
 /// redirect child after `fork`, so it is process-private.

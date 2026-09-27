@@ -176,6 +176,12 @@ const VIRGL_FORMAT_B8G8R8A8_UNORM: u32 = 1;
 /// one of the buffer binds, is rejected for a texture target.
 const VIRGL_BIND_TEXTURE: u32 = (1 << 1) | (1 << 3);
 
+/// The one context id this driver uses.
+///
+/// The node serves a single context (§6.10 D3), and the boot probe uses the same id for its
+/// transient one — it destroys what it made, so the id is free by the time a client asks for it.
+const CONTEXT_ID: u32 = 1;
+
 /// `VIRGL_CCMD_RESOURCE_INLINE_WRITE` — the simplest virgl command that makes the *host*
 /// put known bytes into a resource: no framebuffer, shader or bound state, just the
 /// resource, a box and the data. That is what makes it a good `SUBMIT_3D` probe.
@@ -786,11 +792,16 @@ impl VirtioGpuArch {
     /// `CTX_CREATE`: the context the host will run command buffers for. The context
     /// id is the driver's to choose and travels in the header, which is why the
     /// probe can pick one and hand it straight back.
-    fn ctx_create(&mut self, ctx_id: u32, name: &[u8]) -> Result<(), DriverError> {
+    /// `CTX_CREATE`: make a rendering context.
+    ///
+    /// `flags` is the DRM context request's `context_init` word — on Linux the capset id in its
+    /// low bits — which is how the host learns which capset the context renders with. Zero is a
+    /// context with no capset, which the host accepts and which renders nothing.
+    fn ctx_create(&mut self, ctx_id: u32, flags: u32, name: &[u8]) -> Result<(), DriverError> {
         let mut cmd = CtxCreate {
             hdr: CtrlHdr::new(CMD_CTX_CREATE),
             nlen: 0,
-            context_init: 0,
+            context_init: flags,
             debug_name: [0u8; 64],
         };
         cmd.hdr.ctx_id = ctx_id;
@@ -1088,7 +1099,12 @@ pub struct DrmNode {
     /// The feature word, as `GETPARAM` reports it.
     virgl: bool,
     blob: bool,
-    context_init: bool,
+    /// The device offered `VIRTIO_GPU_F_CONTEXT_INIT`. Named for the feature, not for the
+    /// request, so that `context_init` above it can be the ABI's name.
+    has_context_init: bool,
+    /// The one context a client may have, once it has made one. The ABI ties this to the open
+    /// file on Linux; this node is one allocator, so it is the node's (§6.10 D3).
+    context: Option<u32>,
     /// The objects this node has handed out.
     gems: drm::GemTable,
     /// Image VA of slot 0 of the backing the objects come from. Slot `i` is at
@@ -1126,6 +1142,22 @@ impl DrmNode {
             return Err(drm::ENOENT);
         };
         Ok((self.slot_va(slot), len as u64))
+    }
+
+    /// `CDEV_CLOSE`: give up the context the node holds.
+    ///
+    /// Linux ties a context to the open file and destroys it when that file closes, so this is
+    /// where a client's context goes. This node has no per-open table (§6.10 D3's deviation),
+    /// so a close releases the one context it has; the day the node tracks opens, each close
+    /// releases its own. A host that refuses the destroy keeps the context, so closing again can
+    /// retry rather than leaving the host holding something this side has forgotten.
+    pub fn release_context(&mut self) {
+        let Some(ctx_id) = self.context else {
+            return;
+        };
+        if self.dev.ctx_destroy(ctx_id).is_ok() {
+            self.context = None;
+        }
     }
 
     /// The capset with this id, if the host offers one.
@@ -1180,7 +1212,7 @@ impl drm::RenderNode for DrmNode {
             // Host blobs are not mappable into the guest yet, and there is one virtio
             // device, so nothing to share across devices.
             drm::VIRTGPU_PARAM_HOST_VISIBLE | drm::VIRTGPU_PARAM_CROSS_DEVICE => Ok(0),
-            drm::VIRTGPU_PARAM_CONTEXT_INIT => Ok(self.context_init as i32),
+            drm::VIRTGPU_PARAM_CONTEXT_INIT => Ok(self.has_context_init as i32),
             drm::VIRTGPU_PARAM_SUPPORTED_CAPSET_IDS => Ok(self.capset_mask() as i32),
             _ => Err(drm::EINVAL),
         }
@@ -1310,6 +1342,54 @@ impl drm::RenderNode for DrmNode {
         self.gems.remove(handle);
         Ok(())
     }
+
+    fn context_init(&mut self, params: &[drm::ContextParam]) -> Result<(), i32> {
+        // Both the feature and GL: a device without `VIRTIO_GPU_F_CONTEXT_INIT` has no context
+        // command, and one without GL has no capset for a context to render with.
+        if !self.has_context_init || !self.virgl {
+            return Err(drm::EINVAL);
+        }
+        // One context per client, and a second is `EEXIST` rather than a new one — Linux ties it
+        // to the open file and refuses the second attempt on the same file.
+        if self.context.is_some() {
+            return Err(drm::EEXIST);
+        }
+        let mut flags = 0u32;
+        for p in params {
+            match p.param {
+                drm::VIRTGPU_CONTEXT_PARAM_CAPSET_ID => {
+                    // The capset must be one the device has, and it may be named once.
+                    if p.value > u32::MAX as u64
+                        || self.capset(p.value as u32).is_none()
+                        || flags != 0
+                    {
+                        return Err(drm::EINVAL);
+                    }
+                    flags = p.value as u32;
+                }
+                drm::VIRTGPU_CONTEXT_PARAM_NUM_RINGS => {
+                    // This node serves one command ring — its `CTX_CREATE` carries no ring count
+                    // — so one is the only number it can honour. Linux allows up to its own
+                    // `MAX_RINGS`; a caller asking for more rings hears about it here rather
+                    // than getting one and believing it has more.
+                    if p.value > 1 {
+                        return Err(drm::EINVAL);
+                    }
+                }
+                // The ring-poll mask asks for completion events on rings, which this port does
+                // not deliver, and `DEBUG_NAME` is a parameter this version of the host ABI
+                // rejects itself (a context is named after the calling task there).
+                _ => return Err(drm::EINVAL),
+            }
+        }
+        // `minixrs` for the debug name: Linux names a context after the calling *task*, and a
+        // process on this port has no comm to be named by.
+        self.dev
+            .ctx_create(CONTEXT_ID, flags, b"minixrs")
+            .map_err(|_| drm::EINVAL)?;
+        self.context = Some(CONTEXT_ID);
+        Ok(())
+    }
 }
 
 /// Negotiate the render node and take it (§6.10, stage 3b): the features, the control
@@ -1342,7 +1422,8 @@ fn open_render_node(out: &mut Gpu3d) -> Option<DrmNode> {
         count: 0,
         virgl: out.virgl,
         blob: out.blob,
-        context_init: out.context_init,
+        has_context_init: out.context_init,
+        context: None,
         gems: drm::GemTable::new(0),
         gem_arena: 0,
     };
@@ -1415,19 +1496,18 @@ pub fn probe_render_node() -> (Gpu3d, Option<DrmNode>) {
     if let Ok(len) = node.dev.capset_blob(out.capset) {
         out.capset_len = len;
     }
-    // Create is the evidence and destroy keeps the host from holding a context the
-    // port will never use, so the flag means both halves worked.
-    const PROBE_CTX_ID: u32 = 1;
-    let created = node.dev.ctx_create(PROBE_CTX_ID, b"minixrs").is_ok();
+    // Create is the evidence and destroy keeps the host from holding a context the port
+    // will never use, so the flag means both halves worked.
+    let created = node.dev.ctx_create(CONTEXT_ID, 0, b"minixrs").is_ok();
     if created {
         // The bytes, not the response types: see `Gpu3d::xfer_matched` and
         // `Gpu3d::submit_matched`.
-        if let Ok((xfer, submit)) = node.dev.round_trip(PROBE_CTX_ID) {
+        if let Ok((xfer, submit)) = node.dev.round_trip(CONTEXT_ID) {
             out.xfer_matched = xfer;
             out.submit_matched = submit;
         }
     }
-    out.ctx = created && node.dev.ctx_destroy(PROBE_CTX_ID).is_ok();
+    out.ctx = created && node.dev.ctx_destroy(CONTEXT_ID).is_ok();
     (out, Some(node))
 }
 
@@ -2045,7 +2125,8 @@ mod tests {
             count: capsets.len(),
             virgl,
             blob,
-            context_init,
+            has_context_init: context_init,
+            context: None,
             gems: drm::GemTable::new(0),
             gem_arena: 0,
         };
@@ -2158,5 +2239,66 @@ mod tests {
         let v = node.version();
         assert_eq!(v.name, "virtio_gpu");
         assert!(!v.date.is_empty() && !v.desc.is_empty());
+    }
+
+    /// The context request: everything a node refuses, and every one of those refusals happens
+    /// before any device command, so the answers below are the node's own. The *success* path
+    /// needs a device, which is the GL gate's.
+    #[test]
+    fn context_init_refuses_what_the_node_cannot_serve() {
+        let capsets = [CapsetInfo {
+            id: 1,
+            max_version: 1,
+            max_size: 308,
+        }];
+        let capset = [drm::ContextParam {
+            param: drm::VIRTGPU_CONTEXT_PARAM_CAPSET_ID,
+            value: 1,
+        }];
+
+        // No `VIRTIO_GPU_F_CONTEXT_INIT`: the device has no context command at all.
+        let mut node = drm_node(&capsets, true, false, false);
+        assert_eq!(node.context_init(&capset), Err(drm::EINVAL));
+
+        // The feature, but no GL: there is no capset for a context to render with.
+        let mut node = drm_node(&capsets, false, false, true);
+        assert_eq!(node.context_init(&capset), Err(drm::EINVAL));
+
+        // Both features, so the knobs are what is left: a capset the device does not have, more
+        // command rings than this node serves, the ring-poll mask (this port delivers no ring
+        // events), the `DEBUG_NAME` this version of the host ABI rejects itself, and a knob the
+        // ABI does not define.
+        let mut node = drm_node(&capsets, true, false, true);
+        for bad in [
+            drm::ContextParam {
+                param: drm::VIRTGPU_CONTEXT_PARAM_CAPSET_ID,
+                value: 9,
+            },
+            drm::ContextParam {
+                param: drm::VIRTGPU_CONTEXT_PARAM_NUM_RINGS,
+                value: 2,
+            },
+            drm::ContextParam {
+                param: drm::VIRTGPU_CONTEXT_PARAM_POLL_RINGS_MASK,
+                value: 1,
+            },
+            drm::ContextParam {
+                param: drm::VIRTGPU_CONTEXT_PARAM_DEBUG_NAME,
+                value: 0,
+            },
+            drm::ContextParam {
+                param: 0x9999,
+                value: 0,
+            },
+        ] {
+            assert_eq!(node.context_init(&[bad]), Err(drm::EINVAL), "{bad:?}");
+        }
+
+        // The one context a client may have: a second request is `EEXIST`, and that is said
+        // before the knobs are looked at — a client that already has one hears *that*.
+        let mut taken = drm_node(&capsets, true, false, true);
+        taken.context = Some(CONTEXT_ID);
+        assert_eq!(taken.context_init(&capset), Err(drm::EEXIST));
+        assert_eq!(taken.context_init(&[]), Err(drm::EEXIST));
     }
 }

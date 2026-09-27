@@ -200,6 +200,9 @@ pub const BOOT_BINS: &[(&str, &str)] = &[
     // `/bin/drmmap` makes a render node memory object, maps it, and proves the mapping is
     // that object's memory (§6.10, stage 3b-3).
     ("/bin/drmmap", "drmmap"),
+    // `/bin/drmctx` makes the render node's rendering context, which is what a command buffer
+    // and a transfer through one hang off (§6.10, stage 3b-4).
+    ("/bin/drmctx", "drmctx"),
 ];
 
 /// Programs a **wasm32** image carries: destination path → module file name in the target's
