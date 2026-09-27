@@ -24,6 +24,9 @@ pub mod fbfont;
 /// The `wl_shm` client gate — `/bin/wlclient` (`WAYLAND.md` Phase 1b).
 pub mod wlclient;
 
+/// The DRM render node's client — `/bin/drminfo` (`WAYLAND.md` §6.10, stage 3b).
+pub mod drminfo;
+
 /// When >= 0, all `write_out` calls are routed through this fd (via VFS)
 /// instead of the kernel's serial shortcut on fd 1. Set by the shell's
 /// redirect child after `fork`, so it is process-private.

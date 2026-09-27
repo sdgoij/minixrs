@@ -57,6 +57,23 @@ static FB_BUF: FbBufCell = FbBufCell::new();
 /// Scratch space for ioctl arg structs and inline write data.
 static mut FB_SCRATCH: [u8; 128] = [0; 128];
 
+/// The minor the DRM render node answers on (`WAYLAND.md` §6.10, stage 3b).
+///
+/// VFS routes a `CDEV_*` request by *major* and sends only the *minor*, so the two
+/// interfaces this server answers on are told apart by their minors alone: `/dev/fb` is
+/// minor 0 and the render node is 128, which is where DRM puts render nodes (`cardN`
+/// take 0..63). That is why the render node gets a major of its own (`DRM_MAJOR`) even
+/// though both are this process: the day it moves to a server of its own, this constant
+/// and nothing else has to move with it.
+const DRM_MINOR_BASE: u32 = 128;
+
+/// The render node's device, held from the boot probe (`WAYLAND.md` §6.10, stage 3b).
+///
+/// `None` is a machine with no `virtio-gpu` device at all, and then the node refuses to
+/// open rather than answering for a device that is not there. A device the host gave no
+/// GL to is *not* `None`: its node exists and says so.
+static mut RENDER_NODE: Option<drivers::video::virtio_gpu::DrmNode> = None;
+
 /// Port-I/O hook: route every access through SYS_DEVIO (userland drivers
 /// have no direct I/O port access). The request/port/value live at
 /// payload[0..12]; the result comes back in payload[0..4].
@@ -409,11 +426,14 @@ pub fn fb_server_main() {
         {
             let backend = unsafe { &*core::ptr::addr_of!(FB_BACKEND) };
             if !matches!(backend, FbBackend::VirtioGpu(_)) {
-                // The node comes back with the report and is dropped here: it is the DRM
-                // render node's device state (`drivers::video::drm`), and this boot line
-                // only reports what the negotiation learnt.
-                let (gpu, _node) = drivers::video::virtio_gpu::probe_render_node();
+                let (gpu, node) = drivers::video::virtio_gpu::probe_render_node();
                 report_gpu3d(&gpu);
+                // The node is kept for the DRM render node's clients. `None` means this
+                // machine has no `virtio-gpu` device, and then `/dev/dri/renderD128`
+                // refuses to open rather than answering for a device that is not there.
+                unsafe {
+                    *core::ptr::addr_of_mut!(RENDER_NODE) = node;
+                }
             }
         }
 
@@ -470,6 +490,14 @@ unsafe fn handle_cdev_request(
     //   m2_i1 = minor  (payload +0), m2_i2 = flags (+4), m2_i3 = grant (+8)
     //   m2_l1 = position (+16), m2_l2 = count (+24), m2_l3 = inline data (+32)
     let minor = unsafe { msg.m_payload.m2.m2i1 as u32 };
+    // The render node is a different interface, and the only thing that distinguishes it
+    // here is the minor (VFS sends nothing else), so the split is made before any
+    // framebuffer arm can see the request — one of those arms hands out the
+    // framebuffer's physical range, which is the last thing a client that asked about its
+    // own buffer should be given.
+    if minor >= DRM_MINOR_BASE {
+        return unsafe { handle_drm_request(msg, who_e, call_type) };
+    }
     let arch = unsafe { &mut *core::ptr::addr_of_mut!(FB_BACKEND) };
     let arch: &mut dyn FbArch = arch;
     let driver = unsafe { &mut *core::ptr::addr_of_mut!(FB_DRIVER) };
@@ -705,4 +733,109 @@ fn safecopy_from(_granter: i32, _grant: u32, _data: &mut [u8], _count: usize) ->
 #[cfg(not(target_os = "minix"))]
 fn safecopy_to(_grantee: i32, _grant: u32, _data: &[u8]) -> i32 {
     -14 // EFAULT
+}
+
+/// Answer a `/dev/dri/renderD128` request: the DRM render node's `CDEV_*` surface
+/// (`WAYLAND.md` §6.10, stage 3b).
+///
+/// Three of the ops are refusals, and deliberately so. A DRM render node is an `ioctl`
+/// interface: `read`/`write` have no data stream and no event queue yet, and `mmap` has
+/// nothing to map until the node has GEM objects (3b-3) — answering it with the
+/// framebuffer's range would hand a client a view of memory it did not ask for.
+///
+/// # Safety
+///
+/// `msg` must point to a valid received message.
+unsafe fn handle_drm_request(
+    msg: &mut arch_common::ipc::Message,
+    who_e: i32,
+    call_type: u32,
+) -> i32 {
+    match call_type {
+        CDEV_OPEN => {
+            // The access flags go back like the framebuffer's do, so VFS records what the
+            // client asked for. An open either has a node behind it or is refused: there
+            // is no half-open render node.
+            let access = unsafe { msg.m_payload.m2.m2i2 };
+            match unsafe { &*core::ptr::addr_of!(RENDER_NODE) } {
+                Some(_) => access,
+                None => -6, // ENXIO
+            }
+        }
+        CDEV_CLOSE => 0,
+        CDEV_IOCTL => {
+            let request = unsafe { msg.m_payload.m2.m2i2 as u32 };
+            let grant = unsafe { msg.m_payload.m2.m2i3 as u32 };
+            let user = unsafe { msg.m_payload.m2.m2l1 } as i32;
+            drm_ioctl(request, who_e, grant, user)
+        }
+        CDEV_READ | CDEV_WRITE => -22, // EINVAL
+        CDEV_MAP => -22,               // EINVAL
+        _ => -38,                      // ENOSYS
+    }
+}
+
+/// The render node's ioctls, sized and directed from the request number itself.
+///
+/// That is what separates them from the framebuffer's, whose argument is one fixed struct
+/// per request: a DRM number carries its argument struct's size and the direction the
+/// bytes travel, so one arm serves the whole ABI (and a request whose number differs only
+/// in size is a different request, which `dispatch` answers `ENOTTY`).
+fn drm_ioctl(request: u32, granter: i32, grant: u32, user: i32) -> i32 {
+    use drivers::video::drm;
+
+    let scratch = unsafe { &mut *core::ptr::addr_of_mut!(FB_SCRATCH) };
+    let size = drm::arg_size(request) as usize;
+    if size > scratch.len() {
+        return -7; // E2BIG
+    }
+    let arg = &mut scratch[..size];
+    if drm::carries_in(request) && size > 0 && safecopy_from(granter, grant, arg, size) != 0 {
+        return -14; // EFAULT
+    }
+
+    let node = unsafe { &mut *core::ptr::addr_of_mut!(RENDER_NODE) };
+    let Some(node) = node else {
+        return -6; // ENXIO: no render node on this machine
+    };
+    let mut buffers = DrmUser { ep: user };
+    let r = drm::dispatch(node, &mut buffers, request, arg);
+
+    // The granter of a VFS-made magic grant is VFS, not the client: the kernel reads the
+    // grant entry out of the *named* endpoint's table, and the client has no table. Passing
+    // the client here is an EFAULT that only shows once a client actually reads a reply
+    // back, which is why it is named rather than assumed.
+    if r == 0 && drm::carries_out(request) && size > 0 && safecopy_to(granter, grant, arg) != 0 {
+        return -14; // EFAULT
+    }
+    r
+}
+
+/// The caller's memory, for the buffers a DRM argument struct *points at* — of which the
+/// grant VFS made covers only the argument struct itself.
+///
+/// `sys_vircopy` is what reaches them: this server is one end of a copy whose other end
+/// it names, and the kernel's copy resolves the two address spaces without asking who the
+/// caller is — the same mechanism `/dev/fb`'s datagram write already uses, in the other
+/// direction.
+struct DrmUser {
+    /// The client's endpoint, from the request (VFS names it in `m2_l1`).
+    ep: i32,
+}
+
+impl drivers::video::drm::UserBuffers for DrmUser {
+    fn write(&mut self, addr: u64, src: &[u8]) -> Result<(), i32> {
+        let r = minix_rt::sys_vircopy(
+            minix_rt::SELF,
+            src.as_ptr() as u64,
+            self.ep,
+            addr,
+            src.len(),
+        );
+        if r == 0 {
+            Ok(())
+        } else {
+            Err(drivers::video::drm::EFAULT)
+        }
+    }
 }

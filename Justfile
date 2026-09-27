@@ -354,15 +354,20 @@ test-gpu3d-x86 boot-timeout="30": build-x86
 # context commands it would otherwise send are exactly the ones a feature-less device
 # answers with errors (or, worse, does not answer at all). A plain `virtio-gpu-pci` is
 # that device on every x86 host, GL-capable or not, and being 2D-only it needs no GL
-# display backend: `-nographic` is enough, so this recipe drives the ordinary boot
-# smoke (`tools/smoke/scenario.tsv`) rather than a scenario of its own.
+# display backend: `-nographic` is enough, so this one boot carries both halves of 3b-2:
+# the fb server reports the device as no-3D, and then a client opens the render node and
+# is told so itself. The step is the client rather than the boot smoke because the client
+# is the stronger proof that the guest got here — it execs a binary from the image, opens
+# a device, and takes a path through VFS and a driver — and because the smoke proper is
+# `image-x86`'s. `tools/smoke/drminfo.tsv` has the rest of the reason this gate uses a
+# device without GL.
 test-gpu3d-nogl-x86 boot-timeout="20": build-x86
     mkdir -p target/images/x86_64-pc-minix
     cp target/trampoline.elf target/images/x86_64-pc-minix/minix-x86.elf
     @just _assert-qemu-version qemu-system-x86_64
-    sh tools/smoke/feed.sh target/test-gpu3d-nogl-x86.log {{boot-timeout}} qemu-system-x86_64 -nographic -m 256M -no-reboot -vga none -device bochs-display,id=fb0 -kernel target/images/x86_64-pc-minix/minix-x86.elf -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0 -device virtio-tablet-pci,display=fb0 -device virtio-gpu-pci
+    FEED_SCENARIO=tools/smoke/drminfo.tsv sh tools/smoke/feed.sh target/test-gpu3d-nogl-x86.log {{boot-timeout}} qemu-system-x86_64 -nographic -m 256M -no-reboot -vga none -device bochs-display,id=fb0 -kernel target/images/x86_64-pc-minix/minix-x86.elf -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0 -device virtio-tablet-pci,display=fb0 -device virtio-gpu-pci
     @just _assert-qemu-log target/test-gpu3d-nogl-x86.log "fb: gpu3d device, no VIRTIO_GPU_F_VIRGL"
-    @echo "gpu3d: a device the host gave no GL to is reported as no 3D, and the guest booted (x86_64)"
+    @echo "gpu3d: a device the host gave no GL to was reported as no 3D by the fb server and by a client opening its render node (x86_64)"
 
 # Acceptance test for KNOWN_ISSUES.md 12 — `coreutils seq 3` must write its three lines and
 # the next tool must read them back. It is the gate that made the multicall wedge findable: a

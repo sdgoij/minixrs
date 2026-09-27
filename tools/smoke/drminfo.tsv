@@ -1,0 +1,22 @@
+# The `just test-drminfo-x86` scenario: one step, because what this gate is about is the
+# DRM render node answering a client, and one client call is the whole of that.
+#
+# The device is a plain `virtio-gpu-pci`, which is a device the host enabled no GL on. That
+# is deliberate, twice over:
+#
+#   * a GL device needs a GL display backend (`-display egl-headless`), and host GL keeps
+#     the emulator busy enough that its serial input drops bytes — measured: a step that
+#     sent `/bin/echo gpu3d-ok` was echoed back as `/bin/echo gpu3d`. A gate that types
+#     into such a guest flakes, and this one types;
+#   * the node's *answers* differ with the device but its *path* does not: the request
+#     numbers, the argument sizing, the grant copy and the copies into the buffers the
+#     structs point at are the same code either way. A device without GL exercises all of
+#     them and is the case a client is most likely to meet.
+#
+# So the expected line is the degraded one: the node exists, answers `VERSION` with the
+# driver's name, answers `GETPARAM` with 3D features 0, and refuses `GET_CAPS` with
+# `ENOSYS` (38) — which is what a DRM client is meant to find there rather than finding no
+# device at all. The GL device's own answers are reported by the fb server's boot line
+# (`just test-gpu3d-x86`), which needs no typing.
+
+/bin/drminfo	drminfo: virtio_gpu 3d=0 err 0 blob=0 err 0 ctx=0 err 0 host=0 err 0 mask=0 err 0 caps=err 38

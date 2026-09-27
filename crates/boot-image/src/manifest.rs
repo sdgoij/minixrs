@@ -193,6 +193,10 @@ pub const BOOT_BINS: &[(&str, &str)] = &[
     // the in-house compositor that speaks the wire protocol over `/run/wayland-0`
     // and presents `wl_shm` buffers to `/dev/fb`.
     ("/sbin/wlserver", "wlserver"),
+    // `/bin/drminfo` opens the DRM render node (`/dev/dri/renderD128`) and reports what it
+    // says it is (`WAYLAND.md` §6.10, stage 3b). It is also a second, independent
+    // statement of the render node's ABI — see the module's own comment.
+    ("/bin/drminfo", "drminfo"),
 ];
 
 /// Programs a **wasm32** image carries: destination path → module file name in the target's

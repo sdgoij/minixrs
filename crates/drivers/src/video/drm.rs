@@ -75,6 +75,17 @@ pub const fn arg_size(request: u32) -> u32 {
     (request >> IOC_SIZESHIFT) & IOC_SIZEMASK
 }
 
+/// Whether the argument carries data *in* (`_IOC_WRITE`): the caller's ioctl copies it in
+/// before the request is answered.
+pub const fn carries_in(request: u32) -> bool {
+    (request >> IOC_DIRSHIFT) & IOC_WRITE != 0
+}
+
+/// Whether the argument carries data *out* (`_IOC_READ`): the answer is copied back.
+pub const fn carries_out(request: u32) -> bool {
+    (request >> IOC_DIRSHIFT) & IOC_READ != 0
+}
+
 /// `DRM_IOCTL_VERSION`, `struct drm_version`.
 pub const DRM_IOCTL_VERSION: u32 = iowr(DRM_IOCTL_BASE, 0x00, 64);
 /// `DRM_IOCTL_GEM_CLOSE`, `struct drm_gem_close`.
@@ -526,6 +537,24 @@ mod tests {
             assert_eq!(r >> 30, IOC_READ | IOC_WRITE);
         }
         assert_eq!(DRM_IOCTL_GEM_CLOSE >> 30, IOC_WRITE);
+    }
+
+    /// The direction bits, which decide whether an argument is copied in, out, or both.
+    /// `DRM_IOWR` is both (nearly all of these), `DRM_IOW` in only (`GEM_CLOSE`).
+    #[test]
+    fn the_direction_bits_say_which_way_the_argument_travels() {
+        for request in [
+            DRM_IOCTL_VERSION,
+            DRM_IOCTL_GET_CAP,
+            DRM_IOCTL_VIRTGPU_GETPARAM,
+            DRM_IOCTL_VIRTGPU_GET_CAPS,
+            DRM_IOCTL_VIRTGPU_EXECBUFFER,
+        ] {
+            assert!(carries_in(request), "{request:#x} must carry in");
+            assert!(carries_out(request), "{request:#x} must carry out");
+        }
+        assert!(carries_in(DRM_IOCTL_GEM_CLOSE));
+        assert!(!carries_out(DRM_IOCTL_GEM_CLOSE));
     }
 
     /// `getparam`'s value field is a user *pointer* and the value behind it is an `int`,

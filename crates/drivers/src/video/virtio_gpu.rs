@@ -1064,6 +1064,7 @@ pub struct DrmNode {
     capsets: [CapsetInfo; MAX_CAPSETS],
     count: usize,
     /// The feature word, as `GETPARAM` reports it.
+    virgl: bool,
     blob: bool,
     context_init: bool,
 }
@@ -1113,9 +1114,9 @@ impl drm::RenderNode for DrmNode {
 
     fn getparam(&mut self, param: u64) -> Result<i32, i32> {
         match param {
-            // A node only exists where the host offered VIRGL, so this is 1 by
-            // construction rather than by asking again.
-            drm::VIRTGPU_PARAM_3D_FEATURES => Ok(1),
+            // Whether the *device* has 3D, which is what a client reads to decide the
+            // node is usable. A node exists for a device without GL too.
+            drm::VIRTGPU_PARAM_3D_FEATURES => Ok(self.virgl as i32),
             drm::VIRTGPU_PARAM_CAPSET_QUERY_FIX => Ok(1),
             drm::VIRTGPU_PARAM_RESOURCE_BLOB => Ok(self.blob as i32),
             // Host blobs are not mappable into the guest yet, and there is one virtio
@@ -1128,6 +1129,13 @@ impl drm::RenderNode for DrmNode {
     }
 
     fn get_caps(&mut self, capset_id: u32, version: u32, out: &mut [u8]) -> Result<usize, i32> {
+        // A node with no capsets is a device the host gave no GL (D7's degrade), and the
+        // ABI's answer for "there is no capset here at all" is `ENOSYS`. `EINVAL` would
+        // instead say the *request* was malformed, which is a client's bug and not this
+        // machine's — a difference a client reads to decide whether to retry elsewhere.
+        if self.count == 0 {
+            return Err(drm::ENOSYS);
+        }
         let Some(info) = self.capset(capset_id) else {
             return Err(drm::EINVAL);
         };
@@ -1159,24 +1167,32 @@ fn open_render_node(out: &mut Gpu3d) -> Option<DrmNode> {
     out.blob = virtio::virtio_host_supports(&dev, VIRTIO_GPU_F_RESOURCE_BLOB);
     out.context_init = virtio::virtio_host_supports(&dev, VIRTIO_GPU_F_CONTEXT_INIT);
 
-    // Without VIRGL there is nothing to ask: the capset and context commands are
-    // answered with errors, so the report stops here with the features it saw.
-    if !out.virgl {
-        return None;
+    // The control queues exist for a device that can be commanded: without VIRGL the
+    // capset and context commands are answered with errors, so they are not set up and
+    // nothing below is asked.
+    if out.virgl {
+        let Ok(queues) = setup_queues(&mut dev) else {
+            return None;
+        };
+        out.queues = queues;
     }
-    let Ok(queues) = setup_queues(&mut dev) else {
-        return None;
-    };
-    out.queues = queues;
 
     let mut node = DrmNode {
         dev: VirtioGpuArch::new(),
         capsets: [CapsetInfo::default(); MAX_CAPSETS],
         count: 0,
+        virgl: out.virgl,
         blob: out.blob,
         context_init: out.context_init,
     };
     node.dev.vdev = Some(dev);
+    // A device with no GL still has a *node*: a DRM render node whose driver has no 3D
+    // answers `VERSION`, answers `GETPARAM` with `3D_FEATURES` 0, and refuses `GET_CAPS`
+    // with `ENOSYS` — which is what a client is meant to find there (D7's degrade, seen
+    // from the client's side). Only a machine with no device at all has no node.
+    if !out.virgl {
+        return Some(node);
+    }
 
     // The host lists its capsets by index and answers past the last one with a zero id
     // instead of an error, so this walks until then — bounded, in case a host never does.
@@ -1197,11 +1213,13 @@ fn open_render_node(out: &mut Gpu3d) -> Option<DrmNode> {
             }
         }
     }
-    if node.count == 0 {
-        return None;
+    // A host that answered with no capset at all is still a node — `GET_CAPS` is what
+    // then refuses, with `ENOSYS`, which is the ABI's answer for "no capsets" — so only
+    // the report is left short.
+    if node.count > 0 {
+        out.capset = node.capsets[0];
+        out.capset_count = node.count as u32;
     }
-    out.capset = node.capsets[0];
-    out.capset_count = node.count as u32;
     Some(node)
 }
 
@@ -1225,6 +1243,12 @@ pub fn probe_render_node() -> (Gpu3d, Option<DrmNode>) {
     let Some(mut node) = open_render_node(&mut out) else {
         return (out, None);
     };
+    // Without VIRGL there is nothing to fetch or create — the device answers those with
+    // errors — so the report stops here with the features it saw and the node goes back
+    // unasked.
+    if !out.virgl {
+        return (out, Some(node));
+    }
     // The blob for the capset the report names: what the host renders with is only useful
     // with its contents.
     if let Ok(len) = node.dev.capset_blob(out.capset) {
@@ -1853,11 +1877,12 @@ mod tests {
     /// A node with a fabricated capset list. The ABI answers that need no device are
     /// exactly the ones worth pinning — they are what a client reads to decide the device
     /// is usable — and this is how they are reached without one.
-    fn drm_node(capsets: &[CapsetInfo], blob: bool, context_init: bool) -> DrmNode {
+    fn drm_node(capsets: &[CapsetInfo], virgl: bool, blob: bool, context_init: bool) -> DrmNode {
         let mut node = DrmNode {
             dev: VirtioGpuArch::new(),
             capsets: [CapsetInfo::default(); MAX_CAPSETS],
             count: capsets.len(),
+            virgl,
             blob,
             context_init,
         };
@@ -1879,7 +1904,7 @@ mod tests {
             max_version: 2,
             max_size: 400,
         };
-        let mut node = drm_node(&[virgl], false, true);
+        let mut node = drm_node(&[virgl], true, false, true);
         assert_eq!(node.getparam(drm::VIRTGPU_PARAM_3D_FEATURES), Ok(1));
         assert_eq!(node.getparam(drm::VIRTGPU_PARAM_CAPSET_QUERY_FIX), Ok(1));
         assert_eq!(node.getparam(drm::VIRTGPU_PARAM_RESOURCE_BLOB), Ok(0));
@@ -1894,7 +1919,7 @@ mod tests {
         assert_eq!(node.getparam(0x99), Err(drm::EINVAL));
 
         // Both capsets, and the second id in the second bit.
-        let mut both = drm_node(&[virgl, virgl2], true, false);
+        let mut both = drm_node(&[virgl, virgl2], true, true, false);
         assert_eq!(
             both.getparam(drm::VIRTGPU_PARAM_SUPPORTED_CAPSET_IDS),
             Ok(0b11)
@@ -1907,10 +1932,26 @@ mod tests {
             max_version: 1,
             max_size: 1,
         };
-        let mut three = drm_node(&[virgl, virgl2, third], false, false);
+        let mut three = drm_node(&[virgl, virgl2, third], true, false, false);
         assert_eq!(
             three.getparam(drm::VIRTGPU_PARAM_SUPPORTED_CAPSET_IDS),
             Ok(0b111)
+        );
+
+        // A device without GL has a node all the same, and says so: this is the answer
+        // a client has to be able to read rather than finding no device.
+        let mut no_gl = drm_node(&[], false, false, false);
+        assert_eq!(no_gl.getparam(drm::VIRTGPU_PARAM_3D_FEATURES), Ok(0));
+        assert_eq!(
+            no_gl.getparam(drm::VIRTGPU_PARAM_SUPPORTED_CAPSET_IDS),
+            Ok(0)
+        );
+        // A node with no capsets at all is "no GL on this host", which the ABI answers
+        // `ENOSYS` — not `EINVAL`, which would say the request was malformed (`virtgpu`
+        // returns on `num_capsets == 0` before it looks at the id).
+        assert_eq!(
+            no_gl.get_caps(drm::VIRTGPU_DRM_CAPSET_VIRGL, 1, &mut [0u8; 64]),
+            Err(drm::ENOSYS)
         );
     }
 
@@ -1918,7 +1959,7 @@ mod tests {
     /// rather than answered 0, so a caller can tell "not capable" from "not asked about".
     #[test]
     fn get_cap_answers_only_the_two_it_knows() {
-        let mut node = drm_node(&[], false, false);
+        let mut node = drm_node(&[], true, false, false);
         assert_eq!(node.get_cap(drm::DRM_CAP_DUMB_BUFFER), Ok(0));
         assert_eq!(node.get_cap(drm::DRM_CAP_PRIME), Ok(0));
         assert_eq!(node.get_cap(0x99), Err(drm::EINVAL));
@@ -1936,6 +1977,7 @@ mod tests {
                 max_version: 1,
                 max_size: 308,
             }],
+            true,
             false,
             false,
         );
@@ -1949,7 +1991,7 @@ mod tests {
     /// caller gets.
     #[test]
     fn the_version_names_the_driver() {
-        let node = drm_node(&[], false, false);
+        let node = drm_node(&[], true, false, false);
         let v = node.version();
         assert_eq!(v.name, "virtio_gpu");
         assert!(!v.date.is_empty() && !v.desc.is_empty());
