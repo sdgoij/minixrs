@@ -161,9 +161,12 @@ pub const MAX_QUEUES: usize = 2;
 
 /// Virtio feature descriptor.
 ///
-/// Each feature is identified by a bit position. `host_support` is set
-/// during feature exchange; `guest_support` indicates which features
-/// the driver wants to negotiate (0 = not negotiated).
+/// Each feature is identified by a bit position within the low feature word.
+/// `guest_support` is what the driver *wants* to negotiate (0 = not wanted); it
+/// is only acknowledged when the device offered the same bit (see
+/// [`driver_feature_low`]). `host_support` is not written by the transport — the
+/// exchange publishes the device's word as [`VirtioDevice::host_features`], so
+/// that is what a driver should read.
 #[derive(Debug, Clone, Copy)]
 #[repr(C)]
 pub struct VirtioFeature {
@@ -594,6 +597,26 @@ fn exchange_features(dev: &mut VirtioDevice) {
     }
 }
 
+/// The low half of the driver feature word: every feature the driver wants
+/// (`guest_support != 0`) that the device actually offered.
+///
+/// A driver may only acknowledge a feature the device offered; a device that is
+/// asked to acknowledge one it did not is entitled to refuse `FEATURES_OK`.
+/// The bit is what makes this matter: `VIRTIO_GPU_F_VIRGL` is offered only by a
+/// GL-capable host, and a GPU driver that acknowledged it unconditionally would
+/// fail its whole transport — display included — on a host without one, which is
+/// the opposite of degrading to 2D.
+fn driver_feature_low(dev: &VirtioDevice) -> u32 {
+    let mut low: u32 = 0;
+    for f in dev.features.iter() {
+        debug_assert!(f.bit < 32, "feature bit must be in the low word");
+        if f.guest_support != 0 && virtio_host_supports(dev, f.bit) {
+            low |= 1u32 << f.bit;
+        }
+    }
+    low
+}
+
 /// Modern PCI feature exchange: 64-bit feature space via the feature
 /// selector registers in the common config region. The high word carries
 /// `VIRTIO_F_VERSION_1`, which is mandatory for modern (virtio 1.x) devices.
@@ -608,10 +631,7 @@ fn exchange_features_pci(dev: &mut VirtioDevice) {
         dev.host_features = ((high as u64) << 32) | low as u64;
 
         // Write the driver-selected low-word features.
-        let mut guest_low: u32 = 0;
-        for f in dev.features.iter() {
-            guest_low |= (f.guest_support as u32) << f.bit;
-        }
+        let guest_low = driver_feature_low(dev);
         mmio_write32(base + VPCI_DRIVER_FEATURE_SEL as u64, 0);
         mmio_write32(base + VPCI_DRIVER_FEATURE as u64, guest_low);
         // High word: accept VIRTIO_F_VERSION_1.
@@ -634,10 +654,7 @@ fn exchange_features_mmio(dev: &mut VirtioDevice) {
         dev.host_features = ((high as u64) << 32) | low as u64;
 
         // Write the driver-selected low-word features.
-        let mut guest_low: u32 = 0;
-        for f in dev.features.iter() {
-            guest_low |= (f.guest_support as u32) << f.bit;
-        }
+        let guest_low = driver_feature_low(dev);
         mmio_write32(base + VIRTIO_MMIO_DRIVER_FEATURES_SEL as u64, 0);
         mmio_write32(base + VIRTIO_MMIO_DRIVER_FEATURES as u64, guest_low);
         // High word: accept VIRTIO_F_VERSION_1.
@@ -742,7 +759,9 @@ fn alloc_queue_pci(dev: &mut VirtioDevice, qidx: usize) -> Result<(), VirtioErro
         crate::hal::mfence();
         mmio_write16(base + VPCI_QUEUE_READY as u64, 1);
     }
-    dev.num_queues = 1;
+    // Queues are allocated in order, so the count is the highest index plus one.
+    // Device code reads it as the bound on a queue index (`virtio_from_queue`).
+    dev.num_queues = qidx + 1;
     Ok(())
 }
 
@@ -788,7 +807,7 @@ fn alloc_queue_mmio(dev: &mut VirtioDevice, qidx: usize) -> Result<(), VirtioErr
         crate::hal::mfence();
         mmio_write32(base + VIRTIO_MMIO_QUEUE_READY as u64, 1);
     }
-    dev.num_queues = 1;
+    dev.num_queues = qidx + 1;
     Ok(())
 }
 
@@ -1922,6 +1941,53 @@ mod tests {
         assert!(virtio_host_supports(&dev, 28));
         assert!(!virtio_host_supports(&dev, 29));
         assert!(!virtio_host_supports(&dev, 0));
+    }
+
+    /// A feature the driver wants is acknowledged only when the device offered it.
+    /// `VIRTIO_GPU_F_VIRGL` is the first feature in this port that a host may or may
+    /// not have, and a GPU driver that acknowledged it unconditionally would fail its
+    /// whole transport — the display included — on a host without GL.
+    #[test]
+    fn test_only_host_offered_features_are_acknowledged() {
+        static FEATURES: [VirtioFeature; 2] = [
+            VirtioFeature {
+                name: "virgl",
+                bit: 0,
+                host_support: 0,
+                guest_support: 1,
+            },
+            VirtioFeature {
+                name: "blob",
+                bit: 3,
+                host_support: 0,
+                guest_support: 1,
+            },
+        ];
+        let mut dev = VirtioDevice {
+            transport: VirtioTransport::Pci,
+            base: 0,
+            notify: 0,
+            notify_off_mult: 0,
+            isr: 0,
+            devcfg: 0,
+            name: "test",
+            features: &FEATURES,
+            host_features: 1u64 << 0,
+            queues: [queue_placeholder(0), queue_placeholder(1)],
+            num_queues: 0,
+            irq: 0,
+            msi: false,
+            initialized: true,
+        };
+
+        // Only virgl was offered, so only virgl is acknowledged.
+        assert_eq!(driver_feature_low(&dev), 1u32 << 0);
+
+        dev.host_features = (1u64 << 0) | (1u64 << 3);
+        assert_eq!(driver_feature_low(&dev), (1u32 << 0) | (1u32 << 3));
+
+        dev.host_features = 0;
+        assert_eq!(driver_feature_low(&dev), 0);
     }
 
     #[test]

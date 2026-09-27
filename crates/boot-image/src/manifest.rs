@@ -267,6 +267,10 @@ pub const DEVICES: &[(&str, u32, u32, u32)] = &[
     ("/dev/ptyp3", 0o020666, 9, 195),
     // Last, so no existing device is renumbered by its arrival.
     ("/dev/uds", 0o020600, 18, 0), // char device, major=18 (uds), minor=0
+    // The DRM render node (`WAYLAND.md` §6.10, stage 3b) — the first device in a
+    // *directory*, and last for the same reason. Render nodes take minor 128 and up by
+    // DRM's convention, so a client looking for one finds this where it expects it.
+    ("/dev/dri/renderD128", 0o020666, 25, 128), // char device, major=25 (drm), minor=128
 ];
 
 #[cfg(test)]

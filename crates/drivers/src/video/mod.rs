@@ -2,6 +2,7 @@
 //!
 //! Ported from `.refs/minix-3.3.0/minix/drivers/video/`
 
+pub mod drm;
 pub mod fb;
 pub mod tda19988;
 pub mod virtio_gpu;

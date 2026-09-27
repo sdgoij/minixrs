@@ -755,9 +755,10 @@ Device commands to add (`linux/virtio_gpu.h`):
 
 Features to negotiate: `VIRTIO_GPU_F_VIRGL` (bit 0),
 `VIRTIO_GPU_F_RESOURCE_BLOB` (bit 3), and `VIRTIO_GPU_F_CONTEXT_INIT` (bit 4)
-for modern contexts. Each must be confirmed from the device's feature word;
-without `virgl=on` the capset commands fail, so the driver must degrade rather
-than hang.
+for modern contexts. Each must be confirmed from the device's feature word and
+acknowledged only if it is offered there: a device without GL offers no `VIRGL`, so
+the capset commands are absent rather than failing, and the driver must degrade to 2D
+rather than hang.
 
 DRM ioctls to implement (`drm/virtgpu_drm.h`):
 
@@ -780,13 +781,13 @@ version/`DRM_CAP` queries, and enough of libdrm's expectations to satisfy
 
 | # | Decision | Rationale |
 |---|---|---|
-| **D1** | **PCI first; x86_64 is the bring-up arch.** | Blob resources are exposed through a **shared-memory PCI capability** the mmio transport does not have (verify on the QEMU we ship). x86 is already a PCI guest — but its scanout is `bochs-display` today, so virgl starts as a **second device** (`-device virtio-gpu-gl-pci`) used only as a render node, with bochs still presenting. riscv64/aarch64 follow once the mmio story is settled. |
+| **D1** | **PCI first; x86_64 is the bring-up arch.** | Blob resources are exposed through a **shared-memory PCI capability** the mmio transport does not have (verify on the QEMU we ship). x86 is already a PCI guest — but its scanout is `bochs-display` today, so virgl starts as a **second device** (`-device virtio-gpu-gl-pci`) used only as a render node, with bochs still presenting. riscv64/aarch64 follow once the mmio story is settled. In QEMU 11 the blob resources the mmio transport lacks sit behind the device's `blob=` property, which defaults to off, so a blob gate is `-device virtio-gpu-gl-pci,blob=on`. |
 | **D2** | **Present without dmabuf, first.** EGL surfaceless → render into an FBO → `glReadPixels` → write `/dev/fb` → `FBIOFLUSH`. | dmabuf/GBM export needs `dma_buf`, scatter-gather and PRIME — a large kernel API. The readback path proves the whole GL stack while that is designed. It is slow; it is not the destination. |
 | **D3** | **The render device and the output are separate objects.** | Already true (`FbBackend` vs. the device). Keeps the first milestone from depending on scanout-from-GPU, and lets a render node exist with no display at all. |
 | **D4** | **Fences become pollable.** `SUBMIT_3D`'s fence should surface as an `eventfd`/poll-ready object. | Mesa's `EXECBUFFER` in/out fences and `VIRTGPU_WAIT` need it, and it reuses Phase 0's `epoll`/`eventfd` (§6.3) rather than inventing a wait. |
 | **D5** | **Mesa is built with virgl *and* llvmpipe.** | One port, two winsys. llvmpipe needs no host GL and no 3D transport, so it is both the CI fallback and the "keep the option" answer. |
 | **D6** | **`libdrm` is a dependency, not something to reimplement.** | Mesa's winsys calls `drmIoctl`/`drmGetDevices`. Porting libdrm's device layer is far cheaper than teaching Mesa a new transport, and it is one DSO. |
-| **D7** | **The 2D `/dev/fb` path stays the default.** | GL is strictly optional; a boot with no `virgl=on` must still reach the shell and the window server. The GPU path degrades, it does not gate. |
+| **D7** | **The 2D `/dev/fb` path stays the default.** | GL is strictly optional; a boot with no GL-capable host — and so no `VIRTIO_GPU_F_VIRGL` on the device — must still reach the shell and the window server. The GPU path degrades, it does not gate. |
 | **D8** | **Host-side GL is assumed only where the host has it.** | Without a GL-capable host (CI), virgl must be detected and reported, not assumed. The llvmpipe branch is the runnable-everywhere one. |
 
 #### Staged plan
@@ -795,7 +796,7 @@ Each stage has a gate that can be run without the next stage existing.
 
 | Stage | Deliverable | Gate |
 |---|---|---|
-| **3a** | `virtio-gpu` 3D transport, no Mesa: negotiate VIRGL/blob, `GET_CAPSET_INFO`/`GET_CAPSET`, `CTX_CREATE`, `RESOURCE_CREATE_3D`, a trivial `SUBMIT_3D`, read back with `TRANSFER_FROM_HOST_3D` | In QEMU with `virtio-gpu-gl-pci,virgl=on`: the capset id/version is printed, a 3D resource round-trips known bytes, and the same binary on a device without `virgl=on` reports "no 3D" instead of hanging |
+| **3a** | `virtio-gpu` 3D transport, no Mesa: negotiate VIRGL/blob, `GET_CAPSET_INFO`/`GET_CAPSET`, `CTX_CREATE`, `RESOURCE_CREATE_3D`, a trivial `SUBMIT_3D`, read back with `TRANSFER_FROM_HOST_3D` | In QEMU with a GL device (`-device virtio-gpu-gl-pci` under `-display egl-headless`): the capset id/version is printed, a 3D resource round-trips known bytes, and the same binary on a device without `VIRTIO_GPU_F_VIRGL` reports "no 3D" instead of hanging |
 | **3b** | The `virtgpu` DRM node: `/dev/dri/renderD128`, GEM, `GETPARAM`/`CONTEXT_INIT`/`RESOURCE_CREATE(_BLOB)`/`EXECBUFFER`/`MAP_BLOB`/`WAIT`, `mmap` of a blob | A **hand-written C program** (not Mesa) does ctx-create → create blob → map → exec → wait → read the result. This is the stage that isolates "our DRM ABI" from "Mesa's bugs". |
 | **3c** | `libdrm` + Mesa (`virgl`) as DSOs; EGL surfaceless; a triangle into an FBO; readback; present via `/dev/fb` | A triangle on screen in QEMU, and the **same program** run under llvmpipe (`LIBGL_ALWAYS_SOFTWARE`) as a cross-check — if llvmpipe works and virgl does not, the bug is ours, not Mesa's |
 | **3d** | dmabuf/GBM or a zero-readback present path; the renderer wired into the output backend and the in-house compositor | The compositor composes a GL surface; the frame reaches the display without a full CPU readback |
@@ -806,9 +807,22 @@ exercise; 3d is where the design can still change.
 #### Host and QEMU requirements
 
 - QEMU must be built with **`virglrenderer`**, and the guest launched with a GL
-  device: `-device virtio-gpu-gl-pci,virgl=on` (PCI) or `virtio-gpu-gl-device`
-  (mmio). Today every recipe uses plain `virtio-gpu-device` on riscv64/aarch64
-  and `bochs-display` on x86 — so **no existing recipe enables virgl**.
+  device: `-device virtio-gpu-gl-pci` (PCI) or `virtio-gpu-gl-device` (mmio).
+  Today every recipe uses plain `virtio-gpu-device` on riscv64/aarch64 and
+  `bochs-display` on x86 — so **no existing recipe enables virgl**.
+- **A GL device needs a GL display backend, so a virgl gate cannot use
+  `-nographic`.** `-nographic` means `-display none`, and realizing a GL device
+  against it fails with *"The display backend does not have OpenGL support
+  enabled"*. The recipe names a GL backend instead — `-display egl-headless -serial
+  stdio` keeps the serial console on stdio, which is what `tools/smoke/feed.sh`
+  drives. Checked on the dev host: this QEMU lists `egl-headless`, and
+  `virtio-gpu-gl-pci` realizes against it.
+- **QEMU 11 has no `virgl=` property.** The older `-device
+  virtio-gpu-gl-pci,virgl=on` spelling is rejected (*"Property
+  'virtio-gpu-gl-pci.virgl' not found"*): a `virtio-gpu-gl*` device *is* the virgl
+  device, and what is opt-in are `blob=` and `venus=`. **`blob` defaults to off**, so
+  the blob path of 3b needs `blob=on`, and the feature must be read from the device's
+  word rather than assumed.
 - A GL-capable host is required. Headless CI has none, so the options are
   `-display egl-headless` with host Mesa on llvmpipe (`LIBGL_ALWAYS_SOFTWARE=1`)
   — slow but real — or keeping the virgl gate out of CI and CI-testing only 3a's
@@ -1162,8 +1176,9 @@ alone gives it a window but hands it keycodes it cannot turn into text.
 - **Phase 3 — `/dev/dri` through `devman`.** libdrm scans the directory; our
   VTreeFS must present it with clone-style nodes and permissions that admit a
   render node. Small, but load-bearing for "Mesa finds the device".
-- **Phase 3 — don't gate the boot path.** A guest without `virgl=on` or without a
-  GL host must still boot to the shell and the window server.
+- **Phase 3 — don't gate the boot path.** A guest whose device offers no
+  `VIRTIO_GPU_F_VIRGL`, or whose host has no GL, must still boot to the shell and the
+  window server.
 - **Socket authorisation.** The reference's model would let any process connect.
   Decide the check (node permissions vs. `SO_PEERCRED` allow-list) before
   Phase 1, not after.
@@ -1240,9 +1255,9 @@ Traps found while writing this, for reviewers to consider:
 - A `dlopen`ed object carrying `PT_TLS` lands in a slice the TLS layout reserved
   and is first-touch initialised for threads that already exist. `TPOFF64` is not
   implemented — an object using it will not load.
-- A `virtio-gpu` command issued without `virgl=on` comes back as an error
-  response — the driver must **degrade to 2D**, never block (§6.10, D7). A guest
-  with no GL host still has to reach the shell, so a hang here is a boot failure,
-  not a missing feature.
+- A `virtio-gpu` 3D command issued to a device that never offered
+  `VIRTIO_GPU_F_VIRGL` comes back as an error response — the driver must **degrade to
+  2D**, never block (§6.10, D7). A guest with no GL host still has to reach the shell,
+  so a hang here is a boot failure, not a missing feature.
 - `SUBMIT_3D` fences are implicit in Mesa's buffer reuse. A fence that returns
   too early shows as corrupt frames, not as an error — verify over a loop.

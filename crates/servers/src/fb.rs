@@ -269,6 +269,97 @@ fn fill_test_pattern(arch: &mut dyn FbArch) {
 /// One screen row's worth of scratch: 1024 pixels of XRGB8888.
 const ROW_BYTES: usize = 4096;
 
+/// Append `text` to a boot-log line buffer, dropping what does not fit.
+#[cfg(all(target_os = "minix", target_arch = "x86_64"))]
+fn append(line: &mut [u8], at: &mut usize, text: &[u8]) {
+    let end = (*at + text.len()).min(line.len());
+    let n = end - *at;
+    line[*at..end].copy_from_slice(&text[..n]);
+    *at = end;
+}
+
+/// Append a decimal number to a boot-log line buffer.
+#[cfg(all(target_os = "minix", target_arch = "x86_64"))]
+fn append_dec(line: &mut [u8], at: &mut usize, mut v: u32) {
+    let mut digits = [0u8; 10];
+    let mut i = digits.len();
+    if v == 0 {
+        i -= 1;
+        digits[i] = b'0';
+    }
+    while v > 0 && i > 0 {
+        i -= 1;
+        digits[i] = b'0' + (v % 10) as u8;
+        v /= 10;
+    }
+    append(line, at, &digits[i..]);
+}
+
+/// Report what the render node turned out to be, in one boot-log line.
+///
+/// The line is the evidence for `just test-gpu3d-x86`, and the two "no" cases matter
+/// as much as the capset: a machine with no GPU device and a host with no GL are both
+/// guests that must still boot (D7), so each gets its own line rather than a silent
+/// nothing that would read the same as a probe that never ran.
+///
+/// `xfer` and `submit` are the two fields that are not a command's answer: the transfer
+/// and submit commands are acknowledged `NODATA` whether or not the host did what they
+/// asked, so how far the bytes came back equal is the only evidence they did anything.
+#[cfg(all(target_os = "minix", target_arch = "x86_64"))]
+fn report_gpu3d(gpu: &drivers::video::virtio_gpu::Gpu3d) {
+    if !gpu.device {
+        slog(b"fb: gpu3d none\n");
+        return;
+    }
+    if !gpu.virgl {
+        slog(b"fb: gpu3d device, no VIRTIO_GPU_F_VIRGL\n");
+        return;
+    }
+    let mut line = [0u8; 128];
+    let mut at = 0usize;
+    append(&mut line, &mut at, b"fb: gpu3d virgl capset ");
+    append_dec(&mut line, &mut at, gpu.capset.id);
+    append(&mut line, &mut at, b" v");
+    append_dec(&mut line, &mut at, gpu.capset.max_version);
+    append(&mut line, &mut at, b" size ");
+    append_dec(&mut line, &mut at, gpu.capset.max_size);
+    append(&mut line, &mut at, b" capsets ");
+    append_dec(&mut line, &mut at, gpu.capset_count);
+    append(&mut line, &mut at, b" blob ");
+    append_dec(&mut line, &mut at, if gpu.blob { 1 } else { 0 });
+    append(&mut line, &mut at, b" fetched ");
+    append_dec(&mut line, &mut at, gpu.capset_len);
+    append(&mut line, &mut at, b" ctx ");
+    append_dec(&mut line, &mut at, if gpu.ctx { 1 } else { 0 });
+    append(&mut line, &mut at, b" q");
+    append_dec(&mut line, &mut at, gpu.queues as u32);
+    append(&mut line, &mut at, b" xfer ");
+    append_dec(&mut line, &mut at, gpu.xfer_matched);
+    append(&mut line, &mut at, b"/");
+    append_dec(
+        &mut line,
+        &mut at,
+        drivers::video::virtio_gpu::PROBE_TEX_BYTES,
+    );
+    append(&mut line, &mut at, b" submit ");
+    append_dec(&mut line, &mut at, gpu.submit_matched);
+    append(&mut line, &mut at, b"/");
+    append_dec(
+        &mut line,
+        &mut at,
+        drivers::video::virtio_gpu::PROBE_TEX_BYTES,
+    );
+    // Only when the capset query did not answer as expected: 0 is "nothing came
+    // back", any other value is the response type the device gave (0x1200 is
+    // "invalid parameter" in the virtio-gpu error space).
+    if gpu.capset_rtype != 0 || gpu.capset.id == 0 {
+        append(&mut line, &mut at, b" capsetinfo ");
+        append_dec(&mut line, &mut at, gpu.capset_rtype);
+    }
+    append(&mut line, &mut at, b"\n");
+    slog(&line[..at]);
+}
+
 /// Write one framebuffer row via the driver's volatile write path.
 fn write_row(arch: &dyn FbArch, pos: u64, data: &[u8]) -> usize {
     // The Framebuffer driver's write takes the arch by reference; a whole
@@ -303,6 +394,27 @@ pub fn fb_server_main() {
             // virtio-gpu is explicit-flush: push the pattern to the
             // display (no-op for bochs).
             let _ = arch.flush();
+        }
+
+        // The render device is a separate object from the output (§6.10 D3), which
+        // on x86 means probing past the bochs scanout for a virtio-gpu device. A
+        // plain x86 boot has none, and that is reported rather than ignored: the
+        // gate asserts the "none" line as well as the capset one (D7/D8).
+        //
+        // Skipped when the virtio-gpu *is* the output backend (riscv/aarch64, and
+        // any x86 boot with no bochs): that backend already holds the device's
+        // queues, and a second probe would reprogram them out from under it — the
+        // queue rings are one set of statics per process.
+        #[cfg(target_arch = "x86_64")]
+        {
+            let backend = unsafe { &*core::ptr::addr_of!(FB_BACKEND) };
+            if !matches!(backend, FbBackend::VirtioGpu(_)) {
+                // The node comes back with the report and is dropped here: it is the DRM
+                // render node's device state (`drivers::video::drm`), and this boot line
+                // only reports what the negotiation learnt.
+                let (gpu, _node) = drivers::video::virtio_gpu::probe_render_node();
+                report_gpu3d(&gpu);
+            }
         }
 
         loop {

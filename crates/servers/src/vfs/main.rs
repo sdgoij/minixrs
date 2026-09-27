@@ -175,6 +175,18 @@ unsafe fn sef_cb_init_fresh() -> i32 {
         );
     }
 
+    // Register the DRM render node (/dev/dri/renderD128, major 25). The fb server serves
+    // it because it is the process holding the `virtio-gpu` device; the major is the
+    // render node's own so that the day it moves to a server of its own, this is the line
+    // that changes and nothing else does.
+    unsafe {
+        dmap::map_driver(
+            b"drm",
+            arch_common::com::DRM_MAJOR as i32,
+            arch_common::com::FB_PROC_NR,
+        );
+    }
+
     // Register the grant table with the kernel so FS servers can
     // use SAFECOPYTO/SAFECOPYFROM to transfer data through grants.
     crate::vfs::grant::vfs_grant_init();

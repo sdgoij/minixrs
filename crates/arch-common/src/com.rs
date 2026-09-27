@@ -41,6 +41,15 @@ pub const WLS_PROC_NR: Endpoint = 20;
 pub const FB_MAJOR: u32 = 19;
 /// Character-device major for the PS/2 input driver (/dev/kbd).
 pub const INPUT_MAJOR: u32 = 20;
+/// Character-device major for the DRM render node (/dev/dri/renderD128).
+///
+/// A major of its own rather than a second minor under `FB_MAJOR`, because VFS routes a
+/// `CDEV_*` request by major and the request carries only the minor: the node is a
+/// different *interface*, and it is currently mapped to the fb server only because that
+/// process is the one holding the `virtio-gpu` device. Moving it to a server of its own
+/// is then a change to one `map_driver` call, which matters because it will have to move
+/// when the blocking operations arrive — a GL submit must not block the display's loop.
+pub const DRM_MAJOR: u32 = 25;
 /// Character-device major for the net server's /dev/ip (dmap key).
 pub const NET_MAJOR: u32 = 14;
 /// Character-device major for the UNIX-domain socket server's /dev/uds.

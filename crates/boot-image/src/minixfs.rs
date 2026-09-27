@@ -538,10 +538,27 @@ pub fn build_minixfs(files: &[(&'static str, Vec<u8>)]) -> Vec<u8> {
 
     // Character-device nodes (major << 16 | minor, matching VFS's cdev
     // decoding). init relies on /dev/console resolving so it can route
-    // stdio through the tty.
+    // stdio through the tty. An entry may name a directory of its own —
+    // `/dev/dri` holds the render node — and the directory is made the first time
+    // one does, so the entries directly under /dev keep the inodes the layout tests
+    // pin and the new directory lands after them.
+    let mut dri_zone: Option<u32> = None;
     for &(path, mode, major, minor) in DEVICES {
-        let name = Path::new(path).file_name().unwrap().to_str().unwrap();
-        fs.add_device(dev_zone, name, mode as u16, (major << 16) | minor);
+        let p = Path::new(path);
+        let name = p.file_name().unwrap().to_str().unwrap();
+        let zone = match p.parent().and_then(|d| d.to_str()) {
+            Some("/dev") => dev_zone,
+            Some("/dev/dri") => match dri_zone {
+                Some(zone) => zone,
+                None => {
+                    let zone = fs.add_directory(dev_zone, "dri");
+                    dri_zone = Some(zone);
+                    zone
+                }
+            },
+            other => panic!("{path}: a device node must live under /dev, not {other:?}"),
+        };
+        fs.add_device(zone, name, mode as u16, (major << 16) | minor);
     }
 
     fs.finalise()
@@ -688,11 +705,11 @@ mod tests {
         // Every inode in the table must be marked in use (bit N), so MFS's
         // alloc_bit never hands out an inode that already has table data.
         // The builder writes slot N-1 for inode N; walk the table. The
-        // empty image has 7 dirs (root, bin, sbin, etc, tmp, dev, devices)
-        // + 2 data files (passwd, secret) + 18 devices (tty00, tty01, null,
-        // console, ip, udp, tcp, fb, kbd, the 8 pty nodes ttyp0-3/ptyp0-3, and
-        // uds) = 27 inodes.
-        let n_inodes = 27usize;
+        // empty image has 8 dirs (root, bin, sbin, etc, tmp, dev, devices,
+        // dri) + 2 data files (passwd, secret) + 19 devices (tty00, tty01, null,
+        // console, ip, udp, tcp, fb, kbd, the 8 pty nodes ttyp0-3/ptyp0-3, uds,
+        // and dri/renderD128) = 29 inodes.
+        let n_inodes = 29usize;
         for ino in 1..=n_inodes {
             assert_eq!(
                 (imap[ino / 8] >> (ino % 8)) & 1,
@@ -700,11 +717,11 @@ mod tests {
                 "inode {ino} must be marked in use at bit {ino}"
             );
         }
-        // And the next bit (inode 28) is free — the first allocatable inode.
+        // And the next bit (inode 30) is free — the first allocatable inode.
         assert_eq!(
-            imap[3] & 0b10000,
+            imap[30 / 8] & (1 << (30 % 8)),
             0,
-            "inode 28 must be free for the first create"
+            "inode 30 must be free for the first create"
         );
         let _ = itable_off;
     }

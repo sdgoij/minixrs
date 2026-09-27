@@ -274,7 +274,95 @@ image-x86 boot-timeout="15": build-x86
     @just _assert-qemu-version qemu-system-x86_64
     sh tools/smoke/feed.sh target/image-x86.log {{boot-timeout}} qemu-system-x86_64 -nographic -m 256M -no-reboot -vga none -device bochs-display,id=fb0 -kernel target/images/x86_64-pc-minix/minix-x86.elf -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0 -device virtio-tablet-pci,display=fb0
     @just _assert-qemu-log target/image-x86.log "wserver: ready"
+    @just _assert-qemu-log target/image-x86.log "fb: gpu3d none"
     @echo "done: target/images/x86_64-pc-minix/minix-x86.elf — qemu-system-x86_64 -nographic -m 256M -kernel <it>"
+
+
+# The 3D half of 3a's gate. x86 keeps bochs-display for the output, so the virtio-gpu
+# device the host provides is a render node only (D3): the probe negotiates
+# VIRTIO_GPU_F_VIRGL, reads the virgl capset with GET_CAPSET_INFO, fetches the capset
+# blob with GET_CAPSET, creates a context, round-trips a 64x64 texture through it two
+# ways (RESOURCE_CREATE_3D, ATTACH_BACKING, CTX_ATTACH_RESOURCE, a transfer each way,
+# a SUBMIT_3D inline write, RESOURCE_UNREF), destroys the context, and reports all of
+# it in one boot line (asserted below).
+#
+# `xfer` and `submit` are the two fields that are not a command's answer, and they are
+# byte counts because they have to be: the host answers NODATA to TRANSFER_TO_HOST_3D,
+# TRANSFER_FROM_HOST_3D and SUBMIT_3D even when the renderer refused them, because QEMU
+# discards its return value - so a command that did nothing and one that worked are
+# identical on the control queue. Each half uploads a position-dependent pattern,
+# scribbles over the buffer, reads back, and reports how many leading bytes matched: the
+# whole texture is a round trip, anything less is not. Without the scribble a host that
+# ignored both transfers would pass, because the resource is guest-backed and the
+# pattern would still be sitting in the buffer.
+#
+# `submit` is the stricter of the two: the command names one row of the texture, so the
+# read-back also fails if the host wrote past that row - the whole texture has to come
+# back as that row changed and nothing else.
+#
+# The device's `blob=` property is left off (its default): 3a issues no blob command,
+# and asking for the blob feature adds a shared-memory BAR the boot-time identity map
+# would have to cover.
+#
+# A GL device needs a GL display backend, so this recipe cannot use -nographic:
+# `-display egl-headless -serial stdio` keeps the console on stdio, which is what
+# feed.sh drives.
+#
+# Four things had to be true for that line to appear, each found by a bisecting boot,
+# and each worth checking first when this goes red again:
+#   * the fb process needs the GPU's PCI BARs in its page table (the kernel pre-maps
+#     them for blk/net/input only);
+#   * the command and response buffers must live in this process's *image*, not in the
+#     probe's stack frame, or the host cannot translate the descriptor address and
+#     stops the device with `bogus descriptor or out of resources`;
+#   * `RESP_OK_DISPLAY_INFO` (0x1101) is a member of the success response enum, so
+#     leaving it out shifted the two capset answers down and made the driver reject a
+#     correct `GET_CAPSET_INFO` answer;
+#   * the round-trip resource has to be a *texture* with a texture bind. A resource
+#     whose storage is nothing but guest memory transfers to itself, so its round trip
+#     would pass while moving no data at all.
+#
+# The *degrade* half is graded on every plain x86 boot: `image-x86` asserts
+# `fb: gpu3d none`, and `test-gpu3d-nogl-x86` covers the other degrade case, a device
+# the host gave no GL to.
+#
+# Nothing is typed into this guest, a departure from every other image recipe and a
+# deliberate one. Host GL keeps the emulator busy enough that its serial input drops
+# bytes - measured: the run that made this change sent `/bin/echo gpu3d-ok` and the
+# guest echoed `/bin/echo gpu3d` - and the more the probe asks the renderer to do, the
+# wider that window gets, so a typed step here would be a flake waiting to happen. Nor
+# is one needed: the assertion is a boot line the fb server prints, and `wserver:
+# ready` / `wlserver: ready` are asserted with it so the line cannot come from a
+# half-booted guest. QEMU is bounded by `timeout` rather than by a scenario's last
+# step, so the recipe's `boot-timeout` is the guest's whole lifetime.
+
+test-gpu3d-x86 boot-timeout="30": build-x86
+    mkdir -p target/images/x86_64-pc-minix
+    cp target/trampoline.elf target/images/x86_64-pc-minix/minix-x86.elf
+    @just _assert-qemu-version qemu-system-x86_64
+    /usr/bin/timeout -s 9 {{boot-timeout}} qemu-system-x86_64 -display egl-headless -serial stdio -m 256M -no-reboot -vga none -device bochs-display,id=fb0 -kernel target/images/x86_64-pc-minix/minix-x86.elf -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0 -device virtio-tablet-pci,display=fb0 -device virtio-gpu-gl-pci 2>&1 | tee target/test-gpu3d-x86.log
+    @just _assert-qemu-log target/test-gpu3d-x86.log "wserver: ready"
+    @just _assert-qemu-log target/test-gpu3d-x86.log "wlserver: ready"
+    @just _assert-qemu-log target/test-gpu3d-x86.log "fb: gpu3d virgl capset"
+    @just _assert-qemu-log target/test-gpu3d-x86.log "xfer 16384/16384"
+    @just _assert-qemu-log target/test-gpu3d-x86.log "submit 16384/16384"
+    @echo "gpu3d: the render node negotiated virgl, answered the capset query, and round-tripped a texture (x86_64)"
+
+# The other half of 3a's degrade path, and the one `image-x86` cannot cover: a
+# virtio-gpu device the host offers but did *not* enable GL on. Such a device answers
+# no VIRTIO_GPU_F_VIRGL, and the probe has to say so and stop there - the capset and
+# context commands it would otherwise send are exactly the ones a feature-less device
+# answers with errors (or, worse, does not answer at all). A plain `virtio-gpu-pci` is
+# that device on every x86 host, GL-capable or not, and being 2D-only it needs no GL
+# display backend: `-nographic` is enough, so this recipe drives the ordinary boot
+# smoke (`tools/smoke/scenario.tsv`) rather than a scenario of its own.
+test-gpu3d-nogl-x86 boot-timeout="20": build-x86
+    mkdir -p target/images/x86_64-pc-minix
+    cp target/trampoline.elf target/images/x86_64-pc-minix/minix-x86.elf
+    @just _assert-qemu-version qemu-system-x86_64
+    sh tools/smoke/feed.sh target/test-gpu3d-nogl-x86.log {{boot-timeout}} qemu-system-x86_64 -nographic -m 256M -no-reboot -vga none -device bochs-display,id=fb0 -kernel target/images/x86_64-pc-minix/minix-x86.elf -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0 -device virtio-tablet-pci,display=fb0 -device virtio-gpu-pci
+    @just _assert-qemu-log target/test-gpu3d-nogl-x86.log "fb: gpu3d device, no VIRTIO_GPU_F_VIRGL"
+    @echo "gpu3d: a device the host gave no GL to is reported as no 3D, and the guest booted (x86_64)"
 
 # Acceptance test for KNOWN_ISSUES.md 12 — `coreutils seq 3` must write its three lines and
 # the next tool must read them back. It is the gate that made the multicall wedge findable: a

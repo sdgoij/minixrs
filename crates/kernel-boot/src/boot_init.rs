@@ -494,20 +494,24 @@ pub unsafe fn load_and_prepare_all(cfg: &BootProcessConfig) -> *mut Proc {
         // window (eight transports at 0x10001000, 0x1000 apart — the
         // device can be at any of them).
         #[cfg(target_arch = "x86_64")]
-        if cfg.map_virtio_bars
-            && (proc_nr == VIRTIO_BLK_PROC_NR
-                || proc_nr == VIRTIO_NET_PROC_NR
-                || proc_nr == INPUT_PROC_NR)
-        {
-            let subsys = if proc_nr == VIRTIO_BLK_PROC_NR {
-                0x0002
-            } else if proc_nr == VIRTIO_NET_PROC_NR {
-                0x0001
-            } else {
-                0x0012 // virtio-input (the x86 mouse)
+        if cfg.map_virtio_bars {
+            // Each entry is the device's subsystem id and whether its absence
+            // deserves a warning. The three I/O drivers always have their device;
+            // the fb server's *render node* usually does not — on x86 the display is
+            // bochs, and a virtio-gpu device is present only when the host offers a
+            // GL one (§6.10 D3) — so that absence stays silent.
+            let target = match proc_nr {
+                VIRTIO_BLK_PROC_NR => Some((0x0002u16, true)),
+                VIRTIO_NET_PROC_NR => Some((0x0001, true)),
+                INPUT_PROC_NR => Some((0x0012, true)), // virtio-input (the x86 mouse)
+                FB_PROC_NR => Some((0x0010, false)),   // virtio-gpu, as a render node
+                _ => None,
             };
-            if !unsafe { map_virtio_driver_bars(pt_phys, user_flags, subsys) } {
-                print!("  WARN: virtio driver BAR mapping failed\r\n");
+            if let Some((subsys, must_exist)) = target {
+                let mapped = unsafe { map_virtio_driver_bars(pt_phys, user_flags, subsys) };
+                if !mapped && must_exist {
+                    print!("  WARN: virtio driver BAR mapping failed\r\n");
+                }
             }
         }
         if cfg.map_virtio_mmio
