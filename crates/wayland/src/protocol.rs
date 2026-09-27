@@ -70,12 +70,19 @@ pub static REGION: Interface = Interface {
     events: &[],
 };
 
-/// `wl_surface`: `destroy`, `attach`, `damage`, `frame`, `set_opaque_region`,
-/// `set_input_region`, `commit`, `damage_buffer`; events `enter`, `leave`.
+/// `wl_surface`: the v1 requests `destroy`, `attach`, `damage`, `frame`,
+/// `set_opaque_region`, `set_input_region`, `commit`, then the since-2..5 requests
+/// `set_buffer_transform`, `set_buffer_scale`, `damage_buffer` and `offset`; events
+/// `enter`, `leave`.
+///
+/// The later requests are listed even though this port speaks v1, because their
+/// signatures are what put `damage_buffer` at opcode 9: compressing them away would
+/// leave a client's `damage_buffer` decoded with the wrong arity while still looking
+/// self-consistent to this port.
 pub static SURFACE: Interface = Interface {
     name: "wl_surface",
     version: 1,
-    requests: &["", "oii", "iiii", "n", "o", "o", "", "iiii"],
+    requests: &["", "oii", "iiii", "n", "o", "o", "", "i", "i", "iiii", "ii"],
     events: &["o", "o"],
 };
 
@@ -87,11 +94,11 @@ pub static SHM: Interface = Interface {
     events: &["u"],
 };
 
-/// `wl_shm_pool`: `create_buffer`, `destroy`.
+/// `wl_shm_pool`: `create_buffer`, `destroy`, `resize`.
 pub static SHM_POOL: Interface = Interface {
     name: "wl_shm_pool",
     version: 1,
-    requests: &["niiiiu", ""],
+    requests: &["niiiiu", "", "i"],
     events: &[],
 };
 
@@ -103,12 +110,15 @@ pub static BUFFER: Interface = Interface {
     events: &[""],
 };
 
-/// `wl_output`: events `geometry`, `mode`, `scale`, `done`.
+/// `wl_output`: events `geometry`, `mode`, `done`, `scale`.
+///
+/// `done` (since 2) is opcode 2 and `scale` opcode 3, in that order; the reverse is
+/// the mistake this table once made.
 pub static OUTPUT: Interface = Interface {
     name: "wl_output",
     version: 1,
     requests: &[],
-    events: &["iiiiissi", "uiii", "i", ""],
+    events: &["iiiiissi", "uiii", "", "i"],
 };
 
 /// `wl_seat`: `get_pointer`, `get_keyboard`, `get_touch`; events `capabilities`,
@@ -154,12 +164,15 @@ pub static XDG_POSITIONER: Interface = Interface {
 };
 
 /// `xdg_surface`: `destroy`, `get_toplevel`, `get_popup`, `set_window_geometry`,
-/// `ack_configure`; events `configure`, `close`.
+/// `ack_configure`; its only event is `configure`.
+///
+/// `close` is an `xdg_toplevel` event, not an `xdg_surface` one. A second event here
+/// would mis-decode whatever a client read at opcode 1 while never being sent.
 pub static XDG_SURFACE: Interface = Interface {
     name: "xdg_surface",
     version: 1,
     requests: &["", "n", "noo", "iiii", "u"],
-    events: &["u", ""],
+    events: &["u"],
 };
 
 /// `xdg_toplevel`: the window requests of 2b; events `configure`, `close`.
@@ -189,11 +202,12 @@ pub static LAYER_SHELL: Interface = Interface {
     events: &[],
 };
 
-/// `zwlr_layer_surface_v1`: the panel requests of 2e; events `configure`, `closed`.
+/// `zwlr_layer_surface_v1`: the panel requests of 2e, through `set_layer` (since 2),
+/// which is the last request layer-shell v4 defines; events `configure`, `closed`.
 pub static LAYER_SURFACE: Interface = Interface {
     name: "zwlr_layer_surface_v1",
     version: 1,
-    requests: &["uu", "u", "i", "iiii", "u", "o", "u", "", "u", "u"],
+    requests: &["uu", "u", "i", "iiii", "u", "o", "u", "", "u"],
     events: &["uuu", ""],
 };
 
@@ -402,7 +416,10 @@ pub mod surface_req {
     pub const SET_OPAQUE_REGION: u16 = 4;
     pub const SET_INPUT_REGION: u16 = 5;
     pub const COMMIT: u16 = 6;
-    pub const DAMAGE_BUFFER: u16 = 7;
+    pub const SET_BUFFER_TRANSFORM: u16 = 7;
+    pub const SET_BUFFER_SCALE: u16 = 8;
+    pub const DAMAGE_BUFFER: u16 = 9;
+    pub const OFFSET: u16 = 10;
 }
 pub mod shm_req {
     pub const CREATE_POOL: u16 = 0;
@@ -410,6 +427,7 @@ pub mod shm_req {
 pub mod shm_pool_req {
     pub const CREATE_BUFFER: u16 = 0;
     pub const DESTROY: u16 = 1;
+    pub const RESIZE: u16 = 2;
 }
 pub mod buffer_req {
     pub const DESTROY: u16 = 0;
@@ -483,7 +501,6 @@ pub mod layer_surface_req {
     pub const ACK_CONFIGURE: u16 = 6;
     pub const DESTROY: u16 = 7;
     pub const SET_LAYER: u16 = 8;
-    pub const SET_EXCLUSIVE_EDGE: u16 = 9;
 }
 pub mod decoration_manager_req {
     pub const DESTROY: u16 = 0;
@@ -520,8 +537,8 @@ pub mod buffer_ev {
 pub mod output_ev {
     pub const GEOMETRY: u16 = 0;
     pub const MODE: u16 = 1;
-    pub const SCALE: u16 = 2;
-    pub const DONE: u16 = 3;
+    pub const DONE: u16 = 2;
+    pub const SCALE: u16 = 3;
 }
 pub mod seat_ev {
     pub const CAPABILITIES: u16 = 0;
@@ -548,7 +565,6 @@ pub mod xdg_wm_base_ev {
 }
 pub mod xdg_surface_ev {
     pub const CONFIGURE: u16 = 0;
-    pub const CLOSE: u16 = 1;
 }
 pub mod xdg_toplevel_ev {
     pub const CONFIGURE: u16 = 0;
@@ -603,9 +619,10 @@ pub const WL_OUTPUT_TRANSFORM_NORMAL: i32 = 0;
 pub const WL_OUTPUT_MODE_CURRENT: u32 = 1;
 pub const WL_OUTPUT_MODE_PREFERRED: u32 = 2;
 /// `wl_display.error`.
-pub const WL_DISPLAY_ERROR_INVALID_OBJECT: u32 = 1;
-pub const WL_DISPLAY_ERROR_INVALID_METHOD: u32 = 2;
-pub const WL_DISPLAY_ERROR_NO_MEMORY: u32 = 3;
+pub const WL_DISPLAY_ERROR_INVALID_OBJECT: u32 = 0;
+pub const WL_DISPLAY_ERROR_INVALID_METHOD: u32 = 1;
+pub const WL_DISPLAY_ERROR_NO_MEMORY: u32 = 2;
+pub const WL_DISPLAY_ERROR_IMPLEMENTATION: u32 = 3;
 
 /// Decode a request's arguments, using the interface's own signature.
 pub fn decode_request<'a>(
@@ -669,8 +686,14 @@ mod tests {
 
     #[test]
     fn registry_bind_signature_arg_count() {
-        // `usun` is four arguments; the server relies on this when it decodes a
-        // bind to learn the interface name and the new object id.
+        // `usun` is four arguments; the server relies on this when it decodes a bind to
+        // learn the interface name and the new object id.
+        //
+        // The `wayland.xml` checked into `wayland/` lists `bind` with two args
+        // (`un`), which would leave a server unable to tell what a client is binding;
+        // the C in the same checkout (`registry_bind` in `src/wayland-server.c`) takes
+        // `(name, interface, version, id)`, and so does the published protocol. The
+        // XML is wrong there, not this table.
         assert_eq!(REGISTRY.request(registry_req::BIND), Some("usun"));
         assert_eq!(REGISTRY.events.len(), 2);
     }
@@ -686,10 +709,38 @@ mod tests {
 
     #[test]
     fn surface_request_count_matches_opcodes() {
-        assert_eq!(SURFACE.requests.len(), 8);
+        assert_eq!(SURFACE.requests.len(), 11);
         assert_eq!(SURFACE.request(surface_req::COMMIT), Some(""));
         assert_eq!(SURFACE.request(surface_req::ATTACH), Some("oii"));
         assert_eq!(SURFACE.request(surface_req::DAMAGE_BUFFER), Some("iiii"));
+        assert_eq!(SURFACE.request(surface_req::OFFSET), Some("ii"));
+    }
+
+    /// A request's opcode is fixed by the published protocol, and a wrong one is
+    /// invisible while both halves use the same constant: the server decodes it with
+    /// the number the client wrote it with. `damage_buffer`, `wl_output`'s `done`/
+    /// `scale` and `wl_display.error` were wrong together, so their numbering is
+    /// pinned here against `wayland.xml` rather than left to the wire.
+    #[test]
+    fn opcode_numbering_matches_the_published_protocol() {
+        // `set_buffer_transform` and `set_buffer_scale` sit at 7 and 8, which is what
+        // keeps `damage_buffer` at 9 — not the 7 a table that dropped them would use.
+        assert_eq!(surface_req::SET_BUFFER_TRANSFORM, 7);
+        assert_eq!(surface_req::SET_BUFFER_SCALE, 8);
+        assert_eq!(surface_req::DAMAGE_BUFFER, 9);
+        assert_eq!(SURFACE.request(7), Some("i"));
+        assert_eq!(SURFACE.request(8), Some("i"));
+        assert_eq!(SURFACE.request(surface_req::DAMAGE_BUFFER), Some("iiii"));
+        // `wl_output`: `done` (since 2) is opcode 2 and `scale` opcode 3.
+        assert_eq!((output_ev::DONE, output_ev::SCALE), (2, 3));
+        assert_eq!(OUTPUT.event(output_ev::DONE), Some(""));
+        assert_eq!(OUTPUT.event(output_ev::SCALE), Some("i"));
+        // `wl_display.error`: `invalid_object` is 0, not 1.
+        assert_eq!(WL_DISPLAY_ERROR_INVALID_OBJECT, 0);
+        assert_eq!(WL_DISPLAY_ERROR_INVALID_METHOD, 1);
+        assert_eq!(WL_DISPLAY_ERROR_NO_MEMORY, 2);
+        // `wl_shm_pool.resize` (since 1) is opcode 2, after `destroy`.
+        assert_eq!(SHM_POOL.request(shm_pool_req::RESIZE), Some("i"));
     }
 
     #[test]
@@ -739,6 +790,9 @@ mod tests {
             Some("u")
         );
         assert_eq!(XDG_SURFACE.event(xdg_surface_ev::CONFIGURE), Some("u"));
+        // `xdg_surface`'s only event is `configure`: `close` is an `xdg_toplevel` one.
+        assert_eq!(XDG_SURFACE.events.len(), 1);
+        assert_eq!(XDG_TOPLEVEL.event(xdg_toplevel_ev::CLOSE), Some(""));
         assert_eq!(XDG_TOPLEVEL.request(xdg_toplevel_req::SET_TITLE), Some("s"));
         assert_eq!(
             XDG_TOPLEVEL.request(xdg_toplevel_req::SET_APP_ID),
@@ -765,8 +819,9 @@ mod tests {
             LAYER_SURFACE.event(layer_surface_ev::CONFIGURE),
             Some("uuu")
         );
-        // Ten requests, so `set_exclusive_edge` is not one short of its opcode.
-        assert_eq!(LAYER_SURFACE.requests.len(), 10);
+        // Nine requests: `set_layer` (since 2) is the last layer-shell v4 defines —
+        // there is no tenth request to be one short of.
+        assert_eq!(LAYER_SURFACE.requests.len(), 9);
         assert_eq!(
             DECORATION_MANAGER.request(decoration_manager_req::GET_TOPLEVEL_DECORATION),
             Some("no")

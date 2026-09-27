@@ -1044,6 +1044,16 @@ both, which is why they are the two that unblock one.
 
 #### Deviations to record
 
+- **Every global is offered at version 1.** That is what makes the since-later
+requests and events this port does not implement unreachable rather than broken: a
+client that respects the advertised version never sends `wl_surface.set_buffer_scale`
+(since 3) or `damage_buffer` (4), `wl_shm.release` (2), `wl_seat.release` (5),
+`wl_output.done`/`scale` (2), `xdg_positioner.set_reactive` (3) or
+`xdg_toplevel.configure_bounds` (4), and an opcode that arrives anyway is answered
+`wl_display.error(invalid_method)`. The tables still list the signatures *between* two
+implemented requests (`wl_surface`'s 7, 8 and 10), because those opcodes are what keep
+an implemented request at its published number — `damage_buffer` is 9, not 7. Raising
+a version means implementing the requests that come with it, not editing a number.
 - **The keymap is a fixed artifact**, generated out of tree by the `xkbcli`
 command above and compiled into `wlserver`. Layout selection, per-seat keymaps and
 runtime remapping are later; a non-US user gets a US layout until they are.
@@ -1076,9 +1086,10 @@ redrawn when the pointer moves — nothing redraws on motion yet, so a moving po
 would smear until the next commit. A fully transparent pixel is skipped (a shaped
 cursor works); a partly transparent one is copied rather than blended.
 - **`set_cursor`'s serial is not validated** against a recent pointer `enter`.
-- **`close` is declared and never sent.** `xdg_surface.close`/`xdg_toplevel.close`
-need a window-management action (a titlebar button, a task switcher) this port does
-not have; the decorations here are client-side, so nothing produces one yet.
+- **`close` is declared and never sent.** `xdg_toplevel.close` needs a
+window-management action (a titlebar button, a task switcher) this port does not
+have; the decorations here are client-side, so nothing produces one yet. There is
+no `xdg_surface.close` to send: that event does not exist in `xdg-shell`.
 - **`set_title`/`set_app_id` are accepted and dropped**, as are the window-management
 requests (`set_maximized`, `move`, `resize`, …): there is no window table for them
 to act on, and the decorations this phase answers are client-side, so a title is the

@@ -403,6 +403,15 @@ impl Server {
                     Err(e) => error(out, object_id, e.code(), e.message()),
                 }
             }
+            // A pool's declared size, which the client has already `ftruncate`d the fd
+            // to: recording it is all that a later `create_buffer` validates against.
+            (Kind::ShmPool, protocol::shm_pool_req::RESIZE) => {
+                let size = iarg(n, &args, 0)?;
+                if let Some(p) = self.obj_mut(object_id) {
+                    p.pool_size = size;
+                }
+                Ok(())
+            }
             (Kind::Surface, protocol::surface_req::ATTACH) => {
                 // `buffer` is nullable; an id of 0 detaches.
                 let buffer = arg(n, &args, 0)?;
@@ -1370,6 +1379,59 @@ mod tests {
         );
         // The rejected buffer was never created.
         assert_eq!(s.kind(5), None);
+    }
+
+    /// `wl_shm_pool.resize` is part of v1 and is how a client that outgrows its pool
+    /// grows it. A buffer is validated against the size the pool was last told, not
+    /// the one it was created with.
+    #[test]
+    fn a_pool_resize_sets_the_size_buffers_are_validated_against() {
+        let mut s = Server::new(64, 64);
+        let (a, an) = req(DISPLAY_ID, protocol::display_req::GET_REGISTRY, |w| {
+            w.new_id(2)
+        });
+        let (b, bn) = req(2, protocol::registry_req::BIND, |w| {
+            w.uint(2)?;
+            w.string(b"wl_shm")?;
+            w.uint(1)?;
+            w.new_id(3)
+        });
+        let (c, cn) = req(3, protocol::shm_req::CREATE_POOL, |w| {
+            w.new_id(4)?;
+            w.fd(0)?;
+            w.int(16)
+        });
+        // 16 bytes is too small for a 2x2 image at offset 8 (24 bytes); 32 is not.
+        let (grow, grow_n) = req(4, protocol::shm_pool_req::RESIZE, |w| w.int(32));
+        let (d, dn) = req(4, protocol::shm_pool_req::CREATE_BUFFER, |w| {
+            w.new_id(5)?;
+            w.int(8)?;
+            w.int(2)?;
+            w.int(2)?;
+            w.int(8)?;
+            w.uint(protocol::WL_SHM_FORMAT_ARGB8888)
+        });
+        run_msgs(
+            &mut s,
+            &[&a[..an], &b[..bn], &c[..cn], &grow[..grow_n], &d[..dn]],
+        );
+        assert_eq!(s.kind(5), Some(Kind::Buffer));
+
+        // Shrinking it again puts the same buffer back out of bounds.
+        let (shrink, shrink_n) = req(4, protocol::shm_pool_req::RESIZE, |w| w.int(8));
+        let (e, e_n) = req(4, protocol::shm_pool_req::CREATE_BUFFER, |w| {
+            w.new_id(6)?;
+            w.int(8)?;
+            w.int(2)?;
+            w.int(2)?;
+            w.int(8)?;
+            w.uint(protocol::WL_SHM_FORMAT_ARGB8888)
+        });
+        let out = run_msgs(&mut s, &[&shrink[..shrink_n], &e[..e_n]]);
+        let (h, body) = event(&out, 0);
+        assert_eq!(h.opcode, protocol::display_ev::ERROR);
+        assert_eq!(u32::from_le_bytes(body[0..4].try_into().unwrap()), 4);
+        assert_eq!(s.kind(6), None);
     }
 
     #[test]
