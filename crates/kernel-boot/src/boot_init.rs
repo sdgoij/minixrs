@@ -355,15 +355,15 @@ pub unsafe fn load_and_prepare_all(cfg: &BootProcessConfig) -> *mut Proc {
 
     print!("  loading boot processes...\r\n");
 
-    // One slot per entry in `BOOT_PROCS_ALL`, which is what `boot_procs()` hands back on both builds
-    // now: the boot-test build used to keep a smaller array for the shorter list it had, and the two
-    // drifted the moment INIT was loaded again. The assertion keeps them in step.
-    const BOOT_PROC_SLOTS: usize = 19;
+    // One slot per entry in `BOOT_PROCS_ALL`: `BOOT_PROC_SLOTS` is derived from
+    // that list, so this array cannot be left one short when a boot process is
+    // added. The assertion still guards the config path, which could in principle
+    // hand back a longer list than the compiled-in one.
     assert!(
-        boot_procs.len() <= BOOT_PROC_SLOTS,
+        boot_procs.len() <= crate::BOOT_PROC_SLOTS,
         "boot process list outgrew BOOT_PROC_SLOTS"
     );
-    let mut boot_infos: [core::mem::MaybeUninit<InitInfo>; BOOT_PROC_SLOTS] =
+    let mut boot_infos: [core::mem::MaybeUninit<InitInfo>; crate::BOOT_PROC_SLOTS] =
         unsafe { core::mem::zeroed() };
     for (i, &(path, proc_nr)) in boot_procs.iter().enumerate() {
         let info = match unsafe { load_and_prepare_proc(path, proc_nr, &[path]) } {

@@ -335,12 +335,21 @@ fn select_request_pipe(filp: &Filp, ops: u32) -> u32 {
 /// ready, the driver has registered a late watch (`CDEV_NOTIFY`) and the minor
 /// is recorded so a later `CDEV_SEL2_REPLY` can complete the wait.
 fn select_request_char(filp: &Filp, ops: u32, e: &mut WaitEntry, i: usize) -> u32 {
-    let vp = filp.filp_vno;
-    if vp.is_null() {
+    // The **filp's** device, not the vnode's: a socket's minor is the clone the
+    // driver handed back at open, and the driver knows nothing of the base
+    // `/dev/uds` minor every socket's vnode still carries (`do_open` records the
+    // clone in `filp_dev`; read/write/ioctl already use it).
+    let dev = filp.filp_dev;
+    if dev == 0 {
         return 0;
     }
-    let dev = unsafe { (*vp).v_dev };
-    let ready = crate::vfs::device::cdev_select(dev, ops as i32) as u32;
+    let r = crate::vfs::device::cdev_select(dev, ops as i32);
+    if r < 0 {
+        // A driver that cannot answer (a broken dmap) reports nothing ready
+        // rather than a mask of all-ones.
+        return 0;
+    }
+    let ready = r as u32;
     if ready == 0 && ops != 0 {
         e.minor[i] = dev & 0xFFFF;
     }
@@ -857,6 +866,36 @@ pub unsafe fn select_driver_reply(minor: u32, status: i32) -> i32 {
         }
     }
     ENOENT
+}
+
+/// Re-ask every suspended wait's unanswered descriptors whether they are ready,
+/// and complete the ones that now are.
+///
+/// This is the pull half of char-driver readiness, and it exists because the
+/// push half cannot be relied on: a driver can only *send* VFS a readiness
+/// report while VFS is blocked in `RECEIVE`, and a short retry alarm can sit
+/// permanently out of phase with VFS's own deadline tick — measured on the
+/// `uds` path, where VFS was awake at every retry and `SENDNB` answered
+/// `ENOTREADY` for the whole run (`KNOWN_ISSUES` 36). A driver therefore ends
+/// such a report with a `NOTIFY`, which the kernel remembers for a destination
+/// that is not receiving; VFS re-asks here, on that notification. Readiness is
+/// level-triggered, so nothing has to survive the notification.
+///
+/// # Safety
+///
+/// Must be called from VFS dispatch.
+pub unsafe fn rescan_suspended() {
+    for i in 0..MAX_WAITS {
+        let e = unsafe { se_slot(i) };
+        let fp = e.requestor;
+        if fp.is_null() || !e.block {
+            continue;
+        }
+        unsafe { scan(fp, e) };
+        if count_ready(e) > 0 {
+            unsafe { complete_and_reply(e) };
+        }
+    }
 }
 
 /// A VFS-internal object's state changed: mark every suspended wait that watches

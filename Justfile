@@ -500,6 +500,39 @@ test-epoll-x86 boot-timeout="40": build-x86
     FEED_SCENARIO=tools/smoke/epoll.tsv sh tools/smoke/feed.sh target/test-epoll-x86.log {{boot-timeout}} qemu-system-x86_64 -nographic -m 256M -no-reboot -vga none -device bochs-display,id=fb0 -kernel target/images/x86_64-pc-minix/minix-x86.elf -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0 -device virtio-tablet-pci,display=fb0
     @echo "epoll: persistent interest set, level-triggered readiness, cross-process wake (x86_64)"
 
+# wayland: /bin/waylandtest drives the Phase 1a protocol handshake (registry and
+# wl_display.sync) between a forked client and server over /dev/uds — WAYLAND.md
+# §6.11. build-x86 embeds the binary.
+test-wayland-x86 boot-timeout="40": build-x86
+    mkdir -p target/images/x86_64-pc-minix
+    cp target/trampoline.elf target/images/x86_64-pc-minix/minix-x86.elf
+    @just _assert-qemu-version qemu-system-x86_64
+    FEED_SCENARIO=tools/smoke/wayland.tsv sh tools/smoke/feed.sh target/test-wayland-x86.log {{boot-timeout}} qemu-system-x86_64 -nographic -m 256M -no-reboot -vga none -device bochs-display,id=fb0 -kernel target/images/x86_64-pc-minix/minix-x86.elf -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0 -device virtio-tablet-pci,display=fb0
+    @echo "wayland: registry + sync handshake over /dev/uds (x86_64)"
+
+# wlshm: /bin/wlclient drives the Phase 1b wl_shm present path — it draws into a
+# memfd pool, passes the fd to /sbin/wlserver (boot proc 20), commits a surface,
+# and reads the composited frame back from /dev/fb — WAYLAND.md §6.11. build-x86
+# embeds both binaries.
+test-wlshm-x86 boot-timeout="40": build-x86
+    mkdir -p target/images/x86_64-pc-minix
+    cp target/trampoline.elf target/images/x86_64-pc-minix/minix-x86.elf
+    @just _assert-qemu-version qemu-system-x86_64
+    FEED_SCENARIO=tools/smoke/wlshm.tsv sh tools/smoke/feed.sh target/test-wlshm-x86.log {{boot-timeout}} qemu-system-x86_64 -nographic -m 256M -no-reboot -vga none -device bochs-display,id=fb0 -kernel target/images/x86_64-pc-minix/minix-x86.elf -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0 -device virtio-tablet-pci,display=fb0
+    @echo "wlshm: wl_shm buffer committed and presented to /dev/fb (x86_64)"
+
+# wlkey: tools/wlkey_probe.py drives the Phase 1c input path — /bin/wlkey binds
+# wl_seat's keyboard and commits a surface, and a key injected with QMP reaches it
+# as `wl_keyboard.key` — WAYLAND.md §6.11. A host probe rather than a tsv scenario:
+# the key has to be a real device event, and the serial console the tsv gates type
+# into is not one.
+test-wlkey-x86: build-x86
+    mkdir -p target/images/x86_64-pc-minix
+    cp target/trampoline.elf target/images/x86_64-pc-minix/minix-x86.elf
+    @just _assert-qemu-version qemu-system-x86_64
+    python tools/wlkey_probe.py
+    @echo "wlkey: wl_seat keyboard events reach a client (x86_64)"
+
 # Measure whether two processes that map one object through the loader share its
 # physical frames — Phase 5 of DYNAMIC_LINKING.md. `tools/dso_share_probe.py` boots
 # the dynamic image, runs `/bin/dynclib hold | /bin/dynclib hold` (two lives of the

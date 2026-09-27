@@ -21,6 +21,9 @@ use core::sync::atomic::{AtomicI32, Ordering};
 /// server's text rendering).
 pub mod fbfont;
 
+/// The `wl_shm` client gate — `/bin/wlclient` (`WAYLAND.md` Phase 1b).
+pub mod wlclient;
+
 /// When >= 0, all `write_out` calls are routed through this fd (via VFS)
 /// instead of the kernel's serial shortcut on fd 1. Set by the shell's
 /// redirect child after `fork`, so it is process-private.
@@ -2900,6 +2903,230 @@ pub fn epoll_test(_args: &[&str]) -> i32 {
     let _ = minix_std::fs::close(pw);
 
     write_out(b"epolltest: PASS\r\n");
+    0
+}
+
+/// Wayland Phase 1a smoke test (`WAYLAND.md` §6.11): the protocol handshake over
+/// a real `/dev/uds` socket. A forked child serves one client — the parent —
+/// which enumerates the registry and syncs, and prints PASS only if every global
+/// and the callback arrived.
+pub fn wayland_test(_args: &[&str]) -> i32 {
+    use minix_std::uds;
+    use wayland::protocol;
+    use wayland::server::Server;
+    use wayland::wire::{DispatchBuf, Header, MessageBuffer, Writer};
+
+    // A path of its own: the real server (`/sbin/wlserver`) owns `/run/wayland-0`
+    // once the boot proc starts, so the 1a gate must not collide with it.
+    const SOCK_PATH: &[u8] = b"/run/wayland-test";
+
+    fn fail(msg: &[u8]) -> i32 {
+        write_err(msg);
+        1
+    }
+
+    fn spin() {
+        for _ in 0..2000 {
+            core::hint::spin_loop();
+        }
+    }
+
+    /// Wait for `fd` to become readable, through the readiness engine. The `uds`
+    /// driver now answers `CDEV_SELECT` and holds a late watch, so a socket
+    /// blocks here rather than being retried — which is what this test checks.
+    fn poll_in(fd: i32, timeout: i32) -> bool {
+        let mut pf = [minix_std::fs::PollFd {
+            fd,
+            events: 0x001, // POLLIN
+            revents: 0,
+        }];
+        match minix_std::fs::poll(&mut pf, timeout) {
+            Ok(n) if n > 0 => pf[0].revents & 0x001 != 0,
+            _ => false,
+        }
+    }
+
+    // The listener is bound before the fork, so the client (the parent) can
+    // connect at once; the child accepts the queued connection.
+    let listen = match uds::socket() {
+        Ok(fd) => fd,
+        Err(_) => return fail(b"waylandtest: socket failed\r\n"),
+    };
+    if uds::bind(listen, SOCK_PATH).is_err() {
+        return fail(b"waylandtest: bind failed\r\n");
+    }
+    if uds::listen(listen, 1).is_err() {
+        return fail(b"waylandtest: listen failed\r\n");
+    }
+
+    let pid = match unsafe { minix_std::process::fork() } {
+        Ok(p) => p,
+        Err(_) => return fail(b"waylandtest: fork failed\r\n"),
+    };
+    if pid == 0 {
+        // Child: serve the handshake, then exit. The test's client sends exactly
+        // `get_registry` then `sync`, so the child stops once it has answered a
+        // sync rather than waiting for a close it may never see (socket reads
+        // do not report EOF reliably here).
+        let client = loop {
+            if !poll_in(listen, -1) {
+                continue;
+            }
+            if let Ok(fd) = uds::accept(listen) {
+                break fd;
+            }
+        };
+        let mut server = Server::new(1280, 1024);
+        let mut inbuf = MessageBuffer::new();
+        let mut chunk = [0u8; 512];
+        'serve: loop {
+            if !poll_in(client, -1) {
+                continue;
+            }
+            match uds::recv(client, &mut chunk) {
+                Ok(0) => break,
+                Ok(n) => {
+                    if inbuf.push(&chunk[..n as usize]).is_err() {
+                        break;
+                    }
+                    loop {
+                        let msg = match inbuf.next() {
+                            Ok(Some(m)) => m,
+                            Ok(None) => break,
+                            Err(_) => break 'serve,
+                        };
+                        let Ok(h) = Header::parse(msg) else {
+                            break 'serve;
+                        };
+                        let mut out = [0u8; 2048];
+                        let mut ob = DispatchBuf::new(&mut out);
+                        if server
+                            .dispatch(h.object_id, h.opcode, &msg[8..], &mut ob)
+                            .is_err()
+                        {
+                            break 'serve;
+                        }
+                        if !ob.is_empty() {
+                            let _ = uds::send(client, ob.bytes());
+                        }
+                        inbuf.consume(h.size as usize);
+                        if h.object_id == 1 && h.opcode == protocol::display_req::SYNC {
+                            break 'serve;
+                        }
+                    }
+                }
+                Err(_) => continue,
+            }
+        }
+        let _ = uds::close_fd(client);
+        minix_std::process::exit(0);
+    }
+
+    // Parent: the client.
+    let c = match uds::socket() {
+        Ok(fd) => fd,
+        Err(_) => return fail(b"waylandtest: client socket failed\r\n"),
+    };
+    let mut connected = false;
+    for _ in 0..100_000 {
+        if uds::connect(c, SOCK_PATH).is_ok() {
+            connected = true;
+            break;
+        }
+        spin();
+    }
+    if !connected {
+        return fail(b"waylandtest: connect failed\r\n");
+    }
+
+    // get_registry(2), then sync(3).
+    let mut req = [0u8; 64];
+    let n = {
+        let mut w = match Writer::new(&mut req) {
+            Ok(w) => w,
+            Err(_) => return fail(b"waylandtest: writer failed\r\n"),
+        };
+        if w.new_id(2).is_err() {
+            return fail(b"waylandtest: encode failed\r\n");
+        }
+        match w.finish(1, protocol::display_req::GET_REGISTRY) {
+            Ok(m) => m.len(),
+            Err(_) => return fail(b"waylandtest: frame failed\r\n"),
+        }
+    };
+    if uds::send(c, &req[..n]).is_err() {
+        return fail(b"waylandtest: send get_registry failed\r\n");
+    }
+    let n = {
+        let mut w = match Writer::new(&mut req) {
+            Ok(w) => w,
+            Err(_) => return fail(b"waylandtest: writer failed\r\n"),
+        };
+        if w.new_id(3).is_err() {
+            return fail(b"waylandtest: encode failed\r\n");
+        }
+        match w.finish(1, protocol::display_req::SYNC) {
+            Ok(m) => m.len(),
+            Err(_) => return fail(b"waylandtest: frame failed\r\n"),
+        }
+    };
+    if uds::send(c, &req[..n]).is_err() {
+        return fail(b"waylandtest: send sync failed\r\n");
+    }
+
+    // Read until the callback completes and every global has arrived.
+    let mut inbuf = MessageBuffer::new();
+    let mut chunk = [0u8; 512];
+    let mut globals = 0usize;
+    let mut done = false;
+    let mut deleted = false;
+    let want_globals = protocol::GLOBALS.len();
+    while !(done && deleted && globals >= want_globals) {
+        if !poll_in(c, 2000) {
+            break; // the server went quiet
+        }
+        match uds::recv(c, &mut chunk) {
+            Ok(0) => break,
+            Ok(n) => {
+                if inbuf.push(&chunk[..n as usize]).is_err() {
+                    return fail(b"waylandtest: receive buffer overflow\r\n");
+                }
+                loop {
+                    let msg = match inbuf.next() {
+                        Ok(Some(m)) => m,
+                        Ok(None) => break,
+                        Err(_) => return fail(b"waylandtest: bad frame\r\n"),
+                    };
+                    let Ok(h) = Header::parse(msg) else {
+                        return fail(b"waylandtest: bad header\r\n");
+                    };
+                    match (h.object_id, h.opcode) {
+                        (2, protocol::registry_ev::GLOBAL) => globals += 1,
+                        (3, protocol::callback_ev::DONE) => done = true,
+                        (1, protocol::display_ev::DELETE_ID) => deleted = true,
+                        _ => {}
+                    }
+                    inbuf.consume(h.size as usize);
+                }
+            }
+            Err(_) => break,
+        }
+    }
+
+    let _ = uds::close_fd(c);
+    let _ = minix_std::process::waitpid(pid, 0);
+
+    if globals < want_globals {
+        return fail(b"waylandtest: not every global arrived\r\n");
+    }
+    if !done {
+        return fail(b"waylandtest: wl_display.sync never completed\r\n");
+    }
+    if !deleted {
+        return fail(b"waylandtest: the callback was not deleted\r\n");
+    }
+
+    write_out(b"waylandtest: PASS\r\n");
     0
 }
 

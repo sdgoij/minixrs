@@ -16,6 +16,7 @@ workspace = true
 minix-rt = { path = "../minix-rt" }
 minix-std = { path = "../minix-std" }
 minix-util = { path = "../minix-util" }
+wayland = { path = "../wayland" }
 
 # Binary targets — these are #![no_std] / #![no_main] embedded MINIX
 # binaries that cannot run as host-native tests. Tests live in the lib target.
@@ -284,6 +285,27 @@ test = false
 [[bin]]
 name = "epolltest"
 path = "src/bin/epolltest.rs"
+test = false
+
+[[bin]]
+name = "waylandtest"
+path = "src/bin/waylandtest.rs"
+test = false
+
+# wlclient is the Wayland Phase 1b `wl_shm` client: it draws into a memfd pool,
+# passes the fd to /sbin/wlserver, commits a surface, and reads the frame back
+# from /dev/fb. Driven by `just test-wlshm-x86`.
+[[bin]]
+name = "wlclient"
+path = "src/bin/wlclient.rs"
+test = false
+
+# wlkey is the Wayland Phase 1c input client: it binds wl_seat's keyboard,
+# commits a surface so the server sends `enter`, and prints each key it receives.
+# Driven by `tools/wlkey_probe.py`.
+[[bin]]
+name = "wlkey"
+path = "src/bin/wlkey.rs"
 test = false
 
 [lints]

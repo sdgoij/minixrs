@@ -1,0 +1,16 @@
+# The `just test-wayland-x86` scenario: the Wayland Phase 1a handshake, driven by
+# `/bin/waylandtest`.
+#
+#   FEED_SCENARIO=tools/smoke/wayland.tsv sh tools/smoke/feed.sh <log> <seconds> <qemu command…>
+#
+# One step per line, as `tools/smoke/scenario.tsv` documents: the command, a tab, and the
+# whole line its output must produce.
+#
+# `waylandtest` forks: the child serves one Wayland client over `/run/wayland-test` on
+# `/dev/uds` (its own path, so it does not collide with `/sbin/wlserver` on
+# `/run/wayland-0`), and the parent connects, enumerates the registry (`wl_compositor`,
+# `wl_shm`, `wl_output`, `wl_seat`) and completes a `wl_display.sync`. It prints the
+# line below only if every global arrived and the callback fired; a missing reply
+# hangs the read loop, which the gate reports as a stopped scenario.
+
+/bin/waylandtest	waylandtest: PASS

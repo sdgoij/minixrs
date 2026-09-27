@@ -5,10 +5,15 @@
 //! every key event; IRQ-12 hook for the PS/2 mouse) and virtio-input
 //! (x86 virtio-mouse, riscv/aarch64 virtio-keyboard — no wired userland
 //! IRQ, so the event queue is polled on a periodic SYS_SETALARM). Both
-//! drain into the ring, which the window server consumes as a character
-//! device. Reads are non-blocking: a read with no pending events returns
-//! EAGAIN and the consumer polls (blocking reads and CDEV_SELECT are
-//! follow-ons once VFS passes read nonblock flags).
+//! drain into the ring, which is read as a character device.
+//!
+//! The ring has **several readers**, each with its own cursor: `wserver` and
+//! `wlserver` both read it, and a process opening `/dev/kbd` is added on its first
+//! read. A read advances only the reader that made it, so one consumer draining
+//! cannot take another's events — one producer, several readers, which is what an
+//! input source is. Reads are non-blocking: a read with no pending events returns
+//! EAGAIN and the consumer polls (blocking reads and CDEV_SELECT are follow-ons
+//! once VFS passes read nonblock flags).
 
 use arch_common::com::{CDEV_CLOSE, CDEV_OPEN, CDEV_READ, is_cdev_rq};
 #[cfg(target_os = "minix")]
@@ -48,18 +53,40 @@ static mut VIRTIO_INPUT: VirtioInput = VirtioInput::new();
 /// would spin forever.
 static mut PS2_READY: bool = false;
 
-/// Consumer endpoint (the window server) notified when events queue; -1 =
-/// none. Registered via `INPUT_REG_CONSUMER`.
-static mut CONSUMER_EP: i32 = -1;
+/// How many processes may read the ring at once. `wserver` and `wlserver` are the
+/// two that read it today; a reader that never registered is added on its first
+/// read (a `/dev/kbd` read relayed by VFS arrives with VFS as its source).
+const MAX_CONSUMERS: usize = 8;
+
+/// One reader of the ring: its endpoint, how far it has read, and whether it wants
+/// a notification when events queue.
+#[derive(Clone, Copy)]
+struct Consumer {
+    ep: i32,
+    head: usize,
+    notify: bool,
+}
+
+const NO_CONSUMER: Consumer = Consumer {
+    ep: -1,
+    head: 0,
+    notify: false,
+};
+
+/// The ring's readers, each with its own cursor.
+///
+/// An input source has one producer and several readers, so a read advances only
+/// the reader that made it — one consumer draining cannot take another's events.
+/// `wserver` and `wlserver` both read; a third is a process opening `/dev/kbd`.
+static mut CONSUMERS: [Consumer; MAX_CONSUMERS] = [NO_CONSUMER; MAX_CONSUMERS];
 
 /// Bounded event ring (dropping when full — a keyboard repeat outruns
-/// the consumer rather than blocking the IRQ path).
+/// the consumers rather than blocking the IRQ path).
 static mut EV_QUEUE: [InputEvent; EV_QUEUE_LEN] = [InputEvent {
     page: 0,
     code: 0,
     press: 0,
 }; EV_QUEUE_LEN];
-static mut EV_HEAD: usize = 0;
 static mut EV_TAIL: usize = 0;
 
 /// Scratch space for the inline read reply (48-byte payload).
@@ -68,16 +95,56 @@ static mut EV_SCRATCH: [u8; 48] = [0; 48];
 /// [`InputCallbacks`] implementation that queues decoded events.
 struct ServerCallbacks;
 
-/// Enqueue one decoded event into the ring (drops when full).
+/// Enqueue one decoded event into the ring.
+///
+/// When the ring is full for the *slowest* reader, that reader's oldest event is
+/// dropped rather than the new one: a reader that has stalled (or died) must not
+/// wedge the ring for the others, and for a pointer it is the newest position that
+/// matters. With no readers at all nothing is advanced, so the new event is dropped
+/// as it always was.
 fn push_event(page: u16, code: u16, press: i32) {
     unsafe {
+        use core::ptr::addr_of_mut;
         if ring_is_full() {
-            return; // queue full — drop
+            // The ring is full for the slowest reader. Drop *its* oldest event
+            // rather than the new one: a reader that has stalled (or died) must not
+            // wedge the ring for the others, and for a pointer it is the newest
+            // position that matters.
+            let oldest = oldest_head();
+            let list = &mut *addr_of_mut!(CONSUMERS);
+            let mut advanced = false;
+            for c in list.iter_mut().filter(|c| c.ep >= 0) {
+                if c.head == oldest {
+                    c.head = (c.head + 1) % EV_QUEUE_LEN;
+                    advanced = true;
+                }
+            }
+            if !advanced {
+                return; // no readers: the new event is dropped, as it always was
+            }
         }
-        let next = (EV_TAIL + 1) % EV_QUEUE_LEN;
         EV_QUEUE[EV_TAIL] = InputEvent { page, code, press };
-        EV_TAIL = next;
+        EV_TAIL = (EV_TAIL + 1) % EV_QUEUE_LEN;
     }
+}
+
+/// The oldest position any reader still needs, or 0 when there are none — the
+/// window a reader arriving later can still see.
+unsafe fn oldest_head() -> usize {
+    let list = unsafe { &*core::ptr::addr_of!(CONSUMERS) };
+    let tail = unsafe { EV_TAIL };
+    let mut any = false;
+    let mut oldest = tail;
+    let mut worst = 0usize;
+    for c in list.iter().filter(|c| c.ep >= 0) {
+        let unread = (tail + EV_QUEUE_LEN - c.head) % EV_QUEUE_LEN;
+        if !any || unread > worst {
+            any = true;
+            worst = unread;
+            oldest = c.head;
+        }
+    }
+    if any { oldest } else { 0 }
 }
 
 /// Whether the ring has no room for another event.
@@ -88,7 +155,7 @@ fn push_event(page: u16, code: u16, press: i32) {
 /// newest position that matters, so the drain stops at the capacity and leaves the rest where they
 /// are. Those are picked up by the next drain, which a consumer's read performs.
 fn ring_is_full() -> bool {
-    unsafe { (EV_TAIL + 1) % EV_QUEUE_LEN == EV_HEAD }
+    unsafe { (EV_TAIL + 1) % EV_QUEUE_LEN == oldest_head() }
 }
 
 impl InputCallbacks for ServerCallbacks {
@@ -246,20 +313,43 @@ fn arm_virtio_poll() {
     let _ = minix_rt::kernel_call(24, &mut msg); // SYS_SETALARM
 }
 
-/// Pop up to `count` bytes of events (8 bytes each) into `buf`.
-fn pop_events(buf: &mut [u8], count: usize) -> usize {
+/// Pop up to `count` bytes of events (8 bytes each) into `buf`, for the reader
+/// `ep`.
+///
+/// A reader that has never registered is added here, starting where the oldest live
+/// event is, so a `/dev/kbd` read works without an explicit registration.
+unsafe fn pop_events(buf: &mut [u8], count: usize, ep: i32) -> usize {
+    use core::ptr::addr_of_mut;
+    let start = unsafe { oldest_head() };
+    let list = unsafe { &mut *addr_of_mut!(CONSUMERS) };
+    let i = match list.iter().position(|c| c.ep == ep) {
+        Some(i) => i,
+        None => match list.iter().position(|c| c.ep < 0) {
+            Some(free) => {
+                list[free] = Consumer {
+                    ep,
+                    head: start,
+                    notify: false,
+                };
+                free
+            }
+            // More readers than the table holds: this one gets nothing rather than
+            // stealing another's events.
+            None => return 0,
+        },
+    };
+    let mut n = 0;
     unsafe {
-        let mut n = 0;
-        while n + 8 <= count && EV_HEAD != EV_TAIL {
-            let ev = EV_QUEUE[EV_HEAD];
-            EV_HEAD = (EV_HEAD + 1) % EV_QUEUE_LEN;
+        while n + 8 <= count && list[i].head != EV_TAIL {
+            let ev = EV_QUEUE[list[i].head];
+            list[i].head = (list[i].head + 1) % EV_QUEUE_LEN;
             buf[n..n + 2].copy_from_slice(&ev.page.to_le_bytes());
             buf[n + 2..n + 4].copy_from_slice(&ev.code.to_le_bytes());
             buf[n + 4..n + 8].copy_from_slice(&ev.press.to_le_bytes());
             n += 8;
         }
-        n
     }
+    n
 }
 
 /// How many events the ring is holding, as **this process** computed it.
@@ -269,11 +359,7 @@ fn pop_events(buf: &mut [u8], count: usize) -> usize {
 /// Every instance carries all the servers' code, so asking the wrong one answers a ring that never
 /// received anything — which is why the harness calls it on the input server's own instance.
 pub fn queued_events() -> i32 {
-    unsafe {
-        let head = EV_HEAD;
-        let tail = EV_TAIL;
-        ((tail + EV_QUEUE_LEN - head) % EV_QUEUE_LEN) as i32
-    }
+    unsafe { ((EV_TAIL + EV_QUEUE_LEN - oldest_head()) % EV_QUEUE_LEN) as i32 }
 }
 
 /// Port-I/O hook: route every access through SYS_DEVIO (userland drivers
@@ -398,8 +484,7 @@ pub fn input_server_main() {
                 // The alarm poll is one-shot; re-arm for the next tick.
                 arm_virtio_poll();
                 if had_ps2 || had_virtio || had_host {
-                    // Wake the registered consumer (window server) so it
-                    // routes the queued keys without polling.
+                    // Wake every registered reader so it drains without polling.
                     //
                     // A *notification*, not a message that looks like one: the kernel remembers a
                     // notification for a destination that is not receiving at this instant
@@ -409,15 +494,15 @@ pub fn input_server_main() {
                     // not a theoretical difference: the window server spends its time relaying the
                     // console, so the message form failed per event and the events sat in the ring
                     // until the next one happened to arrive while it was waiting.
-                    let consumer = unsafe { CONSUMER_EP };
-                    if consumer >= 0 {
+                    let list = unsafe { &*core::ptr::addr_of!(CONSUMERS) };
+                    for c in list.iter().filter(|c| c.notify && c.ep >= 0) {
                         let mut buf = [0u8; 8];
                         unsafe {
                             // The kernel builds the notification itself; the buffer is the syscall
                             // ABI's second argument, which this call reads the destination from.
                             let r = minix_rt::syscall2(
                                 minix_rt::NOTIFY_CALL,
-                                consumer as u64,
+                                c.ep as u64,
                                 buf.as_mut_ptr() as u64,
                             );
                             if r < 0 {
@@ -425,8 +510,8 @@ pub fn input_server_main() {
                                 // endpoint that has left, not one that is merely busy. The length
                                 // is the literal's own, because a hand-counted one silently dropped
                                 // the newline when this message was reworded.
-                                let msg = b"input: consumer is unreachable\n";
-                                minix_rt::write(2, msg.as_ptr(), msg.len());
+                                let m = b"input: consumer is unreachable\n";
+                                minix_rt::write(2, m.as_ptr(), m.len());
                             }
                         }
                     }
@@ -434,11 +519,37 @@ pub fn input_server_main() {
                 continue;
             }
 
-            // Direct registration request (not a CDEV message): the sender
-            // becomes the keyboard-event consumer.
+            // Direct registration request (not a CDEV message): the sender wants
+            // events *and* a wakeup when they queue.
             if call_type == arch_common::com::INPUT_REG_CONSUMER {
-                unsafe {
-                    CONSUMER_EP = src_ep;
+                // Adding, not replacing: readers keep the ring alive for each other.
+                let registered = unsafe {
+                    use core::ptr::addr_of_mut;
+                    let start = oldest_head();
+                    let list = &mut *addr_of_mut!(CONSUMERS);
+                    match list.iter().position(|c| c.ep == src_ep) {
+                        Some(i) => {
+                            list[i].notify = true;
+                            true
+                        }
+                        None => match list.iter().position(|c| c.ep < 0) {
+                            Some(free) => {
+                                list[free] = Consumer {
+                                    ep: src_ep,
+                                    head: start,
+                                    notify: true,
+                                };
+                                true
+                            }
+                            None => false,
+                        },
+                    }
+                };
+                if !registered {
+                    // A caller that cannot be added never hears a key, and a silent
+                    // failure there is exactly the kind this reports.
+                    let m = b"input: no room for another consumer\n";
+                    unsafe { minix_rt::write(2, m.as_ptr(), m.len()) };
                 }
                 msg.m_type = 0;
                 unsafe {
@@ -479,7 +590,7 @@ pub fn input_server_main() {
 /// `msg` must point to a valid received message.
 unsafe fn handle_cdev_request(
     msg: &mut arch_common::ipc::Message,
-    _who_e: i32,
+    who_e: i32,
     call_type: u32,
 ) -> i32 {
     // Standard CDEV message layout (m2 fields):
@@ -499,7 +610,7 @@ unsafe fn handle_cdev_request(
             // which at the end of a drag is never. Serving reads is what keeps it moving.
             drain_host();
             let dst = unsafe { &mut *core::ptr::addr_of_mut!(EV_SCRATCH) };
-            let got = pop_events(&mut dst[..n], n);
+            let got = unsafe { pop_events(&mut dst[..n], n, who_e) };
             if got > 0 {
                 unsafe {
                     msg.m_payload.raw[..got].copy_from_slice(&dst[..got]);

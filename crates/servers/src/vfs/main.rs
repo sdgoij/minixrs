@@ -41,6 +41,7 @@ const BOOT_ENDPOINTS: &[i32] = &[
     arch_common::com::FB_PROC_NR,         // 16: framebuffer driver
     arch_common::com::INPUT_PROC_NR,      // 17: PS/2 keyboard driver
     arch_common::com::WS_PROC_NR,         // 18: window server
+    arch_common::com::WLS_PROC_NR,        // 20: Wayland server
 ];
 
 /// Offset of m_source in the message buffer (4 bytes).
@@ -272,10 +273,15 @@ unsafe fn handle_work() {
 
     // Notifications (m_type == NOTIFY_MESSAGE) are fire-and-forget — no reply needed.
     if call_nr == arch_common::com::NOTIFY_MESSAGE as i32 {
-        // VFS's only notification source is the kernel's `CLOCK` alarm, armed by
-        // `vfs::alarm` for the earliest suspended `select`/`poll` deadline. Treat
-        // it as that tick: complete every wait whose timeout has passed and
-        // re-arm for the next. Update req_nr, but skip dispatch and reply.
+        // Two sources, both meaning "something you were waiting for changed":
+        // the kernel's `CLOCK` alarm, which `vfs::alarm` arms for the earliest
+        // suspended `select`/`poll` deadline, and a character driver whose
+        // socket or terminal became ready. A driver cannot reliably *send* VFS a
+        // readiness report (it can only land while VFS is in `RECEIVE`), so it
+        // notifies instead and VFS re-asks here. Then complete whatever deadline
+        // has passed and re-arm for the next. Update req_nr, but skip dispatch
+        // and reply.
+        unsafe { crate::vfs::select::rescan_suspended() };
         unsafe { crate::vfs::select::alarm_ticks() };
         return;
     }

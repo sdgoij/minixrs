@@ -103,7 +103,9 @@ Paths are in this tree (`minixrs/crates/...`) unless noted.
       `crates/drivers/src/input/`.
 - [x] **`select(2)`** — VFS `select` with the CDEV select protocol
       (`CDEV_SEL1_REPLY`/`CDEV_SEL2_REPLY`, driver-side `sel_endpt`/`sel_ops`).
-      `crates/servers/src/vfs/select.rs`.
+      `crates/servers/src/vfs/select.rs`. A driver that cannot *send* a readiness
+      report because VFS is busy ends the change with a `NOTIFY` instead, and VFS
+      re-asks its suspended waits (`rescan_suspended`) — `KNOWN_ISSUES` 36.
 - [x] **`ioctl(2)` with magic grants** — VFS `do_ioctl` → `CDEV_IOCTL`, argument
       struct moved by grant with direction from `_IOW`/`_IOR`.
       `crates/servers/src/vfs/device.rs`.
@@ -254,8 +256,13 @@ Organised by critical path. Each is a real gap, with evidence.
       unimplemented. None of these blocks a stack that installs under `/lib` or
       `/usr/lib` or is referenced by absolute path — which is how Mesa's own
       driver lookups (`LIBGL_DRIVERS_PATH`, `VK_ICD_FILENAMES`) work anyway.
-- [ ] **A Wayland server implementation** — protocol interfaces, wire encoding,
-      `wl_compositor`/`wl_surface`/`wl_shm`/`wl_seat`/`wl_output`/`xdg-shell`.
+- [ ] **A Wayland server implementation** — scoped in **§6.11**. The wire format,
+      the interface tables and both halves of the protocol landed in
+      `crates/wayland` (`wire`/`protocol`/`server`/`shm`/`client`/`input`), the
+      serving side is the `/sbin/wlserver` boot proc (20), and Phase 1a (registry +
+      `wl_display.sync`), 1b (the `wl_shm` present path to `/dev/fb`) and 1c (input:
+      `wl_seat` keyboard/pointer, focus/`enter`, and a key routed from the console to
+      a client) are in. Still open: `xdg_shell` (Phase 2).
 
 ---
 
@@ -333,7 +340,7 @@ not now, record it.
 |---|---|---|---|---|
 | 1 | Socket shape | `/dev/uds` char driver; `socket()` = `open` + `NWIO*` ioctls; data via `read`/`write` | Same shape, one server per socket family, control via ioctl+grant, data via fd read/write | **Follow** (fits our char-driver/ioctl/grant machinery) |
 | 2 | Connect authorisation | `checkperms(owner, path, …)` against the socket node, then a table scan for the name | The driver cannot query a path's mode, so it authorises by **uid**: the binder's user, or root. A uid PM cannot resolve denies | **Deviate** (narrower than the reference; widen once a path-mode query exists) |
-| 3 | Readiness | `select` only (25 slots), one query per major; `poll` emulated over `select`; no server timer | one readiness engine in VFS serving `select` **and** native `poll`, with deadlines armed via `SYS_SETALARM`; `epoll` to follow on the same table | **Deviate** (landed: `select`/`poll` + timeouts; `epoll` open) |
+| 3 | Readiness | `select` only (25 slots), one query per major; `poll` emulated over `select`; no server timer | one readiness engine in VFS serving `select` **and** native `poll` **and** `epoll`, with deadlines armed via `SYS_SETALARM`; character drivers answer `CDEV_SELECT` and hold a late watch | **Deviate** (landed: `select`/`poll`/`epoll` + timeouts, and `uds` now answers `CDEV_SELECT`) |
 | 4 | Shared buffers | writable `MAP_SHARED` file mapping rejected (`ENXIO`); SysV shm | `memfd_create` as a synthetic-identity object that VM's `(dev, ino)` page cache backs, so one object's frames are shared by every mapping and by `read`/`write` | **Deviate** (already deviating; landed, §6.4) |
 | 5 | fd passing | `copyfd` back-call: the privileged `uds` driver moves each descriptor itself, while VFS waits for that driver's ioctl reply | VFS owns the transfer (`vfs/scm.rs`): it captures `SCM_RIGHTS` descriptors at `sendmsg` and installs them at `recvmsg`, keyed by the receiving socket; the driver only names the peer. `SO_PEERCRED` from the peer's owner | **Deviate** (the reference's back-call needs a second VFS thread; ours is single-threaded, so it could never be answered) |
 | 6 | PTY | 32 static pairs, no `/dev/ptmx` | Keep static shape; raise the pair count; add `/dev/ptmx` clone later | **Follow, extend** |
@@ -829,6 +836,128 @@ exercise; 3d is where the design can still change.
 - **`zink` over `lavapipe`/Venus** — a GL-on-Vulkan route; noted only so the DRM
   node is designed to admit it.
 
+### 6.11 Phase 1 — the in-house Wayland server
+
+Phase 1 is the first Wayland code in the tree: a server that speaks the real wire
+protocol, a `wl_shm` client that draws through it, and a present path to
+`/dev/fb`. It implements the **core** protocol plus `wl_shm`, `wl_output` and
+`wl_seat` — exactly the interfaces Phase 0 was built to carry — and stops at
+`xdg_shell`, which is Phase 2. This is Track A of §6.7.
+
+#### Two decisions
+
+**D1 — a new server, not a second mode of `wserver`.** `wserver`'s main loop is a
+blocking IPC `RECEIVE` over its endpoint, and an endpoint is not an fd, so it
+cannot be polled alongside a socket. Bolting a Wayland listener onto it would
+need either a second thread sharing the window table or a loop that polls a fd it
+can never include the IPC receive in. The Wayland server is therefore a new boot
+proc (`/sbin/wlserver`, proc 20) that owns its own socket and its own `/dev/fb`
+mapping. "`wserver` in a second mode" (§6.7) stays open for Phase 4, when a
+compositor speaking both protocols is worth merging; for Phase 1 the two do not
+collide, because `wserver` draws nothing until it has a window and the demo
+creates none.
+
+**D2 — an in-house client, not a ported one.** The Phase 1 gate says "a *stock*
+`wl_shm` client renders". A stock client today means `wayland-rs` (whose pure-Rust
+`wayland-backend` needs `rustix`/`libc` built for `*-minix`) or C `libwayland`
+(needs a C port). Neither exists, and porting `rustix` is its own project. Phase
+1's client is therefore **ours**, but built strictly on the standard protocol —
+no private opcodes, no private interfaces — so the server is exercised exactly as
+a stock client would exercise it. Swapping in a ported client later is then a
+client-side change, not a protocol change. That tightens the gate rather than
+weakening it: the deliverable is the protocol, and our client proves it.
+
+#### The protocol lives in its own crate
+
+A new `crates/wayland` (pure Rust, `no_std`, host-testable, like `net`) holds the
+wire format and the interface tables, so the server, the client and the host
+tests share one definition:
+
+- `wire.rs` — the message header (`object_id: u32`, then `size << 16 | opcode`),
+the argument encoders/decoders (`int`, `uint`, `fixed`, `string`, `array`, `fd`,
+`new_id`, `object`), and the 4-byte alignment and `NUL` padding strings and arrays
+require. Input is decoded against an interface's **signature** rather than
+per-message code, so one parser serves every request.
+- `protocol.rs` — the interface tables: name, version, the opcode→signature map
+for each interface's requests and events, and the enums (`wl_shm.format`,
+`wl_output.*`, …). Written by hand from the published XML, pinned by tests.
+- `server.rs` / `client.rs` — an object map and the send/receive plumbing over an
+fd: the server's `recvmsg`/`sendmsg` with `SCM_RIGHTS`, the client's `memfd` +
+pool path.
+
+#### Staged, each with a gate
+
+| Stage | Deliverable | Gate |
+|---|---|---|
+| **1a** | **Landed** (`just test-wayland-x86`). `crates/wayland` — the framing (`wire`), the core interface tables (`protocol`) and a pure dispatcher (`server`); the gate's server binds `/run/wayland-test`, accepts a client, advertises the globals and answers `wl_display.sync` | A client connects, enumerates the globals, syncs and gets its callback — then `PASS` |
+| **1b** | **Landed** (`just test-wlshm-x86`). The `wl_shm` path end to end: `shm.rs` validates a pool buffer (format, stride, extent) and blits it into a caller-supplied framebuffer with clipping; `server.rs` dispatches `wl_shm.create_pool` (naming the fd index for the caller to resolve), `wl_shm_pool.create_buffer` (validating and posting `wl_shm.error`), `wl_surface.attach`/`damage`/`frame`/`commit`, and exposes the commit and `wl_buffer.release`; `client.rs` is the client half. `/sbin/wlserver` (boot proc 20) is the serving side — it maps `/dev/fb`, speaks the protocol over `/run/wayland-0`, and composites a commit; `/bin/wlclient` is the gate's client | The client draws a pattern, commits, and is told the buffer is released; the frame reaches `/dev/fb` |
+| **1c** | **Landed** (`just test-wlkey-x86`). `input.rs` translates HID usages to evdev keycodes and tracks modifier state (each side of a pair separately, so a stray release cannot clear the other's); `server.rs` advertises `wl_seat` pointer + keyboard capabilities, focuses the first surface to commit, sends `enter` for it, and exposes the input event API (`key`, `modifiers`, pointer `motion`/`button`); `/sbin/wlserver` fetches input from the input server on a 20 ms tick (an endpoint is not an fd, so it cannot be polled) and translates it; `/bin/wlkey` is the gate's client. The input server's ring now keeps a **cursor per consumer**, so `wlserver` and `wserver` read the same HID stream without stealing from each other, and a full ring evicts the slowest reader's oldest record rather than wedging the others. It also needed a UDS readiness fix: a readiness change is announced with a `NOTIFY` (a `SENDNB` cannot reach a busy VFS) and VFS re-asks its suspended waits (`KNOWN_ISSUES` 36) | A client receives a key routed from the console |
+| **2** | `xdg_shell`: `xdg_wm_base`/`xdg_surface`/`xdg_toplevel`, decorations, popups, damage, cursor, keymaps | A toolkit client runs a window with chrome |
+
+#### Present path
+
+`/dev/fb`, exactly as `wserver` uses it: `open("/dev/fb", O_RDWR)`,
+`mmap(MAP_SHARED)` (so the pixels *are* the device's), draw, then `FBIOFLUSH` sent
+**directly to the fb server** — bypassing VFS, whose single worker the shell's
+blocking console read would otherwise hold. The `Output` abstraction of §6.5 is
+introduced here as a trait with one `fb` implementation; virtio-gpu and GL are
+later backends behind it.
+
+#### Deviations to record
+
+- **`wlserver` is now boot proc 20** (D1's promise), and the 1a gate is a
+**forked pair that is not the boot proc**: `waylandtest` still forks a client and
+server so the handshake is testable without a live compositor, and it moved off
+`/run/wayland-0` onto `/run/wayland-test` because the real server owns the
+canonical path from boot.
+- **The gate's frame is checked by reading `/dev/fb` back**: the client maps the
+same device memory the server composited into and compares the pixel, which is
+what turns "a release arrived" into "the frame reached the display".
+- **`wlserver` binds and maps before presenting anything**: it opens `/dev/fb`,
+mmaps it and binds `/run/wayland-0` at boot, reporting each failure rather than
+exiting silently — a boot proc that dies quietly is a client that can never
+connect with no explanation.
+- **`wlserver` serves one client at a time** (Phase 1): it accepts, serves to EOF,
+closes and accepts again. Multiple simultaneous clients arrive with `xdg_shell`,
+when surfaces need per-client state anyway.
+- **The pool fd's control message needs its own read.** The `uds` driver records
+`SCM_RIGHTS` against the socket and hands it over on the next read, so the client
+inserts a `wl_display.sync` barrier before `create_pool` and sends the pool
+request alone: the control then lands on the `create_pool` read rather than
+sharing one with earlier requests (`silent-failure-traps` territory).
+- **The composited geometry is the fb's constants, not a mode query**: every
+backend this port has adopts 1024x768 XRGB8888, so `wlserver` clips against
+those rather than asking the device (a query would go through VFS, and VFS's
+single worker may be held by the shell's console read).
+- **A `uds` socket now wakes `poll`/`epoll`**, so the gate's client and server
+block rather than retry. This closed the last Phase 0 gap on the socket path: the
+driver answers `CDEV_SELECT` and holds one late watch per socket, and VFS retries
+the reply on a short alarm tick because the port's `SENDNB` is `ENOTREADY` while
+VFS is parked in the request that raised it (`KNOWN_ISSUES.md` 36).
+- **One process per protocol for now** (D1): `wlserver` and `wserver` both map
+`/dev/fb`, and last-flush-wins. The Phase 1 demo never has both drawing.
+- **The socket name needs no filesystem**: the `uds` driver matches `sun_path` in
+its own table and `bind`/`connect` authorise by uid (§5 row 2), so
+`/run/wayland-0` works with no writable `/run` and no node on disk — the
+`XDG_RUNTIME_DIR` gap of §3.2 stays open, and the client names the path directly.
+- **No `xdg_shell` at Phase 1**: a client's surface is composited full-screen (or
+at a server-assigned position), because `xdg_toplevel` does not exist yet.
+- **`wl_seat` advertises only what the server implements**: it exists in 1a with
+no capabilities, rather than promising events it cannot send; pointer and keyboard
+arrive with 1c.
+- **1c sends no `keymap` event.** `wl_keyboard.key` carries an evdev keycode, and a
+real keymap is an XKB blob a client feeds to `xkbcommon` — a port item §6.6 defers.
+Phase 1's in-house client interprets keycodes with `input.rs`'s US table, and the
+missing `keymap` is a deviation a *stock* client would notice (it would be handed
+keycodes it cannot map).
+- ~~**The input server is single-consumer.**~~ **Fixed with 1c.** The ring used to be
+popped destructively (`CDEV_READ` advanced one `EV_HEAD`, and `INPUT_REG_CONSUMER` kept
+one `CONSUMER_EP`), so only one process could read the HID stream — and with `wserver`
+active that process was `wserver`. It now keeps a cursor per consumer and notifies
+*every* registered consumer, so `wlserver` and `wserver` both read the same stream. A
+reader that never registered is added on its first read, because VFS relays
+`/dev/kbd`: the request's source is VFS, not the reader.
+
 ---
 
 ## 7. Phased plan
@@ -836,7 +965,7 @@ exercise; 3d is where the design can still change.
 | Phase | Deliverable | Gate |
 |---|---|---|
 | **0** | AF_UNIX server + `socketpair` + `sendmsg`/`recvmsg` + `SCM_RIGHTS`/`SO_PEERCRED`; native `poll`/`epoll`/`eventfd`/`timerfd`; `memfd_create` + `ftruncate` + anonymous shared frames; `mprotect`; `select` timeouts. **Landed:** sockets + fd passing (`test-uds-x86`), memfd (`test-memfd-x86`), `mprotect`, `select`/native `poll` with real deadlines (`test-select-x86`), `eventfd` (`test-eventfd-x86`), `timerfd` (`test-timerfd-x86`), `epoll` (`test-epoll-x86`). **Open:** none. | Two processes connect over the socket and **pass an fd**; a third `epoll_wait`s on it. Host + QEMU test |
-| **1** | In-house Wayland server: `wl_shm` path, `wl_output`, `wl_seat`; presents to `/dev/fb`; a small `wl_shm` client draws a window | A **stock** `wl_shm` client renders, driven by a QEMU smoke scenario (same shape as `tools/smoke/`) |
+| **1** | In-house Wayland server, scoped in **§6.11**. **Landed:** 1a — the wire/interface crate and the registry + `sync` handshake over `/dev/uds` (`test-wayland-x86`); 1b — the `wl_shm` present path: `/sbin/wlserver` (boot proc 20) maps `/dev/fb`, `/bin/wlclient` draws into a memfd pool and commits a surface, and the frame is read back from `/dev/fb` (`test-wlshm-x86`). **Open:** input (1c) | A `wl_shm` client renders through the server to `/dev/fb`, driven by a QEMU smoke scenario (same shape as `tools/smoke/`); a **ported stock** client later, on the same protocol |
 | **2** | `xdg_shell`, decorations, `layer_shell`, popups, damage tracking, cursor, keymaps, multi-output | A real toolkit client runs a window with chrome and input |
 | **3** | GL rendering, scoped in **§6.10** — virgl over `virtio-gpu` first: 3D transport, a `virtgpu` render node, Mesa + `libdrm` as DSOs; llvmpipe kept as the fallback | The compositor renders GL content |
 | **4** | smithay port; `cosmic-comp` against our backends; `cosmic-session` + D-Bus | `cosmic-comp` on screen; a `libcosmic` app connects |
@@ -917,6 +1046,12 @@ Traps found while writing this, for reviewers to consider:
   port prunes lazily at the next wait; a stale one would report `EPOLLNVAL`
   forever and spin the loop. `EPOLLET`/`EPOLLONESHOT` are accepted but not
   honoured, and an instance holds at most 64 interests.
+- A character driver that answers `CDEV_SELECT` with 0 never wakes a `poll`/`epoll`
+  on it. A driver that does answer it must still mind two traps: VFS asks about
+  `filp_dev` (the clone minor), so the driver must key on what the open reply named,
+  not the vnode's; and it cannot `SENDNB` the late reply while VFS is parked in the
+  request that raised it (`SENDNB` is `ENOTREADY` when the target is not receiving),
+  so it queues the reply and retries on a short alarm tick (`KNOWN_ISSUES.md` 36).
 - A UDS server authorises `connect` against the socket node's permissions in
   the reference (`checkperms(owner, path, …)`, `ioc_uds.c`). This port's driver has
   no path-to-mode query, so `uds` authorises by the binder's uid plus root

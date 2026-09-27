@@ -131,6 +131,17 @@ pub const BOOT_BINS: &[(&str, &str)] = &[
     // set, level-triggered readiness, and a blocked epoll_wait woken by a child
     // process.
     ("/bin/epolltest", "epolltest"),
+    // `/bin/waylandtest` is the Wayland Phase 1a smoke test: the protocol
+    // handshake (registry + sync) over `/dev/uds`.
+    ("/bin/waylandtest", "waylandtest"),
+    // `/bin/wlclient` is the Wayland Phase 1b `wl_shm` client: it draws into a
+    // memfd pool, commits a surface to /sbin/wlserver, and reads the frame back
+    // from /dev/fb.
+    ("/bin/wlclient", "wlclient"),
+    // `/bin/wlkey` is the Wayland Phase 1c input client: it binds wl_seat's
+    // keyboard, commits a surface so the server sends `enter`, and prints each key
+    // it receives.
+    ("/bin/wlkey", "wlkey"),
     // `/bin/wterm` is the terminal window client (M3): a pty with /bin/sh
     // on the slave, its output rendered (VT subset) into a wserver window.
     ("/bin/wterm", "wterm"),
@@ -161,6 +172,10 @@ pub const BOOT_BINS: &[(&str, &str)] = &[
     ("/sbin/devman", "devman"),
     ("/sbin/fb", "fb"),
     ("/sbin/input", "input"),
+    // `/sbin/wlserver` is the Wayland server (WAYLAND.md Phase 1): boot proc 20,
+    // the in-house compositor that speaks the wire protocol over `/run/wayland-0`
+    // and presents `wl_shm` buffers to `/dev/fb`.
+    ("/sbin/wlserver", "wlserver"),
 ];
 
 /// Programs a **wasm32** image carries: destination path → module file name in the target's

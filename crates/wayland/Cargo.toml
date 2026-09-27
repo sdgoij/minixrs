@@ -1,0 +1,14 @@
+[package]
+name = "wayland"
+version = "0.1.0"
+description = "Wayland wire protocol and core interfaces, shared by the server and clients"
+# Literal values (not `workspace = true`) so the crate is consumable as a path
+# dependency from outside the minixrs workspace, matching `net`.
+edition = "2024"
+rust-version = "1.96"
+license = "GPL2.0"
+
+[lib]
+crate-type = ["rlib"]
+
+[dependencies]

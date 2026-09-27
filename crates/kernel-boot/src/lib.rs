@@ -11,7 +11,7 @@
 use arch_common::com::{
     DEVMAN_PROC_NR, DS_PROC_NR, FB_PROC_NR, INIT_PROC_NR, INPUT_PROC_NR, MFS_PROC_NR, NET_PROC_NR,
     PFS_PROC_NR, PM_PROC_NR, RAMDISK_PROC_NR, RS_PROC_NR, SCHED_PROC_NR, TTY_PROC_NR, UDS_PROC_NR,
-    VFS_PROC_NR, VIRTIO_BLK_PROC_NR, VIRTIO_NET_PROC_NR, VM_PROC_NR, WS_PROC_NR,
+    VFS_PROC_NR, VIRTIO_BLK_PROC_NR, VIRTIO_NET_PROC_NR, VM_PROC_NR, WLS_PROC_NR, WS_PROC_NR,
 };
 
 pub mod boot_init;
@@ -223,7 +223,10 @@ pub fn serial_putc(c: u8) {
 /// that calls brk() (MFS, PFS, TTY, INIT). VM is loaded right after VFS,
 /// ahead of the device drivers and the brk()-using servers; all three
 /// arches share this single list.
-static BOOT_PROCS_ALL: &[(&str, i32)] = &[
+///
+/// `const`, not `static`, so [`BOOT_PROC_SLOTS`] can be derived from it and the
+/// two cannot drift.
+const BOOT_PROCS_ALL: &[(&str, i32)] = &[
     ("/sbin/ds", DS_PROC_NR),           // Data Store (first, matches C order)
     ("/sbin/rs", RS_PROC_NR),           // Reincarnation Server
     ("/sbin/pm", PM_PROC_NR),           // Process Manager
@@ -242,8 +245,14 @@ static BOOT_PROCS_ALL: &[(&str, i32)] = &[
     ("/sbin/input", INPUT_PROC_NR),     // PS/2 keyboard driver
     ("/sbin/wserver", WS_PROC_NR),      // window server (K5 desktop)
     ("/sbin/uds", UDS_PROC_NR),         // UNIX-domain sockets (/dev/uds)
+    ("/sbin/wlserver", WLS_PROC_NR),    // Wayland server (Phase 1)
     ("/sbin/init", INIT_PROC_NR),       // init
 ];
+
+/// How many boot slots the loader's tables must cover — one per entry in
+/// [`BOOT_PROCS_ALL`], derived rather than hand-kept so adding a boot process
+/// cannot leave the loader's arrays one short.
+pub const BOOT_PROC_SLOTS: usize = BOOT_PROCS_ALL.len();
 
 /// The boot process list for this build: the full list, or — under the
 /// boot-test feature — the full list minus the trailing INIT entry, so

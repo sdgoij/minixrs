@@ -180,6 +180,7 @@ dependencies = [
  "minix-std",
  "minix-util",
  "net",
+ "wayland",
 ]
 
 [[package]]
@@ -189,4 +190,9 @@ dependencies = [
  "minix-rt",
  "minix-std",
  "minix-util",
+ "wayland",
 ]
+
+[[package]]
+name = "wayland"
+version = "0.1.0"

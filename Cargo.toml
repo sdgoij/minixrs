@@ -36,6 +36,7 @@ members = [
     "crates/net",
     "crates/servers",
     "crates/userland",
+    "crates/wayland",
 ]
 
 [workspace.package]

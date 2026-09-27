@@ -36,7 +36,11 @@
 //! # Not yet
 //!
 //! * No `sendmsg`/`recvmsg` or `SCM_RIGHTS` fd passing.
-//! * No readiness: `CDEV_SELECT` answers 0, as `net`'s does.
+//! * `CDEV_SELECT` answers the ready ops and holds a late watch that a later
+//!   readiness change wakes through a *notification* (VFS is told to re-ask,
+//!   `vfs::select::rescan_suspended`), but only **one** watcher per socket and
+//!   no `CDEV_CANCEL` (a satisfied watch is dropped, not cancelled). `net`
+//!   still answers 0.
 //! * No socket types (`SOCK_STREAM` is assumed) and no `shutdown`.
 //!
 //! The pure core below — the table, `open`, `pair`, `bind`, `listen`,
@@ -48,8 +52,8 @@
 use core::cell::UnsafeCell;
 
 use arch_common::com::{
-    CDEV_CLONED, CDEV_CLOSE, CDEV_DGRAM, CDEV_DGRAM_OPEN, CDEV_IOCTL, CDEV_OPEN, CDEV_READ,
-    CDEV_SELECT, CDEV_WRITE,
+    CDEV_CLONED, CDEV_CLOSE, CDEV_DGRAM, CDEV_DGRAM_OPEN, CDEV_IOCTL, CDEV_NOTIFY, CDEV_OP_ERR,
+    CDEV_OP_RD, CDEV_OP_WR, CDEV_OPEN, CDEV_READ, CDEV_SELECT, CDEV_WRITE,
 };
 use arch_common::ipc::Message;
 use net::{
@@ -119,6 +123,11 @@ struct UdsSock {
     /// Established-but-unaccepted ends, oldest first.
     acceptq: [i32; NR_UDS_SOCKETS],
     acceptq_len: usize,
+    /// A `select`/`poll`/`epoll` watcher: the ops it asked for that were not
+    /// ready (`0` = none) and the endpoint to wake (`CDEV_SELECT`'s sender,
+    /// VFS).
+    sel_ops: u32,
+    sel_ep: i32,
 }
 
 impl UdsSock {
@@ -138,6 +147,8 @@ impl UdsSock {
             path_len: 0,
             acceptq: [-1; NR_UDS_SOCKETS],
             acceptq_len: 0,
+            sel_ops: 0,
+            sel_ep: -1,
         }
     }
 
@@ -206,7 +217,12 @@ fn pair_by_minor_inner(socks: &mut [UdsSock], minor: i32, peer_minor: i32) -> i3
     let (Some(a), Some(b)) = (index_of(socks, minor), index_of(socks, peer_minor)) else {
         return EBADF;
     };
-    pair_inner(socks, a, b)
+    let r = pair_inner(socks, a, b);
+    if r == 0 {
+        notify_select(socks, a);
+        notify_select(socks, b);
+    }
+    r
 }
 
 /// Free the socket and detach its peer, so the peer's next drained read reports
@@ -222,6 +238,7 @@ fn close_inner(socks: &mut [UdsSock], minor: i32) -> i32 {
             let c = socks[q].peer;
             if c >= 0 && socks[c as usize].in_use {
                 socks[c as usize].peer = -1;
+                notify_select(socks, c as usize);
             }
             socks[q] = UdsSock::empty();
         }
@@ -229,6 +246,8 @@ fn close_inner(socks: &mut [UdsSock], minor: i32) -> i32 {
     let p = socks[i].peer;
     if p >= 0 && socks[p as usize].in_use {
         socks[p as usize].peer = -1;
+        // The surviving end is now readable/writable without blocking.
+        notify_select(socks, p as usize);
     }
     socks[i] = UdsSock::empty();
     0
@@ -320,6 +339,8 @@ fn connect_inner(socks: &mut [UdsSock], minor: i32, uid: u32, path: &[u8]) -> i3
     let q = socks[l].acceptq_len;
     socks[l].acceptq[q] = srv as i32;
     socks[l].acceptq_len = q + 1;
+    // A connection now waits: wake a listener watching for readability.
+    notify_select(socks, l);
     0
 }
 
@@ -352,16 +373,24 @@ fn accept_inner(socks: &mut [UdsSock], minor: i32, path: &[u8]) -> i32 {
     }
     let client = socks[srv].peer;
     // The acceptor's socket is being replaced by the queued end, but the
-    // acceptor is the one that owns it now, so its endpoint is carried over.
+    // acceptor is the one that owns it now, so its endpoint and any select
+    // watch are carried over.
     let acceptor_ep = socks[dst].owner_ep;
+    let (sel_ops, sel_ep) = (socks[dst].sel_ops, socks[dst].sel_ep);
     let mut taken = socks[srv];
     taken.minor = socks[dst].minor;
     taken.owner_ep = acceptor_ep;
+    taken.sel_ops = sel_ops;
+    taken.sel_ep = sel_ep;
     socks[dst] = taken;
     socks[srv] = UdsSock::empty();
     if client >= 0 && socks[client as usize].in_use {
         socks[client as usize].peer = dst as i32;
+        // The client's connection is live on the server side now.
+        notify_select(socks, client as usize);
     }
+    // The queue shrank; a second queued connection would wake a watcher here.
+    notify_select(socks, l);
     0
 }
 
@@ -420,6 +449,99 @@ fn commit_read(socks: &mut [UdsSock], at: usize, out: &mut [u8]) -> usize {
     n
 }
 
+/// The ops ready on `socks[at]`: what `select`/`poll`/`epoll` ask and
+/// `CDEV_SELECT` answers.
+///
+/// A listening socket is readable when a connection waits. A connected one is
+/// readable with data queued, and either readable or writable when its peer is
+/// gone (a read then returns EOF and a write `EPIPE` — neither blocks). A
+/// listening socket is never writable.
+fn ready_ops(socks: &[UdsSock], at: usize) -> u32 {
+    let s = &socks[at];
+    if !s.in_use {
+        return 0;
+    }
+    if s.listening {
+        return if s.acceptq_len > 0 { CDEV_OP_RD } else { 0 };
+    }
+    let mut r = 0u32;
+    if s.rx_len > 0 || s.peer < 0 {
+        r |= CDEV_OP_RD;
+    }
+    let writable = if s.peer < 0 {
+        true
+    } else {
+        let p = s.peer as usize;
+        p < NR_UDS_SOCKETS && socks[p].in_use && socks[p].rx_len < UDS_BUF
+    };
+    if writable {
+        r |= CDEV_OP_WR;
+    }
+    r
+}
+
+/// `CDEV_SELECT`: answer the ready ops, and remember a watcher for the ops that
+/// are not ready so a later change can wake it ([`notify_select`]). `ep` is the
+/// sender of the request — VFS, which the late reply goes back to.
+fn select_inner(socks: &mut [UdsSock], minor: i32, ops: u32, ep: i32) -> i32 {
+    let Some(i) = index_of(socks, minor) else {
+        return EBADF;
+    };
+    let want = ops & (CDEV_OP_RD | CDEV_OP_WR | CDEV_OP_ERR);
+    let watch = ops & CDEV_NOTIFY;
+    let ready = ready_ops(socks, i) & want;
+    let remaining = want & !ready;
+    if remaining != 0 && watch != 0 {
+        socks[i].sel_ops |= remaining;
+        socks[i].sel_ep = ep;
+    }
+    ready as i32
+}
+
+/// Wake a watcher on `socks[at]` for whatever it asked for and is now ready.
+/// Called wherever readiness can change: data queued, a read draining the ring
+/// a peer writes into, a connection queued or accepted, and a peer closing.
+fn notify_select(socks: &mut [UdsSock], at: usize) {
+    if at >= NR_UDS_SOCKETS || !socks[at].in_use || socks[at].sel_ops == 0 {
+        return;
+    }
+    let ready = ready_ops(socks, at) & socks[at].sel_ops;
+    if ready == 0 {
+        return;
+    }
+    let ep = socks[at].sel_ep;
+    socks[at].sel_ops &= !ready;
+    if ep >= 0 {
+        notify_ready(ep);
+    }
+}
+
+/// Tell `ep` (VFS) that this socket's readiness changed, so it re-asks.
+///
+/// A *notification*, not a message: the kernel remembers one for a destination
+/// that is not receiving and hands it over on that destination's next
+/// `RECEIVE`, whereas a non-blocking send answers `ENOTREADY` to a busy
+/// destination and the wake is gone. That is not theoretical here — a reply
+/// retried on a short alarm phase-locks with VFS's own deadline tick, so VFS is
+/// awake at every retry and the send is refused indefinitely (`KNOWN_ISSUES`
+/// 36). The input server was fixed the same way, for the same reason.
+///
+/// The notification carries no payload, which is why VFS re-asks the driver
+/// (`vfs::select::rescan_suspended`) rather than reading a report out of it.
+fn notify_ready(ep: i32) {
+    #[cfg(target_os = "minix")]
+    {
+        let mut buf = [0u8; 8];
+        unsafe {
+            minix_rt::syscall2(minix_rt::NOTIFY_CALL, ep as u64, buf.as_mut_ptr() as u64);
+        }
+    }
+    #[cfg(not(target_os = "minix"))]
+    {
+        let _ = ep;
+    }
+}
+
 /// Split a `sockaddr_un`'s bytes into `(family, path)`. The path runs to the
 /// first NUL, or to the end of the field when it is not terminated.
 fn parse_addr(bytes: &[u8]) -> Option<(u16, &[u8])> {
@@ -440,7 +562,7 @@ fn parse_addr(bytes: &[u8]) -> Option<(u16, &[u8])> {
 ///
 /// Touches the shared socket table; only the server's own receive loop (or the
 /// host tests, which do not call this) may invoke it.
-unsafe fn handle_cdev_request(msg: &mut Message, call_type: u32) -> i32 {
+unsafe fn handle_cdev_request(msg: &mut Message, call_type: u32, src_ep: i32) -> i32 {
     let minor = msg_i32(msg, 0);
     match call_type {
         CDEV_OPEN => {
@@ -469,9 +591,13 @@ unsafe fn handle_cdev_request(msg: &mut Message, call_type: u32) -> i32 {
             }
         }
         CDEV_IOCTL => unsafe { do_ioctl(msg) },
-        // Readiness is the next increment (`WAYLAND.md` §6.1); `net` answers
-        // the same way.
-        CDEV_SELECT => 0,
+        // Readiness: answer the ready ops and hold a late watch for the rest
+        // (`src_ep` is VFS, which a notification tells to re-ask).
+        CDEV_SELECT => {
+            let ops = msg_u32(msg, 4);
+            let socks = unsafe { table() };
+            select_inner(socks, minor, ops, src_ep)
+        }
         _ => EINVAL,
     }
 }
@@ -501,6 +627,11 @@ unsafe fn do_read(msg: &Message) -> i32 {
     // vircopy names this server as the source.
     let mut scratch = [0u8; UDS_BUF];
     let moved = commit_read(socks, i, &mut scratch[..n]);
+    // Draining this end's queue frees space in it for whoever writes to it.
+    let writer = socks[i].peer;
+    if writer >= 0 {
+        notify_select(socks, writer as usize);
+    }
     let r = minix_rt::sys_vircopy(minix_rt::SELF, scratch.as_ptr() as u64, user, va, moved);
     if r != 0 {
         return r;
@@ -531,6 +662,8 @@ unsafe fn do_write(msg: &Message) -> i32 {
         return r;
     }
     commit_write(socks, peer, &scratch[..n]);
+    // The peer's queue is no longer empty: wake a reader watching it.
+    notify_select(socks, peer);
     n as i32
 }
 
@@ -814,8 +947,14 @@ pub fn uds_server_main() {
             }
             let call_type = msg.m_type as u32;
 
+            // A notification (a peer's wake, or something the kernel relayed):
+            // nothing to do. The socket path raises no alarms of its own.
+            if call_type.wrapping_sub(arch_common::com::NOTIFY_MESSAGE) < 0x100 {
+                continue;
+            }
+
             if arch_common::com::is_cdev_rq(call_type) {
-                let result = unsafe { handle_cdev_request(&mut msg, call_type) };
+                let result = unsafe { handle_cdev_request(&mut msg, call_type, src as i32) };
                 msg.m_type = result;
                 unsafe {
                     minix_rt::syscall2(
@@ -868,6 +1007,72 @@ mod tests {
         let b = open(&mut s);
         assert_eq!(pair_by_minor_inner(&mut s, a, b), 0, "pairing must succeed");
         (s, index_of(&s, a).unwrap(), index_of(&s, b).unwrap())
+    }
+
+    // ---- readiness ----
+
+    #[test]
+    fn select_answers_readiness_and_holds_a_watch() {
+        let (mut s, a, _b) = paired();
+        let minor = s[a].minor;
+        // Nothing queued and the peer open: read blocks, write does not.
+        let r = select_inner(&mut s, minor, CDEV_OP_RD | CDEV_OP_WR | CDEV_NOTIFY, 7);
+        assert_eq!(r, CDEV_OP_WR as i32);
+        // The unready op is remembered for a late wake.
+        assert_eq!(s[a].sel_ops, CDEV_OP_RD);
+        assert_eq!(s[a].sel_ep, 7);
+    }
+
+    #[test]
+    fn a_queued_write_wakes_a_reader_watch() {
+        let (mut s, a, b) = paired();
+        let minor = s[a].minor;
+        assert_eq!(select_inner(&mut s, minor, CDEV_OP_RD | CDEV_NOTIFY, 9), 0);
+        // b writes into a's queue; the watch is satisfied and dropped.
+        let (peer, n) = write_plan(&s, b, 3).unwrap();
+        commit_write(&mut s, peer, &[1, 2, 3][..n]);
+        notify_select(&mut s, peer);
+        assert_eq!(s[a].sel_ops, 0);
+        assert_eq!(ready_ops(&s, a) & CDEV_OP_RD, CDEV_OP_RD);
+    }
+
+    #[test]
+    fn a_queued_connection_wakes_a_listener_watch() {
+        let (mut s, l) = listener();
+        assert_eq!(select_inner(&mut s, l, CDEV_OP_RD | CDEV_NOTIFY, 11), 0);
+        let client = open(&mut s);
+        assert_eq!(connect_inner(&mut s, client, 0, PATH), 0);
+        let li = index_of(&s, l).unwrap();
+        assert_eq!(s[li].sel_ops, 0, "the listener watch is satisfied");
+        assert_eq!(ready_ops(&s, li) & CDEV_OP_RD, CDEV_OP_RD);
+    }
+
+    #[test]
+    fn a_peer_closing_wakes_a_reader_watch() {
+        let (mut s, a, b) = paired();
+        let minor = s[a].minor;
+        assert_eq!(select_inner(&mut s, minor, CDEV_OP_RD | CDEV_NOTIFY, 5), 0);
+        let bm = s[b].minor;
+        assert_eq!(close_inner(&mut s, bm), 0);
+        // a's peer is gone: readable (EOF), and the watch cleared.
+        assert_eq!(s[a].sel_ops, 0);
+        assert_ne!(ready_ops(&s, a) & CDEV_OP_RD, 0);
+    }
+
+    #[test]
+    fn draining_a_queue_wakes_the_writer() {
+        let (mut s, a, b) = paired();
+        // Fill a's queue from b, so b's next write would block.
+        let (peer, _) = write_plan(&s, b, UDS_BUF).unwrap();
+        commit_write(&mut s, peer, &[0u8; UDS_BUF]);
+        assert_eq!(ready_ops(&s, b) & CDEV_OP_WR, 0, "b's write would block");
+        let bm = s[b].minor;
+        assert_eq!(select_inner(&mut s, bm, CDEV_OP_WR | CDEV_NOTIFY, 3), 0);
+        // a drains a byte, freeing space; the watch is satisfied.
+        commit_read(&mut s, a, &mut [0u8; 1]);
+        notify_select(&mut s, b);
+        assert_eq!(s[b].sel_ops, 0);
+        assert_ne!(ready_ops(&s, b) & CDEV_OP_WR, 0);
     }
 
     // ---- open / pair / close ----

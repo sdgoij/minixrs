@@ -1337,6 +1337,37 @@ are arch-specific, `[env]` is tooling/platform, not kernel.
     deregisters before closing, and registers and waits in one process, so none of these bites
     it. (`crates/servers/src/vfs/epoll.rs`, `crates/servers/src/vfs/select.rs`,
     `crates/servers/src/vfs/call.rs`)
+36. **A UDS socket could not wake `poll`/`epoll` (2026-09-28, FIXED).** Three faults, found
+    together when `/bin/waylandtest` moved from retry loops to a real `poll`: (a) VFS's
+    `select_request_char` asked the driver about `vnode.v_dev` — the **base** minor — while a
+    socket's minor is the *clone* the driver returned at open and recorded in `filp_dev`
+    (read/write/ioctl already used `filp_dev`; only select did not), so `CDEV_SELECT` named the
+    wrong socket. (b) The `uds` driver answered `CDEV_SELECT => 0` and held no watch, so
+    nothing could wake a waiter; it now answers the ready ops and holds one late watch per
+    socket, woken on data queued, a connection queued or accepted, or a peer closing. (c) A
+    report *pushed* from the driver cannot be relied on either, and the first fix for it failed
+    in a way worth recording: `SENDNB` only lands while VFS is blocked in `RECEIVE`, and a driver
+    retrying on a short `SYS_SETALARM` tick phase-locks with VFS's *own* deadline alarm (both 2
+    ticks, armed at the same moment), so VFS was awake at every retry and answered `ENOTREADY`
+    for the whole run — measured, with the notification queue stuck at two entries and
+    `SYS_SETALARM` returning `OK` throughout. The driver now ends a readiness change with a
+    `NOTIFY` instead — a *notification*, which the kernel remembers for a destination that is
+    not receiving and hands over on its next `RECEIVE`, exactly as the input server already does
+    for its consumers — and VFS re-asks its suspended waits on that notification
+    (`vfs::select::rescan_suspended`). Readiness is level-triggered, so a lost push costs
+    nothing, and the socket path now holds no reply queue and raises no alarm of its own. Gates:
+    `just test-wayland-x86` (a forked client and server over `/dev/uds`, blocking on `poll`),
+    `just test-wlshm-x86` and `just test-wlkey-x86` (`/bin/wlclient` and `/bin/wlkey` against
+    `/sbin/wlserver`), `uds`'s host tests for the readiness state machine, and the Phase 0
+    readiness gates. (`crates/servers/src/vfs/select.rs`, `crates/servers/src/uds.rs`,
+    `crates/servers/src/vfs/main.rs`, `crates/userland/src/lib.rs`)
+
+    One sibling of (c) is left as it was, and should be fixed the same way when a terminal on a
+    readiness path needs it: the tty still *pushes* its report with `SENDNB`
+    (`crates/servers/src/tty.rs::chardriver_reply_select`), so a `select`/`poll` on a tty can
+    still lose a wake the way the socket did. Nothing on the Wayland path polls a tty —
+    `/sbin/wlserver` polls a socket and takes input by IPC — so it is recorded rather than
+    changed.
 
 ---
 
