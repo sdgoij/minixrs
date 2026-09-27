@@ -382,6 +382,24 @@ test-drmmap-x86 boot-timeout="20": build-x86
     @just _assert-qemu-log target/test-drmmap-x86.log "fb: gpu3d device, no VIRTIO_GPU_F_VIRGL"
     @echo "drmmap: a client created a render node memory object, mapped it twice, found one set of frames, saw a second object be other memory, and closed it (x86_64)"
 
+# The render node's client on the GL device, which is the one gate that types into a guest with a
+# GL display backend: host GL drops serial bytes mid-line, so this recipe sets `FEED_PACE` and
+# `feed.sh` writes the step a byte at a time and refuses to believe it until the guest has echoed
+# the whole line (`tools/smoke/drmgl.tsv` has the measurements and the rest of the reason).
+#
+# `blob=on` because the blob feature is only available on this host's GL device, and the two
+# assertions below are the two ends of it: the fb server's boot line says the device offered it,
+# and the client's line says the node reports it.
+test-drmgl-x86 boot-timeout="40": build-x86
+    mkdir -p target/images/x86_64-pc-minix
+    cp target/trampoline.elf target/images/x86_64-pc-minix/minix-x86.elf
+    @just _assert-qemu-version qemu-system-x86_64
+    FEED_PACE=0.02 FEED_SCENARIO=tools/smoke/drmgl.tsv sh tools/smoke/feed.sh target/test-drmgl-x86.log {{boot-timeout}} qemu-system-x86_64 -display egl-headless -serial stdio -m 256M -no-reboot -vga none -device bochs-display,id=fb0 -kernel target/images/x86_64-pc-minix/minix-x86.elf -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0 -device virtio-tablet-pci,display=fb0 -device virtio-gpu-gl-pci,blob=on
+    @just _assert-qemu-log target/test-drmgl-x86.log "wserver: ready"
+    @just _assert-qemu-log target/test-drmgl-x86.log "wlserver: ready"
+    @just _assert-qemu-log target/test-drmgl-x86.log "capsets 2 blob 1"
+    @echo "drmgl: a client was driven into a guest with a GL display, and the node answered its capset query with the device's blobs on (x86_64)"
+
 # Acceptance test for KNOWN_ISSUES.md 12 — `coreutils seq 3` must write its three lines and
 # the next tool must read them back. It is the gate that made the multicall wedge findable: a
 # child used to die inside `clap` on a corrupted pointer (item 12's open half), and these steps

@@ -37,6 +37,16 @@ here=$(cd "$(dirname "$0")" && pwd)
 # The scenario to drive. `FEED_SCENARIO` lets a caller point at one of its own, so a new
 # check does not have to edit the boot smoke's steps to exist.
 scenario=${FEED_SCENARIO:-"$here/scenario.tsv"}
+# How long to pause between the bytes of a step, or 0 for "one write per step".
+#
+# Zero is the default and every scenario but one uses it: this guest's console keeps a whole
+# line, and has since the harness was written. A guest whose console drops bytes *mid-line*
+# needs the other setting, and a dropped byte is not a failed send — the truncated line still
+# *runs*, as a shorter command (measured: `/bin/echo gpu3d-ok` arrived as `/bin/echo gpu3d`).
+# `type_step` is what a nonzero pace buys: byte-sized writes, and a whole-echo check before the
+# step is believed. Measured working on a guest with a GL display, which drops bursts, and the
+# pace riscv64 needed for the same reason (`tools/dso_share_probe.py` measured one byte).
+pace=${FEED_PACE:-0}
 steps_file="$log.steps"
 status="$log.status"
 tab=$(printf '\t')
@@ -67,6 +77,60 @@ wait_for() {
         fi
         sleep "$poll"
         waited=$((waited + 1))
+    done
+    return 1
+}
+
+# `wait_for`, but only what the guest printed since byte `$2` of the log counts.
+#
+# The log accumulates, and the guest echoes what it is sent, so a pattern that has been printed
+# before — by an earlier step, or by an earlier attempt at this one — matches immediately and
+# says nothing about the send it is checking. A byte offset is the anchor: `tail -c +N` is
+# 1-based, and the log may not exist yet on the first poll.
+wait_for_after() {
+    pattern=$1
+    from=$2
+    while [ "$waited" -lt "$budget" ]; do
+        if tail -c +$((from + 1)) "$log" 2>/dev/null | grep -qE -- "$pattern"; then
+            return 0
+        fi
+        sleep "$poll"
+        waited=$((waited + 1))
+    done
+    return 1
+}
+
+# Type `$1` a byte at a time, and do not accept it until the guest has echoed the whole of it.
+#
+# Two details this turns on, both measured:
+#
+#   * The echoed line is `# <command>` — the prompt is printed by the shell *before* the bytes are
+#     typed — so a pattern that includes the prompt spans the anchor and never matches from an
+#     offset inside the line. Only the command text is searched for, and it is anchored to the end
+#     of a line, which is what makes a *truncated* echo (`# /bin/drmi`) fail to match.
+#   * The anchor is taken once per step, not per attempt, so a retry can still accept the echo a
+#     slow earlier attempt produced. Taking it per attempt is how a send that arrived late gets
+#     retyped and the command runs twice.
+type_step() {
+    at=$(wc -c < "$log" 2>/dev/null || echo 0)
+    attempt=1
+    while [ "$attempt" -le 4 ]; do
+        attempt=$((attempt + 1))
+        send_at=$(wc -c < "$log" 2>/dev/null || echo 0)
+        rest=$1
+        while [ -n "$rest" ]; do
+            byte=${rest%"${rest#?}"}
+            rest=${rest#?}
+            printf '%s' "$byte"
+            sleep "$pace"
+        done
+        printf '\n'
+        if wait_for_after "${1}[[:space:]]*$" "$at"; then
+            return 0
+        fi
+        # Something shorter ran. Let the shell come back before the next attempt, or that attempt
+        # is typed into the window while the truncated command still runs.
+        wait_for_after "^#[[:space:]]*$" "$send_at" || return 1
     done
     return 1
 }
@@ -105,7 +169,12 @@ drive() {
         send=${line%%"$tab"*}
         expect=${line#*"$tab"}
 
-        printf '%s\n' "$send"
+        if [ "$pace" = 0 ]; then
+            printf '%s\n' "$send"
+        elif ! type_step "$send"; then
+            write_status "step $steps" "never arrived whole: sent '$send' a byte at a time and the guest never echoed the whole of it"
+            return 1
+        fi
         if [ -n "$expect" ]; then
             # The whole line, not a substring: the guest echoes what it is sent, and for the first step
             # that echoed text contains the expectation too (TEST_GATES.md cause (h)).

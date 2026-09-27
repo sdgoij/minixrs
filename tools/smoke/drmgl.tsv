@@ -1,0 +1,32 @@
+# The `just test-drmgl-x86` scenario: the render node's client on the device the host *did*
+# enable GL on (`WAYLAND.md` §6.10, stages 3b-4 and on).
+#
+# This is the first gate that types into a guest whose display backend is GL, and that is what
+# `FEED_PACE` in `feed.sh` is for. Every other scenario sends each step as one write, which is
+# what this guest's console keeps — but a GL display makes the emulator drop serial bytes
+# mid-line (measured: `/bin/echo gpu3d-ok` arrived as `/bin/echo gpu3d` and ran, as a shorter
+# command), so this one paces the bytes and makes `feed.sh` check the guest's echo of the whole
+# line before it believes the step. The measurement that pair rests on: the same 30-byte command
+# arrives intact a byte at a time, and truncated sometimes in one write.
+#
+# Why a gate at all, when `test-gpu3d-x86` already boots this device: that one asserts a *boot
+# line* the fb server prints, because it cannot type. What only a client can say is what the
+# node's ABI answers on this device — the capset blob handed to a `GET_CAPS`, the capset mask,
+# and (from here on) contexts, command buffers and blobs, which exist only where there is virgl.
+# So the two gates are different claims about the same device.
+#
+# `blob=on` is on the device line, which is 3b-4's device requirement and pinnable today: a
+# plain `virtio-gpu-pci,blob=on` is refused on this host ("need rutabaga or udmabuf for blob
+# resources"), so the GL device is the only blob-capable device here, and both the fb server's
+# boot line and the client's line report the feature as 1.
+#
+# Expected, on a virgl device with blobs: 3d and ctx are the two features the device offers,
+# `mask=3` is both capsets (virgl 1 and 2) as the bitmask `VIRTGPU_PARAM_SUPPORTED_CAPSET_IDs`
+# encodes, and `caps=ok` is the capset blob arriving through the node — the one field whose
+# value is not a small integer.
+#
+# A step's expectation must be a line no other step can produce (`silent-failure-traps`): the
+# command is `/bin/drminfo`, the answer starts `drminfo:`, and the boot line above is the fb
+# server's, so none of the three is a substring of another.
+
+/bin/drminfo	drminfo: virtio_gpu 3d=1 err 0 blob=1 err 0 ctx=1 err 0 host=0 err 0 mask=3 err 0 caps=ok
