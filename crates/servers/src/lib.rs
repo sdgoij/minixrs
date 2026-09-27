@@ -21,6 +21,7 @@ pub mod ramdisk;
 pub mod rs;
 pub mod sched;
 pub mod tty;
+pub mod uds;
 pub mod vfs;
 pub mod virtio_blk;
 pub mod virtio_net;

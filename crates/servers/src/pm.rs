@@ -4677,8 +4677,18 @@ fn clock_ticks_to_sec_nsec(clock: u64, boottime: i64, hz: u64) -> (i64, i64) {
 }
 
 /// Compute the `mess_pm_lc_time` reply values for `do_gettime` — pure
-/// logic, host-testable. `clock` is the realtime tick count for
-/// `CLOCK_REALTIME` and the uptime tick count for `CLOCK_MONOTONIC`.
+/// logic, host-testable. `CLOCK_REALTIME` is the boot instant on the
+/// epoch plus the ticks since boot; `CLOCK_MONOTONIC` is the ticks
+/// since boot alone.
+///
+/// MINIX 3.3.0's `do_gettime` adds `boottime` to *both* clocks
+/// (`.refs/minix-3.3.0/minix/servers/pm/time.c`: `sec = boottime +
+/// clock / system_hz`). Doing that for `CLOCK_MONOTONIC` is a defect
+/// the port does not copy: the value would jump whenever the wall
+/// clock is set, and it would sit `boottime` seconds away from the
+/// kernel tick timeline that `vfs::alarm`/`timerfd`/`select` arm
+/// absolute deadlines against. Deliberate deviation — see `WAYLAND.md`
+/// §5.
 fn clock_gettime_reply(
     clk_id: i32,
     ticks: u64,
@@ -4686,12 +4696,13 @@ fn clock_gettime_reply(
     boottime: i64,
     hz: u64,
 ) -> Result<(i64, i64), i32> {
-    let clock = match clk_id {
-        CLOCK_REALTIME => realtime,
-        CLOCK_MONOTONIC => ticks,
-        _ => return Err(EINVAL),
-    };
-    Ok(clock_ticks_to_sec_nsec(clock, boottime, hz))
+    match clk_id {
+        // Wall time: the boot instant on the epoch plus the ticks since boot.
+        CLOCK_REALTIME => Ok(clock_ticks_to_sec_nsec(realtime, boottime, hz)),
+        // Time since boot, with no epoch offset (see the doc note above).
+        CLOCK_MONOTONIC => Ok(clock_ticks_to_sec_nsec(ticks, 0, hz)),
+        _ => Err(EINVAL),
+    }
 }
 
 /// Return a clock value — PM_CLOCK_GETTIME handler.
@@ -5017,7 +5028,7 @@ mod tests {
     #[test]
     fn test_init_boot_procs_registers_at_the_kernel_process_number() {
         let registered = init_proc_with_boot_image();
-        assert_eq!(registered, arch_common::com::WS_PROC_NR as u32 + 1);
+        assert_eq!(registered, arch_common::com::UDS_PROC_NR as u32 + 1);
         unsafe {
             let base = MPROC.as_ptr();
             for entry in test_image().iter().filter(|e| e.proc_nr >= 0) {
@@ -6119,7 +6130,7 @@ mod tests {
             assert_eq!(pm_isokendpt(0), None, "a free slot must not answer for PM");
         }
         let slots = init_proc_with_boot_image();
-        assert_eq!(slots, arch_common::com::WS_PROC_NR as u32 + 1);
+        assert_eq!(slots, arch_common::com::UDS_PROC_NR as u32 + 1);
         let mut msg = make_msg();
         msg.m_payload.m1.m1i1 = 0; // PM endpoint
         assert_eq!(unsafe { handle_getepinfo(0, &mut msg) }, 1);
@@ -6393,10 +6404,12 @@ mod tests {
 
     #[test]
     fn test_clock_gettime_reply_monotonic() {
-        // CLOCK_MONOTONIC uses the uptime tick count (C: clock = ticks).
+        // CLOCK_MONOTONIC is the uptime tick count alone: 250 ticks @
+        // 100 Hz is 2.5 s. The boottime (5) is deliberately *not* added,
+        // unlike MINIX 3.3.0's do_gettime.
         assert_eq!(
             clock_gettime_reply(CLOCK_MONOTONIC, 250, 999, 5, 100).unwrap(),
-            (7, 500_000_000)
+            (2, 500_000_000)
         );
     }
 

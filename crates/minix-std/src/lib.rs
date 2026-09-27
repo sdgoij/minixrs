@@ -19,6 +19,7 @@ pub mod process;
 pub mod sha256;
 pub mod termios;
 pub mod time;
+pub mod uds;
 pub mod vmem;
 pub mod wserver;
 
@@ -132,6 +133,7 @@ pub const EINVAL: i32 = -22;
 pub const ENOSPC: i32 = -28;
 pub const EDOM: i32 = -33;
 pub const ERANGE: i32 = -34;
+pub const EOVERFLOW: i32 = -75;
 /// C `errno.h`: `_SIGN 78`. Linux's `ENOSYS` is 38, which is where this had
 /// drifted from.
 pub const ENOSYS: i32 = -78;

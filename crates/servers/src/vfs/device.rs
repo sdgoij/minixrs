@@ -157,6 +157,8 @@ pub unsafe fn cdev_open(dev: u32, flags: i32, reply_flags: *mut u32) -> i32 {
 /// Wire IPC send/recv to the character driver endpoint.  The underlying
 /// `cdev_opcl()` helper mirrors cdev_open's flow with `CDEV_CLOSE`.
 pub unsafe fn cdev_close(dev: u32) -> i32 {
+    // A local socket's in-flight descriptors are dropped with it; see `scm`.
+    crate::vfs::scm::release_device(dev);
     let dp = dmap::get_dmap_by_major((dev >> 16) as i32);
     if dp.is_null() {
         return ENXIO;
@@ -343,6 +345,46 @@ fn build_cdev_ioctl_msg(minor: i32, request: u32, grant: i32, user: i32, flags: 
     request::w_i64(&mut msg, CDEV_COUNT_OFF, flags);
     request::w_i64(&mut msg, CDEV_BUF_OFF, 0); // id: the port's sync model needs none
     msg
+}
+
+/// Send a `CDEV_IOCTL` with no argument buffer and return the reply's payload
+/// words.
+///
+/// The descriptor-passing path needs a few values back from the uds driver —
+/// which socket is the peer, and the sender's credentials — and the ioctl's
+/// user-buffer grant is the wrong channel for them. A `GRANT_INVALID` request
+/// has the driver answer in the message it replies with instead (`vfs::scm`).
+///
+/// `user_ep` still travels in the layout `build_cdev_ioctl_msg` uses (m2_l1), or
+/// the driver would record *that* as the socket's owner.
+///
+/// C source: no equivalent. In the reference the driver already knows the peer
+/// and performs the transfer itself; here VFS does, and has to ask.
+pub(crate) fn cdev_ioctl_payload(dev: u32, request: u32, user_ep: i32) -> Result<[i32; 3], i32> {
+    let dp = dmap::get_dmap_by_major((dev >> 16) as i32);
+    if dp.is_null() {
+        return Err(ENXIO);
+    }
+    let drv_e = unsafe { (*dp).dmap_ep };
+    if drv_e < 0 {
+        return Err(ENXIO);
+    }
+    let mut msg = [0u8; 56];
+    request::w_i32(&mut msg, 4, CDEV_IOCTL);
+    request::w_i32(&mut msg, CDEV_MINOR_OFF, (dev & 0xFFFF) as i32);
+    request::w_i32(&mut msg, CDEV_FLAGS_OFF, request as i32);
+    request::w_i32(&mut msg, CDEV_USER_OFF, GRANT_INVALID);
+    request::w_i64(&mut msg, CDEV_POS_OFF, user_ep as i64);
+    request::w_i64(&mut msg, CDEV_COUNT_OFF, 0);
+    let r = unsafe { request::fs_sendrec(drv_e, &mut msg) };
+    if r < 0 {
+        return Err(r);
+    }
+    Ok([
+        request::r_i32(&msg, 8),
+        request::r_i32(&msg, 12),
+        request::r_i32(&msg, 16),
+    ])
 }
 
 /// Map a character device to a different device number.

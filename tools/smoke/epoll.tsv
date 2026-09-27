@@ -1,0 +1,14 @@
+# The `just test-epoll-x86` scenario: the epoll readiness primitive, driven by
+# `/bin/epolltest`.
+#
+#   FEED_SCENARIO=tools/smoke/epoll.tsv sh tools/smoke/feed.sh <log> <seconds> <qemu command…>
+#
+# One step per line, as `tools/smoke/scenario.tsv` documents: the command, a tab, and the
+# whole line its output must produce.
+#
+# `epolltest` is non-interactive and prints the line below only after an interest set's
+# add/modify/remove, level-triggered readiness over an eventfd and a pipe, and a blocked
+# `epoll_wait` woken by another process all passed. A wake that never arrives hangs the
+# blocked `epoll_wait(-1)`, which the gate reports as a stopped scenario.
+
+/bin/epolltest	epolltest: PASS

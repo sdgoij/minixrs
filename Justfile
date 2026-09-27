@@ -444,6 +444,62 @@ test-cdyn-x86 boot-timeout="40": dynlib-x86
     FEED_SCENARIO=tools/smoke/cdyn.tsv sh tools/smoke/feed.sh target/test-cdyn-x86.log {{boot-timeout}} qemu-system-x86_64 -nographic -m 256M -no-reboot -vga none -device bochs-display,id=fb0 -kernel target/images/x86_64-pc-minix/minix-x86.elf -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0 -device virtio-tablet-pci,display=fb0
     @echo "cdyn: a program built by the recipe ran against the shipped libc.so (x86_64)"
 
+# UNIX-domain sockets: /bin/udstest round-trips a socketpair and a
+# bind/listen/connect/accept connection through the /dev/uds server — Phase 0 of
+# WAYLAND.md. build-x86 embeds the binary; the scenario types the command into
+# the shell and wants the whole line back.
+test-uds-x86 boot-timeout="40": build-x86
+    mkdir -p target/images/x86_64-pc-minix
+    cp target/trampoline.elf target/images/x86_64-pc-minix/minix-x86.elf
+    @just _assert-qemu-version qemu-system-x86_64
+    FEED_SCENARIO=tools/smoke/uds.tsv sh tools/smoke/feed.sh target/test-uds-x86.log {{boot-timeout}} qemu-system-x86_64 -nographic -m 256M -no-reboot -vga none -device bochs-display,id=fb0 -kernel target/images/x86_64-pc-minix/minix-x86.elf -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0 -device virtio-tablet-pci,display=fb0
+    @echo "uds: socketpair, bind/listen/connect/accept and SCM_RIGHTS/SCM_CREDS passing (x86_64)"
+
+test-memfd-x86 boot-timeout="40": build-x86
+    mkdir -p target/images/x86_64-pc-minix
+    cp target/trampoline.elf target/images/x86_64-pc-minix/minix-x86.elf
+    @just _assert-qemu-version qemu-system-x86_64
+    FEED_SCENARIO=tools/smoke/memfd.tsv sh tools/smoke/feed.sh target/test-memfd-x86.log {{boot-timeout}} qemu-system-x86_64 -nographic -m 256M -no-reboot -vga none -device bochs-display,id=fb0 -kernel target/images/x86_64-pc-minix/minix-x86.elf -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0 -device virtio-tablet-pci,display=fb0
+    @echo "memfd: one object mapped twice and across a fork, read/write agreeing (x86_64)"
+
+# Readiness primitives: /bin/seltest drives select(2) and poll(2) over pipes and
+# checks a real timeout on each — Phase 0 of WAYLAND.md. build-x86 embeds the
+# binary; the scenario types the command into the shell and wants the whole line back.
+test-select-x86 boot-timeout="40": build-x86
+    mkdir -p target/images/x86_64-pc-minix
+    cp target/trampoline.elf target/images/x86_64-pc-minix/minix-x86.elf
+    @just _assert-qemu-version qemu-system-x86_64
+    FEED_SCENARIO=tools/smoke/select.tsv sh tools/smoke/feed.sh target/test-select-x86.log {{boot-timeout}} qemu-system-x86_64 -nographic -m 256M -no-reboot -vga none -device bochs-display,id=fb0 -kernel target/images/x86_64-pc-minix/minix-x86.elf -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0 -device virtio-tablet-pci,display=fb0
+    @echo "select/poll: pipe readiness and real timeouts (x86_64)"
+
+# eventfd: /bin/eventfdtest exercises the counter semantics and a cross-process
+# wake of a blocked poll — Phase 0 of WAYLAND.md. build-x86 embeds the binary.
+test-eventfd-x86 boot-timeout="40": build-x86
+    mkdir -p target/images/x86_64-pc-minix
+    cp target/trampoline.elf target/images/x86_64-pc-minix/minix-x86.elf
+    @just _assert-qemu-version qemu-system-x86_64
+    FEED_SCENARIO=tools/smoke/eventfd.tsv sh tools/smoke/feed.sh target/test-eventfd-x86.log {{boot-timeout}} qemu-system-x86_64 -nographic -m 256M -no-reboot -vga none -device bochs-display,id=fb0 -kernel target/images/x86_64-pc-minix/minix-x86.elf -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0 -device virtio-tablet-pci,display=fb0
+    @echo "eventfd: counter semantics and a cross-process wake (x86_64)"
+
+# timerfd: /bin/timerfdtest drives one-shot, periodic and absolute timers (and a
+# disarm) through blocking polls — Phase 0 of WAYLAND.md.
+test-timerfd-x86 boot-timeout="40": build-x86
+    mkdir -p target/images/x86_64-pc-minix
+    cp target/trampoline.elf target/images/x86_64-pc-minix/minix-x86.elf
+    @just _assert-qemu-version qemu-system-x86_64
+    FEED_SCENARIO=tools/smoke/timerfd.tsv sh tools/smoke/feed.sh target/test-timerfd-x86.log {{boot-timeout}} qemu-system-x86_64 -nographic -m 256M -no-reboot -vga none -device bochs-display,id=fb0 -kernel target/images/x86_64-pc-minix/minix-x86.elf -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0 -device virtio-tablet-pci,display=fb0
+    @echo "timerfd: one-shot, periodic, absolute and disarmed timers (x86_64)"
+
+# epoll: /bin/epolltest drives a persistent interest set — add/modify/remove,
+# level-triggered readiness over an eventfd and a pipe, and a blocked
+# `epoll_wait` woken by a child process — Phase 0 of WAYLAND.md.
+test-epoll-x86 boot-timeout="40": build-x86
+    mkdir -p target/images/x86_64-pc-minix
+    cp target/trampoline.elf target/images/x86_64-pc-minix/minix-x86.elf
+    @just _assert-qemu-version qemu-system-x86_64
+    FEED_SCENARIO=tools/smoke/epoll.tsv sh tools/smoke/feed.sh target/test-epoll-x86.log {{boot-timeout}} qemu-system-x86_64 -nographic -m 256M -no-reboot -vga none -device bochs-display,id=fb0 -kernel target/images/x86_64-pc-minix/minix-x86.elf -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0 -device virtio-tablet-pci,display=fb0
+    @echo "epoll: persistent interest set, level-triggered readiness, cross-process wake (x86_64)"
+
 # Measure whether two processes that map one object through the loader share its
 # physical frames — Phase 5 of DYNAMIC_LINKING.md. `tools/dso_share_probe.py` boots
 # the dynamic image, runs `/bin/dynclib hold | /bin/dynclib hold` (two lives of the

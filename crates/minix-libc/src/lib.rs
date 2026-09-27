@@ -1499,42 +1499,210 @@ pub unsafe extern "C" fn getsockname(
     }
 }
 
-/// `poll(2)`: check fd readiness. There is no readiness notification in
-/// the net server yet, so only the serial fds (0-2) are ever ready — a
-/// socket poll returns 0 events (the caller retries or times out).
+/// `poll(2)`: readiness on an array of `struct pollfd`, with a real deadline
+/// (`timeout < 0` blocks, `0` polls). Readiness and the timeout are handled by
+/// VFS (`minix_std::fs::poll`).
 #[cfg(target_os = "minix")]
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn poll(fds: *mut c_void, nfds: u64, _timeout: c_int) -> c_int {
-    if fds.is_null() {
+pub unsafe extern "C" fn poll(fds: *mut c_void, nfds: u64, timeout: c_int) -> c_int {
+    if fds.is_null() && nfds != 0 {
         return fail(22); // EINVAL
     }
-    let fds = fds as *mut PollFd;
-    let mut ready = 0;
-    for i in 0..nfds {
-        let pfd = unsafe { &mut *fds.add(i as usize) };
-        pfd.revents = 0;
-        if pfd.fd >= 0 && pfd.fd <= 2 {
-            // Serial console: readable and writable at all times.
-            pfd.revents = (pfd.events as i16) & (POLLIN | POLLOUT);
-            if pfd.revents != 0 {
-                ready += 1;
-            }
-        }
+    let mut empty: [minix_std::fs::PollFd; 0] = [];
+    let slice: &mut [minix_std::fs::PollFd] = if nfds == 0 {
+        &mut empty
+    } else {
+        unsafe { core::slice::from_raw_parts_mut(fds as *mut minix_std::fs::PollFd, nfds as usize) }
+    };
+    match minix_std::fs::poll(slice, timeout) {
+        Ok(n) => n,
+        Err(e) => fail(e.0),
     }
-    ready
 }
 
-/// C `struct pollfd` (`tools/c-include/poll.h`).
+/// `select(2)`: readiness on up to 64 fds, with a real timeout. `timeout` is
+/// NULL to block forever, `{0,0}` to poll, or a `struct timeval *` for a
+/// deadline. In this port an `fd_set` is a single 64-bit bitmask.
 #[cfg(target_os = "minix")]
-#[repr(C)]
-struct PollFd {
-    fd: c_int,
-    events: i16,
-    revents: i16,
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn select(
+    nfds: c_int,
+    readfds: *mut c_void,
+    writefds: *mut c_void,
+    errorfds: *mut c_void,
+    timeout: *mut c_void,
+) -> c_int {
+    let rd = unsafe { readfds.cast::<u64>().as_mut() };
+    let wr = unsafe { writefds.cast::<u64>().as_mut() };
+    let er = unsafe { errorfds.cast::<u64>().as_mut() };
+    let tv = if timeout.is_null() {
+        None
+    } else {
+        let t = unsafe { &*(timeout as *const crate::c_time::TimeVal) };
+        Some((t.tv_sec as i32, t.tv_usec as i32))
+    };
+    match minix_std::fs::select(nfds, rd, wr, er, tv) {
+        Ok(n) => n,
+        Err(e) => fail(e.0),
+    }
 }
 
-const POLLIN: i16 = 0x001;
-const POLLOUT: i16 = 0x004;
+/// `eventfd(2)`: an anonymous 64-bit counter returned as a descriptor.
+#[cfg(target_os = "minix")]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn eventfd(initval: u32, flags: c_int) -> c_int {
+    match minix_std::fs::eventfd(initval, flags) {
+        Ok(fd) => fd,
+        Err(e) => fail(e.0),
+    }
+}
+
+/// `eventfd_write(3)`: add an 8-byte value to the counter. Returns 0, or -1.
+#[cfg(target_os = "minix")]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn eventfd_write(fd: c_int, value: u64) -> c_int {
+    match unsafe { minix_std::fs::write(fd, &value.to_ne_bytes()) } {
+        Ok(8) => 0,
+        Ok(_) => fail(22), // EINVAL: a short write cannot happen here
+        Err(e) => fail(e.0),
+    }
+}
+
+/// `eventfd_read(3)`: consume the counter into `*value`. Returns 0, or -1.
+#[cfg(target_os = "minix")]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn eventfd_read(fd: c_int, value: *mut u64) -> c_int {
+    if value.is_null() {
+        return fail(22); // EINVAL
+    }
+    let mut raw = [0u8; 8];
+    match unsafe { minix_std::fs::read(fd, &mut raw) } {
+        Ok(8) => {
+            unsafe { *value = u64::from_ne_bytes(raw) };
+            0
+        }
+        Ok(_) => fail(22),
+        Err(e) => fail(e.0),
+    }
+}
+
+/// `timerfd_create(2)`: a descriptor that becomes readable when a timer expires.
+#[cfg(target_os = "minix")]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn timerfd_create(clockid: c_int, flags: c_int) -> c_int {
+    match minix_std::fs::timerfd_create(clockid, flags) {
+        Ok(fd) => fd,
+        Err(e) => fail(e.0),
+    }
+}
+
+/// `timerfd_settime(2)`: arm, re-arm or (with a zero `it_value`) disarm a timer.
+/// `old`, when non-null, receives the previous setting.
+#[cfg(target_os = "minix")]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn timerfd_settime(
+    fd: c_int,
+    flags: c_int,
+    new: *const c_void,
+    old: *mut c_void,
+) -> c_int {
+    if new.is_null() {
+        return fail(14); // EFAULT
+    }
+    let new = unsafe { &*(new as *const minix_std::fs::Itimerspec) };
+    let old = if old.is_null() {
+        None
+    } else {
+        Some(unsafe { &mut *(old as *mut minix_std::fs::Itimerspec) })
+    };
+    match minix_std::fs::timerfd_settime(fd, flags, new, old) {
+        Ok(()) => 0,
+        Err(e) => fail(e.0),
+    }
+}
+
+/// `timerfd_gettime(2)`: the timer's remaining time and interval into `cur`.
+#[cfg(target_os = "minix")]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn timerfd_gettime(fd: c_int, cur: *mut c_void) -> c_int {
+    if cur.is_null() {
+        return fail(14); // EFAULT
+    }
+    match minix_std::fs::timerfd_gettime(fd) {
+        Ok(v) => {
+            unsafe { *(cur as *mut minix_std::fs::Itimerspec) = v };
+            0
+        }
+        Err(e) => fail(e.0),
+    }
+}
+
+/// `epoll_create(2)`: the legacy form of [`epoll_create1`]. `size` is ignored
+/// but must be positive.
+#[cfg(target_os = "minix")]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn epoll_create(size: c_int) -> c_int {
+    match minix_std::fs::epoll_create(size) {
+        Ok(fd) => fd,
+        Err(e) => fail(e.0),
+    }
+}
+
+/// `epoll_create1(2)`: a readiness instance with a persistent interest set.
+#[cfg(target_os = "minix")]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn epoll_create1(flags: c_int) -> c_int {
+    match minix_std::fs::epoll_create1(flags) {
+        Ok(fd) => fd,
+        Err(e) => fail(e.0),
+    }
+}
+
+/// `epoll_ctl(2)`: add, modify or remove one interest. `event` is a
+/// `struct epoll_event *`; it may be NULL only for `EPOLL_CTL_DEL`, which
+/// ignores it.
+#[cfg(target_os = "minix")]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn epoll_ctl(epfd: c_int, op: c_int, fd: c_int, event: *mut c_void) -> c_int {
+    let ev = if event.is_null() {
+        if op != minix_std::fs::EPOLL_CTL_DEL {
+            return fail(14); // EFAULT
+        }
+        minix_std::fs::EpollEvent::default()
+    } else {
+        unsafe { *(event as *const minix_std::fs::EpollEvent) }
+    };
+    match minix_std::fs::epoll_ctl(epfd, op, fd, &ev) {
+        Ok(()) => 0,
+        Err(e) => fail(e.0),
+    }
+}
+
+/// `epoll_wait(2)`: report the ready interests of `epfd`. `timeout` is in
+/// milliseconds (`-1` blocks forever, `0` polls). Returns the number of events
+/// written into `events`, or -1.
+#[cfg(target_os = "minix")]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn epoll_wait(
+    epfd: c_int,
+    events: *mut c_void,
+    maxevents: c_int,
+    timeout: c_int,
+) -> c_int {
+    if events.is_null() || maxevents <= 0 {
+        return fail(22); // EINVAL
+    }
+    let slice = unsafe {
+        core::slice::from_raw_parts_mut(
+            events as *mut minix_std::fs::EpollEvent,
+            maxevents as usize,
+        )
+    };
+    match minix_std::fs::epoll_wait(epfd, slice, timeout) {
+        Ok(n) => n,
+        Err(e) => fail(e.0),
+    }
+}
 
 // ---- dlfcn.h ----
 //

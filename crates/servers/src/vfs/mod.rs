@@ -23,16 +23,21 @@
 // System-level code ported from C — all functions are inherently unsafe.
 #![allow(unsafe_op_in_unsafe_fn)]
 
+pub mod alarm;
+pub mod anon;
 pub mod call;
 pub mod consts;
 pub mod device;
 pub mod dmap;
+pub mod epoll;
+pub mod eventfd;
 pub mod exec;
 pub mod filedes;
 pub mod glo;
 pub mod grant;
 pub mod lock;
 pub mod main;
+pub mod memfd;
 pub mod misc;
 pub mod mmap;
 pub mod mount;
@@ -41,8 +46,10 @@ pub mod pipe;
 pub mod pm;
 pub mod protect;
 pub mod request;
+pub mod scm;
 pub mod select;
 pub mod stadir;
 pub mod table;
+pub mod timerfd;
 pub mod types;
 pub mod worker;

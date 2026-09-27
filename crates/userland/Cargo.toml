@@ -243,6 +243,22 @@ name = "ttyprobe"
 path = "src/bin/ttyprobe.rs"
 test = false
 
+# udstest is the UNIX-domain socket smoke test (Phase 0): a socketpair
+# round-trip plus bind/listen/connect/accept through the /dev/uds server.
+# Embedded as /bin/udstest and driven by `just test-uds-x86`.
+[[bin]]
+name = "udstest"
+path = "src/bin/udstest.rs"
+test = false
+
+# memfdtest is the anonymous-shared-memory smoke test (Phase 0): create, size,
+# map MAP_SHARED twice and across a fork, and check read/write agree.
+# Embedded as /bin/memfdtest and driven by `just test-memfd-x86`.
+[[bin]]
+name = "memfdtest"
+path = "src/bin/memfdtest.rs"
+test = false
+
 # wterm is the M3 terminal window client: opens a pty, spawns /bin/sh on
 # the slave, and renders its output (VT subset) into a wserver window.
 [[bin]]
@@ -253,6 +269,21 @@ test = false
 [[bin]]
 name = "seltest"
 path = "src/bin/seltest.rs"
+test = false
+
+[[bin]]
+name = "eventfdtest"
+path = "src/bin/eventfdtest.rs"
+test = false
+
+[[bin]]
+name = "timerfdtest"
+path = "src/bin/timerfdtest.rs"
+test = false
+
+[[bin]]
+name = "epolltest"
+path = "src/bin/epolltest.rs"
 test = false
 
 [lints]

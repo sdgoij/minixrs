@@ -53,10 +53,15 @@ static NEXT_TIMEOUT: AtomicU64 = AtomicU64::new(TMR_NEVER);
 
 /// Insert a timer into the timer queue, sorted by expiration time.
 ///
+/// If `tp` is already queued it is removed first: `SYS_SETALARM` re-arms the
+/// *same* per-process timer whenever a server's earliest deadline changes, and
+/// splicing a live timer into the list twice corrupts the queue (a later expiry
+/// is lost or a timer fires twice). The reference does the same clear first
+/// (`.refs/minix-3.3.0/minix/lib/libtimers/tmrs_set.c:25`).
+///
 /// # Safety
 ///
-/// `tp` must point to a valid, unqueued `MinixTimer`. `timers` must point to
-/// the queue head.
+/// `tp` must point to a valid `MinixTimer`. `timers` must point to the queue head.
 pub unsafe fn tmrs_settimer(
     timers: *mut *mut MinixTimer,
     tp: *mut MinixTimer,
@@ -65,6 +70,7 @@ pub unsafe fn tmrs_settimer(
     _param: *mut u8,
 ) {
     unsafe {
+        tmrs_clrtimer(timers, tp, core::ptr::null_mut());
         (*tp).tmr_exp_time = exp_time;
         (*tp).tmr_func = watchdog;
 

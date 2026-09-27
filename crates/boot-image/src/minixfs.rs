@@ -689,10 +689,10 @@ mod tests {
         // alloc_bit never hands out an inode that already has table data.
         // The builder writes slot N-1 for inode N; walk the table. The
         // empty image has 7 dirs (root, bin, sbin, etc, tmp, dev, devices)
-        // + 2 data files (passwd, secret) + 17 devices (tty00, tty01, null,
-        // console, ip, udp, tcp, fb, kbd + the 8 pty nodes ttyp0-3/ptyp0-3)
-        // = 26 inodes.
-        let n_inodes = 26usize;
+        // + 2 data files (passwd, secret) + 18 devices (tty00, tty01, null,
+        // console, ip, udp, tcp, fb, kbd, the 8 pty nodes ttyp0-3/ptyp0-3, and
+        // uds) = 27 inodes.
+        let n_inodes = 27usize;
         for ino in 1..=n_inodes {
             assert_eq!(
                 (imap[ino / 8] >> (ino % 8)) & 1,
@@ -700,11 +700,11 @@ mod tests {
                 "inode {ino} must be marked in use at bit {ino}"
             );
         }
-        // And the next bit (inode 27) is free — the first allocatable inode.
+        // And the next bit (inode 28) is free — the first allocatable inode.
         assert_eq!(
-            imap[3] & 0b1000,
+            imap[3] & 0b10000,
             0,
-            "inode 27 must be free for the first create"
+            "inode 28 must be free for the first create"
         );
         let _ = itable_off;
     }

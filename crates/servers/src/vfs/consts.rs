@@ -248,9 +248,33 @@ pub const VFS_COPYFD: i32 = VFS_BASE + 46;
 pub const VFS_CHECKPERMS: i32 = VFS_BASE + 47;
 pub const VFS_GETSYSINFO: i32 = VFS_BASE + 48;
 pub const VFS_DUP2: i32 = VFS_BASE + 49;
+/// `memfd_create(name, flags)` — an anonymous shared-memory object returned as a
+/// descriptor. Not a reference call: MINIX has no `memfd` (see `vfs::memfd`).
+pub const VFS_MEMFD_CREATE: i32 = VFS_BASE + 50;
+/// `poll(fds, nfds, timeout)` — readiness on an array of `struct pollfd`.
+/// Not a reference call: MINIX emulates `poll` over `select`.
+pub const VFS_POLL: i32 = VFS_BASE + 51;
+/// `eventfd(initval, flags)` — an anonymous 64-bit counter returned as a
+/// descriptor. Not a reference call: MINIX has no `eventfd` (see
+/// `vfs::eventfd`).
+pub const VFS_EVENTFD_CREATE: i32 = VFS_BASE + 52;
+/// `timerfd_create(clockid, flags)` — a descriptor that fires when a timer
+/// expires (see `vfs::timerfd`).
+pub const VFS_TIMERFD_CREATE: i32 = VFS_BASE + 53;
+/// `timerfd_settime(fd, flags, new, old)` — arm, re-arm or disarm a timerfd.
+pub const VFS_TIMERFD_SETTIME: i32 = VFS_BASE + 54;
+/// `timerfd_gettime(fd, cur)` — a timerfd's remaining time and interval.
+pub const VFS_TIMERFD_GETTIME: i32 = VFS_BASE + 55;
+/// `epoll_create1(flags)` — a readiness instance with a persistent interest set
+/// (see `vfs::epoll`). Not a reference call: MINIX has no `epoll`.
+pub const VFS_EPOLL_CREATE1: i32 = VFS_BASE + 56;
+/// `epoll_ctl(epfd, op, fd, event)` — add, modify or remove an interest.
+pub const VFS_EPOLL_CTL: i32 = VFS_BASE + 57;
+/// `epoll_wait(epfd, events, maxevents, timeout)` — report the ready interests.
+pub const VFS_EPOLL_WAIT: i32 = VFS_BASE + 58;
 
 /// Number of VFS calls.
-pub const NR_VFS_CALLS: usize = 50;
+pub const NR_VFS_CALLS: usize = 59;
 
 /// F_DUPFD = 0 — duplicate fd as lowest available >= arg.
 pub const F_DUPFD: i32 = 0;
@@ -292,6 +316,7 @@ pub const ENOLCK: i32 = -37;
 pub const ELOOP: i32 = -40;
 pub const ENAMETOOLONG: i32 = -36;
 pub const ENOTEMPTY: i32 = -39;
+pub const EOVERFLOW: i32 = -75;
 pub const ENOSYS: i32 = -78;
 pub const ENOTSOCK: i32 = -88;
 pub const EOPNOTSUPP: i32 = -95;
@@ -352,6 +377,29 @@ pub const SEL_RDFDS_OFF: usize = 16;
 pub const SEL_WRFDS_OFF: usize = 24;
 pub const SEL_EXFDS_OFF: usize = 32;
 pub const SEL_TIMEOUT_OFF: usize = 40; // u64: user `struct timeval *` (NULL = block forever)
+
+// poll message offsets (in fs_m_in).
+/// u64: user `struct pollfd *` (array of 8-byte entries).
+pub const POLL_FDS_OFF: usize = 8;
+/// i32: number of entries.
+pub const POLL_NFDS_OFF: usize = 16;
+/// i32: timeout in milliseconds (-1 = block forever, 0 = poll).
+pub const POLL_TIMEOUT_OFF: usize = 20;
+
+// epoll message offsets (in fs_m_in).
+/// `epoll_create1`: i32 flags.
+pub const EPOLL_CREATE_FLAGS_OFF: usize = 8;
+/// `epoll_ctl`: i32 epfd, i32 op, i32 fd, then (at 24) a user `struct epoll_event *`.
+pub const EPOLL_CTL_EPFD_OFF: usize = 8;
+pub const EPOLL_CTL_OP_OFF: usize = 12;
+pub const EPOLL_CTL_FD_OFF: usize = 16;
+pub const EPOLL_CTL_EVENT_OFF: usize = 24;
+/// `epoll_wait`: i32 epfd, i32 maxevents, i32 timeout, then (at 24) a user
+/// `struct epoll_event` array.
+pub const EPOLL_WAIT_EPFD_OFF: usize = 8;
+pub const EPOLL_WAIT_MAXEVENTS_OFF: usize = 12;
+pub const EPOLL_WAIT_TIMEOUT_OFF: usize = 16;
+pub const EPOLL_WAIT_EVENTS_OFF: usize = 24;
 
 /// VM (memory server) endpoint number.
 pub const VM_PROC_NR: i32 = 8;

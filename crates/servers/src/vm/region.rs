@@ -355,6 +355,87 @@ impl RegionList {
         }
         carved
     }
+
+    /// Apply a protection change to `[start, end)`, splitting whichever regions
+    /// the bounds fall inside so it covers exactly that span.
+    ///
+    /// `add`/`del` are `VR_*` permission bits. A partly covered region has to be
+    /// split: the permissions live on the region, so one region spanning protected
+    /// and unprotected pages would either protect pages the caller never named or
+    /// leave later faults on named pages with the old permissions.
+    ///
+    /// Returns false when the list cannot hold the pieces a split needs
+    /// (`MAX_REGIONS`), having applied what it could — the caller reports ENOMEM.
+    pub fn protect(&mut self, start: u64, end: u64, add: u32, del: u32) -> bool {
+        // Each pass either finishes a region or splits one, so the bound is the
+        // pieces a full-width change can leave behind.
+        for _ in 0..(MAX_REGIONS * 4) {
+            let found = (0..MAX_REGIONS).find(|&s| {
+                self.regions[s].as_ref().is_some_and(|r| {
+                    r.vaddr < end && r.end() > start && ((r.flags & !del) | add) != r.flags
+                })
+            });
+            let Some(slot) = found else {
+                return true;
+            };
+            let Some(r) = self.regions[slot] else {
+                return false;
+            };
+            let (rs, re) = (r.vaddr, r.end());
+            let is = rs.max(start);
+            let ie = re.min(end);
+
+            // Keep the faulted-page count (a stat) whole across the pieces.
+            let mut left = r.npages as u64;
+            let mut share = |from: u64, to: u64| {
+                let pages = (to - from) / 4096;
+                let n = left.min(pages);
+                left -= n;
+                n as u32
+            };
+            let head_n = share(rs, is);
+            let mid_n = share(is, ie);
+            let tail_n = share(ie, re);
+
+            self.regions[slot] = None;
+            if is > rs {
+                let mut head = split_region(&r, rs, is, r.flags);
+                head.npages = head_n;
+                if self.insert(head).is_some() {
+                    return false;
+                }
+            }
+            let mut mid = split_region(&r, is, ie, (r.flags & !del) | add);
+            mid.npages = mid_n;
+            if self.insert(mid).is_some() {
+                return false;
+            }
+            if ie < re {
+                let mut tail = split_region(&r, ie, re, r.flags);
+                tail.npages = tail_n;
+                if self.insert(tail).is_some() {
+                    return false;
+                }
+            }
+        }
+        false
+    }
+}
+
+/// A copy of `r` covering `[a, b)` with `flags`, its backing shifted to the new
+/// start.
+fn split_region(r: &VirRegion, a: u64, b: u64, flags: u32) -> VirRegion {
+    let delta = a - r.vaddr;
+    let mut out = *r;
+    out.vaddr = a;
+    out.length = b - a;
+    out.flags = flags;
+    // A file region's pages map file bytes `file_offset + i*PAGE`, so the offset
+    // moves with the start; `file_size` is an absolute file offset and does not.
+    out.file_offset = r.file_offset + delta;
+    // A direct region's frames are `phys_base + (va - vaddr)`.
+    out.phys_base = r.phys_base + delta;
+    out
 }
 
 /// What a [`RegionList::carve_out`] took away, so its caller can release the

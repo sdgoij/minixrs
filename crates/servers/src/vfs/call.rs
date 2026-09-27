@@ -101,6 +101,18 @@ const FCNTL_CMD_OFF: usize = 12;
 const FCNTL_ARG_OFF: usize = 16;
 /// copyfd: newfd (i32).
 const COPYFD_NEWFD_OFF: usize = 12;
+/// copyfd: endpoint (i32) — the other process the descriptor belongs to.
+const COPYFD_ENDPT_OFF: usize = 8;
+/// copyfd: fd (i32) — the descriptor, in whichever process `what` names.
+const COPYFD_FD_OFF: usize = 12;
+/// copyfd: what (i32) — `COPYFD_FROM` / `COPYFD_TO` / `COPYFD_CLOSE`.
+const COPYFD_WHAT_OFF: usize = 16;
+/// copyfd: take `fd` from the named process into the caller.
+const COPYFD_FROM: i32 = 0;
+/// copyfd: install the caller's `fd` into the named process.
+const COPYFD_TO: i32 = 1;
+/// copyfd: drop an fd a previous `COPYFD_TO` installed.
+const COPYFD_CLOSE: i32 = 2;
 /// umask: mode (i32).
 const UMASK_MODE_OFF: usize = 12;
 
@@ -614,6 +626,36 @@ pub fn do_read() -> i32 {
         if ((*vp).v_mode & S_IFMT) == S_IFBLK {
             return block_io(crate::vfs::pipe::READING, vp, filp, fp, buf_addr, count);
         }
+        // An eventfd is a counter, not a byte stream: VFS answers it directly.
+        if crate::vfs::eventfd::is_eventfd(vp) {
+            return crate::vfs::eventfd::read(vp, fp.fp_endpoint, buf_addr, count);
+        }
+        // A timerfd returns its expiration count.
+        if crate::vfs::timerfd::is_timerfd(vp) {
+            return crate::vfs::timerfd::read(vp, fp.fp_endpoint, buf_addr, count);
+        }
+        // An epoll instance is neither readable nor writable: it has no data,
+        // only interests (Linux answers EINVAL too).
+        if crate::vfs::epoll::is_epoll(vp) {
+            return EINVAL;
+        }
+        // A memfd's bytes are VM's cache pages for the object, not a
+        // filesystem's: read them through the same frames a mapping maps.
+        if crate::vfs::memfd::is_memfd(vp) {
+            let r = crate::vfs::memfd::transfer(
+                fp.fp_endpoint,
+                (*vp).v_inode_nr,
+                (*vp).v_size,
+                filp.filp_pos,
+                buf_addr,
+                count,
+                false,
+            );
+            if r >= 0 {
+                filp.filp_pos += r as i64;
+            }
+            return r;
+        }
         // Call the FS request layer to perform the read.
         let (r, new_pos) = crate::vfs::request::req_read(
             (*vp).v_fs_e,
@@ -688,6 +730,34 @@ pub fn do_write() -> i32 {
         // Block special files (C read_write S_ISBLK).
         if ((*vp).v_mode & S_IFMT) == S_IFBLK {
             return block_io(crate::vfs::pipe::WRITING, vp, filp, fp, buf_addr, count);
+        }
+        // An eventfd is a counter, not a byte stream: VFS answers it directly.
+        if crate::vfs::eventfd::is_eventfd(vp) {
+            return crate::vfs::eventfd::write(vp, fp.fp_endpoint, buf_addr, count);
+        }
+        // A timerfd cannot be written.
+        if crate::vfs::timerfd::is_timerfd(vp) {
+            return EINVAL;
+        }
+        // Nor can an epoll instance.
+        if crate::vfs::epoll::is_epoll(vp) {
+            return EINVAL;
+        }
+        // A memfd's bytes are VM's cache pages for the object (see `do_read`).
+        if crate::vfs::memfd::is_memfd(vp) {
+            let r = crate::vfs::memfd::transfer(
+                fp.fp_endpoint,
+                (*vp).v_inode_nr,
+                (*vp).v_size,
+                filp.filp_pos,
+                buf_addr,
+                count,
+                true,
+            );
+            if r >= 0 {
+                filp.filp_pos += r as i64;
+            }
+            return r;
         }
         let (r, new_pos) = crate::vfs::request::req_write(
             (*vp).v_fs_e,
@@ -898,6 +968,13 @@ pub fn do_ioctl() -> i32 {
             return EBADF;
         }
         let dev = filp.filp_dev;
+        // Local-socket descriptor passing is VFS's own business, so the two
+        // control ioctls never travel to the driver (see `vfs::scm`).
+        if (dev >> 16) == arch_common::com::UDS_MAJOR
+            && matches!(request, net::NWIOSUDSCTRL | net::NWIOGUDSCTRL)
+        {
+            return crate::vfs::scm::control_ioctl(request, dev, fp.fp_endpoint, buf);
+        }
         crate::vfs::device::cdev_io(
             CDEV_IOCTL,
             dev,
@@ -967,38 +1044,101 @@ pub fn do_fcntl() -> i32 {
     }
 }
 
-/// Perform the `copyfd(fd, newfd, flags)` â€” duplicate a file descriptor.
+/// Perform the `copyfd(endpt, fd, what)` — move a descriptor between two
+/// processes, or close one in another process.
 ///
-/// C source: `minix/servers/vfs/filedes.c` â€” `do_copyfd()` (line 82)
+/// The back-call a device driver makes to move an fd on a client's behalf; the
+/// UDS and VND drivers are its callers in C, and that is the only shape in which
+/// this port uses it. `what` selects the direction:
+///
+/// * `COPYFD_FROM` — take `fd` **from** `endpt` and give the caller a handle on
+///   the same filp. The driver ends up with a local fd for a file the client
+///   had open.
+/// * `COPYFD_TO` — install the caller's `fd` **into** `endpt`, returning the
+///   remote's new fd number. This is how received fds reach their receiver.
+/// * `COPYFD_CLOSE` — drop a descriptor a previous `COPYFD_TO` installed,
+///   assuming the caller still holds its own reference.
+///
+/// Root-only: the caller is expected to be a privileged driver, exactly as C's
+/// `if (!super_user) return EPERM` says. C's `filp_ioctl_fp` guard is omitted:
+/// it exists to avoid a filp-lock deadlock, and this port holds no filp locks.
+///
+/// C source: `minix/servers/vfs/filedes.c` — `do_copyfd()` (line 418)
 pub fn do_copyfd() -> i32 {
-    let glob = unsafe { &*vfs_global() };
-    let fp = match unsafe { glob.fp.as_mut() } {
-        Some(fp) => fp,
-        None => return EINVAL,
-    };
-    let fd = r_i32(&glob.fs_m_in, FD_OFF);
-    let _newfd = r_i32(&glob.fs_m_in, COPYFD_NEWFD_OFF);
+    let glob = vfs_global();
 
-    // Validate source fd.
-    if fd < 0 || (fd as usize) >= OPEN_MAX || fp.fp_filp[fd as usize] < 0 {
+    let caller = unsafe { (*glob).fp };
+    if caller.is_null() {
+        return EINVAL;
+    }
+    if unsafe { (*caller).fp_effuid } != SU_UID {
+        return EPERM;
+    }
+
+    let endpt = r_i32(unsafe { &(*glob).fs_m_in }, COPYFD_ENDPT_OFF);
+    let fd = r_i32(unsafe { &(*glob).fs_m_in }, COPYFD_FD_OFF);
+    let what = r_i32(unsafe { &(*glob).fs_m_in }, COPYFD_WHAT_OFF);
+
+    let base = unsafe { (*glob).fproc.as_mut_ptr() };
+    let nfproc = unsafe { (*glob).fproc.len() };
+
+    // C's `isokendpt`: the slot must hold `endpt` itself, so a stale endpoint
+    // cannot move the descriptor of whichever process now lives in that slot.
+    let target = match crate::vfs::misc::endpoint_to_slot(endpt) {
+        Some(slot) if slot < nfproc => unsafe { base.add(slot) },
+        _ => return EINVAL,
+    };
+    if unsafe { (*target).fp_endpoint } != endpt {
+        return EINVAL;
+    }
+    if fd < 0 || (fd as usize) >= OPEN_MAX {
         return EBADF;
     }
 
-    // Find a free fd slot starting from _newfd (or 0 if newfd < 0).
-    let start = _newfd.max(0);
-    let mut k: i32 = 0;
-    unsafe {
-        let r = filedes::get_fd(fp, start, &mut k);
-        if r != OK {
-            return r;
-        }
-        let filp_idx = fp.fp_filp[fd as usize];
-        fp.fp_filp[k as usize] = filp_idx;
-        let glob = vfs_global();
-        let filp_arr = core::ptr::addr_of_mut!((*glob).filp) as *mut Filp;
-        (*filp_arr.add(filp_idx as usize)).filp_count += 1;
+    // `fd` names the caller's table only for COPYFD_TO; otherwise it names the
+    // named process's (C: `get_filp2((what == COPYFD_TO) ? fp : rfp, fd, ...)`).
+    let lookup = if what == COPYFD_TO { caller } else { target };
+    let filp_idx = unsafe { (*lookup).fp_filp[fd as usize] };
+    if filp_idx < 0 {
+        return EBADF;
     }
-    k
+
+    match what {
+        COPYFD_FROM | COPYFD_TO => {
+            // Install into the caller for FROM, into the named process for TO.
+            let install = if what == COPYFD_TO { target } else { caller };
+            // C searches for a free descriptor slot inline. `filedes::get_fd`
+            // is unusable here: it also claims a fresh filp, which this path
+            // would immediately discard, and reports ENFILE for a full filp
+            // table even when descriptor slots remain.
+            let slot = unsafe { (*install).fp_filp.iter().position(|&filp| filp < 0) };
+            let new_fd = match slot {
+                Some(i) => i as i32,
+                None => return EMFILE,
+            };
+            unsafe {
+                (*install).fp_filp[new_fd as usize] = filp_idx;
+                let filp_arr = core::ptr::addr_of_mut!((*glob).filp) as *mut Filp;
+                (*filp_arr.add(filp_idx as usize)).filp_count += 1;
+            }
+            new_fd
+        }
+        COPYFD_CLOSE => {
+            // Clear the descriptor in the *named* process; the caller's own
+            // reference is what the decremented count belonged to (C: "assumes
+            // that the filp is still in use by the caller as well").
+            let filp_arr = unsafe { core::ptr::addr_of_mut!((*glob).filp) as *mut Filp };
+            if unsafe { (*filp_arr.add(filp_idx as usize)).filp_count } <= 1 {
+                return EBADF;
+            }
+            unsafe {
+                (*filp_arr.add(filp_idx as usize)).filp_count -= 1;
+                (*target).fp_filp[fd as usize] = -1;
+            }
+            OK
+        }
+        _ => EINVAL,
+    }
 }
 
 /// Truncate a regular file or pipe vnode to `newsize` (C link.c
@@ -1010,6 +1150,10 @@ pub fn do_copyfd() -> i32 {
 ///
 /// `vp` must point to a valid, locked vnode.
 unsafe fn truncate_vnode(vp: *mut Vnode, newsize: i64) -> i32 {
+    // A memfd has no filesystem to ask: its size is its vnode's.
+    if crate::vfs::memfd::is_memfd(vp) {
+        return crate::vfs::memfd::truncate(vp, newsize);
+    }
     if !matches!((*vp).v_mode & S_IFMT, S_IFREG | S_IFIFO) {
         return EINVAL;
     }
@@ -1190,6 +1334,24 @@ pub fn do_fsync() -> i32 {
 /// C source: `minix/servers/vfs/select.c` â€” `do_select()` (line 30)
 pub fn do_select() -> i32 {
     unsafe { crate::vfs::select::do_select() }
+}
+
+/// Perform the `poll(fds, nfds, timeout)` call.
+///
+/// Not a reference call: MINIX emulates `poll` over `select`, so there is no
+/// C `do_poll` to follow. It shares the `select` readiness engine
+/// (`crate::vfs::select`).
+pub fn do_poll() -> i32 {
+    unsafe { crate::vfs::select::do_poll() }
+}
+
+/// `epoll_wait(epfd, events, maxevents, timeout)` — readiness over an
+/// instance's persistent interest set. Not a reference call: MINIX has no
+/// `epoll`. Like `select`/`poll`, it may suspend the caller.
+///
+/// C source: none — `minix/servers/vfs/select.c` stops at `select`.
+pub fn do_epoll_wait() -> i32 {
+    unsafe { crate::vfs::select::do_epoll_wait() }
 }
 
 /// Perform the `chdir(name)` system call.
@@ -1462,6 +1624,22 @@ pub fn do_fstat() -> i32 {
         let vp = filp.filp_vno;
         if vp.is_null() {
             return EBADF;
+        }
+        // A memfd has no filesystem to stat it.
+        if crate::vfs::memfd::is_memfd(vp) {
+            return crate::vfs::memfd::fstat(vp, fp.fp_endpoint, buf_addr);
+        }
+        // Nor does an eventfd.
+        if crate::vfs::eventfd::is_eventfd(vp) {
+            return crate::vfs::eventfd::fstat(vp, fp.fp_endpoint, buf_addr);
+        }
+        // ...or a timerfd.
+        if crate::vfs::timerfd::is_timerfd(vp) {
+            return crate::vfs::timerfd::fstat(vp, fp.fp_endpoint, buf_addr);
+        }
+        // ...or an epoll instance.
+        if crate::vfs::epoll::is_epoll(vp) {
+            return crate::vfs::epoll::fstat(vp, fp.fp_endpoint, buf_addr);
         }
         crate::vfs::request::req_stat(
             (*vp).v_fs_e,
@@ -2261,6 +2439,12 @@ pub fn do_chmod() -> i32 {
     let inode_nr = vp_ref.v_inode_nr;
     let mut new_mode = rmode;
     crate::vfs::protect::chmod_strip_setgid(fp, vp_ref, &mut new_mode);
+    // A memfd has no filesystem to chmod: its mode lives in the vnode, and the
+    // permission check above has already run.
+    if unsafe { crate::vfs::memfd::is_memfd(vp) } {
+        unsafe { (*vp).v_mode = ((*vp).v_mode & S_IFMT) | (new_mode & 0o7777) };
+        return OK;
+    }
     let (r, new_mode) = unsafe { crate::vfs::request::req_chmod(fs_e, inode_nr, new_mode) };
     if r == OK {
         // Refresh the cached vnode mode from the reply (C protect.c
@@ -2322,6 +2506,16 @@ pub fn do_chown() -> i32 {
     }
     let fs_e = vp_ref.v_fs_e;
     let inode_nr = vp_ref.v_inode_nr;
+    // A memfd has no filesystem to chown; its ownership lives in the vnode, and
+    // the permission check above has already run.
+    if unsafe { crate::vfs::memfd::is_memfd(vp) } {
+        unsafe {
+            (*vp).v_uid = owner as i32;
+            (*vp).v_gid = group as i32;
+            (*vp).v_mode &= !0o6000;
+        }
+        return OK;
+    }
     let (r, new_mode) = unsafe { crate::vfs::request::req_chown(fs_e, inode_nr, owner, group) };
     if r == OK {
         // Refresh the cached vnode ownership/mode from the reply (C

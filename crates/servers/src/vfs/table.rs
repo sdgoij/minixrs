@@ -70,6 +70,15 @@ static CALL_VEC: [VfsHandler; NR_VFS_CALLS] = {
     table[call_index(VFS_MAPDRIVER)] = do_mapdriver;
     table[call_index(VFS_COPYFD)] = do_copyfd;
     table[call_index(VFS_DUP2)] = do_dup2;
+    table[call_index(VFS_MEMFD_CREATE)] = crate::vfs::memfd::do_create;
+    table[call_index(VFS_POLL)] = do_poll;
+    table[call_index(VFS_EVENTFD_CREATE)] = crate::vfs::eventfd::do_create;
+    table[call_index(VFS_TIMERFD_CREATE)] = crate::vfs::timerfd::do_create;
+    table[call_index(VFS_TIMERFD_SETTIME)] = crate::vfs::timerfd::do_settime;
+    table[call_index(VFS_TIMERFD_GETTIME)] = crate::vfs::timerfd::do_gettime;
+    table[call_index(VFS_EPOLL_CREATE1)] = crate::vfs::epoll::do_create;
+    table[call_index(VFS_EPOLL_CTL)] = crate::vfs::epoll::do_ctl;
+    table[call_index(VFS_EPOLL_WAIT)] = do_epoll_wait;
     table[call_index(VFS_CHECKPERMS)] = do_checkperms;
     table[call_index(VFS_GETSYSINFO)] = do_getsysinfo;
     table

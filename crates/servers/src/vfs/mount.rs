@@ -195,6 +195,17 @@ pub unsafe fn put_vnode(vp: *mut Vnode) {
             (*vp).v_ref_count -= 1
         }
         if (*vp).v_ref_count == 0 {
+            // A VFS-internal anonymous object (an eventfd, timerfd or epoll
+            // instance) has no filesystem to release, but does hold a slot in
+            // its own table; free it before the vnode is wiped (the id lives in
+            // `v_inode_nr`).
+            if crate::vfs::eventfd::is_eventfd(vp) {
+                crate::vfs::eventfd::release((*vp).v_inode_nr);
+            } else if crate::vfs::timerfd::is_timerfd(vp) {
+                crate::vfs::timerfd::release((*vp).v_inode_nr);
+            } else if crate::vfs::epoll::is_epoll(vp) {
+                crate::vfs::epoll::release((*vp).v_inode_nr);
+            }
             if (*vp).v_fs_count > 0 {
                 let _ = crate::vfs::request::req_putnode(
                     (*vp).v_fs_e,

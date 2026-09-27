@@ -1,0 +1,14 @@
+# The `just test-uds-x86` scenario: the `/dev/uds` server, driven by `/bin/udstest`.
+#
+#   FEED_SCENARIO=tools/smoke/uds.tsv sh tools/smoke/feed.sh <log> <seconds> <qemu command…>
+#
+# One step per line, as `tools/smoke/scenario.tsv` documents: the command, a tab, and the
+# whole line its output must produce.
+#
+# `udstest` reports a distinct failure code per step, so a gate failure points at the call
+# that broke (1–4 socketpair, 5–10 bind/listen/connect/accept, 11–16 the round-trips,
+# 17–19 `SO_PEERCRED`, 20–30 `SCM_RIGHTS`/`SCM_CREDS` descriptor passing, 31–33
+# `SO_PEERCRED` again) rather than at "the sockets did not work". The one line below is
+# only printed when every step passed.
+
+/bin/udstest	udstest: OK

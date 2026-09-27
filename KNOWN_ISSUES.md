@@ -1218,6 +1218,125 @@ are arch-specific, `[env]` is tooling/platform, not kernel.
     `forktest: parent's write reached the child (fork not a snapshot)` and exits 6.
     (`crates/servers/src/vm/cow.rs`, `crates/servers/src/vm/mod.rs`,
     `crates/userland/src/bin/forktest.rs`)
+28. **Cloned character devices are not visible through `fstat` (2026-09-27, open — a missing
+    subsystem, not a stat bug).** MINIX gives every clone open its own *node*: VFS's
+    `cdev_clone` (`servers/vfs/device.c`) asks PFS to create a temporary device file whose
+    inode's `i_dev` **is** the clone device (`makedev(major(dev), new_minor)`), keeps that
+    vnode on the filp and records `vp->v_sdev`; PFS's `stat_inode` returns `st_dev = i_dev`,
+    so `fstat` names the clone. `libc`'s `socketpair.c` depends on exactly that: it passes
+    `fstat(sv[1]).st_dev` to `NWIOSUDSPAIR`, and the driver takes the peer's minor from it
+    (`minor(dev)`). This port has no clone-node machinery — a `CDEV_CLONED` open reply becomes
+    `filp_dev` alone (`servers/src/vfs/call.rs::do_open`) — and `do_fstat` forwards to the
+    filesystem server unchanged, so it reports the *node's* device: for a cloned socket fd,
+    `st_dev` is the filesystem and `st_rdev` the base device, not the clone. Routing is
+    unaffected (`filp_dev` is what `cdev_io` sends to the driver), so this is not a
+    correctness problem for I/O — only the reference's `fstat` idiom does not port.
+
+    **Decision (2026-09-27): keep clone nodes unimplemented; give a driver that needs its own
+    minor an explicit ioctl.** Replicating `cdev_clone` is a VFS+PFS change (a temporary node
+    per clone open, plus `v_sdev` on the vnode and a close path), and the port's routing does
+    not need it. `/dev/uds` exposes `NWIOGUDSMINOR` (`net::NWIOGUDSMINOR`,
+    `minix-std/src/uds.rs::socket_minor`) and its `socketpair` uses that. Revisit if a ported
+    binary needs `st_dev`/`st_rdev` to name a clone.
+29. **A driver cannot call VFS back while VFS waits on it (2026-09-27, settled for sockets,
+    open for VND).** MINIX's drivers make privileged *back-calls* into VFS during an ioctl: the
+    uds driver moves passed descriptors with `copyfd` (`ioc_uds.c` `send_fds`/`recv_fds`), and
+    VND opens its backing file with `copyfd` plus `fstat` (`vnd.c`). MINIX answers those on a
+    second VFS thread while the calling thread waits for the driver's ioctl reply. This port's
+    VFS is single-threaded and parks in `request::fs_sendrec` (`minix_std::sendrec`), so a
+    back-call would sit behind a receive that never comes — a deadlock, not a slow path.
+
+    **Sockets are settled by moving the work to VFS, not by making VFS reentrant.** VFS
+    intercepts the two `NWIOSUDSCTRL`/`NWIOGUDSCTRL` ioctls and does the descriptor transfer
+    itself (`crates/servers/src/vfs/scm.rs`); the driver's only new duty is answering "which
+    socket is your peer" in its ioctl reply, and `NWIOGUDSPEERCRED` is served from the peer's
+    recorded owner endpoint. `do_copyfd` stays implemented (`VFS_COPYFD`, root-only) for a
+    caller that genuinely has a thread to be answered on, but nothing in the tree uses it yet.
+    See `WAYLAND.md` §5 row 5 and §6.2.
+
+    **VND is still open.** `vnd_copyfd`/`vnd_fstat` (`crates/drivers/src/storage/vnd.rs`) return
+    `Err(DriverError::Unsupported)`, so `VNDIOCSET` cannot open a backing file. Either give VFS
+    the same treatment (it would have to learn VND's ioctls, as it has learned the socket ones),
+    or introduce a mechanism to service a driver's back-call — which needs VFS's per-request
+    state saved around the nested call. No consumer needs VND yet, so this is recorded rather
+    than resolved. (`crates/servers/src/vfs/scm.rs`, `crates/servers/src/vfs/call.rs::do_copyfd`,
+    `crates/drivers/src/storage/vnd.rs`)
+30. **A `memfd` answers the operations a filesystem would, but not every one of them (2026-09-27,
+    open, deliberate).** `vfs::memfd` gives an anonymous shared-memory object an identity
+    (`MEMFD_DEV` plus a never-reused id) and deliberately no filesystem: `v_fs_e` is NONE and
+    `v_fs_count` is 0, which is what lets `put_vnode` skip its `req_putnode` without a special
+    case. VFS answers `read`, `write`, `ftruncate`, `fstat`, `fchmod` and `fchown` there, and the
+    mapping path needs nothing at all (VM's `(dev, ino)` page cache *is* the object).
+
+    The remaining filesystem-shaped operations still travel to `v_fs_e == NONE` and fail with
+    whatever an endpoint of NONE yields: `utimens` and `fsync` on a memfd, and `fstatvfs`, which
+    has no meaning for an object with no storage to measure. Nothing on the `wl_shm` path
+    (`memfd_create`, `ftruncate`, `mmap`, `SCM_RIGHTS`, `read`/`write`) reaches them, so they are
+    recorded rather than synthesized — a ported binary that `utimes` or `fsync`es a memfd gets a
+    failing call rather than a wrong answer. (`crates/servers/src/vfs/memfd.rs`,
+    `crates/servers/src/vfs/call.rs`)
+31. **A blocking `select`/`poll` on a pipe never wakes without a timeout (2026-09-28, open).**
+    The readiness engine (`crates/servers/src/vfs/select.rs`) asks `pipe_check` whether a pipe fd
+    is ready, and a character device registers a late watch (`CDEV_SELECT` → `CDEV_SEL2_REPLY`),
+    but a pipe registers nothing: a blocking `select`/`poll` on a pipe with no timeout sits until
+    its deadline — and with none, forever — even after the other end writes. The reference wires
+    this up: `select_request_pipe` sets `f->filp_pipe_select_ops |= ops` when nothing is ready and
+    blocking (`select.c:501-502`), and a completed pipe read/write walks the filp table calling
+    `select_callback` for each watcher (`pipe.c:386-401`). The port's `Filp` already carries
+    `filp_pipe_select_ops`/`filp_pipe_select_ep`, so the fields exist and are unused. Nothing on
+    the current Wayland path polls a bare pipe without a deadline (sockets are character devices
+    and do wake), so it is recorded rather than fixed. (`crates/servers/src/vfs/select.rs`,
+    `crates/servers/src/vfs/pipe.rs`, `crates/servers/src/vfs/types.rs`)
+32. **`read` never blocks in VFS, so an `eventfd`/`timerfd` read on a zero count returns
+    `EAGAIN` (2026-09-28, open, deliberate).** The port has no suspend/revive for reads
+    (item 31's sibling: `vfs::pipe` reads return `EAGAIN` rather than suspending), and
+    `vfs::eventfd` and `vfs::timerfd` follow it — a POSIX read of a zero `eventfd` counter,
+    or of a `timerfd` whose timer has not expired, would block until it is nonzero / expires.
+    The expected consumer (`calloop`/smithay) polls before it reads, and `EFD_NONBLOCK` /
+    `TFD_NONBLOCK` is the common mode, so the deviation is recorded rather than papered over
+    with a busy retry. Fixing it properly means a general deferred-read mechanism, not a
+    per-object special case. (`crates/servers/src/vfs/eventfd.rs`,
+    `crates/servers/src/vfs/timerfd.rs`, `crates/servers/src/vfs/pipe.rs`)
+33. **`CLOCK_MONOTONIC` is time since boot, *not* `boottime + uptime` (2026-09-28,
+    deliberate deviation).** MINIX 3.3.0's `do_gettime` adds `boottime` to **both** clocks
+    (`servers/pm/time.c`: `sec = boottime + clock / system_hz`), so its `CLOCK_MONOTONIC` is
+    offset by the epoch seconds at boot — and moves if the wall clock is reset, which a
+    monotonic clock must not do. This port returns the uptime tick count alone for
+    `CLOCK_MONOTONIC` (`crates/servers/src/pm.rs`, `clock_gettime_reply`), matching POSIX and
+    the port's own `clock_server` (`clock_time_to_ts`). The concrete reason: an absolute
+    `CLOCK_MONOTONIC` deadline (`TFD_TIMER_ABSTIME`, exactly how `calloop`'s timer arms) is
+    named in the same units `clock_gettime(CLOCK_MONOTONIC)` returns, and that has to be the
+    kernel tick timeline `vfs::alarm` (`SYS_SETALARM`) arms against. With MINIX's offset the
+    deadline landed `boottime` seconds away (~1.79e9 ticks on the x86 image) and the timer
+    never fired. `CLOCK_REALTIME` keeps the `boottime` offset. (`crates/servers/src/pm.rs`,
+    `crates/servers/src/vfs/alarm.rs`, `crates/servers/src/vfs/timerfd.rs`)
+34. **A kernel timer must leave its queue before it is re-armed (2026-09-28, FIXED).**
+    `tmrs_settimer` re-inserts a timer, and the reference *removes it first*
+    (`.refs/minix-3.3.0/minix/lib/libtimers/tmrs_set.c`: `tmrs_clrtimer(tmrs, tp, NULL)`
+    before the insert). The port skipped that, so a timer re-armed while already queued was
+    spliced into the list twice and corrupted it. It surfaced as deadlines that never fired:
+    `SYS_SETALARM` re-arms the *same* per-process timer every time `vfs::alarm`'s earliest
+    deadline changes, so `arm_earliest` re-arms a live timer on each change.
+    (`crates/kernel/src/clock.rs`)
+35. **`epoll` is level-triggered only, an instance is bounded to 64 interests, and a closed
+    registration is pruned lazily (2026-09-28, open, deliberate).** `vfs::epoll`
+    (`crates/servers/src/vfs/epoll.rs`) is net-new — MINIX emulates `poll` over `select` and
+    has no `epoll`. An instance holds a persistent interest set, and `epoll_wait` re-scans
+    the whole set through the shared readiness engine (`vfs::select`), so readiness is
+    level-triggered by construction. Deliberate limits, all in `WAYLAND.md` §5 row 23:
+    `EPOLLET` and `EPOLLONESHOT` are accepted in the event mask but not honoured; an instance
+    holds at most `MAX_INTERESTS` (64) registrations (the wait entry's `MAX_WATCH`),
+    answering `ENOSPC` beyond that; and an interest whose fd the waiter has closed is dropped
+    lazily at the next `epoll_wait`, not at `close` (there is no close hook on a
+    VFS-internal object). `EPOLLERR`/`EPOLLHUP`/`EPOLLRDHUP` are not synthesised, matching
+    what the engine reports for `poll`. Two further edges: an epoll fd registered in
+    `epoll_ctl` is refused with `EINVAL` (no nesting), but one appearing in a *`poll`/`select`*
+    watch is treated as a regular file and reads as always-ready; and an instance whose
+    registrations were made by one process then waited on by another resolves them in the
+    *waiter's* fd table. `calloop` (and so smithay) uses level-triggered `EPOLLIN`,
+    deregisters before closing, and registers and waits in one process, so none of these bites
+    it. (`crates/servers/src/vfs/epoll.rs`, `crates/servers/src/vfs/select.rs`,
+    `crates/servers/src/vfs/call.rs`)
 
 ---
 

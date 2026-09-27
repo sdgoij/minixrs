@@ -164,6 +164,16 @@ unsafe fn sef_cb_init_fresh() -> i32 {
         );
     }
 
+    // Register the uds server as the /dev/uds (major 18) character driver so
+    // opening /dev/uds reaches the UNIX-domain socket server.
+    unsafe {
+        dmap::map_driver(
+            b"uds",
+            arch_common::com::UDS_MAJOR as i32,
+            arch_common::com::UDS_PROC_NR,
+        );
+    }
+
     // Register the grant table with the kernel so FS servers can
     // use SAFECOPYTO/SAFECOPYFROM to transfer data through grants.
     crate::vfs::grant::vfs_grant_init();
@@ -262,7 +272,11 @@ unsafe fn handle_work() {
 
     // Notifications (m_type == NOTIFY_MESSAGE) are fire-and-forget — no reply needed.
     if call_nr == arch_common::com::NOTIFY_MESSAGE as i32 {
-        // Update req_nr, but skip dispatch and reply.
+        // VFS's only notification source is the kernel's `CLOCK` alarm, armed by
+        // `vfs::alarm` for the earliest suspended `select`/`poll` deadline. Treat
+        // it as that tick: complete every wait whose timeout has passed and
+        // re-arm for the next. Update req_nr, but skip dispatch and reply.
+        unsafe { crate::vfs::select::alarm_ticks() };
         return;
     }
 

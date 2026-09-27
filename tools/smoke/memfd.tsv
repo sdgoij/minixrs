@@ -1,0 +1,14 @@
+# The `just test-memfd-x86` scenario: the anonymous shared-memory object, driven
+# by `/bin/memfdtest`.
+#
+#   FEED_SCENARIO=tools/smoke/memfd.tsv sh tools/smoke/feed.sh <log> <seconds> <qemu command…>
+#
+# One step per line, as `tools/smoke/scenario.tsv` documents: the command, a tab, and the
+# whole line its output must produce.
+#
+# `memfdtest` reports a distinct failure code per step, so a gate failure points at the call
+# that broke (1–4 create/ftruncate/fstat, 5–7 two mappings of one object, 8–13 the descriptor
+# and the mappings agreeing, 14–20 the same across a fork) rather than at "memfd did not
+# work". The one line below is only printed when every step passed.
+
+/bin/memfdtest	memfdtest: OK

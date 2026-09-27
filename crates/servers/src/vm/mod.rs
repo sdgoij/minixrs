@@ -16,11 +16,11 @@ pub mod vfs_request;
 
 use arch_common::com::{
     NR_VM_CALLS, RS_PROC_NR, VFS_PROC_NR, VM_BRK, VM_CLEARCACHE, VM_EXEC_NEWMEM, VM_EXIT, VM_FORK,
-    VM_GETPHYS, VM_GETREF, VM_GETRUSAGE, VM_INFO, VM_MAP_PHYS, VM_MAPCACHEPAGE, VM_MMAP, VM_MUNMAP,
-    VM_NOTIFY_SIG, VM_PAGEFAULT, VM_PROCCTL, VM_QUERY_EXIT, VM_REMAP, VM_REMAP_RO, VM_RQ_BASE,
-    VM_RS_MEMCTL, VM_RS_SET_PRIV, VM_RS_UPDATE, VM_SETCACHEPAGE, VM_SHM_UNMAP, VM_UNMAP_PHYS,
-    VM_VFS_MMAP, VM_VFS_REPLY, VM_WATCH_EXIT, VM_WILLEXIT, VMCTL_CLEAR_PAGEFAULT, VMIW_REGION,
-    VMIW_STATS, VMIW_USAGE, VMPPARAM_CLEAR, VMPPARAM_HANDLEMEM,
+    VM_GETPHYS, VM_GETREF, VM_GETRUSAGE, VM_INFO, VM_MAP_PHYS, VM_MAPCACHEPAGE, VM_MMAP,
+    VM_MPROTECT, VM_MUNMAP, VM_NOTIFY_SIG, VM_PAGEFAULT, VM_PROCCTL, VM_QUERY_EXIT, VM_REMAP,
+    VM_REMAP_RO, VM_RQ_BASE, VM_RS_MEMCTL, VM_RS_SET_PRIV, VM_RS_UPDATE, VM_SETCACHEPAGE,
+    VM_SHM_UNMAP, VM_UNMAP_PHYS, VM_VFS_MMAP, VM_VFS_REPLY, VM_WATCH_EXIT, VM_WILLEXIT,
+    VMCTL_CLEAR_PAGEFAULT, VMIW_REGION, VMIW_STATS, VMIW_USAGE, VMPPARAM_CLEAR, VMPPARAM_HANDLEMEM,
 };
 use arch_common::com::{SUSPEND, is_ipc_notify, is_vfs_fs_transid};
 use arch_common::consts::NR_PROCS;
@@ -525,6 +525,7 @@ pub fn init_vm() {
     set_call(VM_CLEARCACHE, do_clearcache, "do_clearcache");
 
     set_call(VM_GETRUSAGE, do_getrusage, "do_getrusage");
+    set_call(VM_MPROTECT, do_mprotect, "do_mprotect");
 
     // Initialize vmproc entries for all boot processes.
     vm_init_boot();
@@ -891,6 +892,30 @@ fn handle_pagefault_for(ep: i32, addr: u64, error_code: u32) {
             mem::sys_vmctl(ep, VMCTL_CLEAR_PAGEFAULT, 0);
         }
         return;
+    }
+
+    // Enforce the region's permissions. Nothing could *reduce* a region's rights
+    // before `mprotect` existed, so this handler never had to ask; a protection
+    // that faults are allowed to ignore is not a protection. It has to come first
+    // because the COW path below would otherwise re-grant write on a page a
+    // `mprotect(PROT_READ)` had just made read-only.
+    //
+    // Only a region that covers the address is consulted; where none does, the
+    // paths below decide (an exec'd image's region bookkeeping is not
+    // authoritative — see the COW comment).
+    if let Some(r) = vmp.vm_regions.find(addr) {
+        let want = if is_write {
+            region::VR_WRITABLE
+        } else {
+            region::VR_READABLE
+        };
+        if r.flags & want == 0 {
+            sys_kill(ep, SIGSEGV);
+            unsafe {
+                mem::sys_vmctl(ep, VMCTL_CLEAR_PAGEFAULT, 0);
+            }
+            return;
+        }
     }
 
     // Handle COW faults via PTE walk (not region lookup). After an exec,
@@ -1290,7 +1315,15 @@ fn start_file_page(va: u64, fault: &Fault) -> PageOutcome {
     // the point — all mappers share it). The page must lie fully inside the file (the tail-zero
     // amount past the region's in-file end depends on the region, so partial pages keep the
     // private allocate path even for shared regions).
-    let cacheable = (!writable || shared) && file_off + page_size <= file_size;
+    //
+    // A memfd is the exception, and deliberately so: it has no file content to
+    // disagree with, its frames *are* the object, and a pool whose size is not a
+    // page multiple would otherwise lose its last page to a private copy — the
+    // page a client's `write` and its neighbours' mapping would then disagree on.
+    // A page that *starts* inside the object is the object's.
+    let cacheable = (!writable || shared)
+        && (file_off + page_size <= file_size
+            || (dev == arch_common::com::MEMFD_DEV && file_off < file_size));
 
     // Everything the completion needs, before anything is allocated: the cache-hit and parking
     // paths below both want it and neither has a frame yet (`pa` is filled in once there is one).
@@ -1366,7 +1399,11 @@ fn start_file_page(va: u64, fault: &Fault) -> PageOutcome {
     // The frame this page will arrive in.
     let state = PageState { pa, ..state };
 
-    if file_off < file_size {
+    // A memfd page has no file to read. The object *is* these frames: the cache
+    // entry `finish_page` is about to create is what every mapping of the object
+    // shares, so the zero-filled page above is already the page's content.
+    // There is also nothing to ask — no filesystem serves a memfd.
+    if dev != arch_common::com::MEMFD_DEV && file_off < file_size {
         let job = crate::vm::vfs_request::Job::Page(state);
         match crate::vm::vfs_request::send(
             arch_common::com::VMVFSREQ_FDIO as i32,
@@ -2055,6 +2092,91 @@ fn mmap_find_hole(regions: &region::RegionList, len_aligned: u64) -> Option<u64>
 ///
 /// Return: m1i1|m1i2 (message bytes 8..16, u64) = mapped address on
 /// success, m_type = errno on failure.
+/// Handle VM_MPROTECT — change the protection of an existing mapping.
+///
+/// MINIX has no `mprotect` (it is listed in `lib/libc/sys/MISSING_SYSCALLS`), so
+/// this is a net-new call with no C original to follow. It shares `VM_MMAP`'s
+/// field layout so a client reads both the same way: `prot` at payload 4,
+/// `length` at payload 12, `address` at payload 20.
+///
+/// The permissions that matter live in two places, and both have to change: the
+/// region, which is what a *later* fault consults, and the PTEs of pages already
+/// faulted in. Nothing is faulted in by this call, as POSIX requires.
+fn do_mprotect(msg: &mut Message) -> i32 {
+    let ep = msg.m_source;
+    if !is_user_ep(ep) {
+        return EINVAL;
+    }
+    let raw = unsafe { &msg.m_payload.raw };
+    let prot = i32::from_ne_bytes(raw[MMAP_PROT..MMAP_PROT + 4].try_into().unwrap_or([0; 4]));
+    let length = u64::from_ne_bytes(raw[MMAP_LEN..MMAP_LEN + 8].try_into().unwrap_or([0; 8]));
+    let addr = u64::from_ne_bytes(raw[MMAP_ADDR..MMAP_ADDR + 8].try_into().unwrap_or([0; 8]));
+
+    if !addr.is_multiple_of(PAGE_SIZE) || length == 0 {
+        return EINVAL;
+    }
+    let len_aligned = (length + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
+    let end = match addr.checked_add(len_aligned) {
+        Some(e) if e <= kernel::pagetable::MAX_USER_ADDRESS => e,
+        _ => return EINVAL,
+    };
+    let Some(cr3) = Some(unsafe { proc::vm_get_addrspace(ep) }).filter(|&c| c != 0) else {
+        return EINVAL;
+    };
+    let Some(vmp) = (unsafe { proc::vmproc_lookup(ep) }) else {
+        return EINVAL;
+    };
+
+    // POSIX answers ENOMEM when the range is not entirely mapped, and a failed
+    // call must change nothing: check the whole span before touching any of it.
+    let mut at = addr;
+    while at < end {
+        let Some(r) = vmp.vm_regions.find(at) else {
+            return ENOMEM;
+        };
+        at = r.end().min(end);
+    }
+
+    let add = (if prot & 0x01 != 0 {
+        region::VR_READABLE
+    } else {
+        0
+    }) | (if prot & 0x02 != 0 {
+        region::VR_WRITABLE
+    } else {
+        0
+    }) | (if prot & 0x04 != 0 { region::VR_EXEC } else { 0 });
+    let del = (region::VR_READABLE | region::VR_WRITABLE | region::VR_EXEC) & !add;
+    if !vmp.vm_regions.protect(addr, end, add, del) {
+        return ENOMEM;
+    }
+
+    // Pages already present carry their permissions in the PTE; pages that have
+    // not faulted yet take them from the region when they do.
+    let mut page = addr;
+    while page < end {
+        let pte = crate::vm::vm_walk_page(cr3, page);
+        if pte & kernel::pagetable::PG_P != 0 {
+            let pa = pte & 0x000F_FFFF_FFFF_F000;
+            // `PROT_NONE` leaves the page present but not user-accessible, so a
+            // touch faults and the enforcement above answers it.
+            let mut flags = 0u64;
+            if add & (region::VR_READABLE | region::VR_WRITABLE) != 0 {
+                flags |= kernel::pagetable::MAP_USER;
+            }
+            if add & region::VR_WRITABLE != 0 {
+                flags |= kernel::pagetable::MAP_WRITE;
+            }
+            if add & region::VR_EXEC != 0 {
+                flags |= kernel::pagetable::MAP_EXEC;
+            }
+            let _ = crate::vm::vm_map_page_in(cr3, page, pa, flags);
+        }
+        page += PAGE_SIZE;
+    }
+    OK
+}
+
 fn do_mmap(msg: &mut Message) -> i32 {
     let ep = msg.m_source;
     if !is_user_ep(ep) {
@@ -2989,6 +3111,42 @@ fn u64_from_i32s(lo: i32, hi: i32) -> u64 {
     ((hi as u32 as u64) << 32) | (lo as u32 as u64)
 }
 
+/// The cached page for a memfd object's offset, allocating and inserting a zero
+/// frame when the object has none there yet.
+///
+/// A memfd's pages *are* its storage, so the two paths that need one — a mapping
+/// fault (`start_file_page`, which allocates for itself) and a `read`/`write`
+/// window (`do_mapcache`) — have to agree on which frame that is. This is the
+/// allocating side of the `(dev, ino, offset)` cache key, which is what makes
+/// them agree.
+fn memfd_page(dev: u32, ino: u32, ino_offset: u64) -> Option<(u64, usize)> {
+    if let Some(hit) = cache::cache_find_byino(dev, ino, ino_offset, true) {
+        return Some(hit);
+    }
+    let pa = crate::vm::vm_alloc_pages(1);
+    if pa == 0 {
+        return None;
+    }
+    let tmp_va = crate::vm::vm_mappage(
+        pa,
+        kernel::pagetable::MAP_USER | kernel::pagetable::MAP_WRITE,
+    );
+    if tmp_va == 0 {
+        crate::vm::vm_free_pages(pa, 1);
+        return None;
+    }
+    unsafe {
+        core::ptr::write_bytes(tmp_va as *mut u8, 0, PAGE_SIZE as usize);
+    }
+    crate::vm::vm_unmappage(tmp_va);
+    let Some(pb_idx) = pb::pb_new(pa) else {
+        crate::vm::vm_free_pages(pa, 1);
+        return None;
+    };
+    cache::cache_insert_byino(dev, ino, ino_offset, pa, pb_idx);
+    Some((pa, pb_idx))
+}
+
 fn do_mapcache(msg: &mut Message) -> i32 {
     // VM_MAPCACHEPAGE (FS → VM): map `pages` cached blocks of
     // (dev, dev_offset ..) into the caller at a fresh virtual address and
@@ -3030,17 +3188,29 @@ fn do_mapcache(msg: &mut Message) -> i32 {
 
     // Resolve every block before touching the caller's address space so a
     // missing block leaves nothing mapped (C unmaps partial work on
-    // ENOENT).
-    let mut frames = [0u64; MAX_CACHE_MAP_PAGES as usize];
+    // ENOENT). A frame is tracked together with the PhysBlock index the
+    // window will hold a reference on.
+    let mut frames = [(0u64, 0usize); MAX_CACHE_MAP_PAGES as usize];
     for (i, frame) in frames.iter_mut().enumerate().take(pages as usize) {
         let i = i as u64;
         let off = dev_offset + i * PAGE_SIZE;
-        let Some((phys, _)) =
+        // A memfd block was never read from a file, so it may not be cached yet:
+        // allocate and insert a zero frame on first use. That is what lets a
+        // `write` preceding any mapping create the very page a later fault maps,
+        // and keeps `read`/`write` on the object's frames rather than a copy.
+        let found = if dev == arch_common::com::MEMFD_DEV {
+            memfd_page(dev, ino, ino_offset + i * PAGE_SIZE)
+        } else {
             cache::cache_find_bydev(dev, off, Some(ino), ino_offset + i * PAGE_SIZE, true)
-        else {
-            return ENOENT;
         };
-        *frame = phys;
+        let Some((phys, pb)) = found else {
+            return if dev == arch_common::com::MEMFD_DEV {
+                ENOMEM
+            } else {
+                ENOENT
+            };
+        };
+        *frame = (phys, pb);
     }
 
     let bytes = (pages as u64) * PAGE_SIZE;
@@ -3065,8 +3235,33 @@ fn do_mapcache(msg: &mut Message) -> i32 {
         v
     };
 
-    for (i, &frame) in frames.iter().enumerate().take(pages as usize) {
+    // Undo the first `n` window frames: unmap each and release the reference
+    // the window took, so the cache's own reference is left intact.
+    fn rollback(cr3: u64, va: u64, frames: &[(u64, usize)], n: usize) {
+        for (j, &(_, pb)) in frames.iter().enumerate().take(n) {
+            let _ = crate::vm::vm_unmap_page_in(cr3, va + (j as u64) * PAGE_SIZE);
+            pb::pb_unref(pb);
+        }
+    }
+
+    for (i, &(frame, pb)) in frames.iter().enumerate().take(pages as usize) {
         let i = i as u64;
+        // The window is a mapping like any other: it has to hold a PhysBlock
+        // reference while it is mapped, and its teardown releases that
+        // reference. Without this, every window teardown consumed the cache's
+        // own reference and freed a frame the cache still pointed at — a memfd
+        // `read`/`write` a few times and the object's pages were freed under the
+        // mappings that shared them (observed as a mapping that stopped reading
+        // its own data).
+        if !pb::pb_ref(pb) {
+            rollback(cr3, va, &frames, i as usize);
+            unsafe {
+                if let Some(vmp) = proc::vmproc_lookup(caller) {
+                    let _ = vmp.vm_regions.remove(va);
+                }
+            }
+            return ENOMEM;
+        }
         if crate::vm::vm_map_page_in(
             cr3,
             va + i * PAGE_SIZE,
@@ -3074,9 +3269,8 @@ fn do_mapcache(msg: &mut Message) -> i32 {
             kernel::pagetable::MAP_USER | kernel::pagetable::MAP_WRITE,
         ) != 0
         {
-            for j in 0..i {
-                let _ = crate::vm::vm_unmap_page_in(cr3, va + j * PAGE_SIZE);
-            }
+            pb::pb_unref(pb);
+            rollback(cr3, va, &frames, i as usize);
             unsafe {
                 if let Some(vmp) = proc::vmproc_lookup(caller) {
                     let _ = vmp.vm_regions.remove(va);
@@ -3410,7 +3604,7 @@ mod tests {
 
     #[test]
     fn test_vm_calls_table_size() {
-        assert_eq!(NR_VM_CALLS, 48);
+        assert_eq!(NR_VM_CALLS, 49);
     }
 
     #[test]

@@ -358,7 +358,7 @@ pub unsafe fn load_and_prepare_all(cfg: &BootProcessConfig) -> *mut Proc {
     // One slot per entry in `BOOT_PROCS_ALL`, which is what `boot_procs()` hands back on both builds
     // now: the boot-test build used to keep a smaller array for the shorter list it had, and the two
     // drifted the moment INIT was loaded again. The assertion keeps them in step.
-    const BOOT_PROC_SLOTS: usize = 18;
+    const BOOT_PROC_SLOTS: usize = 19;
     assert!(
         boot_procs.len() <= BOOT_PROC_SLOTS,
         "boot process list outgrew BOOT_PROC_SLOTS"

@@ -10,13 +10,12 @@ When asked to write a commit message, produce the entire message (subject + body
 ## Format
 
 ```
-<type>: <subject line, max 80-ish chars, imperative mood, no period>
+<type>: <subject, imperative mood, no period>
 
-<body — explain what and why, not how. Omit if subject alone suffices.
+<body — explain what and why, not how. Omit if the subject alone suffices.>
 ```
 
 **Subject line rules:**
-- Max ~120 characters
 - Imperative mood ("Add feature", not "Added feature" or "Adds feature")
 - No trailing period
 - Type prefix: `feat:`, `fix:`, `test:`, `refactor:`, `docs:`, `chore:` etc.
@@ -25,8 +24,12 @@ When asked to write a commit message, produce the entire message (subject + body
 **Body rules:**
 - Only include when the subject alone isn't enough
 - Explain *what* changed and *why* — not *how*
-- Wrap at 120 characters
 - Separate from subject with a blank line
+- **Never hard-wrap.** Write each paragraph as ONE long line and let the reader's client wrap it, exactly like markdown prose. Do not insert line breaks at a column. Do not "keep lines short". Measure length in paragraphs and sentences, not characters.
+
+## Why there is no line-length rule
+
+Hard-wrapped bodies look right only in the terminal width they were written for. Every reader — `git log`, the forge UI, a review tool, another agent — re-wraps or quotes them at a different width, so the artificial breaks resurface as mid-sentence gaps and ragged text, and anyone reflowing the message later has to guess which breaks were intentional. Git and markdown both treat a single newline as a soft break, so a hard-wrapped paragraph is still ONE logical line to anything that parses it: the breaks are pure noise, while a real paragraph break is the only newline that carries meaning. Never wrap. A subject may be a full sentence and a body paragraph may run long — that is fine.
 
 ## Example Patterns
 
@@ -75,9 +78,7 @@ feat(adapter): terminal adapter with comprehensive VT dispatch
 ```
 feat: add terminal connection layer with PTY backend support
 
-Implement PtyTerminalConnection in server crate with TermConnection
-trait for both Windows and Unix platforms. Wire up re-exports in
-winterm crate so the connection types are accessible from the app.
+Implement PtyTerminalConnection in server crate with TermConnection trait for both Windows and Unix platforms. Wire up re-exports in winterm crate so the connection types are accessible from the app.
 ```
 
 ### Pattern 4: Test-focused commit
@@ -103,6 +104,7 @@ Add remaining Phase 2/3 tests. Brings total from 229 to 663.
 | Explain what and why | Explain how (the code shows that) |
 | Use imperative mood | Use past tense ("Added", "Fixed") |
 | Group related changes | List every file individually |
+| Write each paragraph as one unwrapped line | Hard-wrap the body at a column |
 | Close with notes (tests, migration) | Leave the body empty when there's substance |
 
 ## If the user says "better" or "descriptive"

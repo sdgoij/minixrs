@@ -3,8 +3,8 @@
 //! process functions.
 //!
 //! Everything that maps to a real minix syscall is implemented (mmap/
-//! munmap via VM, fork/exec via PM, directory reading via VFS getdents).
-//! The rest (sockets, mprotect, rlimits, setsid) returns ENOSYS — minix
+//! munmap/mprotect via VM, fork/exec via PM, directory reading via VFS
+//! getdents). The rest (sockets, rlimits, setsid) returns ENOSYS — minix
 //! has no equivalent for these yet, and rustc's `--gc-sections` link drops
 //! the LLVM code paths that call them.
 
@@ -22,11 +22,14 @@ const ENOSYS: i32 = 78;
 // mmap/munmap are implemented in lib.rs (minix_std::vmem); only the
 // unsupported calls live here.
 
-/// Change mapping protections. VM has no prot-change call yet.
+/// Change mapping protections (VM's `VM_MPROTECT`, see `minix_std::vmem`).
 #[cfg(target_os = "minix")]
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn mprotect(_addr: *mut c_void, _length: usize, _prot: c_int) -> c_int {
-    crate::fail(ENOSYS)
+pub unsafe extern "C" fn mprotect(addr: *mut c_void, length: usize, prot: c_int) -> c_int {
+    match unsafe { minix_std::vmem::mprotect(addr as *mut u8, length, prot) } {
+        Ok(()) => 0,
+        Err(e) => crate::fail(-e),
+    }
 }
 
 // ---- sys/resource.h ----

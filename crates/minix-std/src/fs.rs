@@ -62,10 +62,39 @@ pub const VFS_SELECT: u32 = VFS_BASE + 30;
 pub const VFS_FSYNC: u32 = VFS_BASE + 32;
 pub const VFS_TRUNCATE: u32 = VFS_BASE + 33;
 pub const VFS_FTRUNCATE: u32 = VFS_BASE + 34;
+/// `memfd_create` — an anonymous shared-memory object (see
+/// [`memfd_create`]). Not a reference call: MINIX has no memfd.
+pub const VFS_MEMFD_CREATE: u32 = VFS_BASE + 50;
+/// `poll(fds, nfds, timeout)` — readiness on an array of `struct pollfd`.
+pub const VFS_POLL: u32 = VFS_BASE + 51;
+/// `eventfd(initval, flags)` — an anonymous 64-bit counter returned as a
+/// descriptor. Not a reference call: MINIX has no `eventfd`.
+pub const VFS_EVENTFD_CREATE: u32 = VFS_BASE + 52;
+/// `timerfd_create(clockid, flags)` — a descriptor that fires on a timer.
+pub const VFS_TIMERFD_CREATE: u32 = VFS_BASE + 53;
+/// `timerfd_settime(fd, flags, new, old)` — arm, re-arm or disarm a timerfd.
+pub const VFS_TIMERFD_SETTIME: u32 = VFS_BASE + 54;
+/// `timerfd_gettime(fd, cur)` — a timerfd's remaining time and interval.
+pub const VFS_TIMERFD_GETTIME: u32 = VFS_BASE + 55;
+/// `epoll_create1(flags)` — a readiness instance with a persistent interest set.
+pub const VFS_EPOLL_CREATE1: u32 = VFS_BASE + 56;
+/// `epoll_ctl(epfd, op, fd, event)` — add, modify or remove an interest.
+pub const VFS_EPOLL_CTL: u32 = VFS_BASE + 57;
+/// `epoll_wait(epfd, events, maxevents, timeout)` — report the ready interests.
+pub const VFS_EPOLL_WAIT: u32 = VFS_BASE + 58;
 pub const VFS_FCHMOD: u32 = VFS_BASE + 35;
 pub const VFS_FCHOWN: u32 = VFS_BASE + 36;
 pub const VFS_PIPE2: u32 = VFS_BASE + 26;
 pub const VFS_COPYFD: u32 = VFS_BASE + 46;
+
+/// `copyfd` direction flags (`minix/include/minix/syslib.h`).
+///
+/// `COPYFD_FROM` takes `fd` from the named process into the caller;
+/// `COPYFD_TO` installs the caller's `fd` into the named process;
+/// `COPYFD_CLOSE` drops an fd a previous `COPYFD_TO` installed.
+pub const COPYFD_FROM: i32 = 0;
+pub const COPYFD_TO: i32 = 1;
+pub const COPYFD_CLOSE: i32 = 2;
 pub const VFS_DUP2: u32 = VFS_BASE + 49;
 pub const VFS_UTIMENS: u32 = VFS_BASE + 37;
 
@@ -361,6 +390,30 @@ pub fn close(fd: i32) -> Result<(), MinixErr> {
         msg_set_i32(&mut msg, OFF_CLOSE_FD, fd);
         let _ = vfs_call(&mut msg)?;
         Ok(())
+    }
+}
+
+/// `copyfd(endpt, fd, what)`: move a descriptor between two processes.
+///
+/// The back-call a *privileged* server makes to move an fd on a client's behalf
+/// — how a device driver passes a descriptor from a sender to a receiver
+/// (`minix/lib/libsys/copyfd.c`). VFS requires the caller to be root, so a
+/// userland program cannot use this on its own fds.
+pub fn copyfd(endpt: i32, fd: i32, what: i32) -> Result<i32, MinixErr> {
+    #[cfg(not(target_os = "minix"))]
+    {
+        let _ = (endpt, fd, what, VFS_PROC_NR);
+        Err(MinixErr::ENOSYS)
+    }
+    #[cfg(target_os = "minix")]
+    unsafe {
+        let mut msg = [0u8; 64];
+        msg_set_i32(&mut msg, OFF_CALL, VFS_COPYFD as i32);
+        msg_set_i32(&mut msg, 8, endpt);
+        msg_set_i32(&mut msg, 12, fd);
+        msg_set_i32(&mut msg, 16, what);
+        let r = vfs_call(&mut msg)?;
+        Ok(r)
     }
 }
 
@@ -962,6 +1015,278 @@ pub fn select(
     }
 }
 
+// poll message offsets (match VFS's POLL_* consts).
+const POLL_FDS: usize = 8;
+const POLL_NFDS: usize = 16;
+const POLL_TIMEOUT: usize = 20;
+
+/// C `struct pollfd` (`tools/c-include/poll.h`): fd, events, revents — 8 bytes.
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+pub struct PollFd {
+    pub fd: i32,
+    pub events: i16,
+    pub revents: i16,
+}
+
+/// `poll(2)`: readiness on an array of [`PollFd`].
+///
+/// `timeout_ms < 0` blocks indefinitely; `0` polls; a positive value is a real
+/// deadline. On success each entry's `revents` is filled in and the number of
+/// ready fds returned.
+pub fn poll(fds: &mut [PollFd], timeout_ms: i32) -> Result<i32, MinixErr> {
+    #[cfg(not(target_os = "minix"))]
+    {
+        let _ = (fds, timeout_ms);
+        Err(MinixErr::ENOSYS)
+    }
+    #[cfg(target_os = "minix")]
+    unsafe {
+        let mut msg = [0u8; 64];
+        msg_set_i32(&mut msg, OFF_CALL, VFS_POLL as i32);
+        msg_set_u64(&mut msg, POLL_FDS, fds.as_mut_ptr() as u64);
+        msg_set_i32(&mut msg, POLL_NFDS, fds.len() as i32);
+        msg_set_i32(&mut msg, POLL_TIMEOUT, timeout_ms);
+        let n = vfs_call(&mut msg)?;
+        Ok(n as i32)
+    }
+}
+
+// eventfd(2) flags (match `tools/c-include/sys/eventfd.h`).
+/// Read returns 1 and decrements the counter instead of returning it whole.
+pub const EFD_SEMAPHORE: i32 = 1;
+/// Accepted; a read on a zero counter returns `EAGAIN` here regardless.
+pub const EFD_NONBLOCK: i32 = O_NONBLOCK;
+/// Set close-on-exec on the returned descriptor.
+pub const EFD_CLOEXEC: i32 = 0o200000;
+
+/// `eventfd(initval, flags)`: an anonymous 64-bit counter returned as a
+/// descriptor an event loop can `poll`.
+///
+/// `initval` is the counter's starting value. The object is VFS-internal (no
+/// filesystem, no path); `read`/`write` move 8-byte values, and a blocked
+/// `poll`/`select` on it is woken by a write from any process.
+pub fn eventfd(initval: u32, flags: i32) -> Result<i32, MinixErr> {
+    #[cfg(not(target_os = "minix"))]
+    {
+        let _ = (initval, flags);
+        Err(MinixErr::ENOSYS)
+    }
+    #[cfg(target_os = "minix")]
+    unsafe {
+        let mut msg = [0u8; 64];
+        msg_set_i32(&mut msg, OFF_CALL, VFS_EVENTFD_CREATE as i32);
+        msg_set_i32(&mut msg, 8, initval as i32);
+        msg_set_i32(&mut msg, 12, flags);
+        vfs_call(&mut msg)?;
+        Ok(msg_i32(&msg, 8))
+    }
+}
+
+// timerfd(2) flags (match `tools/c-include/sys/timerfd.h`).
+pub const TFD_NONBLOCK: i32 = O_NONBLOCK;
+pub const TFD_CLOEXEC: i32 = 0o200000;
+/// `value` is interpreted as an absolute time on `clockid`.
+pub const TFD_TIMER_ABSTIME: i32 = 1;
+
+/// `struct itimerspec` (`<sys/timerfd.h>`): the period, then the first expiry.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct Itimerspec {
+    pub it_interval: crate::time::TimeSpec,
+    pub it_value: crate::time::TimeSpec,
+}
+
+impl Default for Itimerspec {
+    fn default() -> Self {
+        // `time::TimeSpec` has no `Default`; a disarmed spec is all zeroes.
+        let zero = crate::time::TimeSpec {
+            tv_sec: 0,
+            tv_nsec: 0,
+        };
+        Self {
+            it_interval: zero,
+            it_value: zero,
+        }
+    }
+}
+
+/// `timerfd_create(clockid, flags)`: a descriptor that becomes readable when a
+/// timer expires. `clockid` is `time::CLOCK_MONOTONIC` or `CLOCK_REALTIME`.
+pub fn timerfd_create(clockid: i32, flags: i32) -> Result<i32, MinixErr> {
+    #[cfg(not(target_os = "minix"))]
+    {
+        let _ = (clockid, flags);
+        Err(MinixErr::ENOSYS)
+    }
+    #[cfg(target_os = "minix")]
+    unsafe {
+        let mut msg = [0u8; 64];
+        msg_set_i32(&mut msg, OFF_CALL, VFS_TIMERFD_CREATE as i32);
+        msg_set_i32(&mut msg, 8, clockid);
+        msg_set_i32(&mut msg, 12, flags);
+        vfs_call(&mut msg)?;
+        Ok(msg_i32(&msg, 8))
+    }
+}
+
+/// `timerfd_settime(fd, flags, new, old)`: arm, re-arm or (with a zero `value`)
+/// disarm the timer. `old`, when given, receives the previous setting.
+pub fn timerfd_settime(
+    fd: i32,
+    flags: i32,
+    new: &Itimerspec,
+    old: Option<&mut Itimerspec>,
+) -> Result<(), MinixErr> {
+    #[cfg(not(target_os = "minix"))]
+    {
+        let _ = (fd, flags, new, old);
+        Err(MinixErr::ENOSYS)
+    }
+    #[cfg(target_os = "minix")]
+    unsafe {
+        let mut msg = [0u8; 64];
+        msg_set_i32(&mut msg, OFF_CALL, VFS_TIMERFD_SETTIME as i32);
+        msg_set_i32(&mut msg, 8, fd);
+        msg_set_i32(&mut msg, 12, flags);
+        msg_set_u64(&mut msg, 16, new as *const Itimerspec as u64);
+        msg_set_u64(&mut msg, 24, old.map_or(0, |o| o as *mut Itimerspec as u64));
+        vfs_call(&mut msg)?;
+        Ok(())
+    }
+}
+
+/// `timerfd_gettime(fd)`: the timer's remaining time and interval.
+pub fn timerfd_gettime(fd: i32) -> Result<Itimerspec, MinixErr> {
+    #[cfg(not(target_os = "minix"))]
+    {
+        let _ = fd;
+        Err(MinixErr::ENOSYS)
+    }
+    #[cfg(target_os = "minix")]
+    unsafe {
+        let mut cur = Itimerspec::default();
+        let mut msg = [0u8; 64];
+        msg_set_i32(&mut msg, OFF_CALL, VFS_TIMERFD_GETTIME as i32);
+        msg_set_i32(&mut msg, 8, fd);
+        msg_set_u64(&mut msg, 16, &mut cur as *mut Itimerspec as u64);
+        vfs_call(&mut msg)?;
+        Ok(cur)
+    }
+}
+
+// epoll(7) constants (match `tools/c-include/sys/epoll.h`).
+/// `epoll_create1` flag: set close-on-exec on the returned descriptor.
+pub const EPOLL_CLOEXEC: i32 = 0o200000;
+/// `epoll_ctl` operations.
+pub const EPOLL_CTL_ADD: i32 = 1;
+pub const EPOLL_CTL_DEL: i32 = 2;
+pub const EPOLL_CTL_MOD: i32 = 3;
+/// `struct epoll_event.events` bits (the low bits match `poll`'s).
+pub const EPOLLIN: u32 = 0x001;
+pub const EPOLLPRI: u32 = 0x002;
+pub const EPOLLOUT: u32 = 0x004;
+pub const EPOLLERR: u32 = 0x008;
+pub const EPOLLHUP: u32 = 0x010;
+pub const EPOLLNVAL: u32 = 0x020;
+pub const EPOLLRDHUP: u32 = 0x2000;
+/// Edge-triggered — accepted but served level-triggered (see `WAYLAND.md` §5).
+pub const EPOLLET: u32 = 1 << 31;
+/// One-shot — accepted but served level-triggered (see `WAYLAND.md` §5).
+pub const EPOLLONESHOT: u32 = 1 << 30;
+
+/// `struct epoll_event` (Linux kernel ABI: packed, so 12 bytes): the ready
+/// events and the caller's opaque `data`.
+#[repr(C, packed)]
+#[derive(Clone, Copy, Default)]
+pub struct EpollEvent {
+    pub events: u32,
+    pub data: u64,
+}
+
+// epoll message offsets (match VFS's EPOLL_* consts).
+const EPOLL_CREATE_FLAGS: usize = 8;
+const EPOLL_CTL_EPFD: usize = 8;
+const EPOLL_CTL_OP: usize = 12;
+const EPOLL_CTL_FD: usize = 16;
+const EPOLL_CTL_EVENT: usize = 24;
+const EPOLL_WAIT_EPFD: usize = 8;
+const EPOLL_WAIT_MAXEVENTS: usize = 12;
+const EPOLL_WAIT_TIMEOUT: usize = 16;
+const EPOLL_WAIT_EVENTS: usize = 24;
+
+/// `epoll_create1(flags)`: a readiness instance with a persistent interest set.
+///
+/// The instance is VFS-internal (no filesystem, no path). Interests are added
+/// with [`epoll_ctl`] and reported by [`epoll_wait`].
+pub fn epoll_create1(flags: i32) -> Result<i32, MinixErr> {
+    #[cfg(not(target_os = "minix"))]
+    {
+        let _ = flags;
+        Err(MinixErr::ENOSYS)
+    }
+    #[cfg(target_os = "minix")]
+    unsafe {
+        let mut msg = [0u8; 64];
+        msg_set_i32(&mut msg, OFF_CALL, VFS_EPOLL_CREATE1 as i32);
+        msg_set_i32(&mut msg, EPOLL_CREATE_FLAGS, flags);
+        vfs_call(&mut msg)?;
+        Ok(msg_i32(&msg, 8))
+    }
+}
+
+/// `epoll_create(size)`: the legacy form. `size` is ignored but must be
+/// positive, as Linux requires.
+pub fn epoll_create(size: i32) -> Result<i32, MinixErr> {
+    if size <= 0 {
+        return Err(MinixErr(22)); // EINVAL
+    }
+    epoll_create1(0)
+}
+
+/// `epoll_ctl(epfd, op, fd, event)`: add, modify or remove one interest.
+pub fn epoll_ctl(epfd: i32, op: i32, fd: i32, event: &EpollEvent) -> Result<(), MinixErr> {
+    #[cfg(not(target_os = "minix"))]
+    {
+        let _ = (epfd, op, fd, event);
+        Err(MinixErr::ENOSYS)
+    }
+    #[cfg(target_os = "minix")]
+    unsafe {
+        let mut msg = [0u8; 64];
+        msg_set_i32(&mut msg, OFF_CALL, VFS_EPOLL_CTL as i32);
+        msg_set_i32(&mut msg, EPOLL_CTL_EPFD, epfd);
+        msg_set_i32(&mut msg, EPOLL_CTL_OP, op);
+        msg_set_i32(&mut msg, EPOLL_CTL_FD, fd);
+        msg_set_u64(&mut msg, EPOLL_CTL_EVENT, event as *const EpollEvent as u64);
+        vfs_call(&mut msg)?;
+        Ok(())
+    }
+}
+
+/// `epoll_wait(epfd, events, maxevents, timeout_ms)`: report the ready
+/// interests. `timeout_ms < 0` blocks indefinitely; `0` polls; a positive value
+/// is a real deadline. On success each ready event is written into `events` and
+/// the number reported.
+pub fn epoll_wait(epfd: i32, events: &mut [EpollEvent], timeout_ms: i32) -> Result<i32, MinixErr> {
+    #[cfg(not(target_os = "minix"))]
+    {
+        let _ = (epfd, events, timeout_ms);
+        Err(MinixErr::ENOSYS)
+    }
+    #[cfg(target_os = "minix")]
+    unsafe {
+        let mut msg = [0u8; 64];
+        msg_set_i32(&mut msg, OFF_CALL, VFS_EPOLL_WAIT as i32);
+        msg_set_i32(&mut msg, EPOLL_WAIT_EPFD, epfd);
+        msg_set_i32(&mut msg, EPOLL_WAIT_MAXEVENTS, events.len() as i32);
+        msg_set_i32(&mut msg, EPOLL_WAIT_TIMEOUT, timeout_ms);
+        msg_set_u64(&mut msg, EPOLL_WAIT_EVENTS, events.as_mut_ptr() as u64);
+        let n = vfs_call(&mut msg)?;
+        Ok(n as i32)
+    }
+}
+
 /// Push the framebuffer to the display (FBIOFLUSH, `/dev/fb`). No-op on
 /// VGA-style devices; virtio-gpu needs it after drawing. Must match
 /// `drivers::video::fb::FBIOFLUSH`.
@@ -1046,6 +1371,32 @@ pub fn truncate(fd: i32, length: i64) -> Result<(), MinixErr> {
         msg_set_i64(&mut msg, OFF_TRUNC_LENGTH, length);
         let _ = vfs_call(&mut msg)?;
         Ok(())
+    }
+}
+
+/// `memfd_create(name, flags)`: an anonymous shared-memory object as a
+/// descriptor.
+///
+/// Not a reference call — MINIX 3.3.0 has no `memfd`. The object is `ftruncate`d
+/// to the size wanted, then mapped `MAP_SHARED` with [`crate::vmem::mmap`]; every
+/// mapping of it, in any process it has been passed to, is backed by the same
+/// frames. `MFD_CLOEXEC` is bit 0 of `flags`; the name is ignored (nothing names
+/// an anonymous object). See `WAYLAND.md` §6.4.
+pub fn memfd_create(flags: i32) -> Result<i32, MinixErr> {
+    #[cfg(not(target_os = "minix"))]
+    {
+        let _ = (flags, VFS_PROC_NR);
+        Err(MinixErr::ENOSYS)
+    }
+    #[cfg(target_os = "minix")]
+    unsafe {
+        let mut msg = [0u8; 64];
+        msg_set_i32(&mut msg, OFF_CALL, VFS_MEMFD_CREATE as i32);
+        // The name has no wire field: a memfd has no directory entry. Only the
+        // flags travel.
+        msg_set_i32(&mut msg, OFF_FD_ONLY, flags);
+        vfs_call(&mut msg)?;
+        Ok(msg_i32(&msg, OFF_FD_ONLY))
     }
 }
 

@@ -34,6 +34,7 @@ pub const DEVMAN_PROC_NR: Endpoint = 15;
 pub const FB_PROC_NR: Endpoint = 16;
 pub const INPUT_PROC_NR: Endpoint = 17;
 pub const WS_PROC_NR: Endpoint = 18;
+pub const UDS_PROC_NR: Endpoint = 19;
 
 /// Character-device major for the framebuffer driver (/dev/fb).
 pub const FB_MAJOR: u32 = 19;
@@ -41,6 +42,40 @@ pub const FB_MAJOR: u32 = 19;
 pub const INPUT_MAJOR: u32 = 20;
 /// Character-device major for the net server's /dev/ip (dmap key).
 pub const NET_MAJOR: u32 = 14;
+/// Character-device major for the UNIX-domain socket server's /dev/uds.
+pub const UDS_MAJOR: u32 = 18;
+/// The device number every memfd object is keyed on (`vfs::memfd`).
+///
+/// A memfd is anonymous memory with a file descriptor, not a file, so it has no
+/// filesystem device. It still needs a *stable identity*: VM's page cache and
+/// `VR_SHARED` file regions key shared frames by `(dev, ino)`, and per-object
+/// uniqueness comes from the inode number (a never-reused id). This value is
+/// only ever used as that key — no driver is registered for the major, and no
+/// path lookup can reach it.
+pub const MEMFD_MAJOR: u32 = 21;
+pub const MEMFD_DEV: u32 = MEMFD_MAJOR << 16;
+/// The device number every eventfd object is keyed on (`vfs::eventfd`).
+///
+/// An eventfd is an anonymous 64-bit counter with a descriptor, not a file, so it
+/// has no filesystem device. Like `MEMFD_DEV` this is only ever a VFS-internal
+/// identity tag — no driver is registered for the major and no path lookup can
+/// reach it — but it must differ from `MEMFD_DEV` so VFS can tell the two kinds
+/// of anonymous object apart.
+pub const EVENTFD_MAJOR: u32 = 22;
+pub const EVENTFD_DEV: u32 = EVENTFD_MAJOR << 16;
+/// The device number every timerfd object is keyed on (`vfs::timerfd`).
+///
+/// Same shape as `EVENTFD_DEV` — a VFS-internal identity tag, no driver, no
+/// path — but distinct so VFS can tell a timerfd from an eventfd.
+pub const TIMERFD_MAJOR: u32 = 23;
+pub const TIMERFD_DEV: u32 = TIMERFD_MAJOR << 16;
+/// The device number every epoll instance is keyed on (`vfs::epoll`).
+///
+/// Same shape as `EVENTFD_DEV`/`TIMERFD_DEV` — a VFS-internal identity tag, no
+/// driver, no path — but distinct, so VFS can tell an epoll instance apart from
+/// the readiness objects whose interests it holds.
+pub const EPOLL_MAJOR: u32 = 24;
+pub const EPOLL_DEV: u32 = EPOLL_MAJOR << 16;
 
 pub const LAST_SPECIAL_PROC_NR: Endpoint = 10;
 pub const INIT_PROC_NR: Endpoint = LAST_SPECIAL_PROC_NR;
@@ -510,7 +545,10 @@ pub const VM_REMAP_RO: u32 = VM_RQ_BASE + 44;
 pub const VM_PROCCTL: u32 = VM_RQ_BASE + 45;
 pub const VM_VFS_MMAP: u32 = VM_RQ_BASE + 46;
 pub const VM_GETRUSAGE: u32 = VM_RQ_BASE + 47;
-pub const NR_VM_CALLS: u32 = 48;
+/// `mprotect` — change the protection of an existing mapping. Not a reference
+/// call: MINIX lists `mprotect` in `lib/libc/sys/MISSING_SYSCALLS`.
+pub const VM_MPROTECT: u32 = VM_RQ_BASE + 48;
+pub const NR_VM_CALLS: u32 = 49;
 pub const VM_PAGEFAULT: u32 = VM_RQ_BASE + 0xff;
 
 // VM_INFO subcodes
@@ -836,8 +874,9 @@ mod tests {
         assert_eq!(VM_EXIT, 0xC00);
         assert_eq!(VM_FORK, 0xC01);
         assert_eq!(VM_MMAP, 0xC0A);
+        assert_eq!(VM_MPROTECT, 0xC30);
         assert_eq!(VM_PAGEFAULT, 0xCFF);
-        assert_eq!(NR_VM_CALLS, 48);
+        assert_eq!(NR_VM_CALLS, 49);
 
         assert_eq!(VMIW_STATS, 1);
         assert_eq!(VMIW_REGION, 3);

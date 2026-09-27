@@ -1,6 +1,5 @@
-/* Minimal poll.h for the minix OS — poll() is a stub (no readiness
- * notification in the net server yet); fds 0-2 (serial) are always
- * ready. */
+/* Minimal poll.h for the minix OS. VFS implements poll(2) natively with a real
+ * timeout (crates/servers/src/vfs/select.rs); see also sys/select.h. */
 #ifndef _POLL_H
 #define _POLL_H
 

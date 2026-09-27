@@ -16,6 +16,7 @@
 
 mod nwio;
 mod tcp;
+mod uds;
 
 pub use nwio::{
     FIONREAD, NWIOGUDPOPT, NWIOSUDPOPT, NWUO_ACC_MASK, NWUO_BROAD_MASK, NWUO_COPY, NWUO_DI_BROAD,
@@ -31,6 +32,15 @@ pub use tcp::{
     NWTC_REMPORT_MASK, NWTC_SET_RA, NWTC_SET_RP, NWTC_SHARED, NWTC_UNSET_RA, NWTC_UNSET_RP,
     NwioTcpCl, NwioTcpConf, TCF_ASYNCH, TCF_DEFAULT, TcpCookie,
 };
+pub use uds::{
+    AF_UNIX, CMSG_ALIGNBYTES, CMSG_DATA_OFF, CMSG_HDR_SIZE, CMSG_LEN_OFF, CMSG_LEVEL_OFF,
+    CMSG_TYPE_OFF, CmsgError, MSG_CONTROL_LEN_OFF, MSG_CONTROL_MAX, MSG_CONTROL_SIZE, NGROUPS_MAX,
+    NWIOGUDSADDR, NWIOGUDSCTRL, NWIOGUDSMINOR, NWIOGUDSPEERCRED, NWIOSUDSACCEPT, NWIOSUDSADDR,
+    NWIOSUDSBLOG, NWIOSUDSCONN, NWIOSUDSCTRL, NWIOSUDSPAIR, SCM_CREDS, SCM_RIGHTS,
+    SOCKADDR_UN_SIZE, SOL_SOCKET, SockAddrUn, UDS_PATH_MAX, UUCRED_GID_OFF, UUCRED_SIZE,
+    UUCRED_UID_OFF, build_control, cmsg_align, cmsg_len, cmsg_space, parse_creds, parse_rights,
+    uucred,
+};
 
 /// IPv4 address, network byte order (matches `ipaddr_t`).
 pub type IpAddr = [u8; 4];
@@ -41,14 +51,18 @@ pub type Port = u16;
 /// NetBSD-style ioctl encoding (`.refs/minix-3.3.0/sys/sys/ioctl.h`).
 mod ioc {
     /// `IOC_OUT` — device writes data to the user (read ioctl, `_IOR`).
-    pub(crate) const IOC_OUT: u32 = 0x4000_0000;
+    pub const IOC_OUT: u32 = 0x4000_0000;
     /// `IOC_IN` — user writes data to the device (write ioctl, `_IOW`).
-    pub(crate) const IOC_IN: u32 = 0x8000_0000;
+    pub const IOC_IN: u32 = 0x8000_0000;
     /// `IOC_INOUT` — bidirectional.
-    pub(crate) const IOC_INOUT: u32 = 0xC000_0000;
+    pub const IOC_INOUT: u32 = 0xC000_0000;
     /// `IOCPARM_MASK` — size field width.
-    pub(crate) const IOCPARM_MASK: u32 = 0x1fff;
+    pub const IOCPARM_MASK: u32 = 0x1fff;
 }
+
+/// The direction bits an ioctl code is encoded with, for a protocol module
+/// that needs to build one (e.g. `uds`).
+pub use ioc::{IOC_IN, IOC_INOUT, IOC_OUT};
 
 /// Encode an ioctl request: `_IOW`/`_IOR` with the NetBSD layout
 /// (direction in bits 30-31, size in bits 16-28, group in bits 8-15,

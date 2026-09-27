@@ -1,0 +1,14 @@
+# The `just test-timerfd-x86` scenario: the timerfd readiness primitive, driven
+# by `/bin/timerfdtest`.
+#
+#   FEED_SCENARIO=tools/smoke/timerfd.tsv sh tools/smoke/feed.sh <log> <seconds> <qemu command…>
+#
+# One step per line, as `tools/smoke/scenario.tsv` documents: the command, a tab, and the
+# whole line its output must produce.
+#
+# `timerfdtest` is non-interactive and prints the line below only after a one-shot timer, a
+# periodic timer, an absolute deadline and a disarm all behaved — each observed through a
+# blocking `poll` with no deadline. A timer that never fires hangs that poll, which the gate
+# reports as a stopped scenario.
+
+/bin/timerfdtest	timerfdtest: PASS

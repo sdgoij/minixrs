@@ -112,12 +112,34 @@ pub const BOOT_BINS: &[(&str, &str)] = &[
     // `/bin/ttyprobe` is the PTY round-trip probe (M2): opens /dev/ptyp0 +
     // /dev/ttyp0 and pushes bytes both ways through the line discipline.
     ("/bin/ttyprobe", "ttyprobe"),
+    // `/bin/udstest` is the UNIX-domain socket smoke test (Phase 0): a
+    // socketpair round-trip plus bind/listen/connect/accept through /dev/uds.
+    ("/bin/udstest", "udstest"),
+    // `/bin/memfdtest` is the anonymous-shared-memory smoke test (Phase 0): a
+    // memfd mapped shared twice and across a fork, with read/write agreeing.
+    ("/bin/memfdtest", "memfdtest"),
+    // `/bin/seltest` is the readiness smoke test (Phase 0): select(2) and
+    // poll(2) on pipes, each with a real timeout.
+    ("/bin/seltest", "seltest"),
+    // `/bin/eventfdtest` is the eventfd smoke test (Phase 0): counter semantics
+    // and a cross-process wake of a blocked poll.
+    ("/bin/eventfdtest", "eventfdtest"),
+    // `/bin/timerfdtest` is the timerfd smoke test (Phase 0): one-shot,
+    // periodic, absolute and disarmed timers, each observed through poll.
+    ("/bin/timerfdtest", "timerfdtest"),
+    // `/bin/epolltest` is the epoll smoke test (Phase 0): a persistent interest
+    // set, level-triggered readiness, and a blocked epoll_wait woken by a child
+    // process.
+    ("/bin/epolltest", "epolltest"),
     // `/bin/wterm` is the terminal window client (M3): a pty with /bin/sh
     // on the slave, its output rendered (VT subset) into a wserver window.
     ("/bin/wterm", "wterm"),
     // `/sbin/wserver` is the window server (K5): boot proc 18, the in-house
     // compositor on /dev/fb.
     ("/sbin/wserver", "wserver"),
+    // `/sbin/uds` is the UNIX-domain socket server (`WAYLAND.md` Phase 0):
+    // boot proc 19, the /dev/uds character driver.
+    ("/sbin/uds", "uds"),
     ("/bin/kill", "kill"),
     ("/bin/sigtest", "sigtest"),
     ("/sbin/mknod", "mknod"),
@@ -211,6 +233,8 @@ pub const DEVICES: &[(&str, u32, u32, u32)] = &[
     ("/dev/ptyp1", 0o020666, 9, 193),
     ("/dev/ptyp2", 0o020666, 9, 194),
     ("/dev/ptyp3", 0o020666, 9, 195),
+    // Last, so no existing device is renumbered by its arrival.
+    ("/dev/uds", 0o020600, 18, 0), // char device, major=18 (uds), minor=0
 ];
 
 #[cfg(test)]

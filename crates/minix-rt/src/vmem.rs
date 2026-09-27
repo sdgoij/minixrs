@@ -9,6 +9,8 @@ pub const VM_RQ_BASE: u32 = 0xC00;
 pub const VM_MMAP: u32 = VM_RQ_BASE + 10;
 /// Unmap memory (VM_MUNMAP = VM_RQ_BASE + 17 = 0xC11).
 pub const VM_MUNMAP: u32 = VM_RQ_BASE + 17;
+/// Change a mapping's protection (VM_MPROTECT = VM_RQ_BASE + 48 = 0xC30).
+pub const VM_MPROTECT: u32 = VM_RQ_BASE + 48;
 
 pub const PROT_READ: i32 = 0x01;
 pub const PROT_WRITE: i32 = 0x02;
@@ -180,6 +182,37 @@ pub unsafe fn munmap(addr: *mut u8, length: usize) -> i32 {
     {
         let _ = (addr, length);
         -1
+    }
+}
+
+/// Change the protection of the pages in `[addr, addr + length)`.
+///
+/// `addr` must be page-aligned and every page in the range must already be
+/// mapped, as POSIX requires (`ENOMEM` otherwise) — `mprotect` never faults a
+/// page in. `prot` is `PROT_NONE`, or any `|` of `PROT_READ`, `PROT_WRITE` and
+/// `PROT_EXEC`.
+///
+/// The region's permissions are what a later fault consults, and present pages
+/// are re-mapped now, so the change takes effect for pages already faulted in and
+/// for pages that fault later.
+///
+/// # Safety
+///
+/// The range must be mapped in the calling process.
+pub unsafe fn mprotect(addr: *mut u8, length: usize, prot: i32) -> Result<(), i32> {
+    #[cfg(target_os = "minix")]
+    unsafe {
+        let mut msg = [0u8; 64];
+        msg_set_i32(&mut msg, OFF_TYPE, VM_MPROTECT as i32);
+        msg_set_u64(&mut msg, OFF_VM_ADDR, addr as u64);
+        msg_set_u64(&mut msg, OFF_VM_LEN, length as u64);
+        msg_set_i32(&mut msg, OFF_VM_PROT, prot);
+        vm_call(&mut msg)
+    }
+    #[cfg(not(target_os = "minix"))]
+    {
+        let _ = (addr, length, prot);
+        Err(-78) // ENOSYS — no VM to ask on the host
     }
 }
 

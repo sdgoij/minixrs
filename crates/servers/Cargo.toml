@@ -92,6 +92,11 @@ path = "src/bin/net.rs"
 test = false
 
 [[bin]]
+name = "uds"
+path = "src/bin/uds.rs"
+test = false
+
+[[bin]]
 name = "devman"
 path = "src/bin/devman.rs"
 test = false
