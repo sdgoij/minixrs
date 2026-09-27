@@ -216,6 +216,27 @@ pub const VIRTGPU_EXECBUF_RING_IDX: u32 = 0x04;
 pub const VIRTGPU_EXECBUF_FLAGS: u32 =
     VIRTGPU_EXECBUF_FENCE_FD_IN | VIRTGPU_EXECBUF_FENCE_FD_OUT | VIRTGPU_EXECBUF_RING_IDX;
 
+/// `VIRTGPU_BLOB_MEM_GUEST` — the blob's memory is the guest's, which is the only kind that
+/// needs no host window to reach it.
+pub const VIRTGPU_BLOB_MEM_GUEST: u32 = 0x0001;
+/// `VIRTGPU_BLOB_MEM_HOST3D` — the blob's memory is the host's, mapped into the guest through a
+/// shared-memory window (`VIRTIO_GPU_SHM_ID_HOST_VISIBLE`).
+pub const VIRTGPU_BLOB_MEM_HOST3D: u32 = 0x0002;
+/// `VIRTGPU_BLOB_MEM_HOST3D_GUEST` — host memory with a guest shadow, through the same window.
+pub const VIRTGPU_BLOB_MEM_HOST3D_GUEST: u32 = 0x0003;
+
+/// `VIRTGPU_BLOB_FLAG_USE_MAPPABLE` — the blob is to be mapped by its client.
+pub const VIRTGPU_BLOB_FLAG_USE_MAPPABLE: u32 = 0x0001;
+/// `VIRTGPU_BLOB_FLAG_USE_SHAREABLE` — the blob may be shared.
+pub const VIRTGPU_BLOB_FLAG_USE_SHAREABLE: u32 = 0x0002;
+/// `VIRTGPU_BLOB_FLAG_USE_CROSS_DEVICE` — the blob may be imported by another virtio device,
+/// which needs a device-assigned UUID that this port has no command for.
+pub const VIRTGPU_BLOB_FLAG_USE_CROSS_DEVICE: u32 = 0x0004;
+/// `VIRTGPU_BLOB_FLAG_USE_MASK` — the flags this ABI defines, and so the mask a request's flags
+/// are checked against before anything else about it is believed.
+pub const VIRTGPU_BLOB_FLAG_USE_MASK: u32 =
+    VIRTGPU_BLOB_FLAG_USE_MAPPABLE | VIRTGPU_BLOB_FLAG_USE_SHAREABLE | VIRTGPU_BLOB_FLAG_USE_CROSS_DEVICE;
+
 /// `DRM_CAP_DUMB_BUFFER`: the mode-setting dumb-buffer ioctl. A render node has none.
 pub const DRM_CAP_DUMB_BUFFER: u64 = 0x1;
 /// `DRM_CAP_PRIME`: dma-buf import/export. Not yet.
@@ -273,6 +294,23 @@ pub trait RenderNode {
     /// `DRM_IOCTL_VIRTGPU_RESOURCE_INFO`: the object's host resource, its length and its
     /// blob kind (0 for a plain object).
     fn resource_info(&mut self, handle: u32) -> Result<ResourceInfo, i32>;
+
+    /// `DRM_IOCTL_VIRTGPU_RESOURCE_CREATE_BLOB`: make an object whose memory the request names a
+    /// *kind* for, rather than the 2D shape `RESOURCE_CREATE` describes.
+    ///
+    /// This node has one memory — the server's arena, which is guest memory — so the guest kind
+    /// is the one it implements: an object naming an arena slot as any other does, with the slot's
+    /// pages travelling *in* the create command, which is how the host folds a blob's backing
+    /// into it instead of following it with an `ATTACH_BACKING`. The host kinds need a
+    /// shared-memory window to reach host memory, and this node has none — which is what its 0
+    /// for `VIRTGPU_PARAM_HOST_VISIBLE` says — so they are `ENOSYS`: well formed requests this
+    /// device cannot answer, refused rather than half-made.
+    ///
+    /// A request this ABI cannot read — an undefined memory kind or flag bit, a guest blob
+    /// carrying a `blob_id` or a command buffer — is `EINVAL`, and so is one longer than the
+    /// backing. A node whose device never offered `VIRTIO_GPU_F_RESOURCE_BLOB` has no blob kind at
+    /// all, and says `EINVAL` for that reason before it looks at the request.
+    fn create_blob(&mut self, request: BlobCreate) -> Result<CreatedObject, i32>;
 
     /// `DRM_IOCTL_GEM_CLOSE`: drop the object and release the host resource behind it.
     /// Dropping a handle twice, or one this node never issued, is `ENOENT` — the ABI has no
@@ -364,6 +402,24 @@ pub struct ResourceCreate {
     pub stride: u32,
 }
 
+/// `struct drm_virtgpu_resource_create_blob`, as [`dispatch`] decoded it.
+///
+/// `cmd` and `blob_id` are carried for the rules that name them rather than for their contents.
+/// A guest blob must have both zero, so the node's blob path never dereferences `cmd` — which is
+/// why a request with a non-zero one is refused before any copy is attempted, and why `BlobCreate`
+/// holds no user address at all. `blob_hints` is a host-memory hint Linux reads only when it
+/// creates a host blob, so on a guest blob it is a field with a defined offset and no meaning:
+/// decoded so that a test can pin where the ABI puts it, and deliberately unread.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct BlobCreate {
+    pub blob_mem: u32,
+    pub blob_flags: u32,
+    pub size: u64,
+    pub cmd_size: u32,
+    pub blob_id: u64,
+    pub blob_hints: u32,
+}
+
 /// What a `RESOURCE_CREATE` produced: the GEM handle a client names the object by, the host
 /// resource it is attached to, and how many bytes it holds (the request's size rounded up
 /// to a whole page, which is what a GEM object's length always is).
@@ -394,11 +450,25 @@ pub struct ResourceInfo {
 /// handles are per open file and its resource ids per device; this node is one allocator, so
 /// numbering them alike is the honest simplification, not an accident. A client treats both
 /// as opaque, and only the resource id ever reaches the host.
+///
+/// Numbering from 1 is safe only while the *output* path and the node are separate driver
+/// instances, which is what `fb.rs` arranges: it probes for a render node only when `virtio-gpu`
+/// is not already the display backend. The display's own resource is id 1 (`virtio_gpu.rs`'s
+/// `RESOURCE_ID`), so a node sharing that instance would have to number its objects above the
+/// ids the display holds.
 #[derive(Debug, Clone, Copy)]
 pub struct GemTable {
     max_len: u32,
-    /// The length of the object in each slot, or `None` for a free one.
-    objects: [Option<u32>; MAX_OBJECTS],
+    /// What is in each slot, or `None` for a free one.
+    objects: [Option<Slot>; MAX_OBJECTS],
+}
+
+/// One slot's occupant: how long the object is, and the blob kind it was made with (0 for an
+/// object that is not a blob).
+#[derive(Debug, Clone, Copy)]
+struct Slot {
+    len: u32,
+    blob_mem: u32,
 }
 
 impl GemTable {
@@ -412,7 +482,17 @@ impl GemTable {
 
     /// The object in `slot`, if it is in use.
     fn len_of(&self, slot: usize) -> Option<u32> {
-        self.objects.get(slot).copied().flatten()
+        self.objects.get(slot).copied().flatten().map(|s| s.len)
+    }
+
+    /// The blob kind of the object in `slot`, or 0 when the slot is free or its object is not a
+    /// blob.
+    fn blob_kind_of(&self, slot: usize) -> u32 {
+        self.objects
+            .get(slot)
+            .copied()
+            .flatten()
+            .map_or(0, |s| s.blob_mem)
     }
 
     /// How much backing one slot has: the longest object this table can hold.
@@ -438,26 +518,31 @@ impl GemTable {
         self.len_of(Self::slot_of_offset(offset)?)
     }
 
-    /// Make an object of `bytes` (one page when the caller asked for none), or `EINVAL` when
-    /// it is longer than the backing, or `ENOSPC` when every slot is taken.
-    pub fn create(&mut self, bytes: u32) -> Result<CreatedObject, i32> {
+    /// The whole-page length of an object of `bytes` (one page when the caller asked for none),
+    /// or `EINVAL` when it is longer than the backing or so long that rounding it overflows.
+    fn fit(&self, bytes: u32) -> Result<u32, i32> {
         const PAGE: u32 = 4096;
-        // The *rounded* length is what a slot has to have room for, and what the object's
-        // `size` becomes: a GEM object's length is always a whole number of pages, and a
-        // request one byte over a page boundary is a page longer than it looks.
+        // The *rounded* length is what a slot has to have room for, and what the object's `size`
+        // becomes: a GEM object's length is always a whole number of pages, and a request one byte
+        // over a page boundary is a page longer than it looks.
         let Some(len) = bytes.max(1).div_ceil(PAGE).checked_mul(PAGE) else {
-            // `u32::MAX` rounds up out of the type. A request that large is not a request
-            // this node can answer at all, so it is refused rather than wrapped to a length
-            // that would fit.
+            // `u32::MAX` rounds up out of the type. A request that large is not a request this
+            // node can answer at all, so it is refused rather than wrapped to a length that would
+            // fit.
             return Err(EINVAL);
         };
         if len > self.max_len {
             return Err(EINVAL);
         }
+        Ok(len)
+    }
+
+    /// Put a `len`-byte object of kind `blob_mem` in the first free slot, or `ENOSPC`.
+    fn make(&mut self, len: u32, blob_mem: u32) -> Result<CreatedObject, i32> {
         let Some(slot) = self.objects.iter().position(|o| o.is_none()) else {
             return Err(ENOSPC);
         };
-        self.objects[slot] = Some(len);
+        self.objects[slot] = Some(Slot { len, blob_mem });
         let id = slot as u32 + 1;
         Ok(CreatedObject {
             handle: id,
@@ -466,10 +551,36 @@ impl GemTable {
         })
     }
 
+    /// Make an ordinary object of `bytes`, or `EINVAL` when it is longer than the backing, or
+    /// `ENOSPC` when every slot is taken.
+    pub fn create(&mut self, bytes: u32) -> Result<CreatedObject, i32> {
+        let len = self.fit(bytes)?;
+        self.make(len, 0)
+    }
+
+    /// Make a blob object of `bytes` whose memory the request called `blob_mem`. The length rules
+    /// are an ordinary object's: a blob is an object that *remembers* its kind, not one with
+    /// different arithmetic.
+    pub fn create_blob(&mut self, bytes: u32, blob_mem: u32) -> Result<CreatedObject, i32> {
+        let len = self.fit(bytes)?;
+        self.make(len, blob_mem)
+    }
+
     /// The slot and length behind `handle`, or `None`.
     pub fn lookup(&self, handle: u32) -> Option<(usize, u32)> {
         let slot = (handle as usize).checked_sub(1)?;
         self.len_of(slot).map(|len| (slot, len))
+    }
+
+    /// The blob kind behind `handle`: 0 for a handle this table does not hold, and 0 for an
+    /// object that is not a blob. The two are the same answer on purpose — `RESOURCE_INFO`
+    /// reports the field for an object it found, and a client that asked about a handle it does
+    /// not hold has already been told `ENOENT`.
+    pub fn blob_mem(&self, handle: u32) -> u32 {
+        match (handle as usize).checked_sub(1) {
+            Some(slot) => self.blob_kind_of(slot),
+            None => 0,
+        }
     }
 
     /// Release `handle`, returning its slot and id, or `None` for a handle not held.
@@ -690,6 +801,31 @@ pub fn dispatch(
                     // actually allocated is the one number a client cannot work out itself,
                     // and it is what `RESOURCE_INFO` reports for the same object.
                     wr_u32(arg, 48, o.size);
+                    0
+                }
+                Err(e) => e,
+            }
+        }
+        DRM_IOCTL_VIRTGPU_RESOURCE_CREATE_BLOB => {
+            if !fits(arg, request) {
+                return EINVAL;
+            }
+            // `bo_handle` is an *out* field for this request, unlike `RESOURCE_CREATE`'s
+            // re-create input, so it is not read: Linux's `verify_blob` never looks at it, and
+            // the handle comes back in the same word. `size` is an input the host leaves alone,
+            // so this arm writes two fields back where the sibling above writes three.
+            let create = BlobCreate {
+                blob_mem: rd_u32(arg, 0),
+                blob_flags: rd_u32(arg, 4),
+                size: rd_u64(arg, 16),
+                cmd_size: rd_u32(arg, 28),
+                blob_id: rd_u64(arg, 40),
+                blob_hints: rd_u32(arg, 48),
+            };
+            match node.create_blob(create) {
+                Ok(o) => {
+                    wr_u32(arg, 8, o.handle);
+                    wr_u32(arg, 12, o.res_handle);
                     0
                 }
                 Err(e) => e,
@@ -945,6 +1081,31 @@ mod tests {
                 blob_mem: 0,
             })
         }
+
+        /// The node's own rules, so the encoding tests can drive the answer *and* each refusal:
+        /// the guest kind is the one this node serves, the host kinds are the ones it has no
+        /// memory window for, and an undefined kind or flag is a request it cannot read.
+        fn create_blob(&mut self, request: BlobCreate) -> Result<CreatedObject, i32> {
+            if request.blob_flags & !VIRTGPU_BLOB_FLAG_USE_MASK != 0 {
+                return Err(EINVAL);
+            }
+            if request.blob_flags & VIRTGPU_BLOB_FLAG_USE_CROSS_DEVICE != 0 {
+                return Err(EINVAL);
+            }
+            match request.blob_mem {
+                VIRTGPU_BLOB_MEM_GUEST => {}
+                VIRTGPU_BLOB_MEM_HOST3D | VIRTGPU_BLOB_MEM_HOST3D_GUEST => return Err(ENOSYS),
+                _ => return Err(EINVAL),
+            }
+            if request.cmd_size != 0 || request.blob_id != 0 {
+                return Err(EINVAL);
+            }
+            Ok(CreatedObject {
+                handle: OBJECT,
+                res_handle: RESOURCE,
+                size: LEN,
+            })
+        }
         fn close_object(&mut self, handle: u32) -> Result<(), i32> {
             if handle != OBJECT {
                 return Err(ENOENT);
@@ -1026,6 +1187,18 @@ mod tests {
     fn resource_info_arg(handle: u32) -> [u8; 16] {
         let mut arg = [0u8; 16];
         wr_u32(&mut arg, 0, handle);
+        arg
+    }
+
+    /// A `struct drm_virtgpu_resource_create_blob`: the memory kind and flags, the length, and the
+    /// two fields a guest blob must leave zero. `bo_handle`/`res_handle` are output fields, so they
+    /// start zeroed; `size` is at 16, `cmd_size` at 28, `cmd` at 32, `blob_id` at 40 and
+    /// `blob_hints` at 48, which is the layout the request number's 56 bytes encode.
+    fn blob_create_arg(blob_mem: u32, blob_flags: u32, size: u64) -> [u8; 56] {
+        let mut arg = [0u8; 56];
+        wr_u32(&mut arg, 0, blob_mem);
+        wr_u32(&mut arg, 4, blob_flags);
+        wr_u64(&mut arg, 16, size);
         arg
     }
 
@@ -1174,6 +1347,121 @@ mod tests {
                 &mut arg
             ),
             ENOENT
+        );
+    }
+
+    /// `RESOURCE_CREATE_BLOB` reads the kind, the flags and the length out of the fields the ABI
+    /// puts them in, writes the two handles into *its* fields, and leaves an input field alone —
+    /// and every refusal is driven through `dispatch`, which is what makes the offsets the subject
+    /// rather than the node's arithmetic.
+    #[test]
+    fn blob_create_writes_the_handles_and_refuses_what_the_node_cannot_read() {
+        let mut node = FakeNode;
+        let mut users = FakeUser::new();
+        let mut arg = blob_create_arg(VIRTGPU_BLOB_MEM_GUEST, VIRTGPU_BLOB_FLAG_USE_MAPPABLE, 16384);
+        // The length is an input: a node that rounded it in place would be writing a number this
+        // ABI never writes, and `RESOURCE_INFO` is where a client reads what it got.
+        assert_eq!(
+            dispatch(
+                &mut node,
+                &mut users,
+                DRM_IOCTL_VIRTGPU_RESOURCE_CREATE_BLOB,
+                &mut arg
+            ),
+            0
+        );
+        assert_eq!(rd_u32(&arg, 8), OBJECT, "bo_handle at 8");
+        assert_eq!(rd_u32(&arg, 12), RESOURCE, "res_handle at 12");
+        assert_eq!(rd_u64(&arg, 16), 16384, "size is the caller's");
+        assert_eq!(users.writes(), 0, "a guest blob reaches no user pointer");
+
+        // An undefined memory kind, and the two that need a window this node has not got.
+        for (mem, want) in [
+            (0, EINVAL),
+            (4, EINVAL),
+            (VIRTGPU_BLOB_MEM_HOST3D, ENOSYS),
+            (VIRTGPU_BLOB_MEM_HOST3D_GUEST, ENOSYS),
+        ] {
+            let mut arg = blob_create_arg(mem, VIRTGPU_BLOB_FLAG_USE_MAPPABLE, 4096);
+            assert_eq!(
+                dispatch(
+                    &mut node,
+                    &mut users,
+                    DRM_IOCTL_VIRTGPU_RESOURCE_CREATE_BLOB,
+                    &mut arg
+                ),
+                want,
+                "blob_mem {mem}"
+            );
+        }
+
+        // A flag the ABI does not define, and the one that needs a UUID command.
+        for flags in [0x8, VIRTGPU_BLOB_FLAG_USE_CROSS_DEVICE] {
+            let mut arg = blob_create_arg(VIRTGPU_BLOB_MEM_GUEST, flags, 4096);
+            assert_eq!(
+                dispatch(
+                    &mut node,
+                    &mut users,
+                    DRM_IOCTL_VIRTGPU_RESOURCE_CREATE_BLOB,
+                    &mut arg
+                ),
+                EINVAL,
+                "blob_flags {flags:#x}"
+            );
+        }
+
+        // The two fields that name another object's memory, either of which a guest blob must leave
+        // zero — and refusing them here is what keeps the node from ever reading `cmd`.
+        let mut arg = blob_create_arg(VIRTGPU_BLOB_MEM_GUEST, VIRTGPU_BLOB_FLAG_USE_MAPPABLE, 4096);
+        wr_u64(&mut arg, 40, 5);
+        assert_eq!(
+            dispatch(
+                &mut node,
+                &mut users,
+                DRM_IOCTL_VIRTGPU_RESOURCE_CREATE_BLOB,
+                &mut arg
+            ),
+            EINVAL,
+            "a blob_id"
+        );
+        let mut arg = blob_create_arg(VIRTGPU_BLOB_MEM_GUEST, VIRTGPU_BLOB_FLAG_USE_MAPPABLE, 4096);
+        wr_u32(&mut arg, 28, 16);
+        wr_u64(&mut arg, 32, 0x5000);
+        assert_eq!(
+            dispatch(
+                &mut node,
+                &mut users,
+                DRM_IOCTL_VIRTGPU_RESOURCE_CREATE_BLOB,
+                &mut arg
+            ),
+            EINVAL,
+            "a command buffer"
+        );
+
+        // A `blob_hints` value at the offset the ABI puts it in is not an error: it is a hint for a
+        // host blob's mapping, and this request is not one.
+        let mut arg = blob_create_arg(VIRTGPU_BLOB_MEM_GUEST, VIRTGPU_BLOB_FLAG_USE_MAPPABLE, 4096);
+        wr_u32(&mut arg, 48, 1);
+        assert_eq!(
+            dispatch(
+                &mut node,
+                &mut users,
+                DRM_IOCTL_VIRTGPU_RESOURCE_CREATE_BLOB,
+                &mut arg
+            ),
+            0
+        );
+
+        // A shorter argument than the request number's size.
+        let mut arg = [0u8; 40];
+        assert_eq!(
+            dispatch(
+                &mut node,
+                &mut users,
+                DRM_IOCTL_VIRTGPU_RESOURCE_CREATE_BLOB,
+                &mut arg
+            ),
+            EINVAL
         );
     }
 
@@ -1517,6 +1805,30 @@ mod tests {
         assert_eq!(full.create(4096), Err(ENOSPC));
     }
 
+    /// A blob is an object that remembers its kind: `RESOURCE_INFO` reports it, an ordinary object
+    /// reports 0, and the two share every other rule — a free slot, and the same length arithmetic.
+    #[test]
+    fn a_blob_object_remembers_its_kind_and_an_ordinary_one_has_none() {
+        let mut objects = GemTable::new(8192);
+        let blob = objects
+            .create_blob(3000, VIRTGPU_BLOB_MEM_GUEST)
+            .expect("one page fits");
+        assert_eq!(blob.size, 4096, "a blob's length rounds like any object's");
+        assert_eq!(blob.handle, 1);
+        assert_eq!(objects.blob_mem(blob.handle), VIRTGPU_BLOB_MEM_GUEST);
+
+        let plain = objects.create(4096).expect("the next slot is free");
+        assert_eq!(plain.handle, 2);
+        assert_eq!(objects.blob_mem(plain.handle), 0, "not a blob");
+
+        // A blob is bounded by the backing exactly as an ordinary object is, and its kind does not
+        // survive the handle it was made under.
+        assert_eq!(objects.create_blob(8193, VIRTGPU_BLOB_MEM_GUEST), Err(EINVAL));
+        assert_eq!(objects.remove(blob.handle), Some((0, blob.handle)));
+        assert_eq!(objects.blob_mem(blob.handle), 0, "the slot is free again");
+        assert_eq!(objects.blob_mem(99), 0, "a handle this table never issued");
+    }
+
     /// A client's memory, as far as these requests are concerned: a few named buffers, so
     /// that a copy is checked *where it landed* rather than only that it happened. This is
     /// what `safecopy_to` is in the real node.
@@ -1634,6 +1946,11 @@ mod tests {
         assert_eq!(DRM_IOCTL_VIRTGPU_TRANSFER_TO_HOST, 0xC02C_6447);
         assert_eq!(DRM_IOCTL_VIRTGPU_WAIT, 0xC008_6448);
         assert_eq!(DRM_IOCTL_VIRTGPU_GET_CAPS, 0xC018_6449);
+        // 56, not 48: the ABI grew `blob_hints` and a padding word after `blob_id`, and a request
+        // number carries its struct's size — so a client built against a header without them asks
+        // with `0xC030_644A`, a number this node does not serve. Mesa's vendored `virtgpu_drm.h`
+        // has both fields; libdrm's copy, at the time of writing, does not, which is why the Mesa
+        // port must build against Mesa's own header rather than libdrm's.
         assert_eq!(DRM_IOCTL_VIRTGPU_RESOURCE_CREATE_BLOB, 0xC038_644A);
         assert_eq!(DRM_IOCTL_VIRTGPU_CONTEXT_INIT, 0xC010_644B);
 

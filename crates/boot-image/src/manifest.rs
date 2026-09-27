@@ -206,6 +206,9 @@ pub const BOOT_BINS: &[(&str, &str)] = &[
     // `/bin/drmexec` moves an object's contents through a transfer, submits a command that
     // rewrites one row, and transfers the result back (§6.10, stage 3b-4).
     ("/bin/drmexec", "drmexec"),
+    // `/bin/drmblob` makes a blob object, reads its kind back, and asks for every kind and flag
+    // this node cannot serve (§6.10, stage 3b-4).
+    ("/bin/drmblob", "drmblob"),
 ];
 
 /// Programs a **wasm32** image carries: destination path → module file name in the target's

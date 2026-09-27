@@ -58,4 +58,18 @@
 /bin/drminfo	drminfo: virtio_gpu 3d=1 err 0 blob=1 err 0 ctx=1 err 0 host=0 err 0 mask=3 err 0 caps=ok
 /bin/drmctx	drmctx: init=ok again=err 17
 /bin/drmctx	drmctx: init=ok again=err 17
-/bin/drmexec	drmexec: h=1 up=ok exec=ok wait=ok down=ok row=32 rest=16352
+/bin/drmexec	drmexec: h=1 up=ok exec=ok wait=ok down=ok row=32 rest=16352 close=ok
+#
+# The fifth step is the blob request surface: `/bin/drmblob` makes a blob whose memory is the
+# guest's, reads its kind back out of `RESOURCE_INFO` - a field that read 0 for every object
+# before this stage - maps it, and then asks for everything this node cannot give, one request
+# per rule with a single field changed. The host kinds are `ENOSYS` (38) because this device has
+# no shared-memory window to reach host memory, which is what its 0 for
+# `VIRTGPU_PARAM_HOST_VISIBLE` already said; an undefined kind or flag, and the two fields a
+# guest blob must leave zero, are `EINVAL` (22) because those are requests the ABI cannot read.
+# `blobid` is asked with a null `cmd` on purpose: a node that read that pointer before refusing
+# would answer `EFAULT` (14) instead, so the errno is what tells the order of the two checks
+# apart. On this device `GETPARAM` reports `blob 1`, and the no-GL gate's step is the other
+# half - the same client, refused at its first request because that device has the feature
+# off.
+/bin/drmblob	drmblob: create=ok mem=1 size=16384 map=ok host3d=err 38 hostguest=err 38 mem0=err 22 blobid=err 22 cmdsize=err 22 flags=err 22 cross=err 22 close=ok gone=err 2

@@ -55,6 +55,10 @@ const CMD_SUBMIT_3D: u32 = 0x0207;
 /// Releasing a resource matters more than it looks: the host refuses a *duplicate*
 /// resource id, so a probe that leaked one would break the next 3D user's create.
 const CMD_RESOURCE_UNREF: u32 = 0x0102;
+/// `RESOURCE_CREATE_BLOB`. Unlike every other create, this one carries its own backing: the
+/// memory entries follow the command body, so a blob is never followed by an
+/// `ATTACH_BACKING` the way a 2D resource is.
+const CMD_RESOURCE_CREATE_BLOB: u32 = 0x010c;
 
 /// `VIRTIO_GPU_F_*` feature bits. `VIRGL` is the one a host may not have: without
 /// it the device offers no capset and no context, and 3D commands come back as
@@ -290,6 +294,22 @@ struct AttachBacking {
     hdr: CtrlHdr,
     resource_id: u32,
     nr_entries: u32,
+    entries: [MemEntry; 1],
+}
+
+/// `struct virtio_gpu_resource_create_blob` with one memory entry — 72 bytes: the 40-byte body
+/// (hdr, resource_id, blob_mem, blob_flags, nr_entries, blob_id, size) and then the entries,
+/// which is the one way this command differs from a create that is followed by its backing.
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+struct ResourceCreateBlob {
+    hdr: CtrlHdr,
+    resource_id: u32,
+    blob_mem: u32,
+    blob_flags: u32,
+    nr_entries: u32,
+    blob_id: u64,
+    size: u64,
     entries: [MemEntry; 1],
 }
 
@@ -789,10 +809,9 @@ impl VirtioGpuArch {
         self.fetch_capset(info.id, info.max_version, &mut [])
     }
 
-    /// `CTX_CREATE`: the context the host will run command buffers for. The context
-    /// id is the driver's to choose and travels in the header, which is why the
+    /// `CTX_CREATE`: make a rendering context — the thing the host runs command buffers for.
+    /// The context id is the driver's to choose and travels in the header, which is why the
     /// probe can pick one and hand it straight back.
-    /// `CTX_CREATE`: make a rendering context.
     ///
     /// `flags` is the DRM context request's `context_init` word — on Linux the capset id in its
     /// low bits — which is how the host learns which capset the context renders with. Zero is a
@@ -832,6 +851,40 @@ impl VirtioGpuArch {
             hdr: CtrlHdr::new(CMD_RESOURCE_ATTACH_BACKING),
             resource_id,
             nr_entries: 1,
+            entries: [MemEntry {
+                addr: pa,
+                length: len,
+                padding: 0,
+            }],
+        };
+        self.send_cmd(struct_bytes(&cmd))
+    }
+
+    /// `RESOURCE_CREATE_BLOB` for a blob whose memory is the guest's: one command carrying the
+    /// object, the kind of memory it names and the pages behind it. The entries ride *inside*
+    /// this command rather than in an `ATTACH_BACKING` after it, which is the whole difference
+    /// between creating a blob and creating a resource and then giving it a backing.
+    ///
+    /// The blob's length and its backing are the same number here, because this node's objects are
+    /// their slot: the host wants a backing at least as large as the blob, and equal is the only
+    /// length a slot can honestly claim. `blob_id` is zero because a guest blob names no other
+    /// object — the two fields that could say otherwise are refused before this is reached.
+    fn resource_create_blob_guest(
+        &mut self,
+        resource_id: u32,
+        blob_mem: u32,
+        blob_flags: u32,
+        pa: u64,
+        len: u32,
+    ) -> Result<(), DriverError> {
+        let cmd = ResourceCreateBlob {
+            hdr: CtrlHdr::new(CMD_RESOURCE_CREATE_BLOB),
+            resource_id,
+            blob_mem,
+            blob_flags,
+            nr_entries: 1,
+            blob_id: 0,
+            size: len as u64,
             entries: [MemEntry {
                 addr: pa,
                 length: len,
@@ -1400,6 +1453,64 @@ impl drm::RenderNode for DrmNode {
         Ok(object)
     }
 
+    fn create_blob(&mut self, request: drm::BlobCreate) -> Result<drm::CreatedObject, i32> {
+        // The feature first: a device that never offered `VIRTIO_GPU_F_RESOURCE_BLOB` has no blob
+        // kind at all, so *every* blob request is one this node cannot read. `GETPARAM` reports
+        // the same bit, which is how a client knows not to ask.
+        if !self.blob {
+            return Err(drm::EINVAL);
+        }
+        if request.blob_flags & !drm::VIRTGPU_BLOB_FLAG_USE_MASK != 0 {
+            return Err(drm::EINVAL);
+        }
+        // Sharing a blob with another device needs `RESOURCE_ASSIGN_UUID`, a command this port has
+        // not written — which is the same reason `GETPARAM` answers `CROSS_DEVICE` with 0.
+        if request.blob_flags & drm::VIRTGPU_BLOB_FLAG_USE_CROSS_DEVICE != 0 {
+            return Err(drm::EINVAL);
+        }
+        match request.blob_mem {
+            drm::VIRTGPU_BLOB_MEM_GUEST => {}
+            // Host memory reaches the guest through a shared-memory window this device does not
+            // have, which is what its 0 for `VIRTGPU_PARAM_HOST_VISIBLE` says. The request is
+            // well formed and this device cannot answer it, so it is refused rather than answered
+            // with an object no client could map or read.
+            drm::VIRTGPU_BLOB_MEM_HOST3D | drm::VIRTGPU_BLOB_MEM_HOST3D_GUEST => {
+                return Err(drm::ENOSYS);
+            }
+            _ => return Err(drm::EINVAL),
+        }
+        // A guest blob's memory is its own, so the two fields that name *another* object's memory
+        // have to be absent. Linux refuses either being set, and doing the same is what keeps this
+        // node from ever having to reach a user pointer to read `cmd`.
+        if request.cmd_size != 0 || request.blob_id != 0 {
+            return Err(drm::EINVAL);
+        }
+        // The ABI's length is 64-bit and this node's backing is counted in 32, so a request too
+        // large for the type is refused rather than truncated into one that fits.
+        let Ok(bytes) = u32::try_from(request.size) else {
+            return Err(drm::EINVAL);
+        };
+        let object = self.gems.create_blob(bytes, request.blob_mem)?;
+        let pa = self
+            .slot_va((object.handle - 1) as usize)
+            .wrapping_add(virtio::virtio_phys_delta() as u64);
+        let created = self.dev.resource_create_blob_guest(
+            object.res_handle,
+            request.blob_mem,
+            request.blob_flags,
+            pa,
+            object.size,
+        );
+        if created.is_err() {
+            // The slot goes back before the failure is reported, as a failed `RESOURCE_CREATE`
+            // releases its own: a handle a client has but cannot use would surface at `mmap`, one
+            // call further from the cause.
+            self.gems.remove(object.handle);
+            return Err(drm::EINVAL);
+        }
+        Ok(object)
+    }
+
     fn map_offset(&mut self, handle: u32) -> Result<u64, i32> {
         let Some((slot, _)) = self.gems.lookup(handle) else {
             return Err(drm::ENOENT);
@@ -1414,8 +1525,9 @@ impl drm::RenderNode for DrmNode {
         Ok(drm::ResourceInfo {
             res_handle: handle,
             size: len,
-            // No blobs yet, so no object has a blob kind (3b-4).
-            blob_mem: 0,
+            // The kind the object was made with, which is the one field of a blob that no
+            // arithmetic on the others can reconstruct: 0 for an object that is not a blob.
+            blob_mem: self.gems.blob_mem(handle),
         })
     }
 
@@ -2445,5 +2557,144 @@ mod tests {
         taken.context = Some(CONTEXT_ID);
         assert_eq!(taken.context_init(&capset), Err(drm::EEXIST));
         assert_eq!(taken.context_init(&[]), Err(drm::EEXIST));
+    }
+
+    /// `RESOURCE_CREATE_BLOB` is the one create that carries its own backing: a 40-byte body and
+    /// then the memory entries, at `sizeof(struct virtio_gpu_resource_create_blob)` — which is
+    /// where QEMU reads them from, so an entry placed anywhere else is a blob with no pages.
+    #[test]
+    fn resource_create_blob_layout_puts_the_entries_after_the_body() {
+        let cmd = ResourceCreateBlob {
+            hdr: CtrlHdr::new(CMD_RESOURCE_CREATE_BLOB),
+            resource_id: 7,
+            blob_mem: 1,
+            blob_flags: 1,
+            nr_entries: 1,
+            blob_id: 3,
+            size: 0x4000,
+            entries: [MemEntry {
+                addr: 0x1234_5000,
+                length: 0x4000,
+                padding: 0,
+            }],
+        };
+        let b = struct_bytes(&cmd);
+        assert_eq!(b.len(), 72);
+        assert_eq!(
+            u32::from_le_bytes(b[0..4].try_into().unwrap()),
+            CMD_RESOURCE_CREATE_BLOB
+        );
+        assert_eq!(u32::from_le_bytes(b[24..28].try_into().unwrap()), 7);
+        assert_eq!(u32::from_le_bytes(b[28..32].try_into().unwrap()), 1, "blob_mem");
+        assert_eq!(u32::from_le_bytes(b[32..36].try_into().unwrap()), 1, "blob_flags");
+        assert_eq!(u32::from_le_bytes(b[36..40].try_into().unwrap()), 1, "nr_entries");
+        assert_eq!(u64::from_le_bytes(b[40..48].try_into().unwrap()), 3, "blob_id");
+        assert_eq!(
+            u64::from_le_bytes(b[48..56].try_into().unwrap()),
+            0x4000,
+            "size"
+        );
+        assert_eq!(u64::from_le_bytes(b[56..64].try_into().unwrap()), 0x1234_5000);
+        assert_eq!(u32::from_le_bytes(b[64..68].try_into().unwrap()), 0x4000);
+        assert_eq!(u32::from_le_bytes(b[68..72].try_into().unwrap()), 0, "padding");
+    }
+
+    /// `create_blob`'s answers *before* any device command, so they are the node's own: the feature
+    /// gate, then the flags, then the memory kind, then the two fields a guest blob must leave
+    /// zero, and finally the table's own bound. The success path needs a device, and is the GL
+    /// gate's.
+    #[test]
+    fn create_blob_refuses_what_the_node_cannot_serve() {
+        let guest = |flags: u32| drm::BlobCreate {
+            blob_mem: drm::VIRTGPU_BLOB_MEM_GUEST,
+            blob_flags: flags,
+            size: 4096,
+            ..Default::default()
+        };
+
+        // No `VIRTIO_GPU_F_RESOURCE_BLOB`: this node has no blob kind at all, whatever the request
+        // says — which is the same answer `GETPARAM` already gave for `RESOURCE_BLOB`.
+        let mut node = drm_node(&[], true, false, false);
+        assert_eq!(node.create_blob(guest(1)), Err(drm::EINVAL));
+
+        let mut node = drm_node(&[], true, true, false);
+
+        // A memory kind the ABI does not define, and the two that need a host window this device
+        // does not have.
+        for mem in [0, 4] {
+            assert_eq!(
+                node.create_blob(drm::BlobCreate {
+                    blob_mem: mem,
+                    ..guest(1)
+                }),
+                Err(drm::EINVAL),
+                "blob_mem {mem}"
+            );
+        }
+        for mem in [
+            drm::VIRTGPU_BLOB_MEM_HOST3D,
+            drm::VIRTGPU_BLOB_MEM_HOST3D_GUEST,
+        ] {
+            assert_eq!(
+                node.create_blob(drm::BlobCreate {
+                    blob_mem: mem,
+                    ..guest(1)
+                }),
+                Err(drm::ENOSYS),
+                "blob_mem {mem}"
+            );
+        }
+
+        // A flag bit the ABI does not define, and the one that needs a UUID command.
+        for flags in [0x8, drm::VIRTGPU_BLOB_FLAG_USE_CROSS_DEVICE] {
+            assert_eq!(node.create_blob(guest(flags)), Err(drm::EINVAL), "{flags:#x}");
+        }
+
+        // The two fields that name another object's memory, which a guest blob must leave zero.
+        assert_eq!(
+            node.create_blob(drm::BlobCreate {
+                blob_id: 1,
+                ..guest(1)
+            }),
+            Err(drm::EINVAL)
+        );
+        assert_eq!(
+            node.create_blob(drm::BlobCreate {
+                cmd_size: 4,
+                ..guest(1)
+            }),
+            Err(drm::EINVAL)
+        );
+
+        // A length no slot could hold. Until a server names the node's backing there are no slots
+        // at all, so even a page is more than this one has.
+        assert_eq!(node.create_blob(guest(1)), Err(drm::EINVAL));
+    }
+
+    /// `RESOURCE_INFO` reports the kind the object was made with — the one field of a blob that no
+    /// arithmetic on the others can reconstruct, so it is read off the table rather than assumed.
+    #[test]
+    fn resource_info_reports_the_kind_the_object_was_made_with() {
+        let mut node = drm_node(&[], true, true, false);
+        node.gems = drm::GemTable::new(4096);
+        let blob = node
+            .gems
+            .create_blob(4096, drm::VIRTGPU_BLOB_MEM_GUEST)
+            .expect("one page fits the slot");
+        let plain = node.gems.create(4096).expect("the next slot is free");
+
+        assert_eq!(
+            node.resource_info(blob.handle)
+                .expect("the blob is in the table")
+                .blob_mem,
+            drm::VIRTGPU_BLOB_MEM_GUEST
+        );
+        assert_eq!(
+            node.resource_info(plain.handle)
+                .expect("the plain object is too")
+                .blob_mem,
+            0,
+            "not a blob"
+        );
     }
 }

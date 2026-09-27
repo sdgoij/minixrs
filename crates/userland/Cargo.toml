@@ -56,6 +56,11 @@ path = "src/bin/drmexec.rs"
 test = false
 
 [[bin]]
+name = "drmblob"
+path = "src/bin/drmblob.rs"
+test = false
+
+[[bin]]
 name = "init"
 path = "src/bin/init.rs"
 test = false

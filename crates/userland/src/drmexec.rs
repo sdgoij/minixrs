@@ -21,8 +21,12 @@ const NODE: &[u8] = b"/dev/dri/renderD128";
 const fn iowr(type_: u32, nr: u32, size: u32) -> u32 {
     (3u32 << 30) | (type_ << 8) | (size << 16) | nr
 }
+const fn iow(type_: u32, nr: u32, size: u32) -> u32 {
+    (1u32 << 30) | (type_ << 8) | (size << 16) | nr
+}
 
 const DRM_IOCTL_BASE: u32 = b'd' as u32;
+const DRM_IOCTL_GEM_CLOSE: u32 = iow(DRM_IOCTL_BASE, 0x09, 8);
 const DRM_IOCTL_VIRTGPU_MAP: u32 = iowr(DRM_IOCTL_BASE, 0x40 + 0x01, 16);
 const DRM_IOCTL_VIRTGPU_EXECBUFFER: u32 = iowr(DRM_IOCTL_BASE, 0x40 + 0x02, 64);
 const DRM_IOCTL_VIRTGPU_RESOURCE_CREATE: u32 = iowr(DRM_IOCTL_BASE, 0x40 + 0x04, 56);
@@ -140,6 +144,13 @@ struct Map {
 struct Wait {
     handle: u32,
     flags: u32,
+}
+
+/// `struct drm_gem_close`: the handle, and nothing else.
+#[repr(C)]
+struct GemClose {
+    handle: u32,
+    pad: u32,
 }
 
 fn ioctl(fd: i32, request: u32, arg: *mut u8) -> Result<i32, i32> {
@@ -344,6 +355,17 @@ pub fn drmexec(_args: &[&str]) -> i32 {
         }
     }
 
+    // The object goes back before this client exits. A handle left open keeps its arena slot and
+    // the host's copy of the resource for the life of the server, and there are only
+    // `MAX_OBJECTS` of them — so a client that never closes one spends a slot every other client
+    // might need.
+    let mut close_arg = GemClose { handle, pad: 0 };
+    let closed = ioctl(
+        fd,
+        DRM_IOCTL_GEM_CLOSE,
+        core::ptr::addr_of_mut!(close_arg) as *mut u8,
+    );
+
     let mut line = [0u8; 128];
     let mut at = 0usize;
     append(&mut line, &mut at, b"drmexec:");
@@ -354,6 +376,7 @@ pub fn drmexec(_args: &[&str]) -> i32 {
     outcome(&mut line, &mut at, b" down=", download);
     field(&mut line, &mut at, b" row=", row as u32);
     field(&mut line, &mut at, b" rest=", rest as u32);
+    outcome(&mut line, &mut at, b" close=", closed);
     append(&mut line, &mut at, b"\n");
     write_out(&line[..at]);
     0

@@ -1,4 +1,4 @@
-# The `just test-drminfo-x86` scenario: what the render node answers a client *without*
+# The `just test-gpu3d-nogl-x86` scenario: what the render node answers a client *without*
 # GL — its identity, its parameters, its refusals, and a context it cannot make.
 #
 # The device is a plain `virtio-gpu-pci`, which is a device the host enabled no GL on. That
@@ -19,8 +19,14 @@
 # device at all. The context step is the same claim about a different request: with no
 # capset on this device there is nothing for a context to render with, so both attempts
 # are `EINVAL` (22). The GL device's own answers are reported by the fb server's boot line
-# (`just test-gpu3d-x86`) and by `tools/smoke/drmgl.tsv`, which is the same two clients
+# (`just test-gpu3d-x86`) and by `tools/smoke/drmgl.tsv`, which is the same clients
 # driven into a guest that *can* be told to type at a pace host GL tolerates.
 
 /bin/drminfo	drminfo: virtio_gpu 3d=0 err 0 blob=0 err 0 ctx=0 err 0 host=0 err 0 mask=0 err 0 caps=err 38
 /bin/drmctx	drmctx: init=err 22 again=err 22
+#
+# The blob step is this device's half of a request the GL gate drives in full: `/bin/drmblob`
+# asks for a guest blob first, so on a device that never offered `VIRTIO_GPU_F_RESOURCE_BLOB`
+# that first request is the whole answer - `EINVAL` (22), for the same reason `GETPARAM`
+# already reported `blob=0`.
+/bin/drmblob	drmblob: create=err 22
