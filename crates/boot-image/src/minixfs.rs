@@ -451,35 +451,66 @@ impl MinixFs {
         }
     }
 
+    /// Write a directory entry, growing the directory by a zone when every slot is taken.
+    ///
+    /// MFS grows a directory the same way — `search_dir` calls `new_block` at `i_size` when it
+    /// finds no free slot — so a directory the builder fills past one zone is still one the
+    /// filesystem could have grown itself. `dir_zone` is the directory's *first* zone, which is
+    /// what every caller holds; the rest live in the inode's direct zone map.
     fn add_dirent(&mut self, dir_zone: u32, file_ino: u32, name: &str) {
-        let off = dir_zone as usize * self.zone_size();
         let entry_size = 4 + NAMESIZE;
-        let max_entries = self.zone_size() / entry_size;
+        let per_zone = self.zone_size() / entry_size;
+
+        let owner = self
+            .inode_table
+            .iter()
+            .position(|e| e.d2_zone[0] == dir_zone && (e.d2_mode & I_DIRECTORY) != 0)
+            .unwrap_or_else(|| panic!("no directory inode owns zone {dir_zone}"));
+
+        // The first free slot, zone by zone, making a zone when the ones there are full. Seven
+        // direct zones is where the builder stops: past that a directory would need an indirect
+        // block, which is more image than anything here wants.
         let mut slot = None;
-        for i in 0..max_entries {
-            let e_off = i * entry_size;
-            let existing_ino =
-                u32::from_le_bytes(self.data[off + e_off..off + e_off + 4].try_into().unwrap());
-            if existing_ino == 0 {
-                slot = Some(i);
+        let mut z_index = 0usize;
+        while slot.is_none() {
+            assert!(
+                z_index < 7,
+                "directory {dir_zone} is past seven zones ({})",
+                7 * per_zone
+            );
+            let zone = self.inode_table[owner].d2_zone[z_index];
+            if zone == 0 {
+                let zone = self.alloc_zone();
+                self.inode_table[owner].d2_zone[z_index] = zone;
+                slot = Some(z_index * per_zone);
                 break;
             }
+            let off = zone as usize * self.zone_size();
+            for i in 0..per_zone {
+                let e_off = i * entry_size;
+                let existing_ino =
+                    u32::from_le_bytes(self.data[off + e_off..off + e_off + 4].try_into().unwrap());
+                if existing_ino == 0 {
+                    slot = Some(z_index * per_zone + i);
+                    break;
+                }
+            }
+            z_index += 1;
         }
-        let slot = slot.unwrap_or_else(|| panic!("directory zone {dir_zone} is full"));
+        let slot = slot.expect("the loop either finds a slot or makes one");
 
         let entry = Direct::new(file_ino, name);
         let mut entry_bytes = [0u8; 4 + NAMESIZE];
         entry.write_into(&mut entry_bytes);
-        let e_off = slot * entry_size;
+        let zone = self.inode_table[owner].d2_zone[slot / per_zone];
+        let off = zone as usize * self.zone_size();
+        let e_off = (slot % per_zone) * entry_size;
         self.data[off + e_off..off + e_off + entry_size].copy_from_slice(&entry_bytes);
 
         // Grow the directory inode size to encompass the new entry.
         let new_size = ((slot + 1) * entry_size) as i32;
-        for entry in self.inode_table.iter_mut() {
-            if entry.d2_zone[0] == dir_zone && (entry.d2_size as usize) < (slot + 1) * entry_size {
-                entry.d2_size = new_size;
-                break;
-            }
+        if (self.inode_table[owner].d2_size as usize) < (slot + 1) * entry_size {
+            self.inode_table[owner].d2_size = new_size;
         }
     }
 }
@@ -743,6 +774,52 @@ mod tests {
         // And the bytes are in that zone: this is the copy `fs_rdlink` hands to the caller.
         let zone_off = zone as usize * BLOCK_SIZE;
         assert_eq!(&image[zone_off..zone_off + TARGET.len()], TARGET);
+    }
+
+    /// A directory that outgrows one zone gets a second one, the way MFS's `search_dir` grows it
+    /// (`new_block` at `i_size`). `/bin` reached exactly one zone's worth of entries — 62 programs
+    /// plus `.` and `..` — and the builder used to panic on the next one, so this is the boundary
+    /// that decides whether anything can be added to `BOOT_BINS` at all.
+    #[test]
+    fn a_directory_grows_past_one_zone() {
+        let per_zone = ZONE_SIZE / (4 + NAMESIZE);
+        let mut fs = MinixFs::new(2048, INODES);
+        let root = fs.create_directory(ROOT_INODE, ROOT_INODE);
+        let dir = fs.add_directory(root, "many");
+
+        // `.` and `..` are in slot 0 and 1, so these fill the zone exactly.
+        for i in 0..per_zone - 2 {
+            fs.add_file(dir, &format!("f{i:02}"), b"x");
+        }
+        // The entry that cannot fit: it has to land in a zone the directory did not have.
+        fs.add_file(dir, "overflow", b"y");
+
+        let idx = fs
+            .inode_table
+            .iter()
+            .position(|e| e.d2_zone[0] == dir)
+            .expect("the directory inode is the one owning its first zone");
+        let second = fs.inode_table[idx].d2_zone[1];
+        assert_ne!(
+            second, 0,
+            "the directory must have grown into a second zone"
+        );
+        assert!(
+            fs.inode_table[idx].d2_size as usize > ZONE_SIZE,
+            "its size must span both zones, not just the first"
+        );
+
+        let off = second as usize * ZONE_SIZE;
+        let entry_size = 4 + NAMESIZE;
+        let found = (0..per_zone).any(|i| {
+            let e = off + i * entry_size;
+            let ino = u32::from_le_bytes(fs.data[e..e + 4].try_into().unwrap());
+            ino != 0 && &fs.data[e + 4..e + 4 + 8] == b"overflow"
+        });
+        assert!(
+            found,
+            "the past-the-boundary entry is readable in the second zone"
+        );
     }
 
     #[test]

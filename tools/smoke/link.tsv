@@ -1,0 +1,36 @@
+# The `just test-link-x86` scenario: `link(2)` and `rename(2)`, which KNOWN_ISSUES.md item 37
+# says carry no name today.
+#
+# This is a *red* gate on purpose, kept out of `test-arches` the way `test-coreutils-wedge` was
+# while it was red, so a failure here is never read as a boot or arch failure. It is written to
+# the behaviour the calls should have and not the behaviour they have, so the fix flips it green
+# without an edit to this file - and it stays red until then, which is the point of measuring
+# before fixing.
+#
+# The two faults it measures, both read from the code: VFS's `do_link`/`do_rename` pass
+# `core::ptr::null()` where the name goes (`request.rs` then derives the length from that
+# pointer, so the request carries a zero-length grant), and MFS has no parser for
+# `REQ_LINK`/`REQ_RENAME` - `mfs_main` unpacks `cch[]`/`user_path` for lookup/mknod/create/mkdir
+# only - so `fs_link`/`fs_rename` read those slots from whatever request ran before them.
+#
+# That second half is why the client reports the *state after the call* and not only the errno:
+# a call that ran against a stale name can report success and then link or move the wrong file.
+# `keep` is the guard on it - `/tmp/lr-other` holds its own bytes, so a call that went to the
+# wrong name cannot leave that file alone and still look right. `tgt` and `mv` are the positive
+# claims: two names for one inode after the link, and the old name gone with the new one holding
+# the bytes after the rename. `holds()` compares content rather than size, so a rename that
+# copied the bytes and left the original is not mistaken for a move.
+#
+# The client makes its own files in /tmp, so the line does not depend on an applet: `ln` and `mv`
+# are coreutils multicall applets, and measuring through them would confound their bugs with
+# these two syscalls'.
+#
+# Measured 2026-09-28, the state this gate is red in: `linktest: ln=err 20 tgt=none rn=err 20
+# mv=none keep=ok` - both calls fail with ENOTDIR, and the file neither of them names is
+# untouched. ENOTDIR rather than EINVAL says the stale directory number resolved to a live
+# inode that is not a directory, which `search_dir` refuses before writing an entry.
+#
+# Each field is a separate claim, and `checked()` prints `ok`/`bad`/`none` so a step that did not
+# run cannot read as one that passed.
+
+/bin/linktest	linktest: ln=ok tgt=ok rn=ok mv=ok keep=ok

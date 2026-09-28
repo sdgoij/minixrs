@@ -404,6 +404,18 @@ test-symlink-x86 boot-timeout="20": build-x86
     FEED_SCENARIO=tools/smoke/symlink.tsv sh tools/smoke/feed.sh target/test-symlink-x86.log {{boot-timeout}} qemu-system-x86_64 -nographic -m 256M -no-reboot -vga none -device bochs-display,id=fb0 -kernel target/images/x86_64-pc-minix/minix-x86.elf -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0 -device virtio-tablet-pci,display=fb0
     @echo "symlink: a client created a link in /tmp, read its target back through the grant, and got the three refusals (x86_64)"
 
+# `link(2)` and `rename(2)`, the acceptance test for KNOWN_ISSUES.md item 37 - and *red* on
+# purpose until that is fixed: these steps are the behaviour the calls should have, so they are
+# not edited when the fix lands. Kept out of `test-arches`, as `test-coreutils-wedge` was while
+# it was red, so a failure here is never reported as a boot or arch failure. x86 only: the fault
+# is in VFS/MFS, which the other arches share.
+test-link-x86 boot-timeout="20": build-x86
+    mkdir -p target/images/x86_64-pc-minix
+    cp target/trampoline.elf target/images/x86_64-pc-minix/minix-x86.elf
+    @just _assert-qemu-version qemu-system-x86_64
+    FEED_SCENARIO=tools/smoke/link.tsv sh tools/smoke/feed.sh target/test-link-x86.log {{boot-timeout}} qemu-system-x86_64 -nographic -m 256M -no-reboot -vga none -device bochs-display,id=fb0 -kernel target/images/x86_64-pc-minix/minix-x86.elf -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0 -device virtio-tablet-pci,display=fb0
+    @echo "link: a hard link and a rename carried their names (x86_64)"
+
 # The render node's client on the GL device, which is the one gate that types into a guest with a
 # GL display backend: host GL drops serial bytes mid-line, so this recipe sets `FEED_PACE` and
 # `feed.sh` writes the step a byte at a time and refuses to believe it until the guest has echoed

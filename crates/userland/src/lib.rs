@@ -45,6 +45,10 @@ pub mod readlinktest;
 /// The `symlink(2)` smoke test — `/bin/symlinktest` (the writing half of that same path).
 pub mod symlinktest;
 
+/// The `link(2)`/`rename(2)` probe — `/bin/linktest`, the measurement `KNOWN_ISSUES.md` item 37
+/// is waiting on.
+pub mod linktest;
+
 /// When >= 0, all `write_out` calls are routed through this fd (via VFS)
 /// instead of the kernel's serial shortcut on fd 1. Set by the shell's
 /// redirect child after `fork`, so it is process-private.

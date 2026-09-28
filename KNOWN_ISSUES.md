@@ -1387,6 +1387,82 @@ are arch-specific, `[env]` is tooling/platform, not kernel.
     all before this, so a master's armed interest was never reported — and `/bin/wterm` drained
     the master in an `EAGAIN` loop instead of polling, which is what hid it. It polls now.
 
+37. **`link(2)` and `rename(2)` send the filesystem no name, and it reads a stale one
+    (2026-09-28, open — measured).** VFS's `do_link` and `do_rename`
+    resolve the names and then pass `core::ptr::null()` where the name goes (`call.rs`'s
+    `req_link(src_fs_e, dir_ino, core::ptr::null(), src_ino)` and `req_rename(..., null, ..., null)`), and
+    `request.rs` takes the length *from* that pointer (`if _lastc.is_null() { 0 }`), so the
+    request carries a zero-length grant and the inode numbers only. MFS has nothing to parse it
+    with either: `mfs_main` unpacks the payload into `cch[]`/`user_path` for four requests only
+    (26 lookup, 21 mknod, 23 create, 22 mkdir) and no parser exists for `REQ_LINK` or
+    `REQ_RENAME`, so `fs_link`/`fs_rename` read `cch[0]`, `cch[1]` and `user_path` from whatever
+    request ran before them. That is the class of bug `fs_rdlink` had — it read `cch[0]` for its
+    inode — which the readlink work fixed by reading the message in the handler, and which the
+    symlink work then avoided by doing the same (`fs_slink` parses its own payload and grants).
+
+    Two independent faults, so the failure need not look like an error. With `cch[]` still zeroed
+    the inode number is 0 and the call should fail; but after any create/mkdir/mknod those slots
+    hold *that* request's inode and name, and the link or rename is then performed against the
+    wrong file under the wrong name. Nothing gates either call — `tools/smoke/` never runs `ln`,
+    `mv` or `rename`, and no `/bin/*` client calls `minix_std::fs::link`/`rename` — which is how
+    the readlink path stayed stubbed until it got a gate of its own.
+
+    *Measured (2026-09-28).* `/bin/linktest` (`just test-link-x86`) makes its own files in /tmp,
+    links one and renames the link, then prints
+    `linktest: ln=err 20 tgt=none rn=err 20 mv=none keep=ok` — both calls fail with `ENOTDIR`,
+    and the file neither of them names is untouched. The errno is the informative part:
+    `ENOTDIR` rather than `EINVAL` means `fs_link`'s `get_inode(dev, dir_ino)` found a *live*
+    inode that is not a directory — which is what the previous create's mode looks like in a
+    stale `cch[1]` — and `search_dir` refused it before any entry was written. So the
+    wrong-directory half of the fault fires first here; that the *name* half is wrong as well is
+    still only read from the code.
+
+    The gate is red on purpose and out of `test-arches`, as `test-coreutils-wedge` was while it
+    was red: its step is the behaviour the calls should have, so fixing this flips it green with
+    no edit to the scenario.
+
+    One side effect worth recording: the probe could not be added to `BOOT_BINS` at first,
+    because `/bin` was exactly one directory zone full — 62 programs plus `.` and `..`, 64 slots
+    of `4096 / 64` — and `add_dirent` panicked on the next one. Directories now grow into a
+    second zone the way MFS's `search_dir` grows them, pinned by
+    `a_directory_grows_past_one_zone`.
+
+    Fix both sides at once, as symlink had to: pass the resolved name (both names, for rename)
+    from VFS the way `do_slink` now does, and have MFS read the message rather than
+    `cch[]`/`user_path`. The gate belongs in `/bin/symlinktest`'s shape — a client that links
+    and renames a file it made and reads the result back, each step with its own marker so an
+    earlier step's output cannot satisfy a later one (`silent-failure-traps`).
+    (`crates/servers/src/vfs/call.rs`, `crates/servers/src/vfs/request.rs`,
+    `crates/fs/src/mfs/main.rs`, `crates/fs/src/mfs/link.rs`)
+
+38. **The boot test cannot find `/sbin/devman` in the initramfs, though the boot loader loaded
+    it (2026-09-28, open — measured).** `just test-boot-x86` reports exactly one failure,
+    `FAIL: missing /sbin/devman`; `/bin/echo`, `/bin/sh`, `/bin/pipetest`, `/libexec/ld.so`,
+    `/lib/libc.so` and `/bin/dynclib` all pass.
+
+    It is not this session's `BOOT_BINS` additions: removing `/bin/linktest` and rebuilding
+    reproduces it exactly. The loader and the test call the *same* `find_initramfs_file`, and at
+    boot the loader loaded `/sbin/devman` and every entry that follows it in the archive
+    (`/sbin/fb`, `/sbin/input`, `/sbin/wserver`, `/sbin/uds`, `/sbin/wlserver`), so those bytes
+    were readable then and are not later. The built archive is well formed — 104 `070701`
+    headers, `/sbin/devman` present, one `TRAILER!!!` at the end — and `parse_initramfs`'s
+    advance is right (`offset = pad4(pad4(name_end) + filesize)`). Since it returns `None` at the
+    first header that is not `070701`, a write anywhere in the middle makes every entry from
+    that point unreadable, and `/sbin/devman` is the last name the test reaches: that is why one
+    entry is reported rather than the whole walk looking broken.
+
+    So something writes into the embedded, zero-copy initramfs between the boot procs being
+    loaded and the test running. Two suspects, both read out of the code rather than measured:
+    `tools/minix-raw.ld` places `*(.minixfs)` *inside* `[__initramfs_start, __initramfs_end)`,
+    so `initramfs_data()` spans the cpio **and** the 16 MiB disk image — the same region the
+    ramdisk server's `copy_nonoverlapping` reads from (`boot_init.rs`, its `RAMDISK_PROC_NR`
+    branch); and the allocator's reserved kernel range against the loaded image's real end
+    (item 18's two allocators), where a page handed out inside the image is written by whoever
+    now owns it. Measure first: print `initramfs_data().len()` and the six bytes at
+    `/sbin/devman`'s offset from the boot test, and check which `_end` symbol
+    `kernel-boot/src/main.rs` hands the allocator. Only x86's boot test has been run; the
+    linker scripts are per-arch, so `test-boot-riscv64`/`aarch64` may or may not agree.
+
 ---
 
 ## x86_64 (`[x86]`)

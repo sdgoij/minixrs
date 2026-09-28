@@ -217,6 +217,10 @@ pub const BOOT_BINS: &[(&str, &str)] = &[
     // the refusals a creation has to give. The image's `/link` is made by the image builder, so
     // this is the only program in the image that runs `fs_slink`.
     ("/bin/symlinktest", "symlinktest"),
+    // `/bin/linktest` links a file it made and renames the link, then reports what the two calls
+    // said *and* what they left behind — the measurement `KNOWN_ISSUES.md` item 37 is waiting on,
+    // and the one program in the image that reaches `fs_link`/`fs_rename`.
+    ("/bin/linktest", "linktest"),
 ];
 
 /// Programs a **wasm32** image carries: destination path → module file name in the target's
