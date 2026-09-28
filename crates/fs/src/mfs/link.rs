@@ -5,6 +5,7 @@ use crate::mfs::glo;
 use crate::mfs::inode::*;
 use crate::mfs::path::*;
 use crate::mfs::read::*;
+use libs::libminixfs::cache::lmfs_put_block;
 
 /* Args to unlink_file */
 const SAME: i32 = 1000;
@@ -200,32 +201,81 @@ pub fn fs_unlink() -> i32 {
     }
 }
 
+/// Read a symlink's target into the caller's buffer.
+///
+/// Message layout (VFS `req_rdlink`): inode at payload[0], buffer grant at payload[8],
+/// buffer size at payload[16]. The reply carries the number of bytes copied at payload[0]
+/// (u64), which is what `req_rdlink` hands back as the call's result.
+///
+/// The target lives in block 0 of the link's inode — `fs_slink` puts it there and `i_size`
+/// is its length without the terminating NUL (`.refs/minix-3.3.0/minix/fs/mfs/link.c:174`).
+///
+/// Reference: `minix/fs/mfs/link.c` `fs_rdlink()`
+/// Reference: `crates/fs/src/ext2/link.rs` `fs_rdlink()` — the same function for ext2, which
+/// was ported complete and is the pattern this follows.
 pub fn fs_rdlink() -> i32 {
     unsafe {
-        let ino = (*glo::mfs_ptr()).cch[0] as u32;
-        let dev = (*glo::mfs_ptr()).fs_dev;
+        let mfs = glo::mfs_ptr();
+        let raw = (*mfs).m_in.m_payload.raw;
+        let rd_u32 = |off: usize| {
+            u32::from_le_bytes(
+                raw.get(off..off + 4)
+                    .and_then(|s| s.try_into().ok())
+                    .unwrap_or([0u8; 4]),
+            )
+        };
+        let rd_i32 = |off: usize| {
+            i32::from_le_bytes(
+                raw.get(off..off + 4)
+                    .and_then(|s| s.try_into().ok())
+                    .unwrap_or([0u8; 4]),
+            )
+        };
+        let rd_u64 = |off: usize| {
+            u64::from_le_bytes(
+                raw.get(off..off + 8)
+                    .and_then(|s| s.try_into().ok())
+                    .unwrap_or([0u8; 8]),
+            )
+        };
+
+        let ino = rd_u32(0);
+        let grant = rd_i32(8);
+        let mem_size = rd_u64(16) as usize;
+        let dev = (*mfs).fs_dev;
 
         let rip = match get_inode(dev, ino) {
             Some(r) => r,
             None => return EINVAL,
         };
 
-        let r;
         let mode = (*glo::get_inode_ptr(rip as usize)).i_mode;
-        if (mode & I_TYPE) != I_SYMBOLIC_LINK {
-            r = EACCES;
+        let r = if (mode & I_TYPE) != I_SYMBOLIC_LINK {
+            EACCES
         } else {
             let bp = get_block_map(rip, 0);
             if bp.is_null() {
-                r = EIO;
+                EIO
             } else {
-                let rip_ref = &*glo::get_inode_ptr(rip as usize);
-                let copylen = core::cmp::min((*rip_ref).i_size as usize, 0x7FFFFFFF);
-                let _data = core::slice::from_raw_parts(bp, copylen);
-                (*glo::mfs_ptr()).cch[0] = copylen as i32;
-                r = OK;
+                let size = (*glo::get_inode_ptr(rip as usize)).i_size as usize;
+                let copied = core::cmp::min(mem_size, size);
+                #[cfg(target_os = "minix")]
+                let r = safecopy_to_grant(grant, 0, (*bp).data_ptr, copied);
+                #[cfg(not(target_os = "minix"))]
+                let r = {
+                    // No kernel to copy through on the host, so the walk still runs and the
+                    // length it resolved is what is replied — the same split ext2's tests use.
+                    let _ = (grant, (*bp).data_ptr);
+                    OK
+                };
+                lmfs_put_block(bp, DIRECTORY_BLOCK);
+                if r == OK {
+                    let reply = &mut (*mfs).m_out.m_payload.raw;
+                    reply[0..8].copy_from_slice(&(copied as u64).to_le_bytes());
+                }
+                r
             }
-        }
+        };
 
         put_inode(Some(rip));
         r

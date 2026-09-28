@@ -1325,9 +1325,22 @@ impl DrmNode {
 }
 
 impl drm::RenderNode for DrmNode {
+    /// The identity a client reads with `DRM_IOCTL_VERSION`.
+    ///
+    /// `major` is 0 because Linux's virtio_gpu reports 0 (`virtgpu_drv.h`'s `DRIVER_MAJOR`), and
+    /// Mesa's virgl winsys *refuses a device whose major is not*. `virgl_drm_get_version` returns
+    /// `-EINVAL` for a non-zero one and `virgl_drm_winsys_create` then answers NULL, so GL would go
+    /// missing entirely for a number this side picked freely.
+    ///
+    /// `minor` is a *feature* level rather than a revision: 1 is `VIRTGPU_EXECBUF_FENCE_FD_IN`/
+    /// `_OUT`, because `supports_fences = drm_version >= VIRGL_DRM_VERSION(0, 1)`, and with fences
+    /// Mesa passes an in/out fence fd on every submit — which `submit` below refuses. Claiming 1
+    /// would make every submit fail rather than fall back; 0 is what makes Mesa take the path this
+    /// node can drive, a buffer resource polled through `VIRTGPU_WAIT` with `NOWAIT`. It becomes 1
+    /// the day D4's fences land.
     fn version(&self) -> drm::DrmVersion {
         drm::DrmVersion {
-            major: 1,
+            major: 0,
             minor: 0,
             patchlevel: 0,
             name: "virtio_gpu",
@@ -1352,8 +1365,11 @@ impl drm::RenderNode for DrmNode {
             drm::VIRTGPU_PARAM_3D_FEATURES => Ok(self.virgl as i32),
             drm::VIRTGPU_PARAM_CAPSET_QUERY_FIX => Ok(1),
             drm::VIRTGPU_PARAM_RESOURCE_BLOB => Ok(self.blob as i32),
-            // Host blobs are not mappable into the guest yet, and there is one virtio
-            // device, so nothing to share across devices.
+            // Host blobs are not mappable into the guest, and there is one virtio device, so
+            // nothing to share across devices. The first is not a missing feature on this side but
+            // a missing *window*: it is a PCI shared-memory capability the device grows only under
+            // `hostmem=`, which no recipe of ours sets, and which virtio-mmio cannot carry at all
+            // (`WAYLAND.md` §6.10's host requirements).
             drm::VIRTGPU_PARAM_HOST_VISIBLE | drm::VIRTGPU_PARAM_CROSS_DEVICE => Ok(0),
             drm::VIRTGPU_PARAM_CONTEXT_INIT => Ok(self.has_context_init as i32),
             drm::VIRTGPU_PARAM_SUPPORTED_CAPSET_IDS => Ok(self.capset_mask() as i32),
@@ -2487,14 +2503,18 @@ mod tests {
         assert_eq!(node.get_caps(1, 2, &mut out), Err(drm::EINVAL));
     }
 
-    /// The version string is the kernel driver's name — what a client logs, and what some
-    /// of them match on — and the request's protocol is what decides how much of it a
-    /// caller gets.
+    /// The version is a *contract*, not just a name: a non-zero major makes Mesa's virgl winsys
+    /// refuse the device outright, and a minor of 1 or more makes it pass fence fds this node
+    /// refuses — either is a one-line change that breaks GL with nothing failing on this side to
+    /// say so. The name is the kernel driver's, which is what a client logs and some match on, and
+    /// the request's protocol is what decides how much of each string a caller gets.
     #[test]
     fn the_version_names_the_driver() {
         let node = drm_node(&[], true, false, false);
         let v = node.version();
         assert_eq!(v.name, "virtio_gpu");
+        assert_eq!(v.major, 0, "Mesa refuses a device whose major is not 0");
+        assert_eq!(v.minor, 0, "1 means fence fds; see the method's own note");
         assert!(!v.date.is_empty() && !v.desc.is_empty());
     }
 

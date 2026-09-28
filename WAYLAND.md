@@ -781,7 +781,7 @@ version/`DRM_CAP` queries, and enough of libdrm's expectations to satisfy
 
 | # | Decision | Rationale |
 |---|---|---|
-| **D1** | **PCI first; x86_64 is the bring-up arch.** | Blob resources are exposed through a **shared-memory PCI capability** the mmio transport does not have (verify on the QEMU we ship). x86 is already a PCI guest — but its scanout is `bochs-display` today, so virgl starts as a **second device** (`-device virtio-gpu-gl-pci`) used only as a render node, with bochs still presenting. riscv64/aarch64 follow once the mmio story is settled. In QEMU 11 the blob resources the mmio transport lacks sit behind the device's `blob=` property, which defaults to off, so a blob gate is `-device virtio-gpu-gl-pci,blob=on`. |
+| **D1** | **PCI first; x86_64 is the bring-up arch.** | Blob resources are exposed through a **shared-memory PCI capability** the mmio transport does not have — now **verified**, not assumed: QEMU's `virtio-mmio.c` answers `-1` for `VIRTIO_MMIO_SHM_LEN_{LOW,HIGH}` ("the shared memory doesn't exist"), while the PCI device grows a BAR 4 window under `hostmem=` (the `hostmem` bullet under §6.10's host requirements). x86 is already a PCI guest — but its scanout is `bochs-display` today, so virgl starts as a **second device** (`-device virtio-gpu-gl-pci`) used only as a render node, with bochs still presenting. riscv64/aarch64 follow once the mmio story is settled — and a *host-visible blob* never will on those archs, so anything needing one is x86-only. In QEMU 11 the blob resources the mmio transport lacks sit behind the device's `blob=` property, which defaults to off, so a blob gate is `-device virtio-gpu-gl-pci,blob=on`. |
 | **D2** | **Present without dmabuf, first.** EGL surfaceless → render into an FBO → `glReadPixels` → write `/dev/fb` → `FBIOFLUSH`. | dmabuf/GBM export needs `dma_buf`, scatter-gather and PRIME — a large kernel API. The readback path proves the whole GL stack while that is designed. It is slow; it is not the destination. |
 | **D3** | **The render device and the output are separate objects.** | Already true (`FbBackend` vs. the device). Keeps the first milestone from depending on scanout-from-GPU, and lets a render node exist with no display at all. |
 | **D4** | **Fences become pollable.** `SUBMIT_3D`'s fence should surface as an `eventfd`/poll-ready object. | Mesa's `EXECBUFFER` in/out fences and `VIRTGPU_WAIT` need it, and it reuses Phase 0's `epoll`/`eventfd` (§6.3) rather than inventing a wait. |
@@ -823,6 +823,20 @@ exercise; 3d is where the design can still change.
   device, and what is opt-in are `blob=` and `venus=`. **`blob` defaults to off**, so
   the blob path of 3b needs `blob=on`, and the feature must be read from the device's
   word rather than assumed.
+- **The host-visible window is `hostmem`, a PCI-only property, and it too is off by
+  default.** Host blobs (`BLOB_MEM_HOST3D`, and anything that maps host memory into
+  the guest) need a shared-memory region the guest maps, and QEMU adds it only on the
+  *PCI* device: `virtio-gpu-pci.c` registers a **BAR 4** window and advertises it as a
+  `VIRTIO_PCI_CAP_SHARED_MEMORY_CFG` (**8**, not 5 — 5 is the legacy access window)
+  capability with `id = VIRTIO_GPU_SHM_ID_HOST_VISIBLE`, and only when `hostmem > 0`
+  (`DEFINE_PROP_SIZE("hostmem", …, 0)`). So `blob=on` alone does not create it and
+  **no recipe here sets `hostmem`**. On virtio-mmio there is no window to create:
+  QEMU's `virtio-mmio.c` answers `-1` for `VIRTIO_MMIO_SHM_LEN_{LOW,HIGH}`, which its
+  own comment glosses as *"the shared memory doesn't exist"*. A host blob is therefore
+  unreachable on riscv64/aarch64 **on this QEMU**, not merely unimplemented — which is
+  why 3b-4's `create_blob` serves the guest kind and answers `ENOSYS` for the host
+  ones, and why D2's readback is the only present path there rather than the first of
+  two.
 - A GL-capable host is required. Headless CI has none, so the options are
   `-display egl-headless` with host Mesa on llvmpipe (`LIBGL_ALWAYS_SOFTWARE=1`)
   — slow but real — or keeping the virgl gate out of CI and CI-testing only 3a's
@@ -830,6 +844,74 @@ exercise; 3d is where the design can still change.
   it decides whether virgl is a CI gate or a manual one.
 - The project already requires QEMU 11+, which is new enough for blob resources
   and `CONTEXT_INIT`.
+
+#### What 3c's client side requires (read out of Mesa and libdrm)
+
+The contract, taken from the code that will call us rather than from memory, so
+that a 3c failure can be attributed to one side or the other:
+
+- **`DRM_IOCTL_VERSION`'s major must be 0, and `minor` chooses the fence
+  strategy.** Linux's `virtgpu_drv.h` is `DRIVER_MAJOR 0`, `DRIVER_MINOR 1`;
+  `virgl_drm_get_version()` returns `-EINVAL` for a non-zero major and
+  `virgl_drm_winsys_create()` then returns NULL — so a wrong number here costs the
+  whole GL stack, with nothing failing on the guest's side to say so. `minor` is a
+  feature level rather than a revision: `supports_fences = drm_version >=
+  VIRGL_DRM_VERSION(0, 1)`, and with fences Mesa sets
+  `VIRTGPU_EXECBUF_FENCE_FD_IN`/`_OUT` on *every* submit, which this node refuses.
+  At `minor = 0` Mesa takes its
+  **legacy** fence path instead: a `PIPE_BUFFER` resource per fence, polled with
+  `DRM_IOCTL_VIRTGPU_WAIT` and `VIRTGPU_WAIT_NOWAIT`, reading `errno == EBUSY` as
+  busy — which a node whose submits are synchronous answers "done" to, correctly.
+  The node reports `{0, 0, 0}`.
+- **`VIRTGPU_PARAM_3D_FEATURES` gates the winsys itself**: `virgl_drm_winsys_create`
+  returns NULL when it is 0, so D7's graceful degrade is "Mesa finds no device" —
+  which is the answer to aim for on a device without GL.
+- **`supports_coherent = param_resource_blob && param_host_visible`**, so reporting
+  `HOST_VISIBLE` 0 keeps Mesa off coherent resources *and* off the blob path:
+  `virgl_drm_winsys_resource_create` only reaches `resource_create_blob` for
+  `MAP_PERSISTENT`/`MAP_COHERENT`. That is why 3b-4's guest-only `create_blob` does
+  not block a triangle, and why the window is a 3d concern rather than 3c's.
+- **`VIRTGPU_WAIT` is on the real path twice** (`virgl_drm_resource_is_busy`,
+  `virgl_fence_wait`), so D4's fences have to answer `EBUSY` for work still queued —
+  waking a waiter is not enough, because this path *polls*.
+- **libdrm's device layer needs a `/sys` this port does not have.** `drmGetDevice2`
+  cannot work without it: `drmParseSubsystemType` builds
+  `/sys/dev/char/<maj>:<min>/device`, `get_subsystem_type` `readlink`s `<that>/subsystem`
+  and returns `-errno` when the link cannot be read, and that negative propagates out
+  through `drmGetDeviceFromDevId` — so `drmGetDevice2` fails and `drmGetDevices2` skips
+  every node. **`/dev/dri` itself is enumerated with `opendir`, which is ours already**;
+  what comes from `/sys` is the *bus type*, and a virtio node is asked twice
+  (`realpath(node)` then the parent's `subsystem`).
+- **What that costs, exactly.** Mesa's `_eglDeviceList` fills its DRM devices from
+  `drmGetDevices2` + `available_nodes & (1 << DRM_NODE_RENDER)`, and
+  `surfaceless_probe_device` requires `_EGL_DEVICE_DRM`; with no `/sys` the only device
+  in that list is the always-present *software* one, so `dri2_initialize_surfaceless`
+  fails with `EGL_NOT_INITIALIZED` ("DRI2: failed to load driver"). The fix is either a
+  minimal `/sys` in `devman` (a readable `device/subsystem` link whose target names the
+  bus — `/pci` on x86, `/virtio` elsewhere) or a small `drmParseSubsystemType` patch when
+  libdrm is ported. D6 makes libdrm a dependency rather than something to reimplement; a
+  patch is not a reimplementation, but it is a deviation to record either way.
+- **llvmpipe escapes `/sys` entirely — and only under `ForceSoftware`.**
+  `surfaceless_probe_device_sw` runs when `LIBGL_ALWAYS_SOFTWARE=1`, opens *no* DRM
+  device (`fd_render_gpu = -1`) and loads `swrast`. So the llvmpipe branch is not merely
+  the CI fallback: it is the only GL branch that runs before the `/sys` question is
+  settled, which makes it 3c's first milestone rather than its cross-check.
+- **Build EGL surfaceless-only to begin with.** Without `HAVE_WAYLAND_PLATFORM`,
+  `dri2_initialize_surfaceless` drops `loader_get_device_name_for_fd` and
+  `loader_get_user_preferred_fd` — and with the latter, `drmGetDevice2` and
+  `drm_construct_id_path_tag`. What is left that always runs is `loader_get_driver_for_fd`:
+  `drmGetVersion` for the name, a driver lookup, then `dlopen(RTLD_NOW | RTLD_LOCAL)`.
+- **Budgets, pinned.** The object ceiling is the *region table*, not the loader's table:
+  `8 + 3n <= 64` is **18 objects** with `tools/lld.py`'s `-z norelro` (three regions an
+  object), while the loader's `MAX_OBJECTS` is 24 and counts the program. `--no-rosegment`
+  would give two regions and 28 objects, and stays declined for mapping `.rodata`
+  executable. Thread-locals: `TLS_SLOTS` is **8** modules and a `dlopen`'d module gets a
+  **2 KiB** surplus slot, so **`libgallium_dri.so` must carry a `PT_TLS` block of at most
+  2048 bytes or the loader refuses it by name** — readable off the built DSO with
+  `readelf -l` before anything is run. The minimal chain (libc, libEGL, libEGL_mesa,
+  libGLdispatch, libdrm, and the `dlopen`'d libgallium_dri) is about six objects, so 18 is
+  comfortable for a GL probe and is what a *compositor*'s wayland-server/client,
+  xkbcommon, gbm, libinput, libudev, libseat, libdisplay-info and pixman make tight.
 
 #### Dependencies
 
@@ -1164,18 +1246,28 @@ alone gives it a window but hands it keycodes it cannot turn into text.
   affinity); virgl does not JIT on the guest side. If GL is ever the blocker for
   COSMIC-as-shipped, the fallback is a software-rendered session that is
   functional but lacks effects.
-- **Phase 3 — blobs on virtio-mmio are unverified.** Mesa's modern path wants
-  blob resources, and the shared-memory window is a PCI capability. PCI-first
-  (§6.10, D1) is how the phase avoids betting on the mmio transport.
+- **Phase 3 — blobs on virtio-mmio: verified as unavailable, by QEMU's own design.**
+  Mesa's modern path wants blob resources, and the shared-memory window is a PCI
+  capability; QEMU's mmio transport answers `-1` for the shared-memory length
+  registers ("the shared memory doesn't exist"), and the PCI window itself is
+  opt-in through `hostmem=` on top of `blob=on`. PCI-first (§6.10, D1) is therefore
+  not a way of *avoiding* the mmio question but the only way to have a host-visible
+  blob at all: on riscv64/aarch64 those archs' present path is D2's readback, and a
+  design needing `MAP_BLOB` is x86-only.
 - **Phase 3 — host GL in CI.** virgl needs a GL-capable host; CI has none.
   Either `egl-headless` over host llvmpipe works on the runner, or virgl is a
   manual gate and the llvmpipe branch carries CI. Decide before stage 3c.
 - **Phase 3 — fences are the silent-failure surface.** Mesa relies on implicit
   fencing for buffer reuse; a fence that returns too early is corruption, not an
   error. Test with a loop, not a single frame.
-- **Phase 3 — `/dev/dri` through `devman`.** libdrm scans the directory; our
-  VTreeFS must present it with clone-style nodes and permissions that admit a
-  render node. Small, but load-bearing for "Mesa finds the device".
+- **Phase 3 — `/dev/dri` through `devman`, and `/sys` beside it.** libdrm scans the
+  directory with `opendir`, so our VTreeFS must present it with clone-style nodes and
+  permissions that admit a render node — and that is only half of what
+  `drmGetDevices2` needs: the bus type comes from
+  `/sys/dev/char/<maj>:<min>/device/subsystem`, whose absence fails `drmGetDevice2`
+  outright, empties Mesa's EGL device list and makes the surfaceless hardware path
+  answer `EGL_NOT_INITIALIZED` (§6.10). Small either way, but it is the difference
+  between "Mesa finds the device" and "Mesa finds nothing and says so once".
 - **Phase 3 — don't gate the boot path.** A guest whose device offers no
   `VIRTIO_GPU_F_VIRGL`, or whose host has no GL, must still boot to the shell and the
   window server.

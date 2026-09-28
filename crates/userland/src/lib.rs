@@ -39,6 +39,9 @@ pub mod drmexec;
 /// The DRM render node's blob objects — `/bin/drmblob` (§6.10, 3b-4).
 pub mod drmblob;
 
+/// The `readlink(2)` smoke test — `/bin/readlinktest` (a symlink is what `/sys` is made of).
+pub mod readlinktest;
+
 /// When >= 0, all `write_out` calls are routed through this fd (via VFS)
 /// instead of the kernel's serial shortcut on fd 1. Set by the shell's
 /// redirect child after `fork`, so it is process-private.

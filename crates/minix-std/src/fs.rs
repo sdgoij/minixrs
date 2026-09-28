@@ -48,6 +48,8 @@ pub const VFS_ACCESS: u32 = VFS_BASE + 15;
 pub const VFS_CHMOD: u32 = VFS_BASE + 11;
 pub const VFS_UMASK: u32 = VFS_BASE + 27;
 pub const VFS_RMDIR: u32 = VFS_BASE + 18;
+pub const VFS_SYMLINK: u32 = VFS_BASE + 19;
+pub const VFS_READLINK: u32 = VFS_BASE + 20;
 pub const VFS_MKDIR: u32 = VFS_BASE + 9;
 pub const VFS_MKNOD: u32 = VFS_BASE + 10;
 pub const VFS_STAT: u32 = VFS_BASE + 21;
@@ -250,6 +252,17 @@ const OFF_NAME: usize = 8;
 const OFF_NAME_LEN: usize = 16;
 const OFF_MKDIR_MODE: usize = 24;
 const OFF_MKNOD_DEV: usize = 32;
+
+// VFS_READLINK (matches do_rdlink):
+//   offset 8:  name pointer (u64)
+//   offset 16: name length (u64)
+//   offset 24: buffer pointer (u64) — the caller's own, the FS writes into it through a grant
+//   offset 32: buffer size (u64)
+
+const OFF_READLINK_NAME: usize = 8;
+const OFF_READLINK_NAME_LEN: usize = 16;
+const OFF_READLINK_BUF: usize = 24;
+const OFF_READLINK_BUFSIZE: usize = 32;
 
 // VFS_FCNTL (matches do_fcntl):
 //   offset 8:  fd (i32)
@@ -874,6 +887,31 @@ pub fn link(old: &[u8], new: &[u8]) -> Result<(), MinixErr> {
         msg_set_u32(&mut msg, 32, new.len() as u32);
         let _ = vfs_call(&mut msg)?;
         Ok(())
+    }
+}
+
+/// Read a symbolic link's target (VFS_READLINK — path at 8/len at 16, buffer at 24, size
+/// at 32). Returns the number of bytes written into `buf`, which is the target truncated to
+/// the buffer's length and *not* NUL-terminated, exactly as `readlink(2)` reports it.
+///
+pub fn readlink(path: &[u8], buf: &mut [u8]) -> Result<usize, MinixErr> {
+    #[cfg(not(target_os = "minix"))]
+    {
+        let _ = (path, buf, VFS_PROC_NR);
+        Err(MinixErr::ENOSYS)
+    }
+    #[cfg(target_os = "minix")]
+    unsafe {
+        let mut msg = [0u8; 64];
+        msg_set_i32(&mut msg, OFF_CALL, VFS_READLINK as i32);
+        msg_set_u64(&mut msg, OFF_READLINK_NAME, path.as_ptr() as u64);
+        msg_set_u32(&mut msg, OFF_READLINK_NAME_LEN, path.len() as u32);
+        // The buffer is the caller's own: VFS makes a grant for it and the filesystem copies
+        // the target into it through that grant, so the address never reaches the FS server.
+        msg_set_u64(&mut msg, OFF_READLINK_BUF, buf.as_mut_ptr() as u64);
+        msg_set_u32(&mut msg, OFF_READLINK_BUFSIZE, buf.len() as u32);
+        let n = vfs_call(&mut msg)?;
+        Ok(n as usize)
     }
 }
 

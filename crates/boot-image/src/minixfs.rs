@@ -24,6 +24,7 @@ const DEFAULT_BLOCKS: u32 = 4096;
 pub const I_DIRECTORY: u16 = 0o040000;
 pub const I_REGULAR: u16 = 0o100000;
 pub const I_CHAR_SPECIAL: u16 = 0o020000;
+pub const I_SYMBOLIC_LINK: u16 = 0o120000;
 pub const RWX_ALL: u16 = 0o755;
 
 pub const ROOT_INODE: u32 = 1;
@@ -310,6 +311,29 @@ impl MinixFs {
         ino
     }
 
+    /// Add a symbolic link to `dir_zone`; returns its inode number.
+    ///
+    /// The target lives in the inode's **first data zone**, with `i_size` its length and no
+    /// NUL written: that is the form MFS's `fs_slink` writes and `fs_rdlink` reads
+    /// (`.refs/minix-3.3.0/minix/fs/mfs/open.c:196`, `link.c:174`), so a link an image carries
+    /// is indistinguishable from one the filesystem made. The reference refuses a target as
+    /// long as a block, and so does this: `fs_rdlink` reads block 0 and nothing else.
+    pub fn add_symlink(&mut self, dir_zone: u32, name: &str, target: &[u8]) -> u32 {
+        assert!(
+            target.len() < self.zone_size(),
+            "a symlink target must fit one zone: fs_rdlink reads block 0 and stops"
+        );
+        let zone = self.alloc_zone();
+        self.write_zone(zone, target);
+        let ino = self.alloc_inode(I_SYMBOLIC_LINK | RWX_ALL, target.len() as u32);
+        let idx = (ino - 1) as usize;
+        if idx < self.inode_table.len() {
+            self.inode_table[idx].d2_zone[0] = zone;
+        }
+        self.add_dirent(dir_zone, ino, name);
+        ino
+    }
+
     /// Finalize and write the superblock, bitmaps, and inode table.
     pub fn finalise(mut self) -> Vec<u8> {
         let sb = SuperBlock {
@@ -561,6 +585,12 @@ pub fn build_minixfs(files: &[(&'static str, Vec<u8>)]) -> Vec<u8> {
         fs.add_device(zone, name, mode as u16, (major << 16) | minor);
     }
 
+    // One symlink, for the readlink gate. A link is the shape `/sys` is made of, and reading
+    // one exercises the whole path a filesystem server's bytes take to a user process — the FS
+    // safecopies through a grant into the caller's own buffer — which nothing else in this
+    // image does. Created last, so every inode the layout tests pin keeps its number.
+    fs.add_symlink(root_zone, "link", b"/sys/devices/virtio-gpu");
+
     fs.finalise()
 }
 
@@ -675,6 +705,46 @@ mod tests {
         let _ = fs.finalise();
     }
 
+    /// A symlink is on disk in the form MFS reads: a `I_SYMBOLIC_LINK` inode whose `i_size` is
+    /// the target's length and whose *first data zone* holds the target's bytes. That is what
+    /// `fs_rdlink` copies out and what `fs_slink` writes (`.refs/minix-3.3.0/minix/fs/mfs/`
+    /// `link.c:174`, `open.c:196`), so a link an image carries is one the filesystem could have
+    /// made itself.
+    #[test]
+    fn a_symlink_is_the_form_mfs_reads() {
+        const TARGET: &[u8] = b"/sys/devices/virtio-gpu";
+
+        let mut fs = MinixFs::new(2048, INODES);
+        let root = fs.create_directory(ROOT_INODE, ROOT_INODE);
+        let dev = fs.add_directory(root, "dev");
+        let ino = fs.add_symlink(dev, "drm", TARGET);
+        let image = fs.finalise();
+
+        let imap_blocks = i16::from_le_bytes(image[1024 + 8..1024 + 10].try_into().unwrap());
+        let zmap_blocks = i16::from_le_bytes(image[1024 + 10..1024 + 12].try_into().unwrap());
+        let itable_off = (2 + imap_blocks as usize + zmap_blocks as usize) * BLOCK_SIZE;
+        let off = itable_off + (ino as usize - 1) * INODE_SIZE;
+
+        let mode = u16::from_le_bytes(image[off..off + 2].try_into().unwrap());
+        assert_eq!(
+            mode & 0o170000,
+            I_SYMBOLIC_LINK,
+            "the type bits say symlink"
+        );
+        let size = i32::from_le_bytes(image[off + 8..off + 12].try_into().unwrap());
+        assert_eq!(
+            size,
+            TARGET.len() as i32,
+            "i_size is the target's length, with no NUL counted"
+        );
+        let zone = u32::from_le_bytes(image[off + 24..off + 28].try_into().unwrap());
+        assert_ne!(zone, 0, "the target has a block of its own");
+
+        // And the bytes are in that zone: this is the copy `fs_rdlink` hands to the caller.
+        let zone_off = zone as usize * BLOCK_SIZE;
+        assert_eq!(&image[zone_off..zone_off + TARGET.len()], TARGET);
+    }
+
     #[test]
     fn inode_bitmap_uses_on_disk_bit_numbering() {
         // MFS (MINIX `imap_bit`) maps inode N to bit N of the inode bitmap,
@@ -708,8 +778,8 @@ mod tests {
         // empty image has 8 dirs (root, bin, sbin, etc, tmp, dev, devices,
         // dri) + 2 data files (passwd, secret) + 19 devices (tty00, tty01, null,
         // console, ip, udp, tcp, fb, kbd, the 8 pty nodes ttyp0-3/ptyp0-3, uds,
-        // and dri/renderD128) = 29 inodes.
-        let n_inodes = 29usize;
+        // and dri/renderD128) + the /link symlink = 30 inodes.
+        let n_inodes = 30usize;
         for ino in 1..=n_inodes {
             assert_eq!(
                 (imap[ino / 8] >> (ino % 8)) & 1,
@@ -717,11 +787,11 @@ mod tests {
                 "inode {ino} must be marked in use at bit {ino}"
             );
         }
-        // And the next bit (inode 30) is free — the first allocatable inode.
+        // And the next bit (inode 31) is free — the first allocatable inode.
         assert_eq!(
-            imap[30 / 8] & (1 << (30 % 8)),
+            imap[31 / 8] & (1 << (31 % 8)),
             0,
-            "inode 30 must be free for the first create"
+            "inode 31 must be free for the first create"
         );
         let _ = itable_off;
     }

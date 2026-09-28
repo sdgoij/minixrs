@@ -75,6 +75,10 @@ pub const INVALID_THREAD: i32 = -1;
 /// Maximum symlink traversals.
 pub const SYMLOOP: i32 = 16;
 
+/// `SSIZE_MAX`. `readlink`'s size is refused above this before the path is read, because the
+/// FS copies the target through a signed count (C `link.c` `do_rdlink`).
+pub const SSIZE_MAX: usize = i32::MAX as usize;
+
 /// Maximum file system type size.
 pub const FSTYPE_MAX: usize = 16; // VFS_NAMELEN
 
@@ -456,6 +460,7 @@ pub const S_IFBLK: u32 = 0o060000;
 pub const S_IFREG: u32 = 0o100000;
 pub const S_IFDIR: u32 = 0o040000;
 pub const S_IFIFO: u32 = 0o010000;
+pub const S_IFLNK: u32 = 0o120000;
 
 /// Self endpoint (for sys_vircopy).
 pub const SELF: i32 = 0x0000fffd;

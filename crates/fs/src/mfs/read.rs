@@ -328,6 +328,20 @@ fn safecopy_msg(gid: i32, buf_off: u64, local: u64, bytes: u64) -> [u8; 64] {
     kmsg
 }
 
+/// Copy `len` bytes from `src` into the granted buffer at `buf_off` — the C
+/// `sys_safecopyto(VFS_PROC_NR, gid, buf_off, src, len)`.
+///
+/// The grant is the one VFS made for the *caller's* own buffer, which is the only way an
+/// FS server's bytes reach a user process: the message carries a grant id, never a user
+/// address.
+#[cfg(target_os = "minix")]
+pub(crate) fn safecopy_to_grant(gid: i32, buf_off: u64, src: *const u8, len: usize) -> i32 {
+    minix_rt::kernel_call(
+        SAFECOPYTO_CALL,
+        &mut safecopy_msg(gid, buf_off, src as u64, len as u64),
+    )
+}
+
 // Reference: read.c read_map()
 pub fn read_map(rip_idx: u16, position: i64, _opportunistic: i32) -> u32 {
     unsafe {

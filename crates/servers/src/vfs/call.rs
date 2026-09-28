@@ -1834,8 +1834,13 @@ pub fn do_rdlink() -> i32 {
     let glob = unsafe { &*vfs_global() };
     let path_addr = r_u64(&glob.fs_m_in, 8);
     let path_len = r_u32(&glob.fs_m_in, 16) as usize;
-    let _buf_addr = r_u64(&glob.fs_m_in, 24);
+    let buf_addr = r_u64(&glob.fs_m_in, 24);
     let buf_size = r_u32(&glob.fs_m_in, 32) as usize;
+    // C link.c do_rdlink: a size past `SSIZE_MAX` is refused before the path is even read,
+    // because the FS copies the target through a signed count.
+    if buf_size > SSIZE_MAX {
+        return EINVAL;
+    }
     let mut path_buf = [0u8; PATH_MAX];
     let copy_len = path_len.min(PATH_MAX - 1);
     unsafe {
@@ -1862,12 +1867,23 @@ pub fn do_rdlink() -> i32 {
     if vp.is_null() {
         return ENOENT;
     }
+    // C link.c do_rdlink: the vnode has to *be* a symlink. `eat_path` was asked for
+    // PATH_RET_SYMLINK, so it stops at the link rather than following it, and a path that
+    // resolved to anything else is a request this call cannot answer.
+    if unsafe { (*vp).v_mode & S_IFMT } != S_IFLNK {
+        unsafe { mount::put_vnode(vp) };
+        return EINVAL;
+    }
+    // The buffer is the *caller's*, which is why both the endpoint and the address have to be
+    // theirs: VFS makes a grant for that buffer and the FS copies the target into it through
+    // the grant. Passing `-1`/null here — as this once did — asks the FS to write its answer
+    // into nothing at all, so the call returned a length and no bytes.
     let r = unsafe {
         crate::vfs::request::req_rdlink(
             (*vp).v_fs_e,
             (*vp).v_inode_nr,
-            -1,
-            core::ptr::null_mut(),
+            fp.fp_endpoint,
+            buf_addr as *mut u8,
             buf_size,
             0,
         )

@@ -1,0 +1,27 @@
+# The `just test-readlink-x86` scenario: `readlink(2)` on the symlink the image ships.
+#
+# A symlink is the shape `/sys` is made of - the tree libdrm's device enumeration reads, a
+# prerequisite for the accelerated path (`WAYLAND.md` 6.10) - and reading one is the only
+# operation in this image that moves a *filesystem server's* bytes into a user process: the FS
+# copies the target out of the inode's first block through a grant VFS made for the caller's
+# own buffer. A mistake in any of the three shows up as a count with no bytes, or as bytes
+# read from somewhere else.
+#
+# This gate exists because none of the three worked: `readlink` was an `ENOSYS` stub in libc,
+# VFS's `do_rdlink` asked the FS to copy into `-1`/null, and MFS's `fs_rdlink` never copied at
+# all - it only recorded a length in `cch[0]`. With every piece stubbed, nothing else in the
+# tree exercised the path and no existing gate could have noticed.
+#
+# The expected line is four reads: the whole target (23 bytes, `/sys/devices/virtio-gpu`), the
+# same link through an 8-byte buffer (POSIX truncates, so the count becomes the buffer's length
+# and the first 8 bytes still match), and the two refusals. `chr` is `/dev/dri/renderD128`, a
+# character device and not a link, so VFS answers `EINVAL` (22) before any filesystem is asked;
+# `gone` is a path that is not there, which is the filesystem's own `ENOENT` (2).
+#
+# Each field is a separate claim, and the client prints `tgt=bad`/`cutok=0`/`ok` where a
+# mismatch or an unexpected success would otherwise read as another pass.
+#
+# `/link` and its target are both in `boot-image/src/minixfs.rs`, so changing one without the
+# other fails here rather than agreeing with itself.
+
+/bin/readlinktest	readlinktest: n=23 tgt=ok cut=8 cutok=1 chr=err 22 gone=err 2

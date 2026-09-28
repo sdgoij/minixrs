@@ -209,6 +209,10 @@ pub const BOOT_BINS: &[(&str, &str)] = &[
     // `/bin/drmblob` makes a blob object, reads its kind back, and asks for every kind and flag
     // this node cannot serve (§6.10, stage 3b-4).
     ("/bin/drmblob", "drmblob"),
+    // `/bin/readlinktest` reads the target of the symlink the image ships, and the refusals a
+    // read has to give. A symlink is the shape `/sys` is made of, and reading one is what moves a
+    // filesystem server's bytes into a user process.
+    ("/bin/readlinktest", "readlinktest"),
 ];
 
 /// Programs a **wasm32** image carries: destination path → module file name in the target's

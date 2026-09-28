@@ -61,6 +61,11 @@ path = "src/bin/drmblob.rs"
 test = false
 
 [[bin]]
+name = "readlinktest"
+path = "src/bin/readlinktest.rs"
+test = false
+
+[[bin]]
 name = "init"
 path = "src/bin/init.rs"
 test = false

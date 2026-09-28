@@ -864,15 +864,26 @@ pub unsafe extern "C" fn shm_unlink(_name: *const c_char) -> c_int {
     crate::fail(ENOSYS)
 }
 
-/// Read a symbolic link target. VFS has no symlink support yet.
+/// Read a symbolic link's target: the number of bytes written into `buf`, not
+/// NUL-terminated and truncated to `bufsiz`, or -1 with `errno` set.
 #[cfg(target_os = "minix")]
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn readlink(
-    _path: *const c_char,
-    _buf: *mut c_char,
-    _bufsiz: usize,
-) -> isize {
-    crate::fail(ENOSYS) as isize
+pub unsafe extern "C" fn readlink(path: *const c_char, buf: *mut c_char, bufsiz: usize) -> isize {
+    if path.is_null() || (buf.is_null() && bufsiz != 0) {
+        return crate::fail(EINVAL) as isize;
+    }
+    let path_bytes = unsafe { core::ffi::CStr::from_ptr(path) }.to_bytes();
+    // A null buffer with a zero size is the one shape POSIX leaves unspecified, and slicing
+    // from it would be undefined: there is nothing to write and nothing to build a slice from.
+    let out = if bufsiz == 0 {
+        &mut [][..]
+    } else {
+        unsafe { core::slice::from_raw_parts_mut(buf as *mut u8, bufsiz) }
+    };
+    match minix_std::fs::readlink(path_bytes, out) {
+        Ok(n) => n as isize,
+        Err(e) => crate::fail(e.0) as isize,
+    }
 }
 
 /// Change an fd's owner. VFS chown is path-based only.

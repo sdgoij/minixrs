@@ -382,6 +382,17 @@ test-drmmap-x86 boot-timeout="20": build-x86
     @just _assert-qemu-log target/test-drmmap-x86.log "fb: gpu3d device, no VIRTIO_GPU_F_VIRGL"
     @echo "drmmap: a client created a render node memory object, mapped it twice, found one set of frames, saw a second object be other memory, and closed it (x86_64)"
 
+# `readlink(2)`, which nothing proved until now: the three pieces that move a filesystem
+# server's bytes into a user process (`tools/smoke/readlink.tsv` has the whole reason) are all
+# stubs of some kind before this, so the gate is the first exercise of the path. No device is
+# needed beyond the ones a plain boot has, and the step's own expectation is the assertion.
+test-readlink-x86 boot-timeout="20": build-x86
+    mkdir -p target/images/x86_64-pc-minix
+    cp target/trampoline.elf target/images/x86_64-pc-minix/minix-x86.elf
+    @just _assert-qemu-version qemu-system-x86_64
+    FEED_SCENARIO=tools/smoke/readlink.tsv sh tools/smoke/feed.sh target/test-readlink-x86.log {{boot-timeout}} qemu-system-x86_64 -nographic -m 256M -no-reboot -vga none -device bochs-display,id=fb0 -kernel target/images/x86_64-pc-minix/minix-x86.elf -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0 -device virtio-tablet-pci,display=fb0
+    @echo "readlink: a client read the target of the symlink the image ships, and the refusals a read has to give (x86_64)"
+
 # The render node's client on the GL device, which is the one gate that types into a guest with a
 # GL display backend: host GL drops serial bytes mid-line, so this recipe sets `FEED_PACE` and
 # `feed.sh` writes the step a byte at a time and refuses to believe it until the guest has echoed
