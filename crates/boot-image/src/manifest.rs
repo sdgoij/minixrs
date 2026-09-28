@@ -213,6 +213,10 @@ pub const BOOT_BINS: &[(&str, &str)] = &[
     // read has to give. A symlink is the shape `/sys` is made of, and reading one is what moves a
     // filesystem server's bytes into a user process.
     ("/bin/readlinktest", "readlinktest"),
+    // `/bin/symlinktest` creates a link MFS writes, reads the target back out of it, and asks for
+    // the refusals a creation has to give. The image's `/link` is made by the image builder, so
+    // this is the only program in the image that runs `fs_slink`.
+    ("/bin/symlinktest", "symlinktest"),
 ];
 
 /// Programs a **wasm32** image carries: destination path → module file name in the target's

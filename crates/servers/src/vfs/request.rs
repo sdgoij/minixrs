@@ -1253,67 +1253,72 @@ pub unsafe fn req_rmdir(fs_e: i32, inode_nr: u32, _lastc: *const u8) -> i32 {
 
 /// Create a symbolic link.
 ///
+/// `lastc` is VFS's own NUL-terminated copy of the link's name — the last component of
+/// the link's path — which is why it is granted *direct*: it is the granter's own memory.
+/// The target, by contrast, is still in `proc_e`'s address space and travels as a magic
+/// grant, so its bytes never pass through VFS.
+///
 /// # Safety
 ///
-/// `lastc` and `path` must point to valid NUL-terminated strings.  Caller
-/// must ensure `fs_e` is a valid FS endpoint.
+/// `lastc` must point to a valid NUL-terminated string, `fs_e` must be a valid FS
+/// endpoint, and `target_addr` must be readable for `target_len` bytes in `proc_e`.
+#[allow(clippy::too_many_arguments)]
 pub unsafe fn req_slink(
     fs_e: i32,
     inode_nr: u32,
-    _lastc: *const u8,
+    lastc: *const u8,
+    proc_e: i32,
+    target_addr: u64,
+    target_len: usize,
     uid: u16,
     gid: u16,
-    _path: *const u8,
 ) -> i32 {
     #[cfg(target_os = "minix")]
     {
-        let len_name = if _lastc.is_null() {
+        let len_name = if lastc.is_null() {
             0
         } else {
-            core::ffi::CStr::from_ptr(_path.cast::<core::ffi::c_char>())
+            core::ffi::CStr::from_ptr(lastc.cast::<core::ffi::c_char>())
                 .to_bytes()
                 .len()
                 + 1
         };
-        let len_buf = if _path.is_null() {
-            0
-        } else {
-            core::ffi::CStr::from_ptr(_path.cast::<core::ffi::c_char>())
-                .to_bytes()
-                .len()
-                + 1
-        };
-        let gid_name = crate::vfs::grant::cpf_grant_magic(
+        let gid_name = cpf_grant_direct(
             arch_common::com::VFS_PROC_NR,
             fs_e,
-            _lastc as u64,
+            lastc as u64,
             len_name,
+            false,
         );
-        let gid_buf = crate::vfs::grant::cpf_grant_magic(
-            arch_common::com::VFS_PROC_NR,
-            fs_e,
-            _path as u64,
-            len_buf,
-        );
+        let gid_buf = cpf_grant_magic(proc_e, fs_e, target_addr, target_len);
 
         let mut msg = [0u8; 56];
         w_i32(&mut msg, M_TYPE_OFF, REQ_SLINK);
         w_u32(&mut msg, PAYLOAD_OFF, inode_nr); // inode
-        w_u64(&mut msg, PAYLOAD_OFF + 8, len_name as u64);
-        w_u64(&mut msg, PAYLOAD_OFF + 16, len_buf as u64);
+        w_u64(&mut msg, PAYLOAD_OFF + 8, len_name as u64); // the name's length, NUL included
+        w_u64(&mut msg, PAYLOAD_OFF + 16, target_len as u64); // the target's length
         w_i32(&mut msg, PAYLOAD_OFF + 24, gid_name);
         w_i32(&mut msg, PAYLOAD_OFF + 28, gid_buf);
         w_u16(&mut msg, PAYLOAD_OFF + 32, uid); // uid
         w_u16(&mut msg, PAYLOAD_OFF + 34, gid); // gid
 
         let r = fs_sendrec(fs_e, &mut msg);
-        crate::vfs::grant::cpf_revoke(gid_name);
-        crate::vfs::grant::cpf_revoke(gid_buf);
+        cpf_revoke(gid_name);
+        cpf_revoke(gid_buf);
         r
     }
     #[cfg(not(target_os = "minix"))]
     {
-        let _ = (fs_e, inode_nr, _lastc, uid, gid, _path);
+        let _ = (
+            fs_e,
+            inode_nr,
+            lastc,
+            proc_e,
+            target_addr,
+            target_len,
+            uid,
+            gid,
+        );
         ENOSYS
     }
 }
@@ -1790,7 +1795,7 @@ mod tests {
         let r = unsafe { req_rmdir(0, 0, core::ptr::null()) };
         assert_eq!(r, ENOSYS);
 
-        let r = unsafe { req_slink(0, 0, core::ptr::null(), 0, 0, core::ptr::null()) };
+        let r = unsafe { req_slink(0, 0, core::ptr::null(), 0, 0, 0, 0, 0) };
         assert_eq!(r, ENOSYS);
 
         let r = unsafe { req_stat(0, 0, 0, core::ptr::null_mut(), 0) };

@@ -66,6 +66,11 @@ path = "src/bin/readlinktest.rs"
 test = false
 
 [[bin]]
+name = "symlinktest"
+path = "src/bin/symlinktest.rs"
+test = false
+
+[[bin]]
 name = "init"
 path = "src/bin/init.rs"
 test = false

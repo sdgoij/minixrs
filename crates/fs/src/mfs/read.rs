@@ -342,6 +342,20 @@ pub(crate) fn safecopy_to_grant(gid: i32, buf_off: u64, src: *const u8, len: usi
     )
 }
 
+/// Copy `len` bytes out of the granted buffer at `buf_off` into `dst` — the C
+/// `sys_safecopyfrom(VFS_PROC_NR, gid, buf_off, dst, len)`.
+///
+/// The other direction of `safecopy_to_grant`: a caller's string reaches an FS server
+/// only through the grant VFS made for it, so a name or a link target arrives here and
+/// never as a user address.
+#[cfg(target_os = "minix")]
+pub(crate) fn safecopy_from_grant(gid: i32, buf_off: u64, dst: *mut u8, len: usize) -> i32 {
+    minix_rt::kernel_call(
+        SAFECOPYFROM_CALL,
+        &mut safecopy_msg(gid, buf_off, dst as u64, len as u64),
+    )
+}
+
 // Reference: read.c read_map()
 pub fn read_map(rip_idx: u16, position: i64, _opportunistic: i32) -> u32 {
     unsafe {

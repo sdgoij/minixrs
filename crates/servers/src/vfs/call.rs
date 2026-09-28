@@ -2233,50 +2233,101 @@ pub fn do_mknod() -> i32 {
 
 /// Perform the `symlink(target, linkpath)` system call.
 ///
-/// C source: `minix/servers/vfs/open.c` â€” `do_slink()` (line 148)
+/// C source: `minix/servers/vfs/link.c` — `do_slink()` (line 389)
 pub fn do_slink() -> i32 {
     let fp = match current_fp() {
         Some(fp) => fp,
         None => return EINVAL,
     };
     let glob = unsafe { &*vfs_global() };
-    let path_addr = r_u64(&glob.fs_m_in, 8);
-    let path_len = r_u32(&glob.fs_m_in, 16) as usize;
-    let _link_addr = r_u64(&glob.fs_m_in, 24);
-    let _link_len = r_u32(&glob.fs_m_in, 32) as usize;
-    let mut path_buf = [0u8; PATH_MAX];
-    let copy_len = path_len.min(PATH_MAX - 1);
+    let target_addr = r_u64(&glob.fs_m_in, 8);
+    let target_len = r_u32(&glob.fs_m_in, 16) as usize;
+    let link_addr = r_u64(&glob.fs_m_in, 24);
+    let link_len = r_u32(&glob.fs_m_in, 32) as usize;
+
+    // C link.c do_slink: an empty target is not a link, and one at or past
+    // `_POSIX_SYMLINK_MAX` is refused before anything is resolved. These lengths are the
+    // strings' own — C counts the terminating NUL, which is the one off-by-one this port
+    // does not take (`minix_std::fs::symlink`).
+    if target_len == 0 {
+        return ENOENT;
+    }
+    if target_len >= POSIX_SYMLINK_MAX {
+        return ENAMETOOLONG;
+    }
+
+    // Only the *link's* path is resolved, and only to its parent directory: the target is
+    // a string, and it may well name something that does not exist.
+    let mut link_buf = [0u8; PATH_MAX];
+    let copy_len = link_len.min(PATH_MAX - 1);
     unsafe {
         if sys_vircopy(
             fp.fp_endpoint,
-            path_addr,
+            link_addr,
             SELF,
-            path_buf.as_mut_ptr() as u64,
+            link_buf.as_mut_ptr() as u64,
             copy_len,
         ) != 0
         {
             return EBADF;
         }
     }
-    let actual_len = path_buf[..copy_len]
+    let actual_len = link_buf[..copy_len]
         .iter()
         .position(|&b| b == 0)
         .unwrap_or(copy_len);
+    if actual_len == 0 {
+        return ENOENT;
+    }
     let mut resolve = Lookup::default();
-    resolve.l_path[..actual_len].copy_from_slice(&path_buf[..actual_len]);
+    resolve.l_path[..actual_len].copy_from_slice(&link_buf[..actual_len]);
     resolve.l_path_len = actual_len;
     let dirp = unsafe { path::last_dir(&resolve, fp) };
     if dirp.is_null() {
         return ENOENT;
     }
+    if unsafe { (*dirp).v_mode & S_IFMT } != S_IFDIR {
+        unsafe { mount::put_vnode(dirp) };
+        return ENOTDIR;
+    }
+    // C link.c do_slink: the parent must be a directory we may write and search, and only
+    // then is a filesystem asked.
+    let r2 = crate::vfs::protect::forbidden(
+        fp,
+        unsafe { &*dirp },
+        crate::vfs::protect::W_BIT | crate::vfs::protect::X_BIT,
+        false,
+    );
+    if r2 != OK {
+        unsafe { mount::put_vnode(dirp) };
+        return r2;
+    }
+    // The name is the last component, and `link_buf` is terminated at `actual_len` — by
+    // the zero the search above found, or by the one the array started with — so the
+    // suffix is the NUL-terminated string the filesystem is handed (C's `lastc`).
+    let name_start = link_buf[..actual_len]
+        .iter()
+        .rposition(|&b| b == b'/')
+        .map(|i| i + 1)
+        .unwrap_or(0);
+    if name_start == actual_len {
+        // A trailing slash leaves no name to create, and an empty one would enter an
+        // empty name into the directory.
+        unsafe { mount::put_vnode(dirp) };
+        return ENOENT;
+    }
+    let fs_e = unsafe { (*dirp).v_fs_e };
+    let dir_ino = unsafe { (*dirp).v_inode_nr };
     let r = unsafe {
         crate::vfs::request::req_slink(
-            (*dirp).v_fs_e,
-            (*dirp).v_inode_nr,
-            core::ptr::null(),
+            fs_e,
+            dir_ino,
+            link_buf.as_ptr().add(name_start),
+            fp.fp_endpoint,
+            target_addr,
+            target_len,
             fp.fp_effuid,
             fp.fp_effgid,
-            core::ptr::null(),
         )
     };
     unsafe { mount::put_vnode(dirp) };
@@ -3821,6 +3872,21 @@ mod tests {
             fs_m_in[8..16].copy_from_slice(&0u64.to_le_bytes());
             let r = do_slink();
             assert!(r < 0);
+        }
+    }
+
+    /// A target at `_POSIX_SYMLINK_MAX` is refused before the link's path is read, so this
+    /// reaches the check with no filesystem behind it at all. The target is never resolved,
+    /// so nothing else here would notice the limit.
+    #[test]
+    fn test_slink_long_target_returns_enametoolong() {
+        unsafe {
+            setup();
+            let glob = vfs_global();
+            let fs_m_in = &mut (*glob).fs_m_in;
+            fs_m_in[16..20].copy_from_slice(&(POSIX_SYMLINK_MAX as u32).to_le_bytes());
+            let r = do_slink();
+            assert_eq!(r, ENAMETOOLONG);
         }
     }
 

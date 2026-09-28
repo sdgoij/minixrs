@@ -1,0 +1,28 @@
+# The `just test-symlink-x86` scenario: `symlink(2)`, then `readlink(2)` on what it made.
+#
+# `symlink` is the writing half of the readlink gate. MFS puts the target in the inode's
+# first block and `fs_rdlink` copies it back out through a grant, so a link created here and
+# read back exercises both directions of that path at once - and it is the only call in the
+# tree that creates an inode whose entire contents are a name.
+#
+# Nothing had ever created one: MFS's `fs_slink` took its arguments from the wrong fields,
+# allocated the target's block and threw it away (`i_size` left at 0), VFS's `do_slink` handed
+# the filesystem two null pointers, and libc's `symlink` was an `ENOSYS` stub. The image's
+# `/link` is written by the image builder, so no QEMU gate could have noticed any of it.
+#
+# The line is the link's whole round trip and the three things that can refuse a creation.
+# `n` is what `readlink` gives back for a link this client made - 23 bytes,
+# `/sys/devices/virtio-gpu` - and `tgt` is whether those bytes are the target. `again` is the
+# same link a second time, which is the filesystem's own `EEXIST` (17). `nodir` is a link whose
+# directory does not exist, so path resolution answers `ENOENT` (2). `long` is a target past
+# `_POSIX_SYMLINK_MAX`, refused by the length check *before* any path is read, so it is
+# `ENAMETOOLONG` (36) rather than `ENOENT` even though its directory is missing too - the one
+# field that says the checks run in that order.
+#
+# Each field is a separate claim, and the client prints `tgt=bad`/`ok` where a mismatch or an
+# unexpected success would otherwise read as another pass.
+#
+# `/tmp` is where the link is made: it is the one directory in the image a session may write,
+# which is why `bash.tsv`'s redirect step uses it.
+
+/bin/symlinktest	symlinktest: n=23 tgt=ok again=err 17 nodir=err 2 long=err 36

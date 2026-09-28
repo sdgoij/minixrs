@@ -264,6 +264,17 @@ const OFF_READLINK_NAME_LEN: usize = 16;
 const OFF_READLINK_BUF: usize = 24;
 const OFF_READLINK_BUFSIZE: usize = 32;
 
+// VFS_SYMLINK (matches do_slink):
+//   offset 8:  target pointer (u64) — the string the link holds, never resolved
+//   offset 16: target length (u64)
+//   offset 24: link path pointer (u64)
+//   offset 32: link path length (u64)
+
+const OFF_SYMLINK_TARGET: usize = 8;
+const OFF_SYMLINK_TARGET_LEN: usize = 16;
+const OFF_SYMLINK_LINKPATH: usize = 24;
+const OFF_SYMLINK_LINKPATH_LEN: usize = 32;
+
 // VFS_FCNTL (matches do_fcntl):
 //   offset 8:  fd (i32)
 //   offset 12: cmd (i32)
@@ -885,6 +896,30 @@ pub fn link(old: &[u8], new: &[u8]) -> Result<(), MinixErr> {
         msg_set_u32(&mut msg, 16, old.len() as u32);
         msg_set_u64(&mut msg, 24, new.as_ptr() as u64);
         msg_set_u32(&mut msg, 32, new.len() as u32);
+        let _ = vfs_call(&mut msg)?;
+        Ok(())
+    }
+}
+
+/// Create a symbolic link (VFS_SYMLINK — target at 8/len at 16, link path at 24/len at
+/// 32). The first argument is the *target*: it is stored as given and never resolved, so
+/// it may name something that does not exist.
+pub fn symlink(target: &[u8], linkpath: &[u8]) -> Result<(), MinixErr> {
+    #[cfg(not(target_os = "minix"))]
+    {
+        let _ = (target, linkpath, VFS_PROC_NR);
+        Err(MinixErr::ENOSYS)
+    }
+    #[cfg(target_os = "minix")]
+    unsafe {
+        let mut msg = [0u8; 64];
+        msg_set_i32(&mut msg, OFF_CALL, VFS_SYMLINK as i32);
+        // Both strings stay in the caller's address space: VFS resolves the *link path*
+        // itself and grants the target straight to the filesystem.
+        msg_set_u64(&mut msg, OFF_SYMLINK_TARGET, target.as_ptr() as u64);
+        msg_set_u32(&mut msg, OFF_SYMLINK_TARGET_LEN, target.len() as u32);
+        msg_set_u64(&mut msg, OFF_SYMLINK_LINKPATH, linkpath.as_ptr() as u64);
+        msg_set_u32(&mut msg, OFF_SYMLINK_LINKPATH_LEN, linkpath.len() as u32);
         let _ = vfs_call(&mut msg)?;
         Ok(())
     }

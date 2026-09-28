@@ -393,6 +393,17 @@ test-readlink-x86 boot-timeout="20": build-x86
     FEED_SCENARIO=tools/smoke/readlink.tsv sh tools/smoke/feed.sh target/test-readlink-x86.log {{boot-timeout}} qemu-system-x86_64 -nographic -m 256M -no-reboot -vga none -device bochs-display,id=fb0 -kernel target/images/x86_64-pc-minix/minix-x86.elf -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0 -device virtio-tablet-pci,display=fb0
     @echo "readlink: a client read the target of the symlink the image ships, and the refusals a read has to give (x86_64)"
 
+# `symlink(2)`, the write half of the readlink gate: a link MFS creates at run time, read
+# back out through the same path (`tools/smoke/symlink.tsv` has the whole reason). Nothing
+# had ever created one, so this is the first exercise of it, and the step's own expectation
+# is the assertion. No device is needed beyond the ones a plain boot has.
+test-symlink-x86 boot-timeout="20": build-x86
+    mkdir -p target/images/x86_64-pc-minix
+    cp target/trampoline.elf target/images/x86_64-pc-minix/minix-x86.elf
+    @just _assert-qemu-version qemu-system-x86_64
+    FEED_SCENARIO=tools/smoke/symlink.tsv sh tools/smoke/feed.sh target/test-symlink-x86.log {{boot-timeout}} qemu-system-x86_64 -nographic -m 256M -no-reboot -vga none -device bochs-display,id=fb0 -kernel target/images/x86_64-pc-minix/minix-x86.elf -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0 -device virtio-tablet-pci,display=fb0
+    @echo "symlink: a client created a link in /tmp, read its target back through the grant, and got the three refusals (x86_64)"
+
 # The render node's client on the GL device, which is the one gate that types into a guest with a
 # GL display backend: host GL drops serial bytes mid-line, so this recipe sets `FEED_PACE` and
 # `feed.sh` writes the step a byte at a time and refuses to believe it until the guest has echoed

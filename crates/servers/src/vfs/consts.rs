@@ -79,6 +79,10 @@ pub const SYMLOOP: i32 = 16;
 /// FS copies the target through a signed count (C `link.c` `do_rdlink`).
 pub const SSIZE_MAX: usize = i32::MAX as usize;
 
+/// `_POSIX_SYMLINK_MAX`. `symlink`'s target is refused at or past this before the link's
+/// path is resolved (C `link.c` `do_slink`; `.refs/minix-3.3.0/include/limits.h`).
+pub const POSIX_SYMLINK_MAX: usize = 255;
+
 /// Maximum file system type size.
 pub const FSTYPE_MAX: usize = 16; // VFS_NAMELEN
 

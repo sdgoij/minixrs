@@ -42,6 +42,9 @@ pub mod drmblob;
 /// The `readlink(2)` smoke test — `/bin/readlinktest` (a symlink is what `/sys` is made of).
 pub mod readlinktest;
 
+/// The `symlink(2)` smoke test — `/bin/symlinktest` (the writing half of that same path).
+pub mod symlinktest;
+
 /// When >= 0, all `write_out` calls are routed through this fd (via VFS)
 /// instead of the kernel's serial shortcut on fd 1. Set by the shell's
 /// redirect child after `fork`, so it is process-private.

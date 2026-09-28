@@ -726,11 +726,20 @@ pub unsafe extern "C" fn link(old: *const c_char, new: *const c_char) -> c_int {
     }
 }
 
-/// Create a symbolic link. VFS has no symlink call yet.
+/// Create a symbolic link: 0, or -1 with `errno` set. `target` is stored as given and is
+/// never resolved, so it may name something that does not exist yet.
 #[cfg(target_os = "minix")]
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn symlink(_target: *const c_char, _linkpath: *const c_char) -> c_int {
-    crate::fail(ENOSYS)
+pub unsafe extern "C" fn symlink(target: *const c_char, linkpath: *const c_char) -> c_int {
+    if target.is_null() || linkpath.is_null() {
+        return crate::fail(EINVAL);
+    }
+    let target_bytes = unsafe { core::ffi::CStr::from_ptr(target) }.to_bytes();
+    let linkpath_bytes = unsafe { core::ffi::CStr::from_ptr(linkpath) }.to_bytes();
+    match minix_std::fs::symlink(target_bytes, linkpath_bytes) {
+        Ok(()) => 0,
+        Err(e) => crate::fail(e.0),
+    }
 }
 
 /// Truncate an open file (VFS truncate).
