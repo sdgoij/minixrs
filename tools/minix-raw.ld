@@ -53,8 +53,16 @@ SECTIONS
     .initramfs : ALIGN(4096) {
         __initramfs_start = .;
         *(.initramfs)
-        *(.minixfs)
         __initramfs_end = .;
+    }
+
+    /* The disk image gets its own span, as it already has on riscv64 and aarch64: `initramfs_data()`
+     * then covers the archive alone, and the kernel's copy of the image (read only at boot, on the
+     * kernel's own tables) is not swept into it. */
+    .minixfs : ALIGN(4096) {
+        __minixfs_start = .;
+        *(.minixfs)
+        __minixfs_end = .;
     }
 
     __kernel_end = ALIGN(4096);
