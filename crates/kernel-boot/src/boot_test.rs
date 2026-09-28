@@ -72,13 +72,21 @@ pub unsafe fn run_boot_tests() {
     //    so do_getksig_handler can find exited processes.
     failures += test_boot_procs_have_sig_mgr();
 
-    // J: Exec / initramfs verification
-    failures += test_initramfs_echo_exists();
-    failures += test_initramfs_echo_elf();
-    failures += test_initramfs_sh_exists();
-    failures += test_initramfs_boot_files();
-    failures += test_initramfs_pipetest_elf();
-    failures += test_dynamic_artifacts_present();
+    // J: Exec / initramfs verification.
+    //
+    // Run on the kernel's own page tables: the embedded archive reaches past the user VA base, so
+    // from a process's CR3 a lookup above `0x1000000` reads that process's own text instead of the
+    // archive (`KNOWN_ISSUES.md` item 38, where the mechanism is measured).
+    failures += unsafe {
+        on_kernel_tables(|| {
+            test_initramfs_echo_exists()
+                + test_initramfs_echo_elf()
+                + test_initramfs_sh_exists()
+                + test_initramfs_boot_files()
+                + test_initramfs_pipetest_elf()
+                + test_dynamic_artifacts_present()
+        })
+    };
 
     // K: PM MPROC page table walk
     failures += test_pm_mproc_pt();
@@ -682,6 +690,36 @@ fn test_boot_procs_have_sig_mgr() -> u32 {
 }
 
 // J: Exec / initramfs verification
+
+/// Run `f` with the kernel's page tables installed, then restore whatever was there.
+///
+/// The kernel's embedded blobs end past the user VA base (`0x1000000`), so an address-space that
+/// maps a user program there shadows them: a reader on a process's CR3 sees that program's text
+/// where the archive should be, which is what made `test_initramfs_boot_files` report the first
+/// entry past the boundary as missing (`KNOWN_ISSUES.md` item 38). The kernel's own tables have
+/// the identity map the archive lives in, and `boot_cr3` is where `arch` keeps them for exactly
+/// this kind of switch (`proc_stacktrace` requires them for the same reason).
+///
+/// `arch-sim` has no real address translation — its `boot_cr3` is 0 — so there the call is a
+/// no-op, which is the same "unavailable" path `proc_stacktrace` takes.
+///
+/// # Safety
+///
+/// Must run on a kernel stack in identity-mapped memory: the switch makes the caller's own code
+/// and stack reachable only through the kernel's map.
+unsafe fn on_kernel_tables<T>(f: impl FnOnce() -> T) -> T {
+    let boot = kernel::hal::boot_cr3();
+    let saved = unsafe { kernel::hal::read_cr3() };
+    let switched = boot != 0 && boot != saved;
+    if switched {
+        unsafe { kernel::hal::write_cr3(boot) };
+    }
+    let out = f();
+    if switched {
+        unsafe { kernel::hal::write_cr3(saved) };
+    }
+    out
+}
 
 fn test_initramfs_echo_exists() -> u32 {
     match kernel::initramfs::find_initramfs_file("/bin/echo") {

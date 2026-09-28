@@ -1435,33 +1435,54 @@ are arch-specific, `[env]` is tooling/platform, not kernel.
     (`crates/servers/src/vfs/call.rs`, `crates/servers/src/vfs/request.rs`,
     `crates/fs/src/mfs/main.rs`, `crates/fs/src/mfs/link.rs`)
 
-38. **The boot test cannot find `/sbin/devman` in the initramfs, though the boot loader loaded
-    it (2026-09-28, open — measured).** `just test-boot-x86` reports exactly one failure,
-    `FAIL: missing /sbin/devman`; `/bin/echo`, `/bin/sh`, `/bin/pipetest`, `/libexec/ld.so`,
-    `/lib/libc.so` and `/bin/dynclib` all pass.
+38. **The kernel image reaches past the user VA base, so a process's own code shadows its
+    embedded initramfs (2026-09-28, open — measured).** `just test-boot-x86` reports exactly one
+    failure, `FAIL: missing /sbin/devman`, and the archive is not corrupt:
 
-    It is not this session's `BOOT_BINS` additions: removing `/bin/linktest` and rebuilding
-    reproduces it exactly. The loader and the test call the *same* `find_initramfs_file`, and at
-    boot the loader loaded `/sbin/devman` and every entry that follows it in the archive
-    (`/sbin/fb`, `/sbin/input`, `/sbin/wserver`, `/sbin/uds`, `/sbin/wlserver`), so those bytes
-    were readable then and are not later. The built archive is well formed — 104 `070701`
-    headers, `/sbin/devman` present, one `TRAILER!!!` at the end — and `parse_initramfs`'s
-    advance is right (`offset = pad4(pad4(name_end) + filesize)`). Since it returns `None` at the
-    first header that is not `070701`, a write anywhere in the middle makes every entry from
-    that point unreadable, and `/sbin/devman` is the last name the test reaches: that is why one
-    entry is reported rather than the whole walk looking broken.
+    - `initramfs_data()` reports `len=28571180`, which is exactly the cpio (11,793,964) plus the
+      16,777,216-byte disk image — `tools/minix-raw.ld` places `*(.minixfs)` *inside*
+      `[__initramfs_start, __initramfs_end)`, so the kernel's embedded blobs are one 28.6 MB
+      slice starting at `0x596000`.
+    - Walking it from the boot test stops at `stop=10920376`, whose VA is `0x10011b8` — that is
+      16 MiB **plus 440 bytes**. Every name before that offset resolves (echo, sh, pipetest,
+      ld.so, libc.so, dynclib) and every name from it on does not (devman, fb, input, wlserver,
+      readlinktest, linktest).
+    - The bytes there are neither zeros nor archive: they are x86 code, and the *file* has a
+      valid `070701` header at that offset. `0x1000000` is where user programs and servers are
+      linked (`/bin/echo ELF entry=0x1000000`), so what the read returns is a *user program's
+      text*.
 
-    So something writes into the embedded, zero-copy initramfs between the boot procs being
-    loaded and the test running. Two suspects, both read out of the code rather than measured:
-    `tools/minix-raw.ld` places `*(.minixfs)` *inside* `[__initramfs_start, __initramfs_end)`,
-    so `initramfs_data()` spans the cpio **and** the 16 MiB disk image — the same region the
-    ramdisk server's `copy_nonoverlapping` reads from (`boot_init.rs`, its `RAMDISK_PROC_NR`
-    branch); and the allocator's reserved kernel range against the loaded image's real end
-    (item 18's two allocators), where a page handed out inside the image is written by whoever
-    now owns it. Measure first: print `initramfs_data().len()` and the six bytes at
-    `/sbin/devman`'s offset from the boot test, and check which `_end` symbol
-    `kernel-boot/src/main.rs` hands the allocator. Only x86's boot test has been run; the
-    linker scripts are per-arch, so `test-boot-riscv64`/`aarch64` may or may not agree.
+    Nothing writes into the initramfs. The boot test runs on `SYS_BOOT_COMPLETE`, i.e. with the
+    calling process's CR3 (VFS's), and that address space maps the user window from `0x1000000`
+    up: below it the identity map reads the kernel image, above it the process's own mapping
+    shadows it, so the kernel's embedded blobs are unreachable from a process context past
+    16 MiB. `boot_init` reads what it needs at boot with the kernel's own tables, which is why
+    the boot itself is fine and only the test is wrong — `boot_init` and `boot_test` are the only
+    two callers of `find_initramfs_file`.
+
+    The kernel image is `0x200000..~0x20D3000`: text/data/bss to `0x596000` (3.5 MB), then the two
+    blobs. Nothing short of removing a blob changes that — the embedded disk image is 16 MiB on
+    its own, and without it the cpio still ends at `0x10D6000`, about 875 KB past the boundary.
+    It is knife-edge in the other direction too: `/sbin/devman` sits 440 bytes past the 16 MiB
+    line, so a few hundred bytes of growth anywhere in the kernel's own text moves the failure to
+    a different entry without anything in the archive changing, which is how it appeared here.
+
+    *A has landed (2026-09-28):* the boot test's initramfs checks now run inside `on_kernel_tables`
+    (`boot_test.rs`), which installs `boot_cr3` around the lookups and restores the caller's
+    tables after — the same switch `exec` uses to reach physical memory through the boot identity
+    map, and a no-op on `arch-sim`, whose `boot_cr3` is 0. The gate is green and measures the
+    archive again rather than the CR3 it happens to run under.
+
+    *B, the hazard, has not*, and it is a design decision with three shapes. Move the user VA base
+    above `__kernel_end`: that is `tools/minix-user.ld`'s `BASE_ADDRESS` plus the target spec's
+    `--image-base` (the fork, so a stage1 rebuild), plus every window constant and probe that
+    assumes `0x1000000`. Split `*(.minixfs)` out of the `[__initramfs_start, __initramfs_end)`
+    span so `initramfs_data()` is the cpio alone — which is not enough on its own: the cpio still
+    ends 857 KB past 16 MiB. Or stop putting every `/bin/*` binary in the initramfs, since the
+    kernel loads only the `/sbin/*` boot procs from it, and shrink the cpio under the line, which
+    also means deciding what `test_initramfs_boot_files`' list should be. Until one lands, a
+    kernel access to its own embedded blobs from a process context past 16 MiB reads another
+    process's memory and says nothing, which is the shape `silent-failure-traps` is about.
 
 ---
 
