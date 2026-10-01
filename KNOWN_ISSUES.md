@@ -1574,7 +1574,8 @@ are arch-specific, `[env]` is tooling/platform, not kernel.
     with the base at `0x0400_0000`, so this item's own lesson — a frame's physical address is not a
     pointer — is what closed it.
 
-39. **`vm_paging_fork` leaks what it built when an allocation fails mid-walk (2026-10-01, open).**
+39. **`vm_paging_fork` leaked what it built when an allocation fails mid-walk (2026-10-01, FIXED for
+    x86; open on RISC-V and AArch64).**
     `crates/arch-x86_64/src/hal.rs`'s `vm_paging_fork` writes each child table's parent entry as it
     descends and calls `fresh_table()` at three nesting levels; the first failure returns `-12`
     immediately, leaving every frame allocated so far — the child PML4, and any PDP/PD/PT already
@@ -1589,6 +1590,29 @@ are arch-specific, `[env]` is tooling/platform, not kernel.
     single PD removes the failure mode, and the fault did not reproduce with it. The fix, when it is
     wanted, is to pre-allocate the tables or free what was built before returning — the
     allocation-failure path is the only one affected.
+
+    *Fixed for x86 (2026-10-01).* A failing x86 fork now runs `free_fork_tables` before returning: the
+    walk follows only the entries the fork itself wrote, releasing tables and leaving every leaf
+    alone, since a leaf is either the parent's frame (a COW share) or a copied supervisor entry.
+    Leaves are also why it tests for a 1 GiB or 2 MiB entry *before* descending: the old code
+    allocated the PD for a 1 GiB leaf first and then overwrote the parent entry with the leaf,
+    leaking that PD outright -- the new walk is what found it. The root page is the handler's own
+    allocation, so `do_vm_paging_handler` releases it with `pagetable::free_pt_page`; that is done on
+    all three arches and is correct whether or not the arch's walk cleans up after itself.
+    `crates/arch-x86_64/src/hal.rs`'s `fork_release_walk_frees_tables_and_spares_leaves` builds a
+    child tree by hand, runs the walk, and requires the released set to be exactly the tables --
+    including one reachable only through the kernel half, which must not be visited, and two leaves,
+    which must be spared. It needs no allocator, because the one the host suite can see is pointed at
+    an address that is not memory (`alloc.rs::test_global`): `release_table_page` records into a
+    `#[cfg(test)]` log instead.
+
+    **RISC-V and AArch64 still leak, and RISC-V needs a different fix.** Their walks fail the same
+    way, but the child root alone is not enough to undo them: RISC-V's fork *splits the parent's* 1
+    GiB leaves, allocating an L1 table and linking it into both roots, so a rollback that followed
+    the child root would free a table the parent is still using. A fix there has to track what that
+    pass allocated, or split the parent only once the child's tables are all in hand. Both arches'
+    dynlink gates are red at `HEAD` for unrelated reasons, so neither path can be validated the way
+    x86's was.
 
 ---
 

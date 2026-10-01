@@ -1431,9 +1431,125 @@ pub fn bss_end() -> u64 {
     core::ptr::addr_of!(__bss_end) as u64
 }
 
+/// The pointer the fork walk uses for a frame: through the physmap, as everywhere else.
+///
+/// Host tests are the exception, as in `kernel::pagetable::table_ptr`: they have no physmap and
+/// hand over the address of an ordinary buffer, so there the identity is what keeps a fixture
+/// working at all.
+#[inline]
+fn fork_phys_ptr(pa: u64) -> *mut u64 {
+    #[cfg(test)]
+    let ptr = pa as *mut u64;
+    #[cfg(not(test))]
+    let ptr = phys_to_virt(pa) as *mut u64;
+    ptr
+}
+
+/// Release every table page the fork walk created under `child`.
+///
+/// A failed fork has to give back the frames it took from the pool. It links each table into the
+/// child as it allocates it, and the caller discards the whole child on failure, so without this
+/// every table built before the failure is unreachable and unreclaimable (`KNOWN_ISSUES.md` item
+/// 39).
+///
+/// Only *tables* are released. Every leaf the child holds is either the parent's frame (a COW
+/// share) or a copied supervisor entry, so releasing one would hand the parent's live memory back
+/// to the pool. A 1 GiB or 2 MiB entry is a leaf like any other and is skipped, which is why the
+/// walk cannot simply descend every present entry it finds.
+///
+/// `child` itself is the caller's root page and is not released here.
+/// Where the release walk reports what it gave back, in the host suite.
+///
+/// That suite has no pool these frames could come from: `crate::alloc`'s process-wide allocator is
+/// pointed at an address that is not memory by `alloc.rs`'s own `test_global`, so handing a page
+/// back is an out-of-range no-op there. `release_table_page` records it here instead, and the
+/// walk's test asserts on the record. Compiled only under `cfg(test)`.
+#[cfg(test)]
+pub(crate) mod released {
+    use core::cell::UnsafeCell;
+
+    pub(crate) struct Log(UnsafeCell<([u64; 32], usize)>);
+    // SAFETY: only the host suite reaches this, one test at a time.
+    unsafe impl Sync for Log {}
+
+    impl Log {
+        pub(crate) const fn new() -> Self {
+            Self(UnsafeCell::new(([0; 32], 0)))
+        }
+
+        pub(crate) fn record(&self, pa: u64) {
+            // SAFETY: single-threaded, as above.
+            let state = unsafe { &mut *self.0.get() };
+            if state.1 < state.0.len() {
+                state.0[state.1] = pa;
+                state.1 += 1;
+            }
+        }
+
+        /// Take the frames recorded so far, clearing the log.
+        pub(crate) fn take(&self) -> ([u64; 32], usize) {
+            // SAFETY: single-threaded, as above.
+            let state = unsafe { &mut *self.0.get() };
+            let out = (state.0, state.1);
+            state.1 = 0;
+            out
+        }
+    }
+
+    pub(crate) static LOG: Log = Log::new();
+}
+
+/// Give one page-table page back to the pool.
+///
+/// Separate from the walk so the host suite can watch it: see [`released`].
+#[inline]
+fn release_table_page(pa: u64) {
+    #[cfg(test)]
+    released::LOG.record(pa);
+    #[cfg(not(test))]
+    crate::alloc::free_phys_page(pa);
+}
+
+unsafe fn free_fork_tables(child: *mut u64) {
+    const USER_ENTRIES: usize = 256;
+    const PG_P: u64 = 0x01;
+    const PG_PS: u64 = 0x80;
+    const PG_FRAME: u64 = 0x000FFFFFFFFFF000;
+
+    unsafe {
+        for l4 in 0..USER_ENTRIES {
+            let e4 = core::ptr::read(child.add(l4));
+            if e4 & PG_P == 0 {
+                continue;
+            }
+            let p3_pa = e4 & PG_FRAME;
+            let p3 = fork_phys_ptr(p3_pa);
+            for l3 in 0..512 {
+                let e3 = core::ptr::read(p3.add(l3));
+                if e3 & PG_P == 0 || e3 & PG_PS != 0 {
+                    continue;
+                }
+                let p2_pa = e3 & PG_FRAME;
+                let p2 = fork_phys_ptr(p2_pa);
+                for l2 in 0..512 {
+                    let e2 = core::ptr::read(p2.add(l2));
+                    if e2 & PG_P == 0 || e2 & PG_PS != 0 {
+                        continue;
+                    }
+                    release_table_page(e2 & PG_FRAME);
+                }
+                release_table_page(p2_pa);
+            }
+            release_table_page(p3_pa);
+        }
+    }
+}
+
 /// Deep-copy user page table entries from parent to child for fork.
 /// Walks 4-level page tables (PML4 → PDPT → PD → PT).
-/// Returns 0 on success, -12 (ENOMEM) on allocation failure.
+/// Returns 0 on success, -12 (ENOMEM) on allocation failure. A failing call has already released
+/// every table it allocated, so the caller has nothing to unwind but the root page it allocated
+/// itself.
 ///
 /// # Safety
 ///
@@ -1448,8 +1564,8 @@ pub unsafe fn vm_paging_fork(parent_cr3: u64, child_cr3: u64, _msg: &mut [u8; 64
     const PG_FRAME: u64 = 0x000FFFFFFFFFF000;
 
     unsafe {
-        let parent = phys_to_virt(parent_cr3) as *const u64;
-        let child = phys_to_virt(child_cr3) as *mut u64;
+        let parent = fork_phys_ptr(parent_cr3) as *const u64;
+        let child = fork_phys_ptr(child_cr3);
 
         // A page-table page must never be handed to a walk holding anything but its own entries.
         // This allocator recycles pages and does not clear them, and the child's tables are filled
@@ -1461,7 +1577,7 @@ pub unsafe fn vm_paging_fork(parent_cr3: u64, child_cr3: u64, _msg: &mut [u8; 64
             unsafe {
                 match alloc_phys_page() {
                     Some(pa) => {
-                        core::ptr::write_bytes(phys_to_virt(pa) as *mut u8, 0, 4096);
+                        core::ptr::write_bytes(fork_phys_ptr(pa) as *mut u8, 0, 4096);
                         Some(pa)
                     }
                     None => None,
@@ -1483,34 +1599,44 @@ pub unsafe fn vm_paging_fork(parent_cr3: u64, child_cr3: u64, _msg: &mut [u8; 64
             if e4 & PG_P == 0 {
                 continue;
             }
-            let parent_p3 = phys_to_virt(e4 & PG_FRAME) as *const u64;
+            let parent_p3 = fork_phys_ptr(e4 & PG_FRAME) as *const u64;
             let child_p3_pa = match fresh_table() {
                 Some(p) => p,
-                None => return -12,
+                None => {
+                    free_fork_tables(child);
+                    return -12;
+                }
             };
-            let child_p3 = phys_to_virt(child_p3_pa) as *mut u64;
+            let child_p3 = fork_phys_ptr(child_p3_pa);
             core::ptr::write(child.add(l4), child_p3_pa | (e4 & !PG_FRAME));
             for l3 in 0..512 {
                 let e3 = core::ptr::read(parent_p3.add(l3));
                 if e3 & PG_P == 0 {
                     continue;
                 }
-                let parent_p2 = phys_to_virt(e3 & PG_FRAME) as *const u64;
-                let child_p2_pa = match fresh_table() {
-                    Some(p) => p,
-                    None => return -12,
-                };
-                let child_p2 = phys_to_virt(child_p2_pa) as *mut u64;
-                core::ptr::write(child_p3.add(l3), child_p2_pa | (e3 & !PG_FRAME));
+                // A 1 GiB leaf is the parent's mapping, shared (COW-protected if it is a
+                // writable user page); there is no table to build for it. Testing before
+                // allocating matters: a table allocated first and then overwritten by the leaf's
+                // entry, which is what this did, was leaked outright.
                 if e3 & PG_PS != 0 {
-                    // 1GB page — COW-protect if user-writable.
-                    if e3 & PG_U != 0 && e3 & PG_RW != 0 {
-                        core::ptr::write(child_p3.add(l3), e3 & !PG_RW);
+                    let e = if e3 & PG_U != 0 && e3 & PG_RW != 0 {
+                        e3 & !PG_RW
                     } else {
-                        core::ptr::write(child_p3.add(l3), e3);
-                    }
+                        e3
+                    };
+                    core::ptr::write(child_p3.add(l3), e);
                     continue;
                 }
+                let parent_p2 = fork_phys_ptr(e3 & PG_FRAME) as *const u64;
+                let child_p2_pa = match fresh_table() {
+                    Some(p) => p,
+                    None => {
+                        free_fork_tables(child);
+                        return -12;
+                    }
+                };
+                let child_p2 = fork_phys_ptr(child_p2_pa);
+                core::ptr::write(child_p3.add(l3), child_p2_pa | (e3 & !PG_FRAME));
                 for l2 in 0..512 {
                     let e2 = core::ptr::read(parent_p2.add(l2));
                     if e2 & PG_P == 0 {
@@ -1525,12 +1651,15 @@ pub unsafe fn vm_paging_fork(parent_cr3: u64, child_cr3: u64, _msg: &mut [u8; 64
                         }
                         continue;
                     }
-                    let parent_p1 = phys_to_virt(e2 & PG_FRAME) as *const u64;
+                    let parent_p1 = fork_phys_ptr(e2 & PG_FRAME) as *const u64;
                     let child_p1_pa = match fresh_table() {
                         Some(p) => p,
-                        None => return -12,
+                        None => {
+                            free_fork_tables(child);
+                            return -12;
+                        }
                     };
-                    let child_p1 = phys_to_virt(child_p1_pa) as *mut u64;
+                    let child_p1 = fork_phys_ptr(child_p1_pa);
                     core::ptr::write(child_p2.add(l2), child_p1_pa | (e2 & !PG_FRAME));
                     // Copy 4KB PTEs and COW-protect user-writable entries.
                     core::ptr::copy_nonoverlapping(parent_p1, child_p1, 512);
@@ -1922,5 +2051,65 @@ mod tests {
         }
         assert!(physmap_covers(physmap_size() - 1));
         assert!(!physmap_covers(physmap_size()));
+    }
+
+    /// The fork's release walk gives back every table it built and nothing else
+    /// (`KNOWN_ISSUES.md` item 39).
+    ///
+    /// It cannot be driven through `vm_paging_fork` here: that allocates, and the allocator the
+    /// host suite sees is `alloc.rs`'s `test_global`, pointed at an address that is not memory. So
+    /// the child tree is built by hand in a buffer -- `fork_phys_ptr` is the identity under
+    /// `cfg(test)`, the same seam `kernel::pagetable::table_ptr` uses -- and the releases are read
+    /// from `released::LOG`.
+    #[test]
+    fn fork_release_walk_frees_tables_and_spares_leaves() {
+        const PAGE: usize = 4096;
+        #[repr(align(4096))]
+        struct Pages([u8; PAGE * 8]);
+
+        let mut pages = Pages([0u8; PAGE * 8]);
+        let base = pages.0.as_mut_ptr() as u64;
+        let frame = |i: u64| base + i * PAGE as u64;
+        let (root, pdp, pd, pt, pd2, pt2) = (frame(0), frame(1), frame(2), frame(3), frame(4), frame(5));
+        // Leaf frames: written into entries only, never dereferenced by the walk.
+        let (gb_leaf, mb_leaf) = (frame(6), frame(7));
+
+        const PG_P: u64 = 0x01;
+        const PG_PS: u64 = 0x80;
+        let entry = |pa: u64, huge: bool| pa | PG_P | if huge { PG_PS } else { 0 };
+
+        let write = |page: u64, idx: usize, v: u64| {
+            // SAFETY: every page here is a page of `pages`.
+            unsafe { core::ptr::write_volatile((page as *mut u64).add(idx), v) }
+        };
+        // root[0] -> PDP; root[300] is the kernel half, which the walk must not look at even
+        // though it points at a table of ours here.
+        write(root, 0, entry(pdp, false));
+        write(root, 300, entry(pd2, false));
+        // A 1 GiB leaf at PDP[1] and a 2 MiB leaf at PD[1]: leaves, not tables.
+        write(pdp, 0, entry(pd, false));
+        write(pdp, 1, entry(gb_leaf, true));
+        write(pd, 0, entry(pt, false));
+        write(pd, 1, entry(mb_leaf, true));
+        // A second PD under the same PDP, so the walk has to recurse twice.
+        write(pdp, 2, entry(pd2, false));
+        write(pd2, 0, entry(pt2, false));
+
+        let _ = released::LOG.take();
+        // SAFETY: the tree above lives in `pages`, and `fork_phys_ptr` is the identity here.
+        unsafe { free_fork_tables(root as *mut u64) };
+        let (freed, n) = released::LOG.take();
+        let freed = &freed[..n];
+
+        let mut want = [pt, pd, pt2, pd2, pdp];
+        want.sort_unstable();
+        let mut got = freed.to_vec();
+        got.sort_unstable();
+        assert_eq!(got, want, "the walk must release exactly the tables it created");
+        assert!(
+            !freed.contains(&gb_leaf) && !freed.contains(&mb_leaf),
+            "a leaf is the parent's frame, not the child's to release"
+        );
+        assert!(!freed.contains(&root), "the root is the caller's own page");
     }
 }

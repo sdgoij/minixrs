@@ -86,6 +86,15 @@ pub(crate) unsafe fn alloc_pt_page() -> Result<u64, PageTableError> {
     }
 }
 
+/// Release a page-table page allocated by [`alloc_pt_page`].
+///
+/// The arch HAL's `free_phys_contig` is the same operation; this names the one-page case the
+/// page-table allocator hands out, so a caller that allocated a root with `alloc_pt_page` does not
+/// have to spell "one page" itself.
+pub(crate) unsafe fn free_pt_page(pa: u64) {
+    unsafe { crate::hal::free_phys_contig(pa, 1) };
+}
+
 /// The kernel's pointer to the page table at physical address `table_phys`.
 ///
 /// Every table access goes through the physmap rather than through the identity map. The kernel

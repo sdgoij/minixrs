@@ -5481,6 +5481,12 @@ pub unsafe fn do_vm_paging_handler(_caller: *mut Proc, msg: &mut [u8; MESSAGE_SI
                 let result = crate::hal::vm_paging_fork(parent_cr3, child_cr3, msg);
 
                 if result != 0 {
+                    // A failed fork has already released every table it built (see the arch's
+                    // `vm_paging_fork` and `KNOWN_ISSUES.md` item 39); the root page is this
+                    // handler's own allocation, so it is released here. The reply carries 0 on
+                    // either side of this, so no caller is ever handed an address space that no
+                    // longer exists.
+                    crate::pagetable::free_pt_page(child_cr3);
                     msg_write_u64(msg, VM_PAGING_CR3_OFF, 0);
                 } else {
                     msg_write_u64(msg, VM_PAGING_CR3_OFF, child_cr3);
