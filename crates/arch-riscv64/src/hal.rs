@@ -22,25 +22,30 @@ pub fn serial_write_byte(byte: u8) {
     crate::sbi::console_putchar(byte);
 }
 
-/// Read a byte from the 8250 UART at MMIO 0x10000000 (blocking).
+/// Read a byte from the 16550 UART (blocking).
+///
+/// The register address comes from [`crate::uart::uart_base`], which is raw before paging is on and
+/// through the physmap after, so this works at either point (`PHYSMAP.md` P4).
 pub fn serial_read_byte() -> u8 {
+    let base = crate::uart::uart_base() as *const u8;
     unsafe {
         // Wait until data is ready (LSR bit 0 = DR).
-        while (core::ptr::read_volatile((0x10000000usize + 5) as *const u8) & 1) == 0 {
+        while (core::ptr::read_volatile(base.add(5)) & 1) == 0 {
             core::hint::spin_loop();
         }
         // Read the data byte from RBR.
-        core::ptr::read_volatile(0x10000000usize as *const u8)
+        core::ptr::read_volatile(base)
     }
 }
 
-/// Non-blocking check: is a byte available from the 8250 UART?
+/// Non-blocking check: is a byte available from the 16550 UART?
 pub fn serial_byte_available() -> bool {
-    unsafe { (core::ptr::read_volatile((0x10000000usize + 5) as *const u8) & 1) != 0 }
+    let base = crate::uart::uart_base() as *const u8;
+    unsafe { (core::ptr::read_volatile(base.add(5)) & 1) != 0 }
 }
 
 /// Non-blocking poll: returns a byte if available from any console source
-/// (MMIO 8250 UART first, SBI debug console as fallback).
+/// (MMIO 16550 UART first, SBI debug console as fallback).
 ///
 /// The MMIO read is preferred: the SBI getchar is an ecall into M-mode
 /// (~100s of ns per byte), and the per-byte drain loops in the input path
@@ -48,7 +53,8 @@ pub fn serial_byte_available() -> bool {
 /// 16550.
 pub fn poll_console() -> Option<u8> {
     if serial_byte_available() {
-        unsafe { return Some(core::ptr::read_volatile(0x10000000usize as *const u8)) };
+        let base = crate::uart::uart_base() as *const u8;
+        unsafe { return Some(core::ptr::read_volatile(base)) };
     }
     crate::sbi::console_getchar()
 }
@@ -633,33 +639,33 @@ pub const fn kern_vaddr() -> u64 {
     0x80200000
 }
 
-/// User stack base virtual address (must be in RAM).
-/// On RISC-V QEMU virt, RAM starts at 0x80000000, so use 0x8FE00000.
+/// User stack base virtual address, just below the RAM start so the stack gets
+/// maximum space below it while staying inside the low 1 GiB — the user window
+/// the kernel's identity map does not cover (`PHYSMAP.md` P4).
 pub const fn user_stack_base() -> u64 {
-    0x8FE00000u64
+    0x3FC0_0000u64
 }
 
 /// User stack size in bytes.
 pub const fn user_stack_size() -> usize {
     // 1MB: server binaries allocate large stack frames (e.g. pfs_main's
-    // inlined init uses ~340KB) that underflow a 64KB stack into the
-    // identity-mapped RAM below it. That region only exists when RAM is
-    // large enough (stack VA 0x8FE00000 sits at ~2.3 GiB), so give every
+    // inlined init uses ~340KB) that underflow a 64KB stack. Give every
     // process a stack large enough for the biggest frame — same rationale
     // as the AArch64 HAL.
     0x100_000
 }
 
 /// Base of the userland brk heap: a 1 MiB window pre-mapped at exec,
-/// grown upward through VM's brk. The mmap base (4 GiB) is the growth
-/// limit, matching the historical minix-rt HEAP_LIMIT.
+/// grown upward through VM's brk. The heap sits below the anonymous-mmap
+/// base so heap growth (up) and mmap regions (up from the mmap base)
+/// cannot overlap.
 pub const fn user_heap_base() -> u64 {
-    0x3FE00000u64
+    0x2000_0000u64
 }
 
 /// Exclusive upper bound for brk growth (the anonymous-mmap base).
 pub const fn user_heap_limit() -> u64 {
-    0x1_0000_0000
+    0x3000_0000
 }
 
 /// User-space scheduling priority for boot processes.
@@ -677,16 +683,20 @@ pub const fn user_quantum_cycles() -> u64 {
     50_000_000
 }
 
-/// Base of the anonymous-mmap search range, at the top of the brk heap
-/// (0x3FE00000..0x100000000) so heap growth and mmap never collide.
+/// Base of the anonymous-mmap search range, at the top of the brk heap so
+/// heap growth and mmap never collide, and inside the low 1 GiB the user
+/// window occupies.
 pub const fn mmap_base() -> u64 {
-    0x1_0000_0000
+    0x3000_0000
 }
 
-/// Base of VM's temporary self-mapping range: just below the user top so
-/// the scratch mappings never collide with code/heap/mmap/stack.
+/// Base of VM's temporary self-mapping range.
+///
+/// The generic "just below the arch user top" spot would land on the mmap base
+/// now that the user window is only the low 1 GiB, so VM's scratch lives in the
+/// free gap between the exec image and the brk heap instead.
 pub const fn vm_scratch_base() -> u64 {
-    (MAX_USER_ADDRESS - 0x1_0000_0000) & !0xFFF
+    0x1000_0000
 }
 
 pub const MAP_PRESENT: u64 = pte::PTE_V;
@@ -697,12 +707,19 @@ pub const MAP_WRITE: u64 = pte::PTE_R | pte::PTE_W;
 pub const MAP_USER: u64 = pte::PTE_U;
 pub const MAP_EXEC: u64 = pte::PTE_X; // SV39: executable pages must set X
 pub const MAP_NX: u64 = 0; // RISC-V: NX is absence of X bit
-// SV39 user space is 2^38 bytes: bit 38 must be clear in U-mode, so the
-// first non-user address is 0x4000000000 (exclusive bound, like x86's
-// 0x800000000000). The old value (0x3FFFFFFFFFFF) admitted non-canonical
-// SV39 addresses, which the kernel then happily "mapped" — but the CPU
-// faults on access.
-pub const MAX_USER_ADDRESS: u64 = 0x40_0000_0000;
+/// Top of the user-accessible VA range.
+///
+/// SV39 itself allows user space up to 2^38 (bit 38 must be clear in U-mode), but
+/// the port confines the whole user layout — exec image, DSOs, loader, scratch,
+/// heap, mmap and stack — to the low 1 GiB. The kernel's identity map starts at
+/// the RAM base (`0x8000_0000`), so a ceiling below it is what makes a fault at a
+/// kernel-range VA fatal instead of something the user-fault gate tries to
+/// resolve (`PHYSMAP.md` P4). The highest thing that must fit is the loader at
+/// `0x0400_0000`, and the stack sits just below the ceiling at `0x3FC0_0000`.
+///
+/// The previous value was SV39's own user limit (`0x40_0000_0000`); that is the
+/// ISA's ceiling, not the port's window.
+pub const MAX_USER_ADDRESS: u64 = 0x4000_0000;
 
 /// Base of the kernel's physmap: the window through which a *physical*
 /// address is reached as a pointer (`PHYSMAP.md`).
@@ -721,11 +738,21 @@ pub const fn physmap_base() -> u64 {
     0xFFFF_FFC0_0000_0000
 }
 
+/// Top of the kernel's identity map, which is also the port's physical-RAM
+/// ceiling: the boot table and every per-process table carry the RAM window's
+/// 1 GiB blocks, and the first virtual address the identity map does **not**
+/// answer for is 32 GiB.
+pub const fn identity_map_top() -> u64 {
+    0x8_0000_0000
+}
+
 /// Bytes of physical address space the physmap covers, from physical 0.
 ///
 /// The same 0..32 GiB span the identity map covers, so every frame and
 /// device BAR the kernel can name is reachable through it — including the
-/// PLIC and UART at `0x0C00_0000` and the PCIe window above RAM.
+/// devices below the RAM base, which the identity map deliberately does not
+/// cover any more: the PLIC at `0x0C00_0000`, the UART at `0x1000_0000` and the
+/// sifive test finisher at `0x10_0000`.
 pub const fn physmap_size() -> u64 {
     0x8_0000_0000
 }
@@ -768,6 +795,26 @@ const _: () = assert!(
 const _: () = assert!(
     physmap_base() + physmap_size() > physmap_base(),
     "the physmap must not wrap the address space"
+);
+
+// The user layout is confined to the low 1 GiB and the kernel's identity map starts above it — the
+// whole point of the shrink (`PHYSMAP.md` P4). These are compile-time pins, and they are checked by
+// `cargo check --target riscv64gc-unknown-minix` (part of `just check`): this module is riscv-only,
+// so a host `cargo test` never compiles it and a `#[test]` here would never run.
+const _: () = assert!(
+    MAX_USER_ADDRESS <= identity_map_top(),
+    "the identity map must not cover the user window"
+);
+const _: () = assert!(0x0100_0000 < MAX_USER_ADDRESS, "the exec image base");
+const _: () = assert!(0x0400_0000 < MAX_USER_ADDRESS, "the loader base");
+const _: () = assert!(vm_scratch_base() < user_heap_base(), "scratch is below the heap");
+const _: () = assert!(user_heap_base() < MAX_USER_ADDRESS, "the heap base");
+const _: () = assert!(user_heap_limit() <= MAX_USER_ADDRESS, "the heap limit");
+const _: () = assert!(mmap_base() < MAX_USER_ADDRESS, "the mmap base");
+const _: () = assert!(user_stack_base() < MAX_USER_ADDRESS, "the stack base");
+const _: () = assert!(
+    user_stack_base() + user_stack_size() as u64 <= MAX_USER_ADDRESS,
+    "the stack top"
 );
 
 pub fn boot_cr3() -> u64 {
@@ -1218,17 +1265,25 @@ pub unsafe fn tlb_flush() {
     }
 }
 
-/// Exit QEMU via sifive_test device (MMIO 0x100000 on virt machine).
+/// Exit QEMU via the sifive_test finisher (MMIO 0x10_0000 on the virt machine).
 /// 0x5555 = pass (exit code 0), 0x3333 = fail (exit code 1).
 ///
 /// Falls back to SBI SRST shutdown if no test-exit device is present
-/// (QEMU builds without `-device test-exit` treat the 0x100000 write as
-/// plain RAM). The exit code is then lost, so callers that need pass/fail
-/// detection must check the serial log for result markers.
+/// (QEMU builds without the finisher treat the 0x10_0000 write as plain
+/// RAM). The exit code is then lost, so callers that need pass/fail detection
+/// must check the serial log for result markers.
+///
+/// The address is raw before paging is on and through the physmap after, like
+/// every other device below the RAM base (`PHYSMAP.md` P4).
 pub fn qemu_exit(code: u32) -> ! {
     unsafe {
         let val = if code == 0 { 0x5555u32 } else { 0x3333u32 };
-        core::ptr::write_volatile(0x100000 as *mut u32, val);
+        let addr = if boot_cr3() == 0 {
+            0x10_0000
+        } else {
+            phys_to_virt(0x10_0000)
+        };
+        core::ptr::write_volatile(addr as *mut u32, val);
     }
     crate::sbi::system_reset(true)
 }
@@ -1459,9 +1514,11 @@ pub unsafe fn exec_create_root(boot_cr3: u64) -> u64 {
         };
         core::ptr::write_bytes(phys_to_virt(new_root) as *mut u8, 0, PAGE_SIZE as usize);
         let boot_root = phys_to_virt(boot_cr3) as *const u64;
-        // Copy the full identity map (0..32 GiB, one 1 GiB block per L2
+        // Copy the identity map's RAM window (1..32 GiB, one 1 GiB block per L2
         // entry); the entries are supervisor-only, matching the boot table.
-        for i in 0usize..32 {
+        // Entry 0 (0..1 GiB) is the user window and is deliberately not mapped
+        // by the kernel (`PHYSMAP.md` P4).
+        for i in 1usize..32 {
             let e = core::ptr::read(boot_root.add(i));
             core::ptr::write((phys_to_virt(new_root) as *mut u64).add(i), e);
         }
@@ -1522,6 +1579,7 @@ mod tests {
         // shadowable by a user mapping, which is the whole point of it.
         assert_eq!(physmap_base(), 0xFFFF_FFC0_0000_0000);
         assert!(physmap_base() > MAX_USER_ADDRESS);
+        assert!(physmap_base() >= identity_map_top());
 
         for pa in [0, 0x1000, 0x20_0000, 0xFEFF_F000, physmap_size() - 0x1000] {
             assert_eq!(virt_to_phys(phys_to_virt(pa)), pa);

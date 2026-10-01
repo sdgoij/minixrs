@@ -535,7 +535,8 @@ pub fn init_vm() {
 ///
 /// Records the initial data segment boundaries so that do_brk can
 /// track per-process heap state. The initial brk starts at the
-/// pre-allocated heap base (0x3FE00000) that the kernel maps during boot.
+/// pre-allocated heap base (`hal::user_heap_base()`, which the kernel maps
+/// during boot: 0x3FE00000 on x86, 0x20000000 on riscv and aarch64).
 fn vm_init_boot() {
     use arch_common::consts::NR_PROCS;
 

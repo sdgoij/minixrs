@@ -29,14 +29,28 @@ pub const PLIC_THRESHOLD_HART0: u64 = PLIC_BASE + 0x200000 + 0x1000;
 /// UART IRQ number on QEMU virt.
 pub const UART_IRQ: u32 = 10;
 
+/// The address to reach a PLIC register through.
+///
+/// Before paging is on there is no translation, so a register is where its physical address says;
+/// after that the kernel reaches it through the physmap, because the identity map no longer covers
+/// the low 1 GiB the device sits in (`PHYSMAP.md` P4). `boot_cr3` is the test: the boot path stores
+/// it as it turns paging on and installs the window immediately after.
+fn plic_base() -> u64 {
+    if crate::hal::boot_cr3() == 0 {
+        PLIC_BASE
+    } else {
+        crate::hal::phys_to_virt(PLIC_BASE)
+    }
+}
+
 /// Read a 32-bit MMIO register at the given offset from PLIC base.
 unsafe fn plic_read(offset: u64) -> u32 {
-    unsafe { read_volatile((PLIC_BASE + offset) as *const u32) }
+    unsafe { read_volatile((plic_base() + offset) as *const u32) }
 }
 
 /// Write a 32-bit MMIO register at the given offset from PLIC base.
 unsafe fn plic_write(offset: u64, val: u32) {
-    unsafe { write_volatile((PLIC_BASE + offset) as *mut u32, val) }
+    unsafe { write_volatile((plic_base() + offset) as *mut u32, val) }
 }
 
 /// Initialize the PLIC for single-hart (hart 0, S-mode).

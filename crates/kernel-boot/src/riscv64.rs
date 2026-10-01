@@ -715,9 +715,9 @@ pub unsafe extern "C" fn kmain(hart_id: u64, dtb_ptr: u64) -> ! {
 
 /// RISC-V hardware tests: CLINT timer + SBI console.
 ///
-/// Runs inside the integration build after the shared kernel suite. These
-/// probe the actual device/console paths (via the SV39 identity map) rather
-/// than the hal wrappers the shared tests use.
+/// Runs inside the integration build after the shared kernel suite. These go
+/// straight at the CSRs and SBI calls the port's timer and console paths are
+/// built on, rather than through the hal wrappers the shared tests use.
 
 /// CLINT timer: rdtime (the `time` CSR — the architectural view of the CLINT
 /// mtime) must advance, and the SSTC stimecmp CSR (0x14D) must accept and
@@ -775,11 +775,17 @@ unsafe fn test_sbi_console() -> u32 {
     0
 }
 
-/// Create an identity-mapped boot page table for SV39 paging.
+/// Create a boot page table for SV39 paging.
 ///
-/// Maps the full 4GB physical address space with 1GB huge pages.
-/// This covers kernel code at 0x80200000, device memory (UART at 0x10000000,
-/// PLIC at 0x0C000000, CLINT at 0x02000000), and all RAM.
+/// Maps physical 1..32 GiB identity with 1GB huge pages: RAM (kernel code at
+/// 0x80200000 and up) and the empty span below it.
+///
+/// The low 1 GiB is deliberately **not** mapped. That range holds the user
+/// window (exec image, DSOs, loader, heap, mmap, stack) and, below it, the
+/// devices the port uses — the UART at 0x10000000, the PLIC at 0x0C000000 and
+/// the sifive test finisher at 0x10_0000. A kernel identity mapping over the
+/// window is the overlap `PHYSMAP.md` P4 removes; the kernel reaches those
+/// devices through the physmap instead.
 ///
 /// Returns the physical address of the root page table.
 ///
@@ -812,12 +818,15 @@ unsafe fn create_boot_page_table() -> Option<u64> {
             | arch_riscv64::pte::PTE_W
             | arch_riscv64::pte::PTE_X;
 
-        // Map 1 GiB huge pages at L2, identity 0..32 GiB:
+        // Map 1 GiB huge pages at L2, identity 1..32 GiB:
         // - L2[i] covers VA [i<<30, (i+1)<<30) → PA i<<30.
+        // Entry 0 (0..1 GiB) is left out: it is the user window, and the
+        // kernel reaches the devices inside it through the physmap
+        // (`PHYSMAP.md` P4).
         // Per-process tables copy these supervisor-only entries, so the
         // kernel keeps identity access to all of RAM under any page table.
         let root = root_phys as *mut u64;
-        for i in 0..32u64 {
+        for i in 1..32u64 {
             // build_pte encodes PPN = pa >> 12 correctly for SV39
             let pte = arch_riscv64::hal::build_pte(i << 30, flags);
             core::ptr::write(root.add(i as usize), pte);

@@ -79,8 +79,9 @@ pub const fn mmap_base() -> u64 {
 
 /// Base of the userland brk heap. AArch64 user space is only the low 1 GiB
 /// (PUD[0]): the kernel's EL1-only identity map starts at 0x40000000, so a
-/// heap at the top of the range (0x3FE00000, as on x86/riscv) would
-/// collide with the kernel block after ~2 MiB of growth. The heap sits
+/// heap at the top of the range (0x3FE00000, as on x86) would collide with
+/// the kernel block after ~2 MiB of growth. RISC-V adopted this layout with
+/// `PHYSMAP.md` P4, for the same reason. The heap sits
 /// below the anonymous-mmap base (0x30000000) so heap growth (up) and mmap
 /// regions (up from the mmap base) cannot overlap.
 pub const fn user_heap_base() -> u64 {

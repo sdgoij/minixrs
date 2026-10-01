@@ -256,16 +256,14 @@ pub const NR_THREAD_SELF: u64 = 64;
 // User stack top — must match `hal::user_stack_base() + hal::user_stack_size()`
 // used by the kernel's exec loader (`crates/kernel/src/hal.rs` re-exports).
 // The exec frame's pointer arithmetic depends on this value. 1MB stacks on
-// x86 (base 0x0FE00000) and riscv (base 0x8FE00000), 1MB on aarch64 (base
-// 0x3FC00000), 2MB on wasm32 (base 0x00E00000). Note the wasm32 figure is
+// x86 (base 0x0FE00000), riscv and aarch64 (base 0x3FC00000), 2MB on wasm32
+// (base 0x00E00000). Note the wasm32 figure is
 // 0x01000000 — 16 MiB — which is the top of that stack *region*; it is not
 // `arch_wasm32::hal::MAX_USER_ADDRESS` (0x10000000, 256 MiB), which is the
 // instance's memory ceiling and sits well above it.
 #[cfg(all(target_os = "minix", target_arch = "x86_64"))]
 const USER_STACK_TOP: u64 = 0x0FF0_0000;
-#[cfg(all(target_os = "minix", target_arch = "riscv64"))]
-const USER_STACK_TOP: u64 = 0x8FF0_0000;
-#[cfg(all(target_os = "minix", target_arch = "aarch64"))]
+#[cfg(all(target_os = "minix", any(target_arch = "riscv64", target_arch = "aarch64")))]
 const USER_STACK_TOP: u64 = 0x3FD0_0000;
 #[cfg(all(target_os = "minix", target_arch = "wasm32"))]
 const USER_STACK_TOP: u64 = 0x0100_0000;
@@ -1793,11 +1791,11 @@ impl core::fmt::Write for BufWriter<'_> {
 /// The heap starts here (the kernel pre-maps a 1 MiB window at exec) and
 /// grows upward through VM's brk, which demand-maps pages. Raised from the
 /// historical 1 MiB window so MFS's block cache (~4 MiB) and other heap
-/// users fit; on x86/riscv the anonymous-mmap base sits at the same 4 GiB
-/// mark so heap and mmap cannot collide. On aarch64 user space is only the
-/// low 1 GiB (the kernel's EL1-only identity map starts at 0x40000000), so
-/// the heap lives below the mmap base (0x30000000) instead.
-pub const HEAP_BASE: usize = if cfg!(target_arch = "aarch64") {
+/// users fit; on x86 the anonymous-mmap base sits at the same 4 GiB mark
+/// so heap and mmap cannot collide. On aarch64 and riscv user space is only
+/// the low 1 GiB (the kernel's identity map starts above it), so the heap
+/// lives below the mmap base (0x30000000) instead.
+pub const HEAP_BASE: usize = if cfg!(any(target_arch = "aarch64", target_arch = "riscv64")) {
     0x2000_0000
 } else if cfg!(target_arch = "wasm32") {
     // Must match `arch_wasm32::hal::user_heap_base()`: the kernel's brk window is
@@ -1810,7 +1808,7 @@ pub const HEAP_BASE: usize = if cfg!(target_arch = "aarch64") {
 /// Exclusive upper bound for the bump heap. Matches each arch's
 /// anonymous-mmap base so heap growth (up) and mmap regions (up from the
 /// mmap base) cannot overlap.
-pub const HEAP_LIMIT: usize = if cfg!(target_arch = "aarch64") {
+pub const HEAP_LIMIT: usize = if cfg!(any(target_arch = "aarch64", target_arch = "riscv64")) {
     0x3000_0000
 } else if cfg!(target_arch = "wasm32") {
     // Matches `arch_wasm32::hal::user_heap_limit()`. The 4 GiB the other targets

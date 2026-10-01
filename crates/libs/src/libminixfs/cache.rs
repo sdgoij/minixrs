@@ -1088,7 +1088,8 @@ pub unsafe fn lmfs_setquiet(q: i32) {
 pub unsafe fn fs_bufs_heuristic() -> u32 {
     // The block cache lives in the server's bump heap. Its data buffers
     // (4 KiB each) must stay inside the kernel's pre-mapped 1 MiB heap
-    // window (0x3FE00000..0x3FF00000): minix_alloc_zeroed only calls VM's
+    // window (`hal::user_heap_base()`..+1 MiB — 0x3FE00000 on x86, 0x20000000
+    // on riscv and aarch64): minix_alloc_zeroed only calls VM's
     // brk beyond that window, and VM cannot service brk while it is blocked
     // on a file-region FDIO request (VM→VFS→MFS with MFS's brk forming a
     // cycle the deadlock detector rejects). 160 buffers = 640 KiB of data

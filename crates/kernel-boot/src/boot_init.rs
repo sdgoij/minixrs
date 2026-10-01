@@ -144,9 +144,10 @@ pub unsafe fn load_and_prepare_proc(path: &str, proc_nr: i32, argv: &[&str]) -> 
     };
 
     // Write the stack frame into the allocated physical pages, reached through the physmap. Writing
-    // at the user-stack VA would land beyond RAM below 256 MiB on x86 (stack VA 0x0FE00000) and
-    // below that on RISC-V (stack VA 0x8FE00000), producing a garbage frame. The RSP and argv
-    // pointers are then converted from their physmap addresses to the user stack VA.
+    // at the user-stack VA would land where no frame of this process is, producing a garbage frame:
+    // above RAM on x86 (stack VA 0x0FE00000 under a 256 MiB guest) and below it on RISC-V and
+    // AArch64 (stack VA 0x3FC00000). The RSP and argv pointers are then converted from their physmap
+    // addresses to the user stack VA.
     let stack_virt = frame_ptr(phys_stack_base) as u64;
     let stack_top = stack_virt + user_stack_size as u64;
     let stack_rsp = match unsafe { setup_user_stack(stack_top, user_stack_size, argv) } {

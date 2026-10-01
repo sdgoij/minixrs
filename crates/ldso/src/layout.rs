@@ -11,7 +11,8 @@ use crate::elf::{Elf, PT_LOAD};
 
 /// Where the first `ET_DYN` object is mapped. Fixed (no ASLR), and clear of the
 /// main program (`0x0100_0000`), the loader itself (`0x0400_0000`), the stack
-/// (`0x0FE0_0000`) and the heap (`0x3FE0_0000`).
+/// (`0x0FE0_0000` on x86, `0x3FC0_0000` on riscv and aarch64) and the heap
+/// (`0x3FE0_0000` on x86, `0x2000_0000` on riscv and aarch64).
 pub const DSO_BASE: u64 = 0x0200_0000;
 
 /// No object is placed at or above this: the loader is at `0x0400_0000`, and an

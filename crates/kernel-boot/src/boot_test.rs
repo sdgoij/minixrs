@@ -118,8 +118,10 @@ pub unsafe fn run_boot_tests() {
     // M: Every boot process has a walkable page table
     failures += test_boot_procs_page_tables();
 
-    // M1: The user window and the kernel's VAs overlap in neither direction (`PHYSMAP.md` P4)
-    #[cfg(target_arch = "aarch64")]
+    // M1: The user window and the kernel's VAs overlap in neither direction (`PHYSMAP.md` P4).
+    // x86 has not had its shrink yet — its trampoline's 0..32 GiB identity map still covers the
+    // window, so the check is not written for it and is not called there.
+    #[cfg(any(target_arch = "aarch64", target_arch = "riscv64"))]
     {
         failures += test_user_and_kernel_mappings_do_not_overlap();
     }
@@ -1296,8 +1298,8 @@ fn test_pm_mproc_pt() -> u32 {
 
         // Check user stack is mapped.
         // The stack lives at the arch's user_stack_base() (0x0FE00000 on
-        // x86, 0x8FE00000 on RISC-V, 0x3FC00000 on AArch64). Walking the
-        // page-aligned base must succeed with PG_U.
+        // x86, 0x3FC00000 on RISC-V and AArch64). Walking the page-aligned
+        // base must succeed with PG_U.
         let stack_va = kernel::hal::user_stack_base() & !0xFFF;
         match kernel::pagetable::walk(cr3, stack_va) {
             Ok(r) => {
@@ -1385,15 +1387,17 @@ fn test_boot_procs_page_tables() -> u32 {
 /// A kernel mapping over the user window is what `KNOWN_ISSUES.md` item 38 measured: ring 0 reaches
 /// a frame at a VA the process also owns, so a frame the allocator hands out inside that window *is*
 /// the process's own memory and the kernel writes there. The mirror image is a *user* mapping inside
-/// a kernel VA range, which hands a process the kernel's frames. AArch64's user window is the low
-/// 1 GiB, and both halves hold there now: `boot_create_restricted_page_table` and
-/// `create_low_gb_pmd_table` put only the virtio-mmio device entry under PUD[0], and PUD[1] is
-/// EL1-only. x86 and RISC-V join this check when their own shrink lands — today their identity maps
-/// still cover the window, which is exactly what it reports.
+/// a kernel VA range, which hands a process the kernel's frames.
+///
+/// AArch64 and RISC-V both hold now: their user window is the low 1 GiB, the kernel's identity map
+/// starts above it (AArch64's PUD[1] at the RAM base, RISC-V's first 1 GiB leaf at 2 GiB), and
+/// everything the kernel maps there is EL1-only. The devices that live inside the window are reached
+/// through the physmap. x86 joins this check when its own shrink lands — today its identity map still
+/// covers the window, which is exactly what it would report.
 ///
 /// 2 MiB steps: every mapping the check is about is a 2 MB or 1 GB block, so this granularity cannot
 /// step over one.
-#[cfg(target_arch = "aarch64")]
+#[cfg(any(target_arch = "aarch64", target_arch = "riscv64"))]
 fn test_user_and_kernel_mappings_do_not_overlap() -> u32 {
     unsafe {
         fn check(cr3: u64, label: &str) -> u32 {
@@ -1415,25 +1419,47 @@ fn test_user_and_kernel_mappings_do_not_overlap() -> u32 {
 
             // The kernel's VAs — the identity window and the physmap: a present entry must be EL1.
             //
+            // The two are not adjacent everywhere: on AArch64 the physmap starts where the identity
+            // map ends, but on RISC-V it lives in SV39's sign-extended top half, so the spans are
+            // walked separately rather than as one range.
+            //
             // The ramdisk image is the one deliberate exception: the kernel maps it at
             // `RAMDISK_IMAGE_VA` (4 GiB, above every arch's user window — see its comment) so the
             // filesystem server can read it directly, and that is the only user mapping the port
             // places outside the window.
             let ramdisk_lo = arch_common::com::RAMDISK_IMAGE_VA;
             let ramdisk_hi = ramdisk_lo + arch_common::com::RAMDISK_IMAGE_SIZE as u64;
-            let kernel_top = kernel::hal::physmap_base() + kernel::hal::physmap_size();
+
+            let report_user_mapping = |va: u64| {
+                serial_write("  FAIL: ");
+                serial_write(label);
+                serial_write(" has a user-accessible mapping at kernel MiB ");
+                print_dec((va >> 20) as u32);
+                serial_write("\r\n");
+            };
+
+            let identity_hi = kernel::hal::identity_map_top();
             let mut va = kernel::pagetable::MAX_USER_ADDRESS;
-            while va < kernel_top {
+            while va < identity_hi {
                 if !(ramdisk_lo..ramdisk_hi).contains(&va) {
                     if let Ok(r) = unsafe { kernel::pagetable::walk(cr3, va) } {
                         if r.pte_value & kernel::pagetable::PG_U != 0 {
-                            serial_write("  FAIL: ");
-                            serial_write(label);
-                            serial_write(" has a user-accessible mapping at kernel MiB ");
-                            print_dec((va >> 20) as u32);
-                            serial_write("\r\n");
+                            report_user_mapping(va);
                             return 1;
                         }
+                    }
+                }
+                va += 0x20_0000;
+            }
+
+            let physmap_lo = kernel::hal::physmap_base();
+            let physmap_hi = physmap_lo + kernel::hal::physmap_size();
+            let mut va = physmap_lo;
+            while va < physmap_hi {
+                if let Ok(r) = unsafe { kernel::pagetable::walk(cr3, va) } {
+                    if r.pte_value & kernel::pagetable::PG_U != 0 {
+                        report_user_mapping(va);
+                        return 1;
                     }
                 }
                 va += 0x20_0000;

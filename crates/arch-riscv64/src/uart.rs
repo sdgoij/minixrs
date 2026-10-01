@@ -40,7 +40,10 @@ const LSR_THRE: u8 = 0x20; // Transmit Holding Register Empty
 /// after that the kernel reaches it through the physmap, because the identity map is not something
 /// it may lean on (`PHYSMAP.md` P4). `boot_cr3` is the test: the boot path stores it as it turns
 /// paging on and installs the window immediately after.
-fn uart_base() -> u64 {
+///
+/// `pub(crate)`: the HAL's byte-at-a-time console (`serial_read_byte`, `poll_console`) needs the
+/// same address, and duplicating the `boot_cr3` test there is how the two would drift apart.
+pub(crate) fn uart_base() -> u64 {
     if crate::hal::boot_cr3() == 0 {
         UART_BASE
     } else {

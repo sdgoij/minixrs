@@ -239,8 +239,8 @@ would have needed `AT_PHDR` to describe itself.
 
 MINIX reserves 10 MB below the stack and lets `ld.so` relocate itself. For the port the
 cheaper first step is a **non-PIE loader at a fixed high base** (below the user mmap
-base: 4 GiB on x86/riscv, `0x30000000` on aarch64 — see the heap comment in
-`minix-rt/src/lib.rs`). That removes the chicken-and-egg of the relocator needing
+base: 4 GiB on x86, `0x30000000` on aarch64 and riscv — see the heap comment in
+`minix-rt/src/lib.rs`; riscv moved from the 4 GiB base with `PHYSMAP.md` P4). That removes the chicken-and-egg of the relocator needing
 relocation. Cost: a fixed reservation (MINIX reserves 10 MB too, for the same reason),
 and the loader is not itself relocatable until a later phase. Revisit if the loader ever
 needs to be shared or ASLR arrives.

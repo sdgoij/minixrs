@@ -1912,8 +1912,8 @@ are arch-specific, `[env]` is tooling/platform, not kernel.
   paths, so `rm`/`cp` shims and `cargo clean -p kernel-boot` are gone.
 - **The bare-metal suite carried an arch assumption that only a bare-metal run
   can see.** `syscall_brk` in `crates/kernel/src/tests.rs` asserted x86_64's
-  heap base as a literal (`0x3FE00000`, which riscv64 also uses and aarch64 does
-  not — it is at `0x2000_0000`), so `just test-qemu-aarch64` failed at
+  heap base as a literal (`0x3FE00000`, which was x86_64's alone — aarch64 is at
+  `0x2000_0000`, and riscv64 moved there with `PHYSMAP.md` P4), so `just test-qemu-aarch64` failed at
   `FAIL syscall_brk` while `cargo test -p kernel` stayed green. It stayed green
   because `tests.rs` is behind `kernel`'s `qemu-tests` feature and the host suite
   does not enable it: these tests are compiled by a feature the host build never
