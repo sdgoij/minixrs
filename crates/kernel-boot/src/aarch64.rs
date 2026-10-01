@@ -648,21 +648,21 @@ unsafe fn test_cntpct_advances() -> u32 {
 /// read as a valid device (not all-ones), and the TX FIFO must accept a byte.
 #[cfg(feature = "integration-tests")]
 unsafe fn test_pl011_output() -> u32 {
-    const PL011_BASE: usize = 0x0900_0000;
-    const PL011_DR: usize = PL011_BASE + 0x00;
-    const PL011_FR: usize = PL011_BASE + 0x18;
+    // Through the physmap: this runs after `install_physmap_in_boot_tables`, and the low 1 GiB is
+    // not identity-mapped any more.
+    let dr = kernel::hal::phys_to_virt(0x0900_0000) as *mut u8;
+    let fr = kernel::hal::phys_to_virt(0x0900_0018) as *const u32;
     const FR_TXFF: u32 = 1 << 5;
     unsafe {
-        let fr = core::ptr::read_volatile(PL011_FR as *const u32);
-        if fr == 0xFFFF_FFFF {
+        if core::ptr::read_volatile(fr) == 0xFFFF_FFFF {
             serial_write("  FAIL: PL011 not present\r\n");
             return 1;
         }
         let mut spins = 0usize;
-        while core::ptr::read_volatile(PL011_FR as *const u32) & FR_TXFF != 0 && spins < 100_000 {
+        while core::ptr::read_volatile(fr) & FR_TXFF != 0 && spins < 100_000 {
             spins += 1;
         }
-        core::ptr::write_volatile(PL011_DR as *mut u8, b'@');
+        core::ptr::write_volatile(dr, b'@');
         serial_write("  OK PL011 output\r\n");
     }
     0
@@ -704,20 +704,20 @@ unsafe fn enable_mmu() {
         core::ptr::write_volatile(pgd as *mut u64, pud | TABLE_DESC);
     }
 
-    // PUD[i] = 1 GB normal-memory block at PA i<<30, covering 0..32 GiB. The kernel runs
-    // identity-mapped, so this window also bounds the physical memory the allocator can hand out
-    // (`pte_is_valid_phys` checks it).
+    // PUD[i] = 1 GB normal-memory block at PA i<<30, covering 1..32 GiB — the kernel's identity
+    // window, which also bounds the physical memory the allocator can hand out (`pte_is_valid_phys`
+    // checks it).
     //
-    // PUD[0] (0..1 GiB) is the AArch64 *user* window (`MAX_USER_ADDRESS` is the RAM base), so an
-    // identity block there is a kernel mapping over the user window — the overlap `PHYSMAP.md` P4
-    // removes. It stays for now because removing it hangs this boot, and the measurement says why:
-    // pointing PUD[0] at RAM instead of at its own address also boots, so the early path reads some
-    // address below the RAM base and discards or cannot care about the value. The descriptor has to
-    // *exist*; it does not have to be the identity. Tracking that read down — most likely a NULL or
-    // low-pointer load the mapping has been hiding — is P4's remaining work on this arch. The
-    // per-process tables no longer carry the block, so the kernel never runs on a table with it
-    // (`boot_create_restricted_page_table` gives PUD[0] only the device window).
-    for i in 0..32u64 {
+    // PUD[0] (0..1 GiB) is deliberately left unmapped. That range *is* the AArch64 user window
+    // (`MAX_USER_ADDRESS` is the RAM base), so a kernel identity block over it is exactly the
+    // overlap `PHYSMAP.md` P4 removes. It was needed only because `kernel-boot`'s own
+    // `serial_write`/`serial_putc` wrote the PL011 at its physical address (0x0900_0000 /
+    // 0x0900_0018) on every print, so the first message after the MMU came on took a translation
+    // fault at 0x0900_0018 once the block went — a `-d int` trace names it (ESR 0x96000005). Those
+    // two now go through `arch_aarch64::hal::serial_write_byte`, which is raw while the MMU is off
+    // and physmap-based after, so the block can go. The GIC (`enable_gic`) and this file's PL011
+    // test take the same route.
+    for i in 1..32u64 {
         unsafe {
             core::ptr::write_volatile((pud as *mut u64).add(i as usize), (i << 30) | BLOCK_FLAGS);
         }

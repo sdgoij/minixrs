@@ -76,16 +76,12 @@ pub fn serial_write(s: &str) {
     }
     #[cfg(all(not(test), target_arch = "aarch64"))]
     {
-        const UART_DR: usize = 0x0900_0000;
-        const UART_FR: usize = 0x0900_0000 + 0x18;
-        const FR_TXFF: u32 = 1 << 5;
+        // Through the arch's byte writer, which reaches the PL011 at its physical address while the
+        // MMU is off and through the physmap once it is on. Writing 0x0900_0000 here directly only
+        // works while the identity map covers it, and that is the map `PHYSMAP.md` P4 shrinks — so
+        // every boot message after the MMU comes on depended on a block the shrink removes.
         for &b in s.as_bytes() {
-            unsafe {
-                while (core::ptr::read_volatile(UART_FR as *const u32) & FR_TXFF) != 0 {
-                    core::hint::spin_loop();
-                }
-                core::ptr::write_volatile(UART_DR as *mut u32, b as u32);
-            }
+            arch_aarch64::hal::serial_write_byte(b);
         }
     }
     #[cfg(any(
@@ -195,15 +191,8 @@ pub fn serial_putc(c: u8) {
     }
     #[cfg(all(not(test), target_arch = "aarch64"))]
     {
-        const UART_DR: usize = 0x0900_0000;
-        const UART_FR: usize = 0x0900_0000 + 0x18;
-        const FR_TXFF: u32 = 1 << 5;
-        unsafe {
-            while (core::ptr::read_volatile(UART_FR as *const u32) & FR_TXFF) != 0 {
-                core::hint::spin_loop();
-            }
-            core::ptr::write_volatile(UART_DR as *mut u32, c as u32);
-        }
+        // Same route as `serial_write`: raw before the MMU is on, physmap after.
+        arch_aarch64::hal::serial_write_byte(c);
     }
     #[cfg(any(
         test,
