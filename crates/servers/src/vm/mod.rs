@@ -1660,10 +1660,16 @@ fn do_remap(msg: &mut Message) -> i32 {
     OK
 }
 
-/// Handle VM_MAP_PHYS — map physical memory into a process.
+/// Handle VM_MAP_PHYS -- map device memory into a process.
 ///
-/// Validates length and target endpoint, rounds addresses to page boundaries,
-/// and maps the physical page into the target process's address space.
+/// The mapping is given a virtual address from the target's own region space, the way the
+/// reference's `do_map_phys` is (`map_page_region` allocates the region's `vaddr`), instead of
+/// echoing the physical address back as one (`PHYSMAP.md` D5). A device frame mapped at `VA == PA`
+/// lands wherever the device happens to live inside the process's address space and is not
+/// recorded as a region: a later `mmap` cannot see it, `munmap` cannot release it, and the
+/// teardown walks -- which skip `VR_DIRECT` regions so a device's frames are left to the device --
+/// do not know to leave its frames alone either. The window comes from [`mmap_find_hole`], so it
+/// is a tracked `VR_DIRECT` region in the mmap area, and the reply is the 64-bit window address.
 fn do_map_phys(msg: &mut Message) -> i32 {
     let target = unsafe { msg.m_payload.m1.m1i1 };
     let len = unsafe { msg.m_payload.m1.m1i2 };
@@ -1672,7 +1678,7 @@ fn do_map_phys(msg: &mut Message) -> i32 {
     // above 2 GiB into the 64-bit range.
     let phys = (unsafe { msg.m_payload.m1.m1i3 } as u32) as u64;
 
-    if len <= 0 {
+    if len <= 0 || phys == 0 {
         return EINVAL;
     }
 
@@ -1681,13 +1687,11 @@ fn do_map_phys(msg: &mut Message) -> i32 {
         return EINVAL;
     }
 
-    // Round len to page boundary.
-    let page_size: u64 = 4096;
-    let rounded_len = if !(len as u64).is_multiple_of(page_size) {
-        (len as u64) + page_size - ((len as u64) % page_size)
-    } else {
-        len as u64
-    };
+    // Round the physical base down and the length up: a region covers whole frames, so the caller
+    // gets the address of the frame holding `phys`, not of `phys` itself.
+    let offset = phys % PAGE_SIZE;
+    let phys_base = phys - offset;
+    let len_aligned = (len as u64 + offset).div_ceil(PAGE_SIZE) * PAGE_SIZE;
 
     // Get the target process's CR3.
     let cr3 = unsafe { proc::vm_get_addrspace(actual_target) };
@@ -1695,24 +1699,43 @@ fn do_map_phys(msg: &mut Message) -> i32 {
         return EINVAL;
     }
 
-    // The caller provides the desired virtual address (stored in m1i4 or
-    // uses an internal VM allocation). For now, use the same virtual address
-    // as the physical address (identity mapping).
-    let vaddr = phys;
-    let flags =
-        kernel::pagetable::MAP_PRESENT | kernel::pagetable::MAP_USER | kernel::pagetable::MAP_WRITE;
+    let vmp = match unsafe { proc::vmproc_lookup(actual_target) } {
+        Some(vmp) => vmp,
+        None => return EINVAL,
+    };
+    let vaddr = match mmap_find_hole(&vmp.vm_regions, len_aligned) {
+        Some(va) => va,
+        None => return ENOMEM,
+    };
+    if vaddr + len_aligned > kernel::pagetable::MAX_USER_ADDRESS {
+        return EINVAL;
+    }
 
-    let mapped_vaddr = vaddr;
-    for offset in (0..rounded_len).step_by(page_size as usize) {
+    // Readable and writable -- a driver programs the device's registers through the window -- and
+    // `VR_DIRECT`, which is what tells the fault path to map `phys_base + offset` with no
+    // allocation and the teardown walks to leave those frames to the device.
+    let region_flags = region::VR_READABLE | region::VR_WRITABLE | region::VR_DIRECT;
+    let window = region::VirRegion::new_direct(vaddr, len_aligned, region_flags, phys_base);
+    if vmp.vm_regions.insert(window).is_some() {
+        return EAGAIN;
+    }
+
+    let pte_flags =
+        kernel::pagetable::MAP_PRESENT | kernel::pagetable::MAP_USER | kernel::pagetable::MAP_WRITE;
+    for offset in (0..len_aligned).step_by(PAGE_SIZE as usize) {
         // Via the kernel (ring 0): `kernel::pagetable::map_page` calls
         // `tlb_flush_page` (`invlpg`), which is privileged and #GPs from
         // VM's user context.
-        if crate::vm::vm_map_page_in(cr3, vaddr + offset, phys + offset, flags) != 0 {
+        if crate::vm::vm_map_page_in(cr3, vaddr + offset, phys_base + offset, pte_flags) != 0 {
             return EINVAL;
         }
     }
 
-    msg.m_payload.m1.m1i1 = mapped_vaddr as i32;
+    // The window address, as a u64 at message bytes 8..16 -- the reply convention `do_mmap` uses,
+    // and the reason the window may sit anywhere in the user range.
+    unsafe {
+        msg.m_payload.raw[0..8].copy_from_slice(&vaddr.to_ne_bytes());
+    }
     OK
 }
 

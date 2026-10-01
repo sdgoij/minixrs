@@ -1,7 +1,7 @@
 //! Framebuffer character-device server — `/dev/fb`.
 //!
 //! Selects the backend at boot: bochs-display (PCI probe for `1234:1111`,
-//! mode-set to 1024×768×32, BARs identity-mapped via `VM_MAP_PHYS`) on
+//! mode-set to 1024x768x32, BARs mapped into a `VR_DIRECT` window via `VM_MAP_PHYS`) on
 //! x86, virtio-gpu (device ID 16 on the riscv/aarch64 `virt` machines)
 //! whose framebuffer is a server-owned RAM buffer attached as resource
 //! backing, or the host's canvas on wasm (M5) — a server-owned buffer whose
@@ -134,7 +134,9 @@ fn devio_hook(request: u32, port: u16, value: u32) -> u32 {
 }
 
 /// Physical-memory mapping hook: map `phys..phys+len` into this process
-/// via `VM_MAP_PHYS` (identity-mapped, user-accessible) and return the VA.
+/// via `VM_MAP_PHYS` and return the window address VM chose for it. The
+/// address is a `VR_DIRECT` region in this process's mmap area, not the
+/// physical address (`PHYSMAP.md` D5), so it is read as a full 64-bit value.
 ///
 /// # Safety
 ///
@@ -162,7 +164,7 @@ fn physmap_hook(phys: u64, len: usize) -> u64 {
     if mtype != 0 {
         return 0;
     }
-    (u32::from_ne_bytes(msg[8..12].try_into().unwrap_or([0u8; 4]))) as u64
+    u64::from_ne_bytes(msg[8..16].try_into().unwrap_or([0u8; 8]))
 }
 
 /// Query this process's VA→PA image translation offset (SYS_GETINFO

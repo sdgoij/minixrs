@@ -1652,6 +1652,28 @@ are arch-specific, `[env]` is tooling/platform, not kernel.
     and reports `OK allocator page=0x0000000086498000`, and `just test-arches` is green. That is the
     reachable cover here, since this arch's dynlink gate is red at `HEAD` for an unrelated cause.
 
+41. **`VM_GETPHYS` puts the address and the reply in different fields on each side (2026-10-01,
+    open).** `crates/servers/src/ipc.rs`'s `vm_getphys` (`vm_getphys_stub`'s target arm) and
+    `do_get_phys` (`crates/servers/src/vm/mod.rs`) do not agree on the message:
+
+    - the caller writes `who` at message bytes 8..12 (`m1i1`) and the address at bytes 16..24
+      (`m1i3` + `m1i4`, through `msg_set_u64(&mut msg, 16, addr)`), then reads the reply from
+      bytes 24..28 (`m1i5`);
+    - `do_get_phys` reads the target from `m1i1` (which matches), the address from `m1i2`
+      (bytes 12..16 -- a field the caller never wrote), and replies in `m1i1`.
+
+    So the handler walks whatever the address slot happened to hold and the caller reads a field
+    the handler never writes. The value is truncated as well: `do_get_phys` does
+    `msg.m_payload.m1.m1i1 = pa as i32`, so a physical address above 4 GiB comes back wrong, and
+    above 2 GiB it is sign-extended -- the same trap the neighbouring `do_map_phys` guards
+    against by reading its field as `u32`. The right reply for an address is the convention
+    `do_mmap` already uses and `do_map_phys` was moved onto under `PHYSMAP.md` P5: a `u64` at
+    message bytes 8..16.
+
+    It is latent rather than live -- nothing calls `vm_getphys` except its own stub arm, and the
+    host arm returns 0 -- but it is a wrong answer rather than a missing feature, which is the
+    shape that survives longest. Fix it with the P5 reply convention when something needs it.
+
 ---
 
 ## x86_64 (`[x86]`)
