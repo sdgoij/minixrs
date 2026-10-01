@@ -60,6 +60,13 @@ _start:
     jnz 3b
 
     // Fill 32 PDs with 2 MB huge-page entries (identity map, 0..32 GiB).
+    //
+    // This is the *boot* map and it stays broad: the boot-time frame allocator is
+    // top-down, so `install_physmap`'s own page comes from the high end of RAM and has
+    // to be reachable at its physical address until the window exists. Every table the
+    // boot path builds from it for a process narrows the map to the low window
+    // (`identity_map_top`, `PHYSMAP.md` P4), and the entries here are supervisor-only
+    // — see the `orl` below.
     // 64-bit PTEs: PA = (window << 30) | (index << 21). The window base
     // exceeds 32 bits above 16 GiB, so the high dword is window >> 2 plus
     // the carry out of the low-dword add. SHR clobbers CF, so capture the
@@ -79,7 +86,12 @@ _start:
     movl %esi, %ecx
     shrl $2, %ecx          // high dword of window * 1 GiB
     addl %edx, %ecx        // + carry from the low add
-    orl  $0x87, %ebx       // Present|Write|User|Huge (2MB page)
+    // Present|Write|Huge (2MB page), supervisor-only. Nothing runs in user mode on
+    // these tables — every boot process gets a restricted table of its own — and
+    // clearing U is what keeps that harmless if anything ever does: the map covers all
+    // of RAM at VA == PA, so a user-accessible copy would hand a process every other
+    // process's frames (`PHYSMAP.md` P4).
+    orl  $0x83, %ebx
     movl %ebx, (%edi, %eax, 8)
     movl %ecx, 4(%edi, %eax, 8)
     incl %eax

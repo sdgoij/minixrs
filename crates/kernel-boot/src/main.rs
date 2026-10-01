@@ -58,21 +58,6 @@ const FALLBACK_ACPI_CUT_START: u64 = 0x3FE0_0000;
 const FALLBACK_ACPI_CUT_END: u64 = 0x3FF0_0000;
 const MAX_MMAP_ENTRIES: usize = 32;
 
-/// Physical ranges shadowed by user mappings in every per-process page
-/// table: the user stack (0x0FE00000, 1 MiB) and the brk heap plus its
-/// growth range (0x3FE00000..0x100000000). Once a process maps its
-/// stack/heap, the per-process table no longer identity-maps those VAs,
-/// so page-table pages placed there by a top-down allocator become
-/// unreadable to the kernel's identity-based walks. With the 32-PD
-/// per-process tables (~2 MiB of top-down pages per boot), RAM near these
-/// windows (e.g. 256 MiB, 1 GiB) would otherwise place the last
-/// processes' tables inside them. Reserve the windows from both physical
-/// allocators.
-#[cfg(all(not(test), target_arch = "x86_64"))]
-const USER_STACK_WIN: (u64, u64) = (0x0FE0_0000, 0x0FF0_0000);
-#[cfg(all(not(test), target_arch = "x86_64"))]
-const BRK_HEAP_WIN: (u64, u64) = (0x3FE0_0000, 0x1_0000_0000);
-
 /// Detect usable RAM from the multiboot info and build the physical map.
 /// Returns `(detected, top_of_ram, map)`: `detected` is the sum of the
 /// available regions (the RAM the guest was given), `top` the highest
@@ -290,17 +275,6 @@ pub extern "C" fn kmain_body(magic: u32, info_ptr: u32) -> ! {
         // through kmain). The identity map covers 0..32 GiB, so anything the
         // bootloader reports above that is capped away.
         let (detected, mem_top, mmap) = build_memory_map(magic, info_ptr, kernel_end);
-        // Keep top-down page-table pages out of the user stack/brk VA
-        // windows (see USER_STACK_WIN/BRK_HEAP_WIN). x86 only: RISC-V and
-        // AArch64 per-process tables are small enough that top-down
-        // allocations never reach their user VA windows.
-        #[cfg(target_arch = "x86_64")]
-        let mmap = {
-            let mut m = mmap;
-            m.cut(USER_STACK_WIN.0, USER_STACK_WIN.1);
-            m.cut(BRK_HEAP_WIN.0, BRK_HEAP_WIN.1);
-            m
-        };
         arch_x86_64::alloc::init_allocator(&mmap);
 
         // Report both the guest-detected RAM total and the usable
@@ -318,42 +292,11 @@ pub extern "C" fn kmain_body(magic: u32, info_ptr: u32) -> ! {
             let kernel_end_page = kernel_end.div_ceil(4096);
             let total_pages = (mem_top / 4096).max(kernel_end_page);
             if kernel_end_page < total_pages {
-                // Split the free range around the user-mapped windows so VM
-                // never hands out page-table pages inside them (same shadowing
-                // reason as the arch allocator cut above). Boundaries in page
-                // units; empty when the window is beyond detected RAM.
-                let mut chunks = [kernel::vm::MemoryChunk { base: 0, size: 0 }; 3];
-                let mut n = 0;
-                let mut cur = kernel_end_page;
-                #[cfg(target_arch = "x86_64")]
-                let bounds = [
-                    USER_STACK_WIN.0 / 4096,
-                    USER_STACK_WIN.1 / 4096,
-                    BRK_HEAP_WIN.0 / 4096,
-                    BRK_HEAP_WIN.1 / 4096,
-                ];
-                #[cfg(not(target_arch = "x86_64"))]
-                let bounds: [u64; 0] = [];
-                for b in bounds.chunks(2) {
-                    let start = b[0].min(total_pages);
-                    let end = b[1].min(total_pages);
-                    if cur < start {
-                        chunks[n] = kernel::vm::MemoryChunk {
-                            base: cur,
-                            size: start - cur,
-                        };
-                        n += 1;
-                    }
-                    cur = cur.max(end);
-                }
-                if cur < total_pages {
-                    chunks[n] = kernel::vm::MemoryChunk {
-                        base: cur,
-                        size: total_pages - cur,
-                    };
-                    n += 1;
-                }
-                kernel::vm::mem_init(&chunks[..n]);
+                let chunks = [kernel::vm::MemoryChunk {
+                    base: kernel_end_page,
+                    size: total_pages - kernel_end_page,
+                }];
+                kernel::vm::mem_init(&chunks);
             }
         }
     }

@@ -885,7 +885,7 @@ pub unsafe fn boot_create_restricted_page_table(
     // On RISC-V SV39 with 3 levels, walks from L2(2) down to L1(1)…
     // but our boot page table uses 1GB huge pages at L2 (leaf entries).
     // In that case, there is no L1-level table to copy from.
-    // x86_64 skips the walk: it deep-copies the boot PDP's four PD windows
+    // x86_64 skips the walk: it deep-copies the boot PDP's identity window
     // directly (see below).
     #[cfg(not(target_arch = "x86_64"))]
     let mut table_phys = boot_cr3_val;
@@ -918,12 +918,7 @@ pub unsafe fn boot_create_restricted_page_table(
     #[cfg(not(target_arch = "x86_64"))]
     let boot_pd_phys = if found_boot_pd { table_phys } else { 0 };
 
-    // Allocate the hierarchy pages. RISC-V/AArch64 need (levels-1): root +
-    // intermediate levels + the bottom-level PD. x86_64 needs 31 more:
-    // one PD copy per 1 GiB window of the 0..32 GiB boot identity map.
-    #[cfg(target_arch = "x86_64")]
-    let n_pages = (levels - 1) as usize + 31;
-    #[cfg(not(target_arch = "x86_64"))]
+    // Allocate the hierarchy pages: root + intermediate levels + the bottom-level PD.
     let n_pages = (levels - 1) as usize;
     let mut pages = [0u64; 40];
     for entry in pages.iter_mut().take(n_pages) {
@@ -954,21 +949,20 @@ pub unsafe fn boot_create_restricted_page_table(
     let flags = kernel::hal::pte_present(); // PTE_TABLE for AArch64 non-leaf entries
     #[cfg(target_arch = "x86_64")]
     {
-        // PML4[0] → PDP, then deep-copy all 32 boot PDs (identity 0..32 GiB)
-        // and link PDP[0..31] → the copies, so kernel phys access stays mapped
-        // under this CR3 at any RAM size. map_page splits the 2 MiB huge
-        // pages for the user's code/stack/brk pages below.
+        // PML4[0] → PDP, whose one window points at a deep copy of the boot PD that
+        // holds the identity map. The copy stops at `identity_map_top` (the user base), so the
+        // kernel reaches its own image and the low frames through the identity map and anything
+        // above the base through the physmap (`PHYSMAP.md` P4). map_page splits the 2 MiB huge
+        // pages for the user's code/stack/brk pages.
         //
-        // Every window is supervisor-only, window 0 included. The identity map
-        // exists so the kernel can reach physical memory from this CR3; it is not how a
-        // process reaches its own, and U on window 0 gives every boot process the whole
-        // low pool at VA == PA — other processes' frames (whose pages it can then write as
-        // ordinary user stores, with no kernel write path to attribute the result to, which
-        // is how one process's message buffer turns up in another's heap), the page tables,
-        // and the kernel's own stacks. Above 1 GiB it is also what would let the
-        // anonymous-mmap heap silently alias identity memory instead of faulting. Device
-        // windows a driver is entitled to are granted explicitly (`map_virtio_bars`,
-        // `VM_MAP_PHYS`), and a process's own pages are mapped with their own flags.
+        // Every entry is supervisor-only. The identity map exists so the kernel can reach
+        // physical memory from this CR3; it is not how a process reaches its own, and U here
+        // gives every boot process the whole low pool at VA == PA: other processes' frames
+        // (whose pages it can then write as ordinary user stores, with no kernel write path to
+        // attribute the result to, which is how one process's message buffer turns up in
+        // another's heap), the page tables, and the kernel's own stacks. Device windows a driver
+        // is entitled to are granted explicitly (`map_virtio_bars`, `VM_MAP_PHYS`), and a
+        // process's own pages are mapped with their own flags.
         unsafe {
             core::ptr::write(
                 table_ptr(pages[0]),
@@ -977,21 +971,16 @@ pub unsafe fn boot_create_restricted_page_table(
             let boot_pdp_phys =
                 kernel::hal::pte_to_phys(core::ptr::read(table_ptr(boot_cr3_val)));
             let boot_pdp = table_ptr(boot_pdp_phys);
-            for i in 0..32usize {
-                let e = core::ptr::read(boot_pdp.add(i));
-                if e & kernel::hal::pte_present() == 0 {
-                    continue;
-                }
+            let e = core::ptr::read(boot_pdp);
+            if e & kernel::hal::pte_present() != 0 {
                 let boot_pd = table_ptr(kernel::hal::pte_to_phys(e));
-                let new_pd = table_ptr(pages[2 + i]);
-                for j in 0..512usize {
+                let new_pd = table_ptr(pages[2]);
+                let entries = (kernel::hal::identity_map_top() / 0x20_0000) as usize;
+                for j in 0..entries {
                     let entry = core::ptr::read(boot_pd.add(j)) & !kernel::hal::pte_user();
                     core::ptr::write(new_pd.add(j), entry);
                 }
-                core::ptr::write(
-                    table_ptr(pages[1]).add(i),
-                    kernel::hal::build_pte(pages[2 + i], flags),
-                );
+                core::ptr::write(table_ptr(pages[1]), kernel::hal::build_pte(pages[2], flags));
             }
         }
     }

@@ -1436,7 +1436,7 @@ are arch-specific, `[env]` is tooling/platform, not kernel.
     `crates/fs/src/mfs/main.rs`, `crates/fs/src/mfs/link.rs`)
 
 38. **The kernel image reaches past the user VA base, so a process's own code shadows its
-    embedded initramfs (2026-09-28, open — measured).** `just test-boot-x86` reports exactly one
+    embedded initramfs (2026-09-28, resolved 2026-10-01 — measured).** `just test-boot-x86` reports exactly one
     failure, `FAIL: missing /sbin/devman`, and the archive is not corrupt:
 
     - `initramfs_data()` reports `len=28571180`, which is exactly the cpio (11,793,964) plus the
@@ -1553,6 +1553,42 @@ are arch-specific, `[env]` is tooling/platform, not kernel.
     boot test writes through the window and reads the frame back through the identity map, and
     the reverse, on all three arches. What it is not yet is *used*: the derefs are P2, and the
     per-process install is P4.
+
+    *And it is used now: `PHYSMAP.md` P4 landed on all three arches (2026-10-01, x86 last).* Every
+    per-process table's identity map is the kernel image plus the low frames and stops at the user
+    base (x86's `0x200000..~0x20D3000` under a `identity_map_top()` of 64 MiB; AArch64's and
+    RISC-V's start above their low-1 GiB windows instead), every page-table frame and every kernel
+    buffer that a physical message names is reached through `phys_to_virt`, and the boot test's M1
+    assertion — no present kernel mapping inside a user window, and no user-accessible mapping
+    inside a kernel VA range — runs on all three arches. So both shapes this item listed as
+    "still open" are closed: the page-table dereferences went through `table_ptr` (P2b) and the
+    frame dereferences through `frame_ptr` (P3, P4).
+
+    The `[x86]` half of this item is closed too, and **the hang that reverted the base move has a
+    cause.** `fpu.rs` kept `p_seg.fpu_state` as a *frame pointer* and dereferenced it at its
+    physical address ("The kernel reaches it through the identity map"); once the DSO region
+    (80..128 MiB) landed inside RAM, the first dynamically-linked program took an unbounded
+    kernel-mode write fault there (`-d int`: `v=0e e=0002 cpl=0`, hundreds of thousands of
+    repetitions, RIP at `kernel::fpu::save`). Phase 1 moved all five sites to hold a *physmap*
+    address. Nothing is left hidden: `just test-dynlink-x86` and `just test-cdyn-x86` are green
+    with the base at `0x0400_0000`, so this item's own lesson — a frame's physical address is not a
+    pointer — is what closed it.
+
+39. **`vm_paging_fork` leaks what it built when an allocation fails mid-walk (2026-10-01, open).**
+    `crates/arch-x86_64/src/hal.rs`'s `vm_paging_fork` writes each child table's parent entry as it
+    descends and calls `fresh_table()` at three nesting levels; the first failure returns `-12`
+    immediately, leaving every frame allocated so far — the child PML4, and any PDP/PD/PT already
+    built — unreferenced, with no rollback and no free. The caller is `do_vm_paging_handler`
+    (`crates/kernel/src/system.rs`), which on a non-zero result writes 0 into the caller's CR3 field
+    and propagates the error, so a partial root is **never installed**: this is a frame leak once
+    the guest runs out of physical memory, not a fault.
+
+    It is recorded because an earlier P4 attempt reported a `CR2 == RIP` instruction-fetch fault with
+    "a child CR3 whose PD was empty", which pointed here. That attempt's `exec_create_root`
+    allocated 32 PDs and returned 0 when one failed to allocate on a 256 MiB guest; the shrink to a
+    single PD removes the failure mode, and the fault did not reproduce with it. The fix, when it is
+    wanted, is to pre-allocate the tables or free what was built before returning — the
+    allocation-failure path is the only one affected.
 
 ---
 

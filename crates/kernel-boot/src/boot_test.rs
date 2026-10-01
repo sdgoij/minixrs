@@ -129,9 +129,9 @@ pub unsafe fn run_boot_tests() {
     failures += test_boot_procs_page_tables();
 
     // M1: The user window and the kernel's VAs overlap in neither direction (`PHYSMAP.md` P4).
-    // x86 has not had its shrink yet — its trampoline's 0..32 GiB identity map still covers the
-    // window, so the check is not written for it and is not called there.
-    #[cfg(any(target_arch = "aarch64", target_arch = "riscv64"))]
+    // All three arches hold it now: AArch64's and RISC-V's windows are the low 1 GiB, and x86's is
+    // a band above its shrunk identity map.
+    #[cfg(any(target_arch = "aarch64", target_arch = "riscv64", target_arch = "x86_64"))]
     {
         failures += test_user_and_kernel_mappings_do_not_overlap();
     }
@@ -517,10 +517,13 @@ fn test_vm_check_range() -> u32 {
                     continue;
                 }
                 kernel::hal::write_cr3(p_cr3);
-                // Read from user code at 0x01000000 to verify switch
-                let _b = core::ptr::read_volatile(0x01000000u64 as *const u8);
-                // Read from kernel higher-half (boot_cr3 mapping)
-                let _k = core::ptr::read_volatile(saved as *const u8);
+                // Read from user code to verify the switch
+                let _b = core::ptr::read_volatile(USER_IMAGE_BASE as *const u8);
+                // Read from the kernel image, which every process's table maps at its link
+                // address — the point is that the kernel is still reachable after the switch.
+                // This used to read `saved` (the CR3) as a pointer, which only worked while
+                // the identity map covered a frame's physical address (`PHYSMAP.md` P4).
+                let _k = core::ptr::read_volatile(kernel::hal::kern_vaddr() as *const u8);
                 kernel::hal::write_cr3(saved);
             }
             serial_write("  OK VM: CR3 switches\r\n");
@@ -860,10 +863,13 @@ unsafe fn test_physmap_everywhere() -> u32 {
             return failures;
         }
 
-        // The proof: one frame, written through the boot tables and read back through every
-        // boot process's tables, has to be the same memory.
+        // The proof: one frame, written through the kernel's physmap and read back through every
+        // boot process's tables, has to be the same memory. The write cannot be the identity view of
+        // `pa` any more — a frame's physical address is not a VA the kernel may use once the
+        // per-process identity map stops at the low window (`PHYSMAP.md` P4), and this runs on the
+        // calling process's tables.
         const PATTERN: u64 = 0x5048_5953_4D41_5001;
-        core::ptr::write_volatile(pa as *mut u64, PATTERN);
+        core::ptr::write_volatile(va as *mut u64, PATTERN);
         for &(proc_nr, name) in BOOTED_PROCS {
             let rp = kernel::table::proc_addr(proc_nr);
             let cr3 = (*rp).p_seg.p_cr3;
@@ -1399,26 +1405,44 @@ fn test_boot_procs_page_tables() -> u32 {
 /// the process's own memory and the kernel writes there. The mirror image is a *user* mapping inside
 /// a kernel VA range, which hands a process the kernel's frames.
 ///
-/// AArch64 and RISC-V both hold now: their user window is the low 1 GiB, the kernel's identity map
-/// starts above it (AArch64's PUD[1] at the RAM base, RISC-V's first 1 GiB leaf at 2 GiB), and
-/// everything the kernel maps there is EL1-only. The devices that live inside the window are reached
-/// through the physmap. x86 joins this check when its own shrink lands — today its identity map still
-/// covers the window, which is exactly what it would report.
+/// All three arches hold. AArch64 and RISC-V put the user window at the bottom of the address space
+/// (the low 1 GiB) and start the kernel's identity map above it (AArch64's PUD[1] at the RAM base,
+/// RISC-V's first 1 GiB leaf at 2 GiB), with everything the kernel maps there EL1-only. x86's window
+/// is a *band*: its kernel image is linked at 2 MiB and executes there, so its identity map covers
+/// `[0, identity_map_top())` — the user base — and the window is the range above it. The devices that
+/// live inside a window are reached through the physmap on all three.
 ///
 /// 2 MiB steps: every mapping the check is about is a 2 MB or 1 GB block, so this granularity cannot
 /// step over one.
-#[cfg(any(target_arch = "aarch64", target_arch = "riscv64"))]
+#[cfg(any(target_arch = "aarch64", target_arch = "riscv64", target_arch = "x86_64"))]
 fn test_user_and_kernel_mappings_do_not_overlap() -> u32 {
     unsafe {
         fn check(cr3: u64, label: &str) -> u32 {
             // The user window: a present entry must be user-accessible.
-            let mut va = 0u64;
+            //
+            // Its lower bound is arch-shaped. AArch64 and RISC-V start the window at 0, so a kernel
+            // mapping *over* it is what this walk catches. x86's window is a band above the kernel
+            // image (`USER_IMAGE_BASE`), with the identity map below it, so the walk starts at the
+            // base and the identity map is the other loop. The two share a bound on x86, so a drift
+            // between them is reported rather than silently narrowing the check.
+            #[cfg(any(target_arch = "aarch64", target_arch = "riscv64"))]
+            let window_lo = 0u64;
+            #[cfg(target_arch = "x86_64")]
+            let window_lo = USER_IMAGE_BASE;
+            #[cfg(target_arch = "x86_64")]
+            {
+                if kernel::hal::identity_map_top() != USER_IMAGE_BASE {
+                    serial_write("  FAIL: the identity map does not stop at the user base\r\n");
+                    return 1;
+                }
+            }
+            let mut va = window_lo;
             while va < kernel::pagetable::MAX_USER_ADDRESS {
                 if let Ok(r) = unsafe { kernel::pagetable::walk(cr3, va) } {
                     if r.pte_value & kernel::pagetable::PG_U == 0 {
                         serial_write("  FAIL: ");
                         serial_write(label);
-                        serial_write(" has an EL1-only mapping at user MiB ");
+                        serial_write(" has a kernel-only mapping at user MiB ");
                         print_dec((va >> 20) as u32);
                         serial_write("\r\n");
                         return 1;
@@ -1448,8 +1472,14 @@ fn test_user_and_kernel_mappings_do_not_overlap() -> u32 {
                 serial_write("\r\n");
             };
 
+            // The identity map is *below* the window on x86 and above it on the other two arches,
+            // so the span is stated from each side rather than as one shared range.
+            #[cfg(any(target_arch = "aarch64", target_arch = "riscv64"))]
+            let identity_lo = kernel::pagetable::MAX_USER_ADDRESS;
+            #[cfg(target_arch = "x86_64")]
+            let identity_lo = 0u64;
             let identity_hi = kernel::hal::identity_map_top();
-            let mut va = kernel::pagetable::MAX_USER_ADDRESS;
+            let mut va = identity_lo;
             while va < identity_hi {
                 if !(ramdisk_lo..ramdisk_hi).contains(&va) {
                     if let Ok(r) = unsafe { kernel::pagetable::walk(cr3, va) } {
@@ -1520,7 +1550,10 @@ fn test_map_page_walk_roundtrip() -> u32 {
                 return 1;
             }
         };
-        core::ptr::write_bytes(root as *mut u8, 0, 4096);
+        // Through the physmap: `root` is a frame, and a frame's physical address is not a VA
+        // the kernel may use — the per-process identity map stops at the low window now
+        // (`PHYSMAP.md` P4), and this test runs on the calling process's tables.
+        core::ptr::write_bytes(kernel::pagetable::frame_ptr(root), 0, 4096);
 
         // 2. Allocate a page to map.
         let test_pa = match kernel::hal::alloc_phys_page() {

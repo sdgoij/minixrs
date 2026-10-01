@@ -3667,8 +3667,8 @@ pub unsafe fn do_exec_load_handler(caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZ
 
         // Copy the frame into a kernel buffer (the only remaining
         // whole-image transfer; the ELF itself is demand-paged from the
-        // file by VM). alloc_phys_contig returns identity-mapped physical
-        // pages, writable under any CR3.
+        // file by VM). alloc_phys_contig returns frames the kernel reaches
+        // through its physmap, not at their physical address.
         let frame_pages = (frame_len as usize).div_ceil(0x1000).max(1);
         let frame_base = match crate::hal::alloc_phys_contig(frame_pages) {
             Some(b) => b,
@@ -3683,14 +3683,14 @@ pub unsafe fn do_exec_load_handler(caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZ
         let r = crate::vm::read_from_proc(
             (*caller).p_nr,
             frame_ptr,
-            frame_base as *mut u8,
+            crate::pagetable::frame_ptr(frame_base),
             frame_len as usize,
         );
         if r != 0 {
             return r;
         }
 
-        let frame_slice = core::slice::from_raw_parts(frame_base as *const u8, frame_len as usize);
+        let frame_slice = core::slice::from_raw_parts(crate::pagetable::frame_ptr(frame_base) as *const u8, frame_len as usize);
 
         // Parse argv/envp out of the frame.
         let user_stack_top = crate::hal::user_stack_base() + crate::hal::user_stack_size() as u64;
@@ -5299,7 +5299,7 @@ pub unsafe fn do_vm_paging_handler(_caller: *mut Proc, msg: &mut [u8; MESSAGE_SI
                 // than each mapping site. Without it a fresh heap page carries the previous owner's
                 // words, which is what made every allocation-heavy tool die in `clap` on a pointer
                 // that appears nowhere in its binary.
-                core::ptr::write_bytes(pa as *mut u8, 0, count as usize * crate::vm::VM_PAGE_SIZE);
+                core::ptr::write_bytes(crate::pagetable::frame_ptr(pa), 0, count as usize * crate::vm::VM_PAGE_SIZE);
                 msg_write_u64(msg, VM_PAGING_PA_OFF, pa);
                 OK
             }
@@ -5424,9 +5424,9 @@ pub unsafe fn do_vm_paging_handler(_caller: *mut Proc, msg: &mut [u8; MESSAGE_SI
                 OK
             }
             VM_PAGING_COPY => {
-                // Copy count pages from src_pa to dst_pa.
-                // The kernel runs in ring 0 and can access physical
-                // addresses via the identity map (virtual == physical).
+                // Copy count pages from src_pa to dst_pa. Both are frames, so both
+                // go through the physmap: a frame's physical address is not a
+                // virtual address the kernel may dereference (`PHYSMAP.md` P4).
                 let src_pa = msg_read_u64(msg, VM_PAGING_PA_OFF);
                 let dst_pa = msg_read_u64(msg, VM_PAGING_CR3_OFF);
                 let count = msg_read_i32(msg, VM_PAGING_COUNT_OFF);
@@ -5435,8 +5435,8 @@ pub unsafe fn do_vm_paging_handler(_caller: *mut Proc, msg: &mut [u8; MESSAGE_SI
                 }
                 let page_size: u64 = 4096;
                 for i in 0..count as u64 {
-                    let src = (src_pa + i * page_size) as *const u8;
-                    let dst = (dst_pa + i * page_size) as *mut u8;
+                    let src = crate::pagetable::frame_ptr(src_pa + i * page_size) as *const u8;
+                    let dst = crate::pagetable::frame_ptr(dst_pa + i * page_size);
                     core::ptr::copy_nonoverlapping(src, dst, page_size as usize);
                 }
                 OK
@@ -5469,7 +5469,7 @@ pub unsafe fn do_vm_paging_handler(_caller: *mut Proc, msg: &mut [u8; MESSAGE_SI
                 }
                 let child_cr3 = match crate::pagetable::alloc_pt_page() {
                     Ok(pa) => {
-                        core::ptr::write_bytes(pa as *mut u8, 0, 4096);
+                        core::ptr::write_bytes(crate::pagetable::frame_ptr(pa), 0, 4096);
                         pa
                     }
                     Err(_) => {

@@ -933,6 +933,14 @@ pub const MAP_NX: u64 = 0x8000000000000000; // PG_NX
 /// to `[0, 0x0400_0000)` instead of the whole low range.
 pub const MAX_USER_ADDRESS: u64 = 0x10_0000_0000;
 
+/// Top of the kernel's identity map: `[0, identity_map_top())` is mapped VA == PA in every
+/// address space, supervisor-only. It stops at the user base, so only the kernel image
+/// (2..34 MiB) and the low frames below the base are reachable without a translation; a frame
+/// above it goes through [`phys_to_virt`] (`PHYSMAP.md` P4).
+pub const fn identity_map_top() -> u64 {
+    0x0400_0000
+}
+
 /// Base of the kernel's physmap: the window through which a *physical*
 /// address is reached as a pointer (`PHYSMAP.md`).
 ///
@@ -1008,6 +1016,18 @@ const _: () = assert!(user_stack_base() < MAX_USER_ADDRESS, "the stack base");
 const _: () = assert!(
     user_stack_base() + user_stack_size() as u64 <= MAX_USER_ADDRESS,
     "the stack top"
+);
+
+// The identity map stops at the user base, so it is one PD window and never reaches the window.
+const _: () = assert!(
+    identity_map_top() <= MAX_USER_ADDRESS,
+    "the identity map must not cover the user window"
+);
+const _: () = assert!(identity_map_top() == 0x0400_0000, "the identity map stops at the user base");
+const _: () = assert!(identity_map_top() <= 1 << 30, "the identity map fits one PD window");
+const _: () = assert!(
+    identity_map_top().is_multiple_of(0x20_0000),
+    "the identity map is built from 2 MiB entries"
 );
 
 /// Get the boot page table root physical address.
@@ -1678,39 +1698,34 @@ pub unsafe fn exec_create_root(boot_cr3: u64) -> u64 {
             None => return 0,
         };
         core::ptr::write_bytes(phys_to_virt(pdpt_page) as *mut u8, 0, 4096);
-        // One PD per 1 GiB window of the boot identity map (0..32 GiB).
-        let mut pd_pages = [0u64; 32];
-        for pd in pd_pages.iter_mut() {
-            *pd = match alloc_phys_page() {
-                Some(p) => p,
-                None => return 0,
-            };
-            core::ptr::write_bytes(phys_to_virt(*pd) as *mut u8, 0, 4096);
-        }
+        // The identity map is one 1 GiB window: `identity_map_top` is the user base, well
+        // inside PDPT[0], so exactly one PD is needed (`PHYSMAP.md` P4).
+        let pd_page = match alloc_phys_page() {
+            Some(p) => p,
+            None => return 0,
+        };
+        core::ptr::write_bytes(phys_to_virt(pd_page) as *mut u8, 0, 4096);
         let flags = PG_P | PG_RW | PG_U;
         core::ptr::write(phys_to_virt(pml4) as *mut u64, pdpt_page | flags);
         let boot_pml4 = phys_to_virt(boot_cr3) as *const u64;
         let boot_pdpt = core::ptr::read(boot_pml4) & PG_FRAME;
-        for (i, new_pd) in pd_pages.iter().enumerate() {
-            let pdpte = core::ptr::read((phys_to_virt(boot_pdpt) as *const u64).add(i));
-            if pdpte & PG_P == 0 {
-                continue;
-            }
+        let pdpte = core::ptr::read(phys_to_virt(boot_pdpt) as *const u64);
+        if pdpte & PG_P != 0 {
             let boot_pd = phys_to_virt(pdpte & PG_FRAME) as *const u64;
-            let new_pd = phys_to_virt(*new_pd) as *mut u64;
-            for j in 0usize..512 {
-                let mut e = core::ptr::read(boot_pd.add(j));
-                // The identity map is the kernel's and must stay mapped in every address space
-                // (the kernel runs on the process's tables), but it must never be user-accessible:
-                // it covers the whole low pool, so U here lets a process reach other processes'
-                // frames, the page tables and the kernel's own stacks at VA == PA. A process's own
-                // code is demand-paged from VM and its stack and heap are mapped explicitly, so it
-                // needs nothing from this map. This mirrors the boot path's restricted tables and
-                // the RISC-V port, which copies the same map supervisor-only.
-                e &= !PG_U;
+            let new_pd = phys_to_virt(pd_page) as *mut u64;
+            // The identity map is the kernel's and must stay mapped in every address space
+            // (the kernel runs on the process's tables), but it must never be user-accessible:
+            // it covers the low pool, so U here lets a process reach other processes' frames,
+            // the page tables and the kernel's own stacks at VA == PA. A process's own code is
+            // demand-paged from VM and its stack and heap are mapped explicitly, so it needs
+            // nothing from this map. This mirrors the boot path's restricted tables and the
+            // RISC-V port, which copies the same map supervisor-only.
+            let entries = (identity_map_top() / 0x20_0000) as usize;
+            for j in 0..entries {
+                let e = core::ptr::read(boot_pd.add(j)) & !PG_U;
                 core::ptr::write(new_pd.add(j), e);
             }
-            core::ptr::write((phys_to_virt(pdpt_page) as *mut u64).add(i), pd_pages[i] | flags);
+            core::ptr::write(phys_to_virt(pdpt_page) as *mut u64, pd_page | flags);
         }
         for i in 256usize..512 {
             let e = core::ptr::read(boot_pml4.add(i));
