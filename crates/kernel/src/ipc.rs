@@ -1891,11 +1891,14 @@ mod tests {
         map_va: u64,
         map_pa: u64,
     ) -> u64 {
-        pml4[0] = (pdpt.as_mut_ptr() as u64) | crate::pagetable::PG_P;
-        pdpt[0] = (pd.as_mut_ptr() as u64) | crate::pagetable::PG_P;
-        pd[0] = (pt.as_mut_ptr() as u64) | crate::pagetable::PG_P;
-        let idx = (map_va >> 12) & 511;
-        pt[idx as usize] = map_pa | crate::pagetable::PG_P | crate::pagetable::PG_RW;
+        // Index by the VA's own bits rather than assuming it is small: a test that needs the
+        // caller's virtual address to be a real, dereferenceable buffer (as `copy_from_user`
+        // does) has to pass an ordinary host address, whose upper indices are not zero.
+        pml4[((map_va >> 39) & 511) as usize] = (pdpt.as_mut_ptr() as u64) | crate::pagetable::PG_P;
+        pdpt[((map_va >> 30) & 511) as usize] = (pd.as_mut_ptr() as u64) | crate::pagetable::PG_P;
+        pd[((map_va >> 21) & 511) as usize] = (pt.as_mut_ptr() as u64) | crate::pagetable::PG_P;
+        pt[((map_va >> 12) & 511) as usize] =
+            map_pa | crate::pagetable::PG_P | crate::pagetable::PG_RW;
         pml4.as_mut_ptr() as u64
     }
 
@@ -2065,8 +2068,11 @@ mod tests {
             let dst = setup_proc(1);
             (*dst).p_rts_flags.store(0, Ordering::Relaxed); // not receiving
 
-            // Caller's message lives in a page-aligned host buffer mapped at
-            // VA 0x1000 in the sender's fake page table.
+            // The caller's message lives in this page-aligned buffer, and the caller's virtual
+            // address *is* the buffer's address: a host test has one address space, so that is the
+            // only address a virtual-address read can reach (`copy_from_user` reads the caller's VA,
+            // which is what makes it shadow-proof on a real address space). The fake table maps the
+            // same address so the walk's presence check passes too.
             #[repr(align(4096))]
             struct AlignedBuf {
                 data: [u8; MESSAGE_SIZE],
@@ -2082,6 +2088,7 @@ mod tests {
             msg_buf[16..24].copy_from_slice(&65u64.to_ne_bytes()); // len
             msg_buf[24..32].copy_from_slice(&0x1003_0000u64.to_ne_bytes()); // value
 
+            let msg_va = msg_buf.as_ptr() as u64;
             let mut pml4 = FakePtPage { data: [0; 512] };
             let mut pdpt = FakePtPage { data: [0; 512] };
             let mut pd = FakePtPage { data: [0; 512] };
@@ -2091,21 +2098,21 @@ mod tests {
                 &mut pdpt.data,
                 &mut pd.data,
                 &mut pt.data,
-                0x1000,
-                msg_buf.as_ptr() as u64,
+                msg_va,
+                msg_va,
             );
             (*src).p_seg.p_cr3 = cr3;
 
             let dst_ep = (*dst).p_endpoint;
             // Check the blocked-path copy directly.
-            let copy_r = copy_from_user(src, 0x1000, (*src).p_sendmsg.as_mut_ptr(), MESSAGE_SIZE);
+            let copy_r = copy_from_user(src, msg_va, (*src).p_sendmsg.as_mut_ptr(), MESSAGE_SIZE);
             assert_eq!(copy_r, OK, "copy_from_user in blocked path must succeed");
             assert_eq!(
                 &(&(*src).p_sendmsg)[12..16],
                 &7i32.to_ne_bytes(),
                 "field after direct copy"
             );
-            assert_eq!(mini_send(src, dst_ep, 0x1000 as *const u8, 0), OK);
+            assert_eq!(mini_send(src, dst_ep, msg_va as *const u8, 0), OK);
             assert!(
                 (*src).p_rts_flags.load(Ordering::Relaxed) & RtsFlags::SENDING.bits() != 0,
                 "sender must block on the queued path"

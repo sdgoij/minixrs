@@ -608,6 +608,11 @@ pub unsafe extern "C" fn kmain(hart_id: u64, dtb_ptr: u64) -> ! {
                 boot_abort("boot page table");
             }
         }
+        // Before the in-kernel suite: its page-table tests walk, and a walk reaches every table
+        // through the physmap (`PHYSMAP.md` D4).
+        unsafe {
+            kernel_boot::boot_init::install_physmap_in_boot_tables();
+        }
 
         serial_write("Running RISC-V integration tests...\r\n");
         let mut failures = kernel::tests::run_all();
@@ -679,6 +684,12 @@ pub unsafe extern "C" fn kmain(hart_id: u64, dtb_ptr: u64) -> ! {
             } else {
                 boot_abort("boot page table");
             }
+        }
+
+        // Before any per-process table is built: the boot servers' tables must carry the window,
+        // and `load_and_prepare_all` walks to build them (`PHYSMAP.md` D2/D4).
+        unsafe {
+            kernel_boot::boot_init::install_physmap_in_boot_tables();
         }
 
         let boot_cfg = kernel_boot::boot_init::BootProcessConfig {

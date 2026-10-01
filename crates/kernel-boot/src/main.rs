@@ -359,6 +359,13 @@ pub extern "C" fn kmain_body(magic: u32, info_ptr: u32) -> ! {
     }
     serial_write("allocator ready\r\n");
 
+    // The physmap goes in as soon as the allocator can hand out the page it needs on this arch, and
+    // before anything walks a page table: the walk helpers reach every table through the window
+    // (`PHYSMAP.md` D4). Paging itself is already on — the trampoline enabled it.
+    unsafe {
+        kernel_boot::boot_init::install_physmap_in_boot_tables();
+    }
+
     // Print banner via serial
     serial_write("Hello MINIX!\r\n");
 

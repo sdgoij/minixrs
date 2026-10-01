@@ -1192,11 +1192,14 @@ mod tests {
         map_va: u64,
         map_pa: u64,
     ) -> u64 {
-        pml4[0] = (pdpt.as_mut_ptr() as u64) | crate::pagetable::PG_P;
-        pdpt[0] = (pd.as_mut_ptr() as u64) | crate::pagetable::PG_P;
-        pd[0] = (pt.as_mut_ptr() as u64) | crate::pagetable::PG_P;
-        let idx = (map_va >> 12) & 511;
-        pt[idx as usize] = map_pa | crate::pagetable::PG_P | crate::pagetable::PG_RW;
+        // Index by the VA's own bits rather than assuming it is small: a test that needs the
+        // caller's virtual address to be a real, dereferenceable buffer (as `copy_from_user`
+        // does) has to pass an ordinary host address, whose upper indices are not zero.
+        pml4[((map_va >> 39) & 511) as usize] = (pdpt.as_mut_ptr() as u64) | crate::pagetable::PG_P;
+        pdpt[((map_va >> 30) & 511) as usize] = (pd.as_mut_ptr() as u64) | crate::pagetable::PG_P;
+        pd[((map_va >> 21) & 511) as usize] = (pt.as_mut_ptr() as u64) | crate::pagetable::PG_P;
+        pt[((map_va >> 12) & 511) as usize] =
+            map_pa | crate::pagetable::PG_P | crate::pagetable::PG_RW;
         pml4.as_mut_ptr() as u64
     }
 

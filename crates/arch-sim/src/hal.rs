@@ -658,6 +658,31 @@ pub const FPU_STATE_SIZE: usize = 512;
 pub const KERNBASE: u64 = 0xFFFF_8000_0000_0000;
 pub const MAX_USER_ADDRESS: u64 = 0x0000_8000_0000_0000;
 
+/// The simulator has one address space and no MMU, so a "physical" address is already a valid
+/// pointer and there is no window to distinguish. `PHYSMAP.md`'s physmap exists to separate the
+/// two; here the identity is the correct answer rather than a missing feature. Host tests that
+/// fabricate page tables build them at host addresses and pass them through [`virt_to_phys`],
+/// which is why the identity keeps those fixtures working under either HAL.
+pub const fn physmap_base() -> u64 {
+    0
+}
+
+pub const fn physmap_size() -> u64 {
+    u64::MAX
+}
+
+pub const fn phys_to_virt(pa: u64) -> u64 {
+    pa
+}
+
+pub const fn virt_to_phys(va: u64) -> u64 {
+    va
+}
+
+pub const fn physmap_covers(_pa: u64) -> bool {
+    true
+}
+
 pub const MAP_PRESENT: u64 = 0x1;
 pub const MAP_READ: u64 = 0;
 pub const MAP_WRITE: u64 = 0x2;

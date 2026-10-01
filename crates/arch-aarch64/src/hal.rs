@@ -1187,6 +1187,13 @@ pub unsafe fn exec_create_root(boot_cr3: u64) -> u64 {
         let pgd0_entry = crate::pte::make_pte(private_pud, pte_nonleaf_flags());
         core::ptr::write(new_pgd as *mut u64, pgd0_entry);
 
+        // The physmap lives in PUD[32..64], and this PUD was built rather than copied from
+        // boot, so it goes in explicitly: every address space the kernel runs on must have it
+        // (`PHYSMAP.md` D2).
+        if !install_physmap(new_pgd) {
+            return 0;
+        }
+
         new_pgd
     }
 }

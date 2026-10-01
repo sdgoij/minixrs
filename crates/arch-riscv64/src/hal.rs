@@ -1456,6 +1456,12 @@ pub unsafe fn exec_create_root(boot_cr3: u64) -> u64 {
             let e = core::ptr::read(boot_root.add(i));
             core::ptr::write((new_root as *mut u64).add(i), e);
         }
+        // The physmap sits above the identity map, in entries 256..288, which the copy above
+        // does not reach, so it goes in explicitly: every address space the kernel runs on must
+        // have it (`PHYSMAP.md` D2).
+        if !install_physmap(new_root) {
+            return 0;
+        }
         new_root
     }
 }

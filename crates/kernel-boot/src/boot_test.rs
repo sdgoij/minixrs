@@ -16,6 +16,25 @@ const REQ_READSUPER: i32 = FS_BASE + 28;
 /// `REQ_LOOKUP` — what VFS asks for next once the root is mounted.
 const REQ_LOOKUP: i32 = FS_BASE + 26;
 
+/// The processes that get a per-process page table while booting (the `boot_procs` list in
+/// `main.rs` / `riscv64.rs` / `aarch64.rs`). Shared by the tests that have to visit every one of
+/// those address spaces.
+const BOOTED_PROCS: &[(i32, &str)] = &[
+    (DS_PROC_NR, "ds"),
+    (RS_PROC_NR, "rs"),
+    (PM_PROC_NR, "pm"),
+    (SCHED_PROC_NR, "sched"),
+    (VFS_PROC_NR, "vfs"),
+    (VM_PROC_NR, "vm"),
+    (RAMDISK_PROC_NR, "ramdisk"),
+    (VIRTIO_BLK_PROC_NR, "virtio_blk"),
+    (VIRTIO_NET_PROC_NR, "virtio_net"),
+    (NET_PROC_NR, "net"),
+    (MFS_PROC_NR, "mfs"),
+    (TTY_PROC_NR, "tty"),
+    (DEVMAN_PROC_NR, "devman"),
+];
+
 /// Run all boot tests, then exit QEMU with success/failure.
 ///
 /// # Safety
@@ -98,6 +117,11 @@ pub unsafe fn run_boot_tests() {
 
     // M: Every boot process has a walkable page table
     failures += test_boot_procs_page_tables();
+
+    // M2: Every boot process's address space reaches the physmap
+    failures += test_physmap_everywhere();
+    // M3: A walk reaches its table through the physmap even when the identity map is shadowed
+    failures += test_walk_through_the_physmap();
 
     // N: Mouse wiring — the IRQ-12 hook must notify the input server.
     failures += test_mouse_irq_notifies_input();
@@ -777,6 +801,196 @@ unsafe fn test_physmap() -> u32 {
     }
 }
 
+/// Every boot process's address space must reach the physmap: the kernel reaches page tables
+/// through it and runs on whichever of these tables is current (`PHYSMAP.md` D2/D4).
+///
+/// The walk is the part that can fail cleanly, so it runs first for every process; the read from
+/// the process's own CR3 is the actual proof, and it runs only once all the walks have passed, so
+/// a missing window reports as a FAIL rather than as a page fault inside the boot test.
+unsafe fn test_physmap_everywhere() -> u32 {
+    unsafe {
+        let pa = match kernel::hal::alloc_phys_page() {
+            Some(p) => p,
+            None => {
+                serial_write("  FAIL: physmap: no free frame\r\n");
+                return 1;
+            }
+        };
+        let va = kernel::hal::phys_to_virt(pa);
+
+        let mut failures = 0u32;
+        for &(proc_nr, name) in BOOTED_PROCS {
+            let rp = kernel::table::proc_addr(proc_nr);
+            let cr3 = if rp.is_null() { 0 } else { (*rp).p_seg.p_cr3 };
+            if cr3 == 0 {
+                serial_write("  FAIL: ");
+                serial_write(name);
+                serial_write(" has no page table\r\n");
+                failures += 1;
+                continue;
+            }
+            if kernel::pagetable::walk(cr3, va).is_err() {
+                serial_write("  FAIL: ");
+                serial_write(name);
+                serial_write(" cannot reach the physmap\r\n");
+                failures += 1;
+            }
+        }
+        if failures != 0 {
+            return failures;
+        }
+
+        // The proof: one frame, written through the boot tables and read back through every
+        // boot process's tables, has to be the same memory.
+        const PATTERN: u64 = 0x5048_5953_4D41_5001;
+        core::ptr::write_volatile(pa as *mut u64, PATTERN);
+        for &(proc_nr, name) in BOOTED_PROCS {
+            let rp = kernel::table::proc_addr(proc_nr);
+            let cr3 = (*rp).p_seg.p_cr3;
+            let saved = kernel::hal::read_cr3();
+            if cr3 == saved {
+                continue;
+            }
+            kernel::hal::write_cr3(cr3);
+            let seen = core::ptr::read_volatile(va as *const u64);
+            kernel::hal::write_cr3(saved);
+            if seen != PATTERN {
+                serial_write("  FAIL: ");
+                serial_write(name);
+                serial_write(" physmap read ");
+                print_hex(seen);
+                serial_write("\r\n");
+                failures += 1;
+            }
+        }
+
+        if failures == 0 {
+            serial_write("  OK physmap reachable from every boot process's table\r\n");
+        }
+        failures
+    }
+}
+
+/// The kernel's pointer to a frame: the conversion `walk` itself uses, so a test that builds a
+/// table by hand and one that walks it agree on where the table is.
+fn frame_ptr(pa: u64) -> *mut u64 {
+    kernel::hal::phys_to_virt(pa) as *mut u64
+}
+
+/// Zero a whole frame, the way a page-table page has to start out.
+unsafe fn zero_frame(pa: u64) {
+    for i in 0..512 {
+        unsafe { core::ptr::write_volatile(frame_ptr(pa).add(i), 0) };
+    }
+}
+
+/// A walk must reach a page table through the physmap, not through the identity map.
+///
+/// The construction is the one P2b's gate asks for: build a chain whose *root* is a frame, then make
+/// that frame's identity address resolve somewhere else — a zeroed decoy — in the tables the kernel
+/// is running on. Anything that reached its root at "the virtual address equal to its physical
+/// address" would now read the decoy and report `NotMapped`; a walk that goes through the physmap
+/// still finds the real root. The identity mapping is put back before this returns.
+///
+/// Runs on the kernel's own tables, because that is where the shadow has to be placed for it to be
+/// the mapping the walk would otherwise use.
+unsafe fn test_walk_through_the_physmap() -> u32 {
+    unsafe {
+        on_kernel_tables(|| {
+            let boot = kernel::hal::boot_cr3();
+            if boot == 0 {
+                serial_write("  SKIP: physmap walk check needs the boot tables\r\n");
+                return 0;
+            }
+
+            // The VA the walk is asked about, and the physical address the 1 GiB leaf names. Both sit
+            // inside the identity map's span; neither is ever *accessed* — the walk only reads the
+            // entries — so the leaf may name an address above RAM.
+            let va: u64 = 0x8000_0000;
+            let target_pa: u64 = va;
+            let expected_level = 3;
+
+            let mut frames = [0u64; 4];
+            for f in frames.iter_mut() {
+                match kernel::hal::alloc_phys_page() {
+                    Some(p) => *f = p,
+                    None => {
+                        serial_write("  FAIL: physmap walk: no free frame\r\n");
+                        return 1;
+                    }
+                }
+                zero_frame(*f);
+            }
+            let root_pa = frames[0];
+            let decoy_pa = frames[1];
+
+            // Chain from the root down to the 1 GiB level, then a 1 GiB block leaf there. On a
+            // three-level arch (SV39) the root *is* the 1 GiB level, so no table is chained.
+            let mut table_pa = root_pa;
+            let mut next = 2usize;
+            for level in (3..kernel::hal::pt_levels()).rev() {
+                let child_pa = frames[next];
+                next += 1;
+                core::ptr::write(
+                    frame_ptr(table_pa).add(kernel::hal::pt_index(va, level)),
+                    kernel::hal::build_pte(child_pa, kernel::hal::pte_nonleaf_flags()),
+                );
+                table_pa = child_pa;
+            }
+            let leaf_flags = kernel::hal::pte_present()
+                | kernel::hal::pte_writable()
+                | kernel::hal::pte_large_page();
+            core::ptr::write(
+                frame_ptr(table_pa).add(kernel::hal::pt_index(va, 2)),
+                kernel::hal::build_pte(target_pa, leaf_flags),
+            );
+
+            // Shadow the root's identity address: from here, VA `root_pa` is the (zeroed) decoy.
+            let kernel_flags = kernel::pagetable::PG_P | kernel::pagetable::PG_RW;
+            if kernel::pagetable::map_page(boot, root_pa, decoy_pa, kernel_flags).is_err() {
+                serial_write("  FAIL: physmap walk: could not shadow the root\r\n");
+                return 1;
+            }
+
+            let outcome = kernel::pagetable::walk(root_pa, va);
+            let resolved = matches!(
+                &outcome,
+                Ok(r) if r.level == expected_level
+                    && r.pte_value & kernel::pagetable::PG_P != 0
+                    && kernel::hal::pte_to_phys(r.pte_value) == target_pa
+            );
+
+            // The control that keeps this honest. Read, through the identity address, the entry the
+            // chain wrote at the root's own level: it must now be the decoy's zero. If it still read
+            // the real entry, the walk below would prove nothing about which address it reached the
+            // table at — the check would pass for a walk that never consulted the physmap.
+            let chain_idx = kernel::hal::pt_index(va, kernel::hal::pt_levels() - 1);
+            let spoiled = core::ptr::read_volatile((root_pa as *const u64).add(chain_idx));
+
+            // Put the identity mapping back: the frame is kernel RAM either way, and the rest of
+            // boot still runs on these tables.
+            let _ = kernel::pagetable::map_page(boot, root_pa, root_pa, kernel_flags);
+
+            if spoiled != 0 {
+                serial_write("  FAIL: physmap walk: the identity shadow did not take\r\n");
+                return 1;
+            }
+
+            if resolved {
+                serial_write(
+                    "  OK physmap walk: a table shadowed by the identity map still resolves\r\n",
+                );
+                0
+            } else {
+                serial_write("  FAIL: physmap walk: table ");
+                print_hex(root_pa);
+                serial_write(" did not resolve from behind the identity map\r\n");
+                1
+            }
+        })
+    }
+}
+
 fn test_initramfs_echo_exists() -> u32 {
     match kernel::initramfs::find_initramfs_file("/bin/echo") {
         Some((data, _mode)) => {
@@ -1009,25 +1223,10 @@ fn test_pm_mproc_pt() -> u32 {
 /// and that a walk at the entry point succeeds.
 fn test_boot_procs_page_tables() -> u32 {
     unsafe {
-        // Only check processes that actually get per-process page tables
-        // during boot (the boot_procs list in main.rs / riscv64.rs).
-        let booted: &[(i32, &str)] = &[
-            (DS_PROC_NR, "ds"),
-            (RS_PROC_NR, "rs"),
-            (PM_PROC_NR, "pm"),
-            (SCHED_PROC_NR, "sched"),
-            (VFS_PROC_NR, "vfs"),
-            (VM_PROC_NR, "vm"),
-            (RAMDISK_PROC_NR, "ramdisk"),
-            (VIRTIO_BLK_PROC_NR, "virtio_blk"),
-            (VIRTIO_NET_PROC_NR, "virtio_net"),
-            (NET_PROC_NR, "net"),
-            (MFS_PROC_NR, "mfs"),
-            (TTY_PROC_NR, "tty"),
-            (DEVMAN_PROC_NR, "devman"),
-        ];
+        // Only check processes that actually get per-process page tables during boot (see
+        // [`BOOTED_PROCS`]).
         let mut failures = 0u32;
-        for &(proc_nr, name) in booted {
+        for &(proc_nr, name) in BOOTED_PROCS {
             let rp = kernel::table::proc_addr(proc_nr);
             if rp.is_null() {
                 serial_write("  FAIL: ");

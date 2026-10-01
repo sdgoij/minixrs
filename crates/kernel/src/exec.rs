@@ -3,7 +3,7 @@
 //! Builds a private page table for a newly exec'd process, with
 //! private physical copies of code and stack pages.
 
-use crate::pagetable::{PG_P, PG_RW, PG_U};
+use crate::pagetable::{PG_P, PG_RW, PG_U, table_ptr};
 use crate::vm::{self, NO_MEM};
 
 /// Create a per-process page table for an exec'd process.
@@ -30,7 +30,7 @@ pub unsafe fn exec_setup_new_page_table() -> u64 {
         // (PD on x86_64, PMD on SV39). Iterates levels 2..N-1.
         let mut table_phys = boot_cr3;
         for level in (2..levels).rev() {
-            let table = table_phys as *const u64;
+            let table = table_ptr(table_phys);
             let idx = crate::hal::pt_index(0, level); // va=0 to get PML4[0]/PUD[0]
             let entry = core::ptr::read(table.add(idx));
             table_phys = crate::hal::pte_to_phys(entry);
@@ -46,7 +46,7 @@ pub unsafe fn exec_setup_new_page_table() -> u64 {
                 return 0;
             }
             *entry = p * vm::VM_PAGE_SIZE as u64;
-            core::ptr::write_bytes(*entry as *mut u8, 0, vm::VM_PAGE_SIZE);
+            core::ptr::write_bytes(table_ptr(*entry) as *mut u8, 0, vm::VM_PAGE_SIZE);
         }
 
         // Link hierarchy: root[0] → level[1][0] → ... → PD.
@@ -54,7 +54,7 @@ pub unsafe fn exec_setup_new_page_table() -> u64 {
         // For SV39 (3 levels):    PUD[0]  → PMD      (already at bottom)
         let flags = PG_P | PG_RW | PG_U;
         for i in 0..(n_pages - 1) {
-            let parent = page_addrs[i] as *mut u64;
+            let parent = table_ptr(page_addrs[i]);
             let child = page_addrs[i + 1];
             core::ptr::write(parent, child | flags);
         }
@@ -62,8 +62,8 @@ pub unsafe fn exec_setup_new_page_table() -> u64 {
         // Deep-copy the boot PD entries into the new PD (shared identity map),
         // supervisor-only: the map is the kernel's, and a user entry over the low pool would
         // expose other processes' frames and the page tables themselves.
-        let new_pd = page_addrs[n_pages - 1] as *mut u64;
-        let boot_pd = boot_pd_phys as *const u64;
+        let new_pd = table_ptr(page_addrs[n_pages - 1]);
+        let boot_pd = table_ptr(boot_pd_phys);
         for i in 0..512 {
             let entry = core::ptr::read(boot_pd.add(i)) & !PG_U;
             core::ptr::write(new_pd.add(i), entry);
@@ -72,8 +72,8 @@ pub unsafe fn exec_setup_new_page_table() -> u64 {
         // Share kernel high mappings (top half of address space).
         // For x86_64 PML4: entries 256-511.
         // For SV39 PUD: entries are arch-defined.
-        let boot_root = boot_cr3 as *const u64;
-        let new_root = page_addrs[0] as *mut u64;
+        let boot_root = table_ptr(boot_cr3);
+        let new_root = table_ptr(page_addrs[0]);
         let half_entries = 512 / 2; // 256 entries
         for i in half_entries..512 {
             let entry = core::ptr::read(boot_root.add(i));

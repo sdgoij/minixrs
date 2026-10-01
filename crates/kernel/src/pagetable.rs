@@ -59,7 +59,11 @@ pub fn get_proc_cr3(ep: i32) -> u64 {
 // Convenience wrappers for each level (name matches x86_64 convention).
 #[derive(Debug, Clone, Copy)]
 pub struct PageWalkResult {
+    /// The *physical* address of the entry, so a caller can put it back in a PTE.
     pub pte_phys: u64,
+    /// The kernel's pointer to that same entry, through the physmap — what a caller writes to.
+    /// It is deliberately not `pte_phys` as a pointer: the identity address of a table page is
+    /// one a user window can occupy (`PHYSMAP.md` D4).
     pub pte_virt: *mut u64,
     pub pte_value: u64,
     pub level: u32,
@@ -80,6 +84,28 @@ pub(crate) unsafe fn alloc_pt_page() -> Result<u64, PageTableError> {
             None => Err(PageTableError::OutOfMemory),
         }
     }
+}
+
+/// The kernel's pointer to the page table at physical address `table_phys`.
+///
+/// Every table access goes through the physmap rather than through the identity map. The kernel
+/// runs on the calling process's page tables, so the *identity* address of a table page is a
+/// virtual address that process's own window can occupy — and a table page the allocator hands out
+/// inside that window would make every walk in the system read whatever the process put there,
+/// silently (`KNOWN_ISSUES.md` item 38, `PHYSMAP.md` D4). The physmap is above every user address,
+/// so it cannot be shadowed.
+///
+/// Host tests are the exception, and deliberately so: they have no physmap and fabricate tables in
+/// ordinary buffers whose "physical" address is the buffer's own (see `fill_fake_pt` in `grants`
+/// and `ipc`), so there the identity is what keeps those fixtures working. The kernel, the QEMU
+/// suite and the boot tests all take the translation, which is the behaviour that matters.
+#[inline]
+pub(crate) fn table_ptr(table_phys: u64) -> *mut PtEntry {
+    #[cfg(test)]
+    let ptr = table_phys as *mut PtEntry;
+    #[cfg(not(test))]
+    let ptr = crate::hal::phys_to_virt(table_phys) as *mut PtEntry;
+    ptr
 }
 
 unsafe fn read_pte(pt_virt: *const PtEntry) -> PtEntry {
@@ -112,9 +138,9 @@ pub unsafe fn walk(cr3: u64, va: u64) -> Result<PageWalkResult, PageTableError> 
 
         // Walk from the top non-leaf level down to level 1 (just above PT).
         for level in (1..levels).rev() {
-            let table = table_phys as *const u64;
             let idx = crate::hal::pt_index(va, level);
-            let pte = read_pte(table.add(idx));
+            let pte_addr = table_ptr(table_phys).add(idx);
+            let pte = read_pte(pte_addr);
 
             if pte & PG_P == 0 {
                 return Err(PageTableError::NotMapped);
@@ -124,7 +150,7 @@ pub unsafe fn walk(cr3: u64, va: u64) -> Result<PageWalkResult, PageTableError> 
             if pte & PG_PS != 0 {
                 return Ok(PageWalkResult {
                     pte_phys: table_phys + (idx as u64) * 8,
-                    pte_virt: (table_phys + (idx as u64) * 8) as *mut u64,
+                    pte_virt: pte_addr,
                     pte_value: pte,
                     level: level + 1,
                 });
@@ -134,9 +160,9 @@ pub unsafe fn walk(cr3: u64, va: u64) -> Result<PageWalkResult, PageTableError> 
         }
 
         // Level 0 (PT — 4KB page).
-        let pt = table_phys as *const u64;
         let idx = crate::hal::pt_index(va, 0);
-        let pte = read_pte(pt.add(idx));
+        let pte_addr = table_ptr(table_phys).add(idx);
+        let pte = read_pte(pte_addr);
 
         if pte & PG_P == 0 {
             return Err(PageTableError::NotMapped);
@@ -144,7 +170,7 @@ pub unsafe fn walk(cr3: u64, va: u64) -> Result<PageWalkResult, PageTableError> 
 
         Ok(PageWalkResult {
             pte_phys: table_phys + (idx as u64) * 8,
-            pte_virt: (table_phys + (idx as u64) * 8) as *mut u64,
+            pte_virt: pte_addr,
             pte_value: pte,
             level: 1,
         })
@@ -180,7 +206,7 @@ pub unsafe fn map_page(cr3: u64, va: u64, pa: u64, flags: u64) -> Result<(), Pag
             if !crate::hal::pte_is_valid_phys(table_phys) {
                 return Err(PageTableError::InvalidArgument);
             }
-            let table = table_phys as *mut PtEntry;
+            let table = table_ptr(table_phys);
             let idx = crate::hal::pt_index(va, level);
             let pte_addr = table.add(idx);
             let pte = read_pte(pte_addr);
@@ -191,10 +217,10 @@ pub unsafe fn map_page(cr3: u64, va: u64, pa: u64, flags: u64) -> Result<(), Pag
                 // Zero the entire page so stale data doesn't masquerade as
                 // valid PTEs on subsequent lookups at different indices.
                 #[cfg(not(target_arch = "aarch64"))]
-                core::ptr::write_bytes(p as *mut u8, 0, 4096);
+                core::ptr::write_bytes(table_ptr(p) as *mut u8, 0, 4096);
                 #[cfg(target_arch = "aarch64")]
                 for i in 0..512 {
-                    core::ptr::write_volatile((p as *mut u64).add(i), 0);
+                    core::ptr::write_volatile((table_ptr(p)).add(i), 0);
                 }
                 let branch_flags = crate::hal::pte_nonleaf_flags();
                 write_pte(pte_addr, crate::hal::build_pte(p, branch_flags));
@@ -212,7 +238,7 @@ pub unsafe fn map_page(cr3: u64, va: u64, pa: u64, flags: u64) -> Result<(), Pag
                 let step = crate::hal::PAGE_SIZE << (next_level * 9);
                 // Permissions from the original huge page, arch-adjusted.
                 let pte_flags_src = crate::hal::pte_split_flags(pte, next_level);
-                let pt_virt = pt_phys as *mut u64;
+                let pt_virt = table_ptr(pt_phys);
                 for i in 0..512u64 {
                     let pte_pa = base_pa + i * step;
                     write_pte(
@@ -231,7 +257,7 @@ pub unsafe fn map_page(cr3: u64, va: u64, pa: u64, flags: u64) -> Result<(), Pag
         }
 
         // Level 0 (PT — write the final PTE).
-        let pt = table_phys as *mut u64;
+        let pt = table_ptr(table_phys);
         let idx = crate::hal::pt_index(va, 0);
         let pte_addr = pt.add(idx);
         write_pte(pte_addr, pte_val);
@@ -294,7 +320,7 @@ pub unsafe fn clear_page(cr3: u64, va: u64) -> Result<(), PageTableError> {
             if !crate::hal::pte_is_valid_phys(table_phys) {
                 return Err(PageTableError::InvalidArgument);
             }
-            let table = table_phys as *mut u64;
+            let table = table_ptr(table_phys);
             let idx = crate::hal::pt_index(va, level);
             let pte_addr = table.add(idx);
             let pte = read_pte(pte_addr as *const PtEntry);
@@ -313,7 +339,7 @@ pub unsafe fn clear_page(cr3: u64, va: u64) -> Result<(), PageTableError> {
                 let next_level = level - 1;
                 let step = crate::hal::PAGE_SIZE << (next_level * 9);
                 let pte_flags_src = crate::hal::pte_split_flags(pte, next_level);
-                let pt_virt = pt_phys as *mut u64;
+                let pt_virt = table_ptr(pt_phys);
                 for i in 0..512u64 {
                     write_pte(
                         pt_virt.add(i as usize),
@@ -331,7 +357,7 @@ pub unsafe fn clear_page(cr3: u64, va: u64) -> Result<(), PageTableError> {
         }
 
         // Level 0 — clear the leaf entry.
-        let pt = table_phys as *mut u64;
+        let pt = table_ptr(table_phys);
         let idx = crate::hal::pt_index(va, 0);
         write_pte(pt.add(idx), 0);
         if split {
@@ -433,7 +459,7 @@ pub unsafe fn pt_mapkernel(cr3: u64) -> Result<(), PageTableError> {
 
         // Allocate a 4KB page table to hold the split PTEs
         let pt_phys = alloc_pt_page()?;
-        let pt = pt_phys as *mut PtEntry;
+        let pt = table_ptr(pt_phys);
 
         // Populate the new page table with 512 × 4KB entries
         for i in 0..512 {

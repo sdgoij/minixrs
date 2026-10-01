@@ -341,6 +341,23 @@ pub struct BootProcessConfig {
     pub map_virtio_mmio: bool,
 }
 
+/// Install the physmap into the boot page tables.
+///
+/// Call this as soon as paging is on and the physical allocator is ready, and **before anything
+/// walks a page table**: `pagetable`'s walk and map helpers reach every table through the window
+/// (`PHYSMAP.md` D4), so a boot path that walks before this faults. It also has to precede the
+/// first per-process table, which `load_and_prepare_all` builds — the tables the boot servers keep
+/// running on must carry the window too.
+///
+/// # Safety
+///
+/// The boot page tables must be the active ones, and the arch physical allocator initialized.
+pub unsafe fn install_physmap_in_boot_tables() {
+    if !unsafe { kernel::hal::install_physmap(kernel::hal::boot_cr3()) } {
+        boot_abort("physmap into the boot tables");
+    }
+}
+
 /// Load every boot process from the initramfs and build its per-process
 /// page table, mirroring the per-arch loops in the old entry files.
 ///
@@ -374,6 +391,11 @@ pub unsafe fn load_and_prepare_all(cfg: &BootProcessConfig) -> *mut Proc {
     }
 
     print!("  creating per-process page tables...\r\n");
+
+    // The physmap is already in the boot tables: [`install_physmap_in_boot_tables`] ran in this
+    // arch's entry before calling here. The constructors below either inherit it through the boot
+    // root's upper half (x86-64, RISC-V) or install it explicitly into their private PUD (AArch64)
+    // (`PHYSMAP.md` D2/D4).
 
     let mut first_proc: *mut Proc = core::ptr::null_mut();
     for (i, &(_, proc_nr)) in boot_procs.iter().enumerate() {
@@ -1218,6 +1240,15 @@ pub unsafe fn boot_create_restricted_page_table(
     // With cacheable PT walks (TCR_EL1.IRGN0=ORGN0=1), the walker
     // reads from cache where our writes are already visible.
     // No explicit cache maintenance is needed.
+
+    // Every address space gets the physmap, not only the boot ones. On x86-64 and RISC-V the
+    // upper-half copy above already brought it in, but on AArch64 the private PUD was built
+    // rather than copied, so this is the only thing that puts it there. Installing it
+    // unconditionally keeps that a property of this constructor instead of a consequence of
+    // which entry range each arch happens to copy (`PHYSMAP.md` D2).
+    if !unsafe { kernel::hal::install_physmap(pages[0]) } {
+        return None;
+    }
 
     Some(pages[0])
 }

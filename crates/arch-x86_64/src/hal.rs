@@ -1668,6 +1668,12 @@ pub unsafe fn exec_create_root(boot_cr3: u64) -> u64 {
             let e = core::ptr::read(boot_pml4.add(i));
             core::ptr::write((pml4 as *mut u64).add(i), e);
         }
+        // The physmap lives in that upper half, so the copy above brings it in; installing it
+        // here as well keeps it a property of this constructor rather than of the copy's range
+        // (`PHYSMAP.md` D2).
+        if !install_physmap(pml4) {
+            return 0;
+        }
         pml4
     }
 }

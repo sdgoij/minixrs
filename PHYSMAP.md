@@ -1,6 +1,6 @@
 # PHYSMAP.md — a physmap the user window cannot shadow
 
-Status: **P1 landed (2026-09-29); P2–P6 are design.** This scopes the fix for the class that
+Status: **P1, P2a, P2b and P2c landed (2026-09-29); P3–P6 are design.** This scopes the fix for the class that
 `KNOWN_ISSUES.md` item 38's B exposed: the kernel dereferences *physical* addresses as pointers,
 and the virtual address it does that at is one a user window can also occupy.
 
@@ -29,10 +29,12 @@ Two ways to satisfy the invariant:
 2. **Dereference it at a virtual address no user window can occupy.** Then the mapping is the
    kernel's alone, in every address space, and a bare `phys`→pointer convention is safe again.
 
-Today the port does neither. It dereferences raw physical addresses (item 38's measured failure:
-`copy_from_user` read a frame through `VA == PA`, and `VA == PA` was inside the sender's own
-image), and its mapping of physical memory — the 0..32 GiB identity map — shares addresses with
-the user window.
+The port's mapping of physical memory — the 0..32 GiB identity map — shares addresses with the
+user window, so it is not that second address. P1 and P2a added the mapping that is (the physmap,
+present in every address space) and P2b routes every page-table access through it, so mechanism 2
+now holds for the walk and map helpers. What is left of mechanism 2 are the *frame* derefs below
+(P3's list), one of which is item 38's measured failure: `copy_from_user` read a frame through
+`VA == PA`, and `VA == PA` was inside the sender's own image.
 
 ## 2. What we start with (measured, not proposed)
 
@@ -70,15 +72,17 @@ uses, which is why this is a smaller change than it looks:
   into VM's own address space so it can reach one it has no mapping for. This is the reference's
   `freepdes` idea, already implemented for the one consumer that needed it.
 
-**What is missing.** The third mechanism — a mapping of physical memory at an address the user
-window cannot occupy — and, with it, a rule about when a physical address may become a pointer.
+**What is missing.** The third mechanism was a mapping of physical memory at an address the user
+window cannot occupy, and a rule about when a physical address may become a pointer. P1 and P2a
+supply the mapping, P2b supplies the rule for page tables, and the rest of the table below — frames,
+grant tables, device BARs — is P3's.
 
 **The deref sites (the audit).** These are the places a `phys_bytes` becomes a pointer:
 
 | Site | What it reaches | Today |
 |---|---|---|
-| `pagetable.rs` `walk`/`map_page`/`unmap_page`/`clear_page` | every page table | `table_phys as *const u64` |
-| `exec.rs` | the ELF walk | `table_phys as *const u64` |
+| `pagetable.rs` `walk`/`map_page`/`unmap_page`/`clear_page` | every page table | **P2b**: `table_ptr` = `phys_to_virt` |
+| `exec.rs` | the ELF walk | **P2b**: `table_ptr` = `phys_to_virt` |
 | `vm.rs` (page-fault fill, COW/copy) | a frame being filled | `pte_to_phys(..) + offset` then deref |
 | `grants.rs` `verify_grant` | the *granter's* grant table | `s_grant_pa + i * size` (a physical address, by design — the granter may not be the running process) |
 | `system.rs` `do_map_phys` | a device BAR | maps it *identity*, user-accessible |
@@ -156,7 +160,7 @@ becomes a pointer only through one conversion function.
 | # | Decision | Rationale |
 |---|---|---|
 | **D1** | **One physmap base per arch, somewhere no user window reaches**, with `phys_to_virt(pa)` / `virt_to_phys(va)` as the *only* conversion. x86-64 `0xFFFF_8000_0000_0000` and riscv64 `0xFFFF_FFC0_0000_0000` (each arch's top half); aarch64 `0x8_0000_0000`, in the *low* half — `TCR_EL1` sets `EPD1`, so TTBR1 is not walked and a high base would fault on every access instead of shadowing. | §3.2. Its range is what makes the invariant a property of the layout rather than a convention: on x86/riscv the kernel stays low and only the physmap is high; on aarch64 the window is above both the 1 GiB user space and the 0..32 GiB identity map, and still inside TTBR0's 48 bits. |
-| **D2** | **The physmap is installed in the boot tables and copied into every per-process table**, supervisor-only, non-executable, covering RAM **and device MMIO** (the same 0..32 GiB span the identity map covers today, or a second sparse window for MMIO if we prefer). Using 1 GiB blocks, the span is **one PDPT page on x86-64 and no page at all on riscv64 or aarch64** — SV39's root table *is* its 1 GiB level, and aarch64's `PGD[0]` already points at the window's PUD — against today's 32 PDs. | Device BARs at `0xFD00_0000`… are dereferenced by drivers; a physmap that stops at RAM would move the bug to drivers. |
+| **D2** | **The physmap is installed in the boot tables and in every per-process table** (landed as P2a), supervisor-only, non-executable, covering RAM **and device MMIO** (the same 0..32 GiB span the identity map covers today, or a second sparse window for MMIO if we prefer). Using 1 GiB blocks, the span is **one PDPT page on x86-64 and no page at all on riscv64 or aarch64** — SV39's root table *is* its 1 GiB level, and aarch64's `PGD[0]` already points at the window's PUD — against today's 32 PDs. | Device BARs at `0xFD00_0000`… are dereferenced by drivers; a physmap that stops at RAM would move the bug to drivers. |
 | **D3** | **The identity map shrinks to the kernel image** (`0x200000..__kernel_end`), and **the user base moves above it** (64 MiB — item 38's B). Together these *retire* the class: the image is then below the user base and the physmap is above the user top, so **no kernel mapping shares a VA with any user window** on any arch. | §1. Item 38's B moved the base for the *archive*'s sake and was reverted with the move unexplained; this is the same move, made once, with the physmap present and the assertion that pins it. |
 | **D4** | **Page tables are reached through the physmap** (`PHYS_TO_VIRT(table_pa) as *mut u64`), and the walk/map helpers take the same conversion. This is MINIX's `p_cr3_v`, expressed with the physmap instead of a per-object VA. | §3.1. It is also the site that would go wrong *silently*: a table page allocated inside a user window poisons every walk in the system. |
 | **D5** | **Device mappings get a window, not their physical address.** `do_map_phys` picks a VA (a device window, per-process, from a bounded range) instead of `vaddr = phys`. | A BAR mapped at `VA == PA` can collide with the stack window (`0xFD00_0000` is 253 MiB, the stack is 254 MiB) and is the same shadowing hazard for a *user* mapping. Phase 3 needs this anyway. |
@@ -170,24 +174,33 @@ Each stage has a gate that runs without the next existing.
 | Stage | Deliverable | Gate |
 |---|---|---|
 | **P1** | **Landed (2026-09-29).** `physmap_base` / `physmap_size` / `phys_to_virt` / `virt_to_phys` / `physmap_covers` per arch, the base pinned by module-level `const _: () = assert!(...)` (above `MAX_USER_ADDRESS`, 1 GiB-aligned, no wrap — plus `>= identity_map_top()` and inside 48-bit TTBR0 on aarch64, and inside SV39's top half on riscv64), and `hal::install_physmap(cr3)`, which installs the window in 1 GiB blocks. | Host tests in each arch crate, and a boot-test line on all three arches — `OK physmap: frame 0x... at 0x...`, written through the physmap and read back through the identity map, then the reverse. Green: `cargo test -p arch-{x86_64,riscv64,aarch64}`, `just check`, `just test-arches`. |
-| **P2** | Page-table walks through the physmap: `pagetable.rs` (`walk`, `map_page`, `unmap_page`, `clear_page`) and `exec.rs`. | Every arch boots; boot test + image gates; plus one deliberate check that a walk still resolves a table whose *physical* address lies inside a user window (constructible: allocate a page and choose a window address as its "physical"). And **re-check dynlink**: `just test-dynlink-x86` and `just test-cdyn-x86`, because the reverted base move's dynamic-exec hang is hidden rather than fixed and this stage touches the same tables (`KNOWN_ISSUES.md` item 38). |
+| **P2a** | **Landed (2026-09-29).** The window goes into the boot tables before the first per-process table is built, and **every** root constructor installs it: `boot_create_restricted_page_table` (the tables the boot servers keep running on) and each arch's `exec_create_root`. x86-64 and RISC-V also inherit it through the boot root's upper half; AArch64's private PUD is built rather than copied, so the explicit install is the only thing that puts it there. This had to come before P2b, not with P4: `walk`/`map_page` cannot deref `PHYS_TO_VIRT(table_pa)` while the tables the kernel is running on lack the window. | A new boot-test line walks the window in *every* boot process's address space and then reads one frame back from each process's own CR3 — `OK physmap reachable from every boot process's table` — on all three arches. Green: `just check`, `just test-arches`. |
+| **P2b** | **Landed (2026-09-29).** `walk` / `map_page` / `unmap_page` / `clear_page` and `exec.rs` reach every table through `phys_to_virt`, via one `table_ptr` helper; `PageWalkResult::pte_virt` is now the physmap address while `pte_phys` stays the physical one. Two prerequisites the plan did not name came with it: the window has to be installed **before the first walk** — `install_physmap_in_boot_tables` now runs in each arch's entry, ahead of the in-kernel suite *and* of `load_and_prepare_all`, because riscv64/aarch64 run `tests::run_all()` first — and `arch-sim`/`arch-wasm32` needed the conversion too, since `pagetable.rs` compiles against every HAL (identity there: one address space, no MMU). | Green: `cargo test -p kernel` (423 host tests), `just check`, `just test-arches` (all six QEMU gates), `just test-dynlink-x86`, `just test-cdyn-x86`. The deliberate shadow check its gate also asked for is P2c. |
+| **P2c** | **Landed (2026-09-29).** The deliberate check P2b's gate asked for: `test_walk_through_the_physmap` builds a chain whose *root* is a frame, shadows that frame's identity address on the boot tables with a zeroed decoy, and walks. It also reads the root's own chain entry back **through the identity address** and requires it to be the decoy's zero — the control that keeps the check from passing vacuously, since a walk that never consulted the physmap would satisfy the main assertion whenever the shadow had failed to take. On SV39 the root *is* the 1 GiB level, so nothing is chained; the loop covers the 4-level arches. | Green on all three arches: each boot log carries `OK physmap walk: a table shadowed by the identity map still resolves`, and none reports `the identity shadow did not take`. `just test-arches`, `just check`. |
 | **P3** | The remaining derefs: `vm.rs`'s fault fill, `grants.rs`'s `s_grant_pa` read, the boot path's writes. | All gates; the grant path exercised by the existing `safe*` tests. |
-| **P4** | The identity map shrinks to the kernel image, the user base moves above it (item 38's B, made once, here), and the physmap is installed in every per-process table. | All gates. A new boot-test assertion: **no present kernel mapping's VA intersects the user window** (and no user-accessible mapping lies in a kernel VA range). And the same **re-check dynlink** as P2, because this is the stage that moves the base. |
+| **P4** | The identity map shrinks to the kernel image, and the user base moves above it (item 38's B, made once, here). | All gates. A new boot-test assertion: **no present kernel mapping's VA intersects the user window** (and no user-accessible mapping lies in a kernel VA range). And the same **re-check dynlink** as P2b, because this is the stage that moves the base. |
 | **P5** | The device window for `do_map_phys` (BARs and, later, dmabuf). | `image-x86`'s `fb: backend bochs-display` needs the BAR path, so this gate already exists; `test-drmmap-x86` covers the render node. |
 | **P6** | The invariant as a standing gate: the P4 assertion plus a `grep`-able rule that no `pte_to_phys(..)` is dereferenced without `PHYS_TO_VIRT`. | The assertion runs on every boot-test arch. |
 
-**P2 and P4 are the two that must be done carefully.** P1 is mechanical; P3 is a grind; P5 is Phase
+**P2b and P4 are the two that must be done carefully.** P1, P2a and P3 are mechanical or additive; P5 is Phase
 3's first step by another name.
 
-**What P1 deliberately left.** The window goes into the *boot* tables only, and the boot test reads
-it inside `on_kernel_tables`, which is where it is reachable. Every per-process table is P4's work —
-though on x86-64 and riscv64 the window is already inherited sooner by accident rather than by
-design (`exec_create_root` / `boot_create_page_table` copy the root's top half, which is where the
-physmap lives), while aarch64's `exec_create_root` rebuilds the PUD and copies only `PUD[0..32]`, so
-there the window is boot-tables-only until P4. Also still open is one assertion the plan put in P1:
-"the kernel image is below the user base" **cannot be stated yet**, because on x86-64 and riscv64 it
-is not true — the image ends at ~33 MiB and ~2.05 GiB against user bases of 16 MiB, which is item 38
-itself. It belongs with D3 in P4.
+**What P2b cost that the plan did not see.** `pagetable.rs` compiles against five HALs, so the
+conversion it now calls had to exist on `arch-sim` (and through it `arch-wasm32`) as well as the
+three hardware arches, where it is the identity rather than a missing feature. And the two host
+fixtures that fabricate page tables in ordinary buffers (`grants`, `ipc`) needed their reader fixed:
+`copy_from_user` reads the caller's *virtual* address, so a test whose caller VA is a real buffer
+cannot index its fake chain as if that VA were small. The `cfg(test)` identity in `table_ptr` is what
+keeps those fixtures working at all — the translation is the kernel's and the QEMU suite's behaviour,
+not the host suite's.
+
+**What P1 deliberately left, and P2a took up.** P1 put the window in the *boot* tables only, and
+its boot test read it inside `on_kernel_tables` — enough to prove the mapping, not enough for the
+kernel to rely on it, because the kernel normally runs on a process's tables. P2a is where it
+became a property of every address space. Also still open is one assertion the plan first put in
+P1: "the kernel image is below the user base" **cannot be stated yet**, because on x86-64 and
+riscv64 it is not true — the image ends at ~33 MiB and ~2.05 GiB against user bases of 16 MiB,
+which is item 38 itself. It belongs with D3 in P4.
 
 ## 6. What this is worth
 
@@ -196,7 +209,7 @@ itself. It belongs with D3 in P4.
 - **Removes a latent time bomb.** Page tables are allocated around `0xFC00000` (252 MiB) with free
   RAM to 256 MiB, and *every* process's stack window is 254..255 MiB: a table page allocated there
   poisons every walk in the system, silently, and the allocator is one MiB of growth away from it.
-  P2/P4 make that impossible rather than unlikely.
+  P2b/P4 make that impossible rather than unlikely.
 - **Smaller address spaces.** 0..32 GiB with 1 GiB pages is 2 page-table pages per process instead
   of 32.
 - **Phase 3's prerequisite.** dmabuf/GBM, the render node's mmap and the device window all want a
@@ -224,8 +237,12 @@ itself. It belongs with D3 in P4.
   identity (the trampoline, early boot, `kmain @ 0x200000`, the boot test's archive reads) keeps
   it; the point of D3 is that the identity map is a *small, named* exception.
 - **`.rules`-shaped trap:** `pte_to_phys(..)` returns a number that *looks* like a pointer and
-  was one for this port's whole history. Converting it is now the rule, and the grep in P6 is what
-  keeps it.
+  was one for this port's whole history. Converting it is now the rule for page tables (P2b) and P6's
+  grep is what keeps it; frames, grant tables and BARs follow in P3.
+- **A walk needs the window already installed.** `walk`/`map_page`/`clear_page` now fault before
+  `install_physmap_in_boot_tables` has run. That is why the call sits in each arch's entry rather
+  than in `load_and_prepare_all`: the riscv64/aarch64 test binaries run the in-kernel suite — which
+  walks — before that, and the x86 test binary runs its own ahead of it too.
 
 ## 8. Suggested `.rules` additions
 
