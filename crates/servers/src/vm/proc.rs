@@ -281,25 +281,48 @@ pub unsafe fn pt_new(ep: Endpoint) -> i32 {
         }
         let pml4_phys = pml4_pg * vm::VM_PAGE_SIZE as u64;
 
-        // 2. Zero the entire PML4.
-        core::ptr::write_bytes(pml4_phys as *mut u8, 0, vm::VM_PAGE_SIZE);
-
-        // 3. Copy the kernel PML4 entries (upper 256 slots, indices 256-511)
-        //    from the boot/template PML4.  The kernel's entries are shared
-        //    between all user processes, so we read them from the boot CR3.
+        // 2. The boot/template PML4 to copy the kernel's entries from. Its
+        //    entries are shared between all user processes.
         let boot_cr3 = kernel::pagetable::boot_cr3();
         if boot_cr3 == 0 {
             // No boot CR3 available — free the page and fail.
             vm::free_mem(pml4_pg, 1);
             return -1;
         }
-        let boot_pml4 = boot_cr3 as *const PtEntry;
-        let new_pml4 = pml4_phys as *mut PtEntry;
+
+        // 3. Zero the new PML4 and copy the kernel PML4 entries (upper 256
+        //    slots, indices 256-511) from the boot one.
+        //
+        // Both frames are reached through a mapping, never at their physical
+        // address: VM is a user process with no user-visible physical window.
+        // The direct pointer writes this replaces only worked while a
+        // user-visible identity map covered the frames — x86's, which
+        // `PHYSMAP.md` P4 shrinks, and never RISC-V's or AArch64's, whose
+        // identity leaves are supervisor-only. `pt_free_internal`,
+        // `free_address_space` and `cow_setup_fork` map tables the same way.
+        const VM_MAP_FLAGS: u64 = kernel::pagetable::MAP_WRITE | kernel::pagetable::MAP_USER;
+        let boot_va = crate::vm::vm_mappage(boot_cr3, VM_MAP_FLAGS);
+        let new_va = crate::vm::vm_mappage(pml4_phys, VM_MAP_FLAGS);
+        if boot_va == 0 || new_va == 0 {
+            if boot_va != 0 {
+                crate::vm::vm_unmappage(boot_va);
+            }
+            if new_va != 0 {
+                crate::vm::vm_unmappage(new_va);
+            }
+            vm::free_mem(pml4_pg, 1);
+            return -1;
+        }
+        // SAFETY: both VAs were just mapped to those frames, and nothing else
+        // walks them yet.
+        core::ptr::write_bytes(new_va as *mut u8, 0, vm::VM_PAGE_SIZE);
         core::ptr::copy_nonoverlapping(
-            boot_pml4.add(USER_PML4_ENTRIES),
-            new_pml4.add(USER_PML4_ENTRIES),
+            (boot_va as *const u64).add(USER_PML4_ENTRIES),
+            (new_va as *mut u64).add(USER_PML4_ENTRIES),
             USER_PML4_ENTRIES,
         );
+        crate::vm::vm_unmappage(boot_va);
+        crate::vm::vm_unmappage(new_va);
 
         // 4. Store the PML4 address in the Vmproc entry.
         if let Some(vmp) = vmproc_lookup(ep) {
@@ -1193,8 +1216,13 @@ mod tests {
                 "PML4 physical address should be non-zero"
             );
 
-            // Verify kernel entries are present
-            let pml4 = vmp.vm_pml4_phys as *const PtEntry;
+            // Verify kernel entries are present. The frame is reached through
+            // a mapping, as in `pt_new`: VM has no user-visible physical window
+            // through which to read a table.
+            const VM_MAP_FLAGS: u64 = kernel::pagetable::MAP_WRITE | kernel::pagetable::MAP_USER;
+            let pml4_va = crate::vm::vm_mappage(vmp.vm_pml4_phys, VM_MAP_FLAGS);
+            assert!(pml4_va != 0, "vm_mappage for the new PML4 should succeed");
+            let pml4 = pml4_va as *const PtEntry;
             for i in USER_PML4_ENTRIES..NENTRIES {
                 let entry = core::ptr::read(pml4.add(i));
                 assert!(
@@ -1203,6 +1231,7 @@ mod tests {
                     i
                 );
             }
+            crate::vm::vm_unmappage(pml4_va);
 
             // Free resources
             vm::free_mem(vmp.vm_pml4_phys / vm::VM_PAGE_SIZE as u64, 1);

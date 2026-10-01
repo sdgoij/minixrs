@@ -1082,15 +1082,17 @@ pub unsafe fn boot_create_restricted_page_table(
             // carries (`install_physmap` below). A driver's virtio-mmio window is put back under
             // PUD[0] if it needs one. PUD[2..32] are copied from boot further down.
 
-            // Create a PMD page with 512 2MB block entries
-            // for the kernel identity range (0x40000000-0x7FFFFFFF).
-            // PMD entry 0 (0x40000000-0x401FFFFF) uses AP=EL1_only
-            // because it contains the exception vector table — changing
-            // AP to EL0_RW causes a prefetch abort on kernel exception
-            // entry (QEMU Cortex-A57 quirk). All other entries (1..511)
-            // use AP=EL0_RW so user-mode servers like VM can access
-            // physical memory.
-            let user_pmd = unsafe { kernel::hal::alloc_phys_page()? };
+            // Create a PMD page with 512 2MB block entries for the kernel
+            // identity range (0x40000000-0x7FFFFFFF), all EL1-only. This is the
+            // kernel's own window: its base holds the exception vector table
+            // (AP=EL0_RW there causes a prefetch abort on kernel exception
+            // entry, a QEMU Cortex-A57 quirk), and the rest must stay EL1-only
+            // for the other half of `PHYSMAP.md` P4's invariant — a
+            // user-accessible mapping inside a kernel VA range. Userspace never
+            // needed to reach physical memory through it: VM maps the frames it
+            // touches (`crate::vm::vm_mappage`) and the drivers use
+            // `virtio_phys_delta`.
+            let kern_pmd = unsafe { kernel::hal::alloc_phys_page()? };
             const PMD_BLOCK_EL1: u64 = 0b01u64 | (0b11u64 << 8) | (1u64 << 10); // 0x701, AP=EL1 only
             const PMD_BLOCK_USER: u64 = 0b01u64 | (0b01u64 << 6) | (0b11u64 << 8) | (1u64 << 10); // 0x741, AP=EL0_RW
             let ram_base: u64 = 0x4000_0000;
@@ -1109,25 +1111,18 @@ pub unsafe fn boot_create_restricted_page_table(
                 // actual VA 0x40000000 + i*2MB.
                 let va = ram_base + (i as u64) * 0x20_0000;
                 let entry = if va < ram_end {
-                    // PMD entry 0 contains the exception vector table;
-                    // use EL1-only to avoid QEMU Cortex-A57 prefetch abort.
-                    let flags = if i == 0 {
-                        PMD_BLOCK_EL1
-                    } else {
-                        PMD_BLOCK_USER
-                    };
-                    va | flags
+                    va | PMD_BLOCK_EL1
                 } else {
                     0 // not RAM: leave unmapped (faults loudly, never aliases)
                 };
                 unsafe {
-                    core::ptr::write_volatile(table_ptr(user_pmd).add(i), entry);
+                    core::ptr::write_volatile(table_ptr(kern_pmd).add(i), entry);
                 }
             }
 
-            // Set PUD[1] to point to the user PMD page.
+            // Set PUD[1] to point to the kernel identity PMD page.
             let pud1_flags = arch_aarch64::pte::PTE_VALID | arch_aarch64::pte::PTE_TYPE;
-            let pud1_entry = kernel::hal::build_pte(user_pmd, pud1_flags);
+            let pud1_entry = kernel::hal::build_pte(kern_pmd, pud1_flags);
             unsafe { core::ptr::write(table_ptr(private_pud).add(1), pud1_entry) };
 
             // Copy the remaining boot PUD blocks (2..32) — 1 GiB EL1-only
