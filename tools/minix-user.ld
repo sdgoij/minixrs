@@ -1,7 +1,15 @@
-/* Userland linker script — each output section page-aligned */
+/* Userland linker script — each output section page-aligned.
+ *
+ * The shared-object region (`crates/ldso/src/layout.rs` `DSO_BASE`/`DSO_LIMIT`)
+ * and the loader's base (`tools/minix-ldso.ld` `LOADER_BASE`) are placed relative
+ * to this base, so a per-arch base moves all three together. */
 ENTRY(_start)
 
-BASE_ADDRESS = 0x01000000;
+/* Overridable: the target spec passes `--defsym=BASE_ADDRESS=<arch base>`,
+   because the base is per-arch (`PHYSMAP.md` P4 — x86's image occupies
+   2..34 MiB, so its userland starts at 64 MiB). A bare `rustc` invocation
+   that does not go through the spec still gets this default. */
+PROVIDE(BASE_ADDRESS = 0x01000000);
 
 SECTIONS
 {

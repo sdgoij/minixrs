@@ -900,10 +900,15 @@ pub const fn mmap_base() -> u64 {
     0x1_0000_0000
 }
 
-/// Base of VM's temporary self-mapping range: just below the user top so
-/// the scratch mappings never collide with code/heap/mmap/stack.
+/// Base of VM's temporary self-mapping range.
+///
+/// The "just below the arch user top" spot the other two ports use would land at the
+/// top of a 64 GiB window, far from anything, and this port's mmap heap grows upward
+/// from 4 GiB — so the scratch lives in the free gap above the loaded image instead:
+/// the stack ends at `0x0FF0_0000` and the brk heap starts at `0x3FE0_0000`, leaving
+/// that span for scratch mappings.
 pub const fn vm_scratch_base() -> u64 {
-    (MAX_USER_ADDRESS - 0x1_0000_0000) & !0xFFF
+    0x1000_0000
 }
 
 /// Page table flags (x86_64).
@@ -914,8 +919,19 @@ pub const MAP_USER: u64 = 0x0000000000000004; // PG_U
 pub const MAP_EXEC: u64 = 0; // x86 has no execute bit; absence of PG_NX is executable
 pub const MAP_NX: u64 = 0x8000000000000000; // PG_NX
 
-/// Maximum user address (48-bit VA, top half reserved for kernel).
-pub const MAX_USER_ADDRESS: u64 = 0x0000800000000000;
+/// Top of the user-accessible VA range.
+///
+/// Reduced from the canonical half's 128 TiB to 64 GiB so that the window is a range a
+/// standing check can walk: everything the port places lives below the 4 GiB mmap base,
+/// and a ceiling two orders of magnitude below where the identity map used to end is
+/// also what makes a fault at a kernel-range VA fatal instead of something the
+/// user-fault gate tries to resolve (`PHYSMAP.md` P4).
+///
+/// The port's user window is a *band* rather than `0..this`: the kernel image occupies
+/// 2..34 MiB with the trampoline below it, so the window starts at the user base
+/// (`0x0400_0000`, the spec's `--defsym=BASE_ADDRESS`) and the identity map is confined
+/// to `[0, 0x0400_0000)` instead of the whole low range.
+pub const MAX_USER_ADDRESS: u64 = 0x10_0000_0000;
 
 /// Base of the kernel's physmap: the window through which a *physical*
 /// address is reached as a pointer (`PHYSMAP.md`).
@@ -978,6 +994,20 @@ const _: () = assert!(
 const _: () = assert!(
     physmap_base() + physmap_size() > physmap_base(),
     "the physmap must not wrap the address space"
+);
+
+// The user layout stays inside the window, and the window stays below the physmap.
+// Compile-time pins for `PHYSMAP.md` P4, alongside the ones above.
+const _: () = assert!(0x0400_0000 < MAX_USER_ADDRESS, "the exec image base");
+const _: () = assert!(0x0800_0000 < MAX_USER_ADDRESS, "the loader base");
+const _: () = assert!(vm_scratch_base() < MAX_USER_ADDRESS, "VM's scratch base");
+const _: () = assert!(user_heap_base() < MAX_USER_ADDRESS, "the heap base");
+const _: () = assert!(user_heap_limit() <= MAX_USER_ADDRESS, "the heap limit");
+const _: () = assert!(mmap_base() < MAX_USER_ADDRESS, "the mmap base");
+const _: () = assert!(user_stack_base() < MAX_USER_ADDRESS, "the stack base");
+const _: () = assert!(
+    user_stack_base() + user_stack_size() as u64 <= MAX_USER_ADDRESS,
+    "the stack top"
 );
 
 /// Get the boot page table root physical address.

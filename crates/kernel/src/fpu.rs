@@ -11,6 +11,16 @@
 //! `restore` on the way out, so the kernel may use the FPU freely in between and a context switch
 //! in the middle cannot lose the state either.
 //!
+//! `p_seg.fpu_state` holds a **physmap** address (`hal::phys_to_virt` of the frame), not the frame's
+//! physical address. It used to be the physical address, dereferenced through the identity map: that
+//! is sound only while no user window covers the frame's address, and it is `KNOWN_ISSUES.md` item
+//! 38's shape. Moving x86's userland above the kernel image (`PHYSMAP.md` P4) put the shared-object
+//! region inside RAM's physical range, so a frame allocated there was also a VA the running process
+//! had mapped — the first dynamically-linked program on the new layout took a kernel-mode write
+//! fault on a not-present user page and looped on it (`-d int`: `v=0e e=0002 cpl=0`, repeating).
+//! `arch-x86_64`'s `restore` reads the same field in asm and dereferences it, so both sides agree on
+//! the physmap.
+//!
 //! Every user→kernel path must call `save` as its *first* Rust. The hooks today are
 //! `save_fault_context` (`#PF`), `syscall_handler_c`, and the timer, serial, keyboard and mouse ISR
 //! callbacks — all in `crates/kernel-boot/src/main.rs`. `#GP`/`#UD`/`#DF`/`#DB` never return, so
@@ -62,11 +72,12 @@ pub unsafe fn save(rp: *mut Proc) {
         let mut area = (*rp).p_seg.fpu_state;
         if area.is_null() {
             // One page: the FXSAVE area is 512 bytes and needs 16-byte alignment, which the page
-            // allocator gives for free. The kernel reaches it through the identity map.
+            // allocator gives for free. The kernel reaches it through the physmap — see the module
+            // comment for why the physical address is not usable as a pointer.
             let Some(page) = crate::hal::alloc_phys_contig(1) else {
                 return;
             };
-            area = page as *mut u8;
+            area = crate::hal::phys_to_virt(page) as *mut u8;
             core::ptr::write_bytes(area, 0, 1 << 12);
             (*rp).p_seg.fpu_state = area;
         }
@@ -221,7 +232,7 @@ unsafe fn riscv_area(rp: *mut Proc) -> *mut u8 {
         let Some(page) = crate::hal::alloc_phys_contig(1) else {
             return core::ptr::null_mut();
         };
-        area = page as *mut u8;
+        area = crate::hal::phys_to_virt(page) as *mut u8;
         // Zero the whole page: the image is only `RISCV_IMAGE_SIZE` of it, but an uninitialised
         // tail is a value a later width could read as state.
         unsafe { core::ptr::write_bytes(area, 0, 1 << 12) };
@@ -258,7 +269,7 @@ pub unsafe fn fork_inherit(parent: *mut Proc, child: *mut Proc) {
         let Some(page) = crate::hal::alloc_phys_contig(1) else {
             return;
         };
-        let dst = page as *mut u8;
+        let dst = crate::hal::phys_to_virt(page) as *mut u8;
         core::ptr::copy_nonoverlapping(src, dst, RISCV_IMAGE_SIZE);
         (*child).p_seg.fpu_state = dst;
     }
@@ -275,7 +286,7 @@ pub unsafe fn fork_inherit(parent: *mut Proc, child: *mut Proc) {
         let Some(page) = crate::hal::alloc_phys_contig(1) else {
             return;
         };
-        let dst = page as *mut u8;
+        let dst = crate::hal::phys_to_virt(page) as *mut u8;
         core::ptr::copy_nonoverlapping(src, dst, crate::hal::FPU_STATE_SIZE);
         (*child).p_seg.fpu_state = dst;
     }

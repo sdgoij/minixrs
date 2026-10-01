@@ -43,7 +43,7 @@ first sees the program text that several processes share. A wrong table address 
 stride therefore cannot pass quietly: it finds nothing, and says so.
 
 The walk is the arch's own, chosen with `--arch`. Only the walk differs: the loader's
-`DSO_BASE` and every program's `TEXT_BASE` are shared, so which levels to descend, the
+`DSO_BASE` and every program's `TEXT_BASE` move with the arch's user base, so which levels to descend, the
 bits that make an entry present, a huge page or writable, and the bits holding the frame
 are a row in `ARCHS` rather than a second copy of this file. aarch64 is not a row yet: its
 read-only bit (`AP[2]`) is inverted relative to these two, so it is its own change and not
@@ -123,6 +123,10 @@ ARCHS = {
             "-device", "virtio-tablet-pci,display=fb0",
             "-kernel", str(IMAGE),
         ],
+        # The x86 user base is 64 MiB, above the kernel image (`PHYSMAP.md` P4), so its
+        # objects start at 80 MiB and its programs link at 64 MiB.
+        "dso_base": 0x0500_0000,
+        "text_base": 0x0400_0000,
         "shifts": (39, 30, 21),
         "pg_present": 0x001,
         "pg_huge": 0x080,
@@ -144,6 +148,8 @@ ARCHS = {
             "-device", "virtio-keyboard-device",
             "-kernel", str(RISCV_IMAGE),
         ],
+        "dso_base": 0x0200_0000,
+        "text_base": 0x0100_0000,
         "shifts": (30, 21),
         "pg_present": 0x001,
         "pg_huge": 0x00A,
@@ -167,17 +173,19 @@ DYNCLIB = ARGS[1] if len(ARGS) > 1 else "/bin/dynclib"
 # (crates/arch-common/src/consts.rs, crates/kernel/src/table.rs).
 SLOTS = 256 + 5
 
-# Where the loader maps its first object (crates/ldso/src/layout.rs).
-DSO_BASE = 0x0200_0000
+# Where the loader maps its first object (crates/ldso/src/layout.rs). Per-arch: the
+# arch's row in `ARCHS` carries it, because the base moves with the user base.
+DSO_BASE = PAGING["dso_base"]
 # Walk the object's first 256 KiB: the loader's mapping starts at DSO_BASE and no
 # DSO here is larger, so a present page in this range is one of the object's.
 DSO_WINDOW = 0x40000
 # Pages the two processes must *both* have faulted in, to compare. Below this the
 # run proves too little to report.
 MIN_COMPARED = 8
-# Every minix program is linked at this base (tools/minix-user.ld), so a walk that
-# finds nobody here is a broken walk rather than a system with nothing in it.
-TEXT_BASE = 0x0100_0000
+# Every minix program is linked at its arch's base (the target spec's
+# `--defsym=BASE_ADDRESS`), so a walk that finds nobody here is a broken walk rather
+# than a system with nothing in it.
+TEXT_BASE = PAGING["text_base"]
 TEXT_WINDOW = 0x4000
 MIN_TEXT_MAPPERS = 5
 

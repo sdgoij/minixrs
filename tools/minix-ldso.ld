@@ -1,17 +1,22 @@
-/* Loader (`/libexec/ld.so`) linker script.
+/* The loader (`/libexec/ld.so`) linker script.
  *
  * The same sections as `tools/minix-user.ld`, at the loader's own base: clear of
- * the main program (0x01000000), the shared objects (0x02000000), the stack
- * (0x0FE00000) and the heap (0x3FE00000). The base cannot come from
+ * the main program, the shared objects and the stack. The base cannot come from
  * `--image-base` because an explicit section address in a script wins over it.
+ *
+ * Overridable: the target spec passes `--defsym=LOADER_BASE=<arch loader base>`,
+ * because the base is per-arch (`PHYSMAP.md` P4 — x86's userland starts at
+ * 64 MiB and the shared objects fill 80..128 MiB, so its loader is at 128 MiB).
+ * A bare `rustc` invocation that does not go through the spec still gets this
+ * default.
  */
 ENTRY(_start)
 
-BASE_ADDRESS = 0x04000000;
+PROVIDE(LOADER_BASE = 0x04000000);
 
 SECTIONS
 {
-    . = BASE_ADDRESS;
+    . = LOADER_BASE;
 
     .text : ALIGN(0x1000) {
         KEEP(*(.text._start))

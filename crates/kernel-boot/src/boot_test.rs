@@ -11,6 +11,16 @@ use arch_common::com::{
     VM_PROC_NR,
 };
 
+/// The base every userland binary is linked at: the target spec's
+/// `--defsym=BASE_ADDRESS` (`rust/compiler/rustc_target/src/spec/base/minix.rs`),
+/// which is also the `PROVIDE`d default in `tools/minix-user.ld`. It is per-arch
+/// and x86's is 64 MiB because its kernel image occupies 2..34 MiB — the user
+/// window is a band above the image (`PHYSMAP.md` P4).
+#[cfg(target_arch = "x86_64")]
+const USER_IMAGE_BASE: u64 = 0x0400_0000;
+#[cfg(not(target_arch = "x86_64"))]
+const USER_IMAGE_BASE: u64 = 0x0100_0000;
+
 const FS_BASE: i32 = 0xA00;
 const REQ_READSUPER: i32 = FS_BASE + 28;
 /// `REQ_LOOKUP` — what VFS asks for next once the root is mounted.
@@ -472,9 +482,9 @@ fn test_vm_check_range() -> u32 {
             serial_write("  VM: no CR3\r\n");
             return 1;
         }
-        // All userland binaries link at 0x01000000 (tools/minix-user.ld),
-        // so the first code page is identical on every arch.
-        if kernel::pagetable::walk(cr3, 0x01000000).is_err() {
+        // Every userland binary is linked at its arch's user image base, so the
+        // first code page is that address on every arch.
+        if kernel::pagetable::walk(cr3, USER_IMAGE_BASE).is_err() {
             serial_write("  VM: code page FAIL\r\n");
             return 1;
         }
@@ -1276,9 +1286,9 @@ fn test_pm_mproc_pt() -> u32 {
         serial_write("\r\n");
 
         // Walk known PM code pages — must be mapped with user permissions.
-        // Every userland binary links at 0x01000000 (tools/minix-user.ld),
-        // so the entry point page is identical on all three arches.
-        let slot0_va = 0x1000000u64 + 0x10;
+        // Every userland binary links at its arch's user image base, so the entry
+        // point page is the same VA on all three arches.
+        let slot0_va = USER_IMAGE_BASE + 0x10;
         match kernel::pagetable::walk(cr3, slot0_va) {
             Ok(r) => {
                 let has_user = r.pte_value & kernel::pagetable::PG_U != 0;

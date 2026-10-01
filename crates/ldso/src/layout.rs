@@ -10,13 +10,23 @@
 use crate::elf::{Elf, PT_LOAD};
 
 /// Where the first `ET_DYN` object is mapped. Fixed (no ASLR), and clear of the
-/// main program (`0x0100_0000`), the loader itself (`0x0400_0000`), the stack
-/// (`0x0FE0_0000` on x86, `0x3FC0_0000` on riscv and aarch64) and the heap
-/// (`0x3FE0_0000` on x86, `0x2000_0000` on riscv and aarch64).
+/// main program, the loader, the stack and the heap.
+///
+/// Per-arch because the main program's base is: x86's userland starts at 64 MiB
+/// (above the kernel image — `PHYSMAP.md` P4), so its objects start at 80 MiB and
+/// its loader at 128 MiB; riscv and aarch64 keep the 16 MiB base, so theirs start
+/// at 32 MiB with the loader at 64 MiB. Each value mirrors the arch's
+/// `--defsym=BASE_ADDRESS` / `--defsym=LOADER_BASE` in the target spec.
+#[cfg(target_arch = "x86_64")]
+pub const DSO_BASE: u64 = 0x0500_0000;
+#[cfg(not(target_arch = "x86_64"))]
 pub const DSO_BASE: u64 = 0x0200_0000;
 
-/// No object is placed at or above this: the loader is at `0x0400_0000`, and an
-/// object must not be mapped over it.
+/// No object is placed at or above this: an object must not be mapped over the
+/// loader, which links at its arch's `LOADER_BASE` (`tools/minix-ldso.ld`).
+#[cfg(target_arch = "x86_64")]
+pub const DSO_LIMIT: u64 = 0x0800_0000;
+#[cfg(not(target_arch = "x86_64"))]
 pub const DSO_LIMIT: u64 = 0x0400_0000;
 
 /// Gap left after each object, so an access past one object's end faults instead

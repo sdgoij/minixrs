@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Read the input server's EV_HEAD/EV_TAIL/CONSUMER_EP from guest RAM.
 
-The input server loads at phys 0x3bf4000 (VA 0x1000000), so a symbol's
-phys address = 0x3bf4000 + (VA - 0x1000000). Read the queue indices before
+The input server loads at a physical address the boot log prints (VA base
+0x4000000 since `PHYSMAP.md` P4), so a symbol's phys address = PHYS_BASE +
+(VA - VA_BASE). Read the queue indices before
 and after injecting mouse moves to see whether the wserver ever drains.
 """
 import json
@@ -23,9 +24,10 @@ QEMU = [
     "-device", "virtio-mouse-pci,display=fb0",
 ]
 
-# input server: loaded phys 0x3bf4000, VA base 0x1000000
+# input server: `/sbin/input: loaded phys=... stack=...` from the boot log, and the
+# user base the arch links userland at (`--defsym=BASE_ADDRESS`: 64 MiB on x86).
 PHYS_BASE = 0x3bf4000
-VA_BASE = 0x1000000
+VA_BASE = 0x4000000
 # symbol VAs (rust-nm)
 CONSUMER_EP_VA = 0x1005000
 EV_HEAD_VA = 0x1006048
