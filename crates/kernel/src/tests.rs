@@ -1357,11 +1357,12 @@ fn test_pt_map_unmap(ctx: &mut TestCtx) {
             Err(_) => ctx.assert(false, "walk of mapped page should succeed"),
         }
 
-        // Write through the identity mapping at the allocated physical page
-        // (the fresh root is not the active page table, so writes must go
-        // to the physical address, not the virtual one).
-        core::ptr::write_volatile(phys as *mut u32, 0xCAFEBABE);
-        let val = core::ptr::read_volatile(phys as *const u32);
+        // Write to the allocated frame through the physmap: the fresh root is not the active
+        // page table, so the write cannot go through `va`, and a frame's own address is only
+        // reachable as a pointer after the conversion (`PHYSMAP.md` D4).
+        let frame = crate::pagetable::frame_ptr(phys) as *mut u32;
+        core::ptr::write_volatile(frame, 0xCAFEBABE);
+        let val = core::ptr::read_volatile(frame);
         ctx.assert(val == 0xCAFEBABE, "readback should match written value");
 
         ctx.assert(unmap_page(root, va).is_ok(), "unmap_page should succeed");
@@ -1417,8 +1418,9 @@ fn test_vm_alloc_free(ctx: &mut TestCtx) {
         let page = crate::vm::alloc_mem(1, 0);
         ctx.assert(page != crate::vm::NO_MEM, "alloc_mem(1, 0) should succeed");
         let phys = page * crate::vm::VM_PAGE_SIZE as u64;
-        core::ptr::write_volatile(phys as *mut u32, 0xF00DBABE);
-        let val = core::ptr::read_volatile(phys as *const u32);
+        let frame = crate::pagetable::frame_ptr(phys) as *mut u32;
+        core::ptr::write_volatile(frame, 0xF00DBABE);
+        let val = core::ptr::read_volatile(frame);
         ctx.assert(val == 0xF00DBABE, "VM page write/readback should match");
         crate::vm::free_mem(page, 1);
     }

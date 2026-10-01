@@ -1439,7 +1439,7 @@ pub fn bss_end() -> u64 {
 #[inline]
 fn fork_phys_ptr(pa: u64) -> *mut u64 {
     #[cfg(test)]
-    let ptr = pa as *mut u64;
+    let ptr = pa as *mut u64; // physmap-ok: host fixtures have no physmap; the arm below is the conversion
     #[cfg(not(test))]
     let ptr = phys_to_virt(pa) as *mut u64;
     ptr
@@ -1746,7 +1746,8 @@ pub fn qemu_exit(code: u32) -> ! {
 /// The pointer a builder writes a physical address through, per `PhysAccess`.
 fn phys_ptr(pa: u64, access: arch_common::PhysAccess) -> *mut u64 {
     match access {
-        arch_common::PhysAccess::Identity => pa as *mut u64,
+        arch_common::PhysAccess::Identity => pa as *mut u64, // physmap-ok: the boot builder's
+                                                             // arm, which runs before the physmap
         arch_common::PhysAccess::Physmap => phys_to_virt(pa) as *mut u64,
     }
 }

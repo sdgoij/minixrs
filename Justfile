@@ -1099,9 +1099,14 @@ test-linux:
 # consumers compile against (bash, /bin/helloc and /bin/ctest, the libc++
 # build), and nothing else notices when an export and its declaration drift
 # apart. The checker parses the Rust sources, so it needs no cbindgen.
+#
+# The physmap rule is the same kind of gate (`PHYSMAP.md` P6): a physical address is a
+# number, not a pointer, and check-physmap.py rejects one cast to a pointer unless the line
+# converts it (`phys_to_virt`/`frame_ptr`/`table_ptr`) or says `physmap-ok: <reason>`.
 check:
     cargo clippy -- -D warnings
     python tools/check-c-headers.py
+    python tools/check-physmap.py
     @test -n "{{stage1-rustc}}" || (echo 'error: stage1 rustc not found — run `just bootstrap` first' >&2 && exit 1)
     RUSTC="{{stage1-rustc}}" cargo check -p kernel-boot --bin kernel-boot-riscv64 --features riscv64 --target riscv64gc-unknown-minix --release
 

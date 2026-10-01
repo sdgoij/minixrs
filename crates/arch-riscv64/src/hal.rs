@@ -1472,7 +1472,8 @@ pub unsafe fn vm_paging_fork(parent_cr3: u64, child_cr3: u64, _msg: &mut [u8; 64
 /// The pointer a builder writes a physical address through, per `PhysAccess`.
 fn phys_ptr(pa: u64, access: arch_common::PhysAccess) -> *mut u64 {
     match access {
-        arch_common::PhysAccess::Identity => pa as *mut u64,
+        arch_common::PhysAccess::Identity => pa as *mut u64, // physmap-ok: the boot builder's
+                                                             // arm, which runs before the physmap
         arch_common::PhysAccess::Physmap => phys_to_virt(pa) as *mut u64,
     }
 }

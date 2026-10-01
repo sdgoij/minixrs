@@ -115,7 +115,7 @@ pub(crate) unsafe fn free_pt_page(pa: u64) {
 #[inline]
 pub fn table_ptr(table_phys: u64) -> *mut PtEntry {
     #[cfg(test)]
-    let ptr = table_phys as *mut PtEntry;
+    let ptr = table_phys as *mut PtEntry; // physmap-ok: host fixtures have no physmap; the arm below is the conversion
     #[cfg(not(test))]
     let ptr = crate::hal::phys_to_virt(table_phys) as *mut PtEntry;
     ptr
@@ -129,7 +129,7 @@ pub fn table_ptr(table_phys: u64) -> *mut PtEntry {
 #[inline]
 pub fn frame_ptr(pa: u64) -> *mut u8 {
     #[cfg(test)]
-    let ptr = pa as *mut u8;
+    let ptr = pa as *mut u8; // physmap-ok: host fixtures have no physmap; the arm below is the conversion
     #[cfg(not(test))]
     let ptr = crate::hal::phys_to_virt(pa) as *mut u8;
     ptr

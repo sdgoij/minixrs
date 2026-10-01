@@ -13,7 +13,7 @@ use crate::pte::{PTE_ADDR_MASK, PTE_AP_MASK, PTE_AP_RO, PTE_ATTR_MASK, PTE_BLOCK
 #[inline]
 fn phys_ptr(pa: u64) -> *mut u64 {
     #[cfg(test)]
-    let ptr = pa as *mut u64;
+    let ptr = pa as *mut u64; // physmap-ok: host fixtures have no physmap; the arm below is the conversion
     #[cfg(not(test))]
     let ptr = crate::vmparam::phys_to_virt(pa) as *mut u64;
     ptr

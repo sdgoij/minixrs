@@ -1112,7 +1112,8 @@ pub unsafe fn create_low_gb_pmd_table() -> Option<u64> {
 /// The pointer a builder writes a physical address through, per `PhysAccess`.
 fn phys_ptr(pa: u64, access: arch_common::PhysAccess) -> *mut u64 {
     match access {
-        arch_common::PhysAccess::Identity => pa as *mut u64,
+        arch_common::PhysAccess::Identity => pa as *mut u64, // physmap-ok: the boot builder's
+                                                             // arm, which runs before the physmap
         arch_common::PhysAccess::Physmap => phys_to_virt(pa) as *mut u64,
     }
 }

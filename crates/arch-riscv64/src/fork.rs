@@ -15,7 +15,7 @@ fn walk_phys_ptr(pa: u64) -> *mut u64 {
     #[cfg(target_arch = "riscv64")]
     let ptr = crate::hal::phys_to_virt(pa) as *mut u64;
     #[cfg(not(target_arch = "riscv64"))]
-    let ptr = pa as *mut u64;
+    let ptr = pa as *mut u64; // physmap-ok: the host has no physmap; the arm above converts
     ptr
 }
 
