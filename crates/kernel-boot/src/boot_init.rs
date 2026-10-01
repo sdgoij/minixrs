@@ -1076,12 +1076,11 @@ pub unsafe fn boot_create_restricted_page_table(
             for i in 0..(page_sz / 8) {
                 unsafe { core::ptr::write_volatile(table_ptr(private_pud).add(i), 0) };
             }
-            // Copy boot PUD entries as-is: PUD[0] and the 1 GiB EL1-only
-            // identity blocks PUD[2..32] (0x80000000..0x7FFFFFFFFF) so kernel
-            // phys access to RAM above 2 GiB stays mapped under this
-            // per-process table at large RAM sizes. PUD[1] is replaced below.
-            let entry0 = unsafe { core::ptr::read(table_ptr(boot_pud_phys).add(0)) };
-            unsafe { core::ptr::write(table_ptr(private_pud).add(0), entry0) };
+            // PUD[0] (0..1 GiB) stays unmapped: that range is the user window, and a kernel
+            // identity mapping over it is the overlap `PHYSMAP.md` P4 removes. The kernel reaches
+            // the GIC and the UART through the physmap, which every table this constructor builds
+            // carries (`install_physmap` below). A driver's virtio-mmio window is put back under
+            // PUD[0] if it needs one. PUD[2..32] are copied from boot further down.
 
             // Create a PMD page with 512 2MB block entries
             // for the kernel identity range (0x40000000-0x7FFFFFFF).
@@ -1153,13 +1152,16 @@ pub unsafe fn boot_create_restricted_page_table(
                 const VIRTIO_MMIO_BASE: u64 = 0x0a00_0000;
                 for i in 0..512usize {
                     let va = (i as u64) * 0x20_0000;
-                    let flags = if va >= VIRTIO_MMIO_BASE && va < VIRTIO_MMIO_BASE + 0x20_0000 {
-                        PMD_BLOCK_USER
+                    // Only the virtio-mmio window is mapped. The rest of 0..1 GiB is the user
+                    // window, and mapping it here — even EL1-only — is the overlap `PHYSMAP.md`
+                    // P4 removes; the driver needs the device, not the range.
+                    let entry = if va >= VIRTIO_MMIO_BASE && va < VIRTIO_MMIO_BASE + 0x20_0000 {
+                        va | PMD_BLOCK_USER
                     } else {
-                        PMD_BLOCK_EL1
+                        0
                     };
                     unsafe {
-                        core::ptr::write_volatile(table_ptr(pmd_low).add(i), va | flags);
+                        core::ptr::write_volatile(table_ptr(pmd_low).add(i), entry);
                     }
                 }
                 let pud0_entry = kernel::hal::build_pte(pmd_low, pud1_flags);

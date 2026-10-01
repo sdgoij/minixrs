@@ -118,6 +118,12 @@ pub unsafe fn run_boot_tests() {
     // M: Every boot process has a walkable page table
     failures += test_boot_procs_page_tables();
 
+    // M1: No EL1-only kernel mapping over the user window (`PHYSMAP.md` P4, first half)
+    #[cfg(target_arch = "aarch64")]
+    {
+        failures += test_no_kernel_mapping_in_user_window();
+    }
+
     // M2: Every boot process's address space reaches the physmap
     failures += test_physmap_everywhere();
     // M3: A walk reaches its table through the physmap even when the identity map is shadowed
@@ -1369,6 +1375,54 @@ fn test_boot_procs_page_tables() -> u32 {
 
         if failures == 0 {
             serial_write("  OK all booted procs have walkable page tables\r\n");
+        }
+        failures
+    }
+}
+
+/// No EL1-only kernel mapping lies in the user window (`PHYSMAP.md` P4, first half).
+///
+/// A kernel identity mapping over the user window is what `KNOWN_ISSUES.md` item 38 measured: ring 0
+/// reaches a frame at a VA the process also owns, so a frame the allocator hands out inside that
+/// window *is* the process's own memory and the kernel writes there. AArch64's window is the low
+/// 1 GiB, whose identity entries the shrink removed, so every 2 MiB step of it must now be absent or
+/// a user-accessible entry. x86 and RISC-V join this check when their own shrink lands — today their
+/// identity maps still cover the window, which is exactly what it would report.
+#[cfg(target_arch = "aarch64")]
+fn test_no_kernel_mapping_in_user_window() -> u32 {
+    unsafe {
+        let mut failures = 0u32;
+        for &(proc_nr, name) in BOOTED_PROCS {
+            let rp = kernel::table::proc_addr(proc_nr);
+            if rp.is_null() {
+                continue;
+            }
+            let cr3 = (*rp).p_seg.p_cr3;
+            if cr3 == 0 {
+                continue;
+            }
+
+            // 2 MiB steps: the offending mappings were 2 MB / 1 GB kernel blocks, so this granularity
+            // cannot step over one.
+            let mut va = 0u64;
+            while va < kernel::pagetable::MAX_USER_ADDRESS {
+                if let Ok(r) = kernel::pagetable::walk(cr3, va) {
+                    if r.pte_value & kernel::pagetable::PG_U == 0 {
+                        serial_write("  FAIL: ");
+                        serial_write(name);
+                        serial_write(" has an EL1-only mapping at user MiB ");
+                        print_dec((va >> 20) as u32);
+                        serial_write("\r\n");
+                        failures += 1;
+                        break;
+                    }
+                }
+                va += 0x20_0000;
+            }
+        }
+
+        if failures == 0 {
+            serial_write("  OK no kernel mapping over the user window\r\n");
         }
         failures
     }

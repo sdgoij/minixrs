@@ -569,21 +569,8 @@ pub unsafe extern "C" fn kmain(arg_dtb: u64) -> ! {
 
         let first_proc = unsafe { kernel_boot::boot_init::load_and_prepare_all(&boot_cfg) };
 
-        // Restore PUD[0] with proper BBM (Break-Before-Make):
-        // The map_page calls in boot_create_restricted_page_table split
-        // PUD[0] from a 1GB block into a table. We need to restore it
-        // to a block so device memory (GIC at 0x08000000) is accessible.
-        unsafe {
-            let boot_pgd = kernel::hal::boot_cr3() as *const u64;
-            let pud_phys = core::ptr::read_volatile(boot_pgd) & 0x0000_FFFF_FFFF_F000;
-            const BLOCK_FLAGS: u64 = 0b01u64 | (0b11 << 8) | (1 << 10);
-            // Step 1: invalidate
-            core::ptr::write_volatile(pud_phys as *mut u64, 0);
-            core::arch::asm!("dsb ish; tlbi vmalle1is; dsb ish; isb", options(nostack));
-            // Step 2: write new block
-            core::ptr::write_volatile(pud_phys as *mut u64, BLOCK_FLAGS);
-            core::arch::asm!("dsb ish; isb", options(nostack));
-        }
+        // The boot PUD[0] identity block this used to restore is gone: PUD[0] is left unmapped so
+        // the user window is not covered, and the GIC is reached through the physmap.
 
         // Enable GIC (needed for timer PPI routing, even though the
         // timer ISR acknowledges via system registers).
@@ -717,9 +704,19 @@ unsafe fn enable_mmu() {
         core::ptr::write_volatile(pgd as *mut u64, pud | TABLE_DESC);
     }
 
-    // PUD[i] = 1 GB normal-memory block at PA i<<30, covering 0..32 GiB.
-    // The kernel runs identity-mapped, so this window bounds the physical
-    // memory the allocator can hand out (pte_is_valid_phys checks it).
+    // PUD[i] = 1 GB normal-memory block at PA i<<30, covering 0..32 GiB. The kernel runs
+    // identity-mapped, so this window also bounds the physical memory the allocator can hand out
+    // (`pte_is_valid_phys` checks it).
+    //
+    // PUD[0] (0..1 GiB) is the AArch64 *user* window (`MAX_USER_ADDRESS` is the RAM base), so an
+    // identity block there is a kernel mapping over the user window — the overlap `PHYSMAP.md` P4
+    // removes. It stays for now because removing it hangs this boot, and the measurement says why:
+    // pointing PUD[0] at RAM instead of at its own address also boots, so the early path reads some
+    // address below the RAM base and discards or cannot care about the value. The descriptor has to
+    // *exist*; it does not have to be the identity. Tracking that read down — most likely a NULL or
+    // low-pointer load the mapping has been hiding — is P4's remaining work on this arch. The
+    // per-process tables no longer carry the block, so the kernel never runs on a table with it
+    // (`boot_create_restricted_page_table` gives PUD[0] only the device window).
     for i in 0..32u64 {
         unsafe {
             core::ptr::write_volatile((pud as *mut u64).add(i as usize), (i << 30) | BLOCK_FLAGS);
@@ -757,32 +754,35 @@ unsafe fn enable_mmu() {
 /// Enable GICv2 for timer (PPI 30) and UART (SPI 33) interrupts.
 #[cfg(not(feature = "integration-tests"))]
 unsafe fn enable_gic() {
-    let gicd_base = 0x0800_0000usize;
-    let gicc_base = 0x0801_0000usize;
+    // Through the physmap. The GIC is below the RAM base, and the low 1 GiB is not identity-mapped
+    // in the boot tables any more — that range *is* the AArch64 user window (`PHYSMAP.md` P4). This
+    // runs after `install_physmap_in_boot_tables`, so the window is there.
+    let gicd_base = kernel::hal::phys_to_virt(0x0800_0000) as *mut u32;
+    let gicc_base = kernel::hal::phys_to_virt(0x0801_0000) as *mut u32;
 
     // Enable GIC distributor.
     unsafe {
-        core::ptr::write_volatile(gicd_base as *mut u32, 1); // GICD_CTLR = Enable
+        core::ptr::write_volatile(gicd_base, 1); // GICD_CTLR = Enable
     }
 
     // Enable CPU interface.
     unsafe {
-        core::ptr::write_volatile(gicc_base as *mut u32, 1); // GICC_CTLR = Enable
+        core::ptr::write_volatile(gicc_base, 1); // GICC_CTLR = Enable
     }
 
     // Set priority mask to allow all interrupts.
     unsafe {
-        core::ptr::write_volatile((gicc_base + 0x04) as *mut u32, 0xFF); // GICC_PMR
+        core::ptr::write_volatile(gicc_base.add(0x04 / 4), 0xFF); // GICC_PMR
     }
 
     // Enable PPI 30 (timer) in GICD_ISENABLER0.
     unsafe {
-        core::ptr::write_volatile((gicd_base + 0x100) as *mut u32, 1 << 30);
+        core::ptr::write_volatile(gicd_base.add(0x100 / 4), 1 << 30);
     }
 
     // Enable SPI 33 (UART) in GICD_ISENABLER1.
     unsafe {
-        core::ptr::write_volatile((gicd_base + 0x104) as *mut u32, 1 << 1); // SPI 33 = bit 1 of word 1
+        core::ptr::write_volatile(gicd_base.add(0x104 / 4), 1 << 1); // SPI 33 = bit 1 of word 1
     }
 }
 
