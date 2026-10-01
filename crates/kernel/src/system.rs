@@ -3904,11 +3904,6 @@ pub unsafe fn do_exec_initramfs_handler(_caller: *mut Proc, msg: &mut [u8; MESSA
 
         let user_stack_base: u64 = 0x0FE00000;
         let user_stack_size: usize = 65536;
-        let stack_top = user_stack_base + user_stack_size as u64;
-        let user_rsp = match crate::elf::setup_user_stack(stack_top, user_stack_size, &[path]) {
-            Ok(rsp) => rsp,
-            Err(_) => return crate::ipc::ENOSYS,
-        };
 
         let code_start = loaded_base & !0xFFF;
         let code_end = (loaded_top + 0xFFF) & !0xFFF;
@@ -3919,12 +3914,16 @@ pub unsafe fn do_exec_initramfs_handler(_caller: *mut Proc, msg: &mut [u8; MESSA
             Some(p) => p,
             None => return crate::ipc::ENOMEM,
         };
-        core::ptr::write_bytes(pml4 as *mut u8, 0, crate::hal::PAGE_SIZE as usize);
+        core::ptr::write_bytes(
+            crate::pagetable::frame_ptr(pml4),
+            0,
+            crate::hal::PAGE_SIZE as usize,
+        );
 
-        let boot_pml4 = crate::pagetable::boot_cr3() as *const u64;
+        let boot_pml4 = crate::pagetable::table_ptr(crate::pagetable::boot_cr3());
         for i in 256..512 {
             let entry = core::ptr::read(boot_pml4.add(i));
-            core::ptr::write((pml4 as *mut u64).add(i), entry);
+            core::ptr::write(crate::pagetable::table_ptr(pml4).add(i), entry);
         }
 
         // Allocate physical pages for the code and load ELF segments.
@@ -3940,7 +3939,7 @@ pub unsafe fn do_exec_initramfs_handler(_caller: *mut Proc, msg: &mut [u8; MESSA
             }
             let seg_vaddr = phdr.p_vaddr;
             let seg_offset = seg_vaddr - code_start;
-            let dst = (phys_code_base + seg_offset) as *mut u8;
+            let dst = crate::pagetable::frame_ptr(phys_code_base + seg_offset);
             if phdr.p_filesz > 0 {
                 let src = data.as_ptr().add(phdr.p_offset as usize);
                 core::ptr::copy_nonoverlapping(src, dst, phdr.p_filesz as usize);
@@ -3951,18 +3950,34 @@ pub unsafe fn do_exec_initramfs_handler(_caller: *mut Proc, msg: &mut [u8; MESSA
             }
         }
 
-        // Allocate physical pages for the stack.
+        // Allocate physical pages for the stack and build the frame in them through the physmap.
+        // This used to build the frame at the user-stack VA, reached through the identity map, and
+        // copy it into the allocated frames — leaning on the map `PHYSMAP.md` P4 shrinks and writing
+        // to the low physical page that happened to sit at that address.
         let stack_pages = ((stack_end - stack_start) / 4096) as usize;
         let phys_stack_base = match crate::hal::alloc_phys_contig(stack_pages) {
             Some(b) => b,
             None => return crate::ipc::ENOMEM,
         };
-        // Copy stack data from identity-mapped temp area to allocated pages.
-        core::ptr::copy_nonoverlapping(
-            user_stack_base as *const u8,
-            phys_stack_base as *mut u8,
-            user_stack_size,
+        core::ptr::write_bytes(
+            crate::pagetable::frame_ptr(phys_stack_base),
+            0,
+            stack_pages * 0x1000,
         );
+        let stack_virt = crate::pagetable::frame_ptr(phys_stack_base) as u64;
+        let stack_rsp = match crate::elf::setup_user_stack(
+            stack_virt + user_stack_size as u64,
+            user_stack_size,
+            &[path],
+        ) {
+            Ok(rsp) => rsp,
+            Err(_) => return crate::ipc::ENOSYS,
+        };
+        let delta = user_stack_base.wrapping_sub(stack_virt);
+        let argv0_slot = stack_rsp + 8;
+        let argv0 = core::ptr::read_volatile(argv0_slot as *const u64);
+        core::ptr::write_volatile(argv0_slot as *mut u64, argv0.wrapping_add(delta));
+        let user_rsp = user_stack_base + (stack_rsp - stack_virt);
 
         // Map user code: VA -> allocated PA
         let user_flags = crate::pagetable::PG_P | crate::pagetable::PG_RW | crate::pagetable::PG_U;

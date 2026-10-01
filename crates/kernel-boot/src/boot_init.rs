@@ -5,7 +5,7 @@
 
 use kernel::elf::{Elf64Phdr, ElfError, LoadedElf, parse_elf_header, setup_user_stack};
 use kernel::initramfs::find_initramfs_file;
-use kernel::pagetable::{boot_cr3, map_page};
+use kernel::pagetable::{boot_cr3, frame_ptr, map_page, table_ptr};
 
 use crate::boot_abort;
 use crate::print;
@@ -94,9 +94,7 @@ pub unsafe fn load_and_prepare_proc(path: &str, proc_nr: i32, argv: &[&str]) -> 
         }
     };
 
-    // Step 3: Load ELF data into the allocated physical pages.
-    // The identity mapping covers all of 0..1GB, so writing to
-    // phys_code_base + (vaddr - code_start) goes to the right pages.
+    // Step 3: Load ELF data into the allocated physical pages, through the physmap.
     if unsafe { load_elf_at(data, phys_code_base, loaded.base) }.is_err() {
         print!("  ");
         print!(path);
@@ -105,13 +103,13 @@ pub unsafe fn load_and_prepare_proc(path: &str, proc_nr: i32, argv: &[&str]) -> 
     }
 
     // AArch64: clean D-cache + invalidate I-cache for loaded code.
-    // The identity-mapped PA used for loading differs from the runtime
+    // The physmap address used for loading differs from the runtime
     // VA (0x1000000+). Without I-cache invalidation, VIPT aliasing
     // causes the CPU to fetch stale instructions.
     #[cfg(target_arch = "aarch64")]
     {
-        let mut addr = phys_code_base;
-        let end = phys_code_base + (code_end - code_start);
+        let mut addr = frame_ptr(phys_code_base) as u64;
+        let end = addr + (code_end - code_start);
         let ctr_el0: u64;
         unsafe {
             core::arch::asm!("mrs {}, ctr_el0", out(reg) ctr_el0, options(nomem, nostack));
@@ -145,14 +143,13 @@ pub unsafe fn load_and_prepare_proc(path: &str, proc_nr: i32, argv: &[&str]) -> 
         }
     };
 
-    // Write the stack frame directly into the allocated physical pages,
-    // which are always real RAM. Writing at the user-stack VA through the
-    // boot identity map instead would land beyond RAM below 256 MiB on x86
-    // (stack VA 0x0FE00000) and below that on RISC-V (stack VA 0x8FE00000),
-    // producing a garbage frame. The RSP and argv pointers are then
-    // converted from their physical addresses to the user stack VA.
-    let stack_top_phys = phys_stack_base + user_stack_size as u64;
-    let phys_rsp = match unsafe { setup_user_stack(stack_top_phys, user_stack_size, argv) } {
+    // Write the stack frame into the allocated physical pages, reached through the physmap. Writing
+    // at the user-stack VA would land beyond RAM below 256 MiB on x86 (stack VA 0x0FE00000) and
+    // below that on RISC-V (stack VA 0x8FE00000), producing a garbage frame. The RSP and argv
+    // pointers are then converted from their physmap addresses to the user stack VA.
+    let stack_virt = frame_ptr(phys_stack_base) as u64;
+    let stack_top = stack_virt + user_stack_size as u64;
+    let stack_rsp = match unsafe { setup_user_stack(stack_top, user_stack_size, argv) } {
         Ok(rsp) => rsp,
         Err(_) => {
             print!("  ");
@@ -161,11 +158,11 @@ pub unsafe fn load_and_prepare_proc(path: &str, proc_nr: i32, argv: &[&str]) -> 
             return None;
         }
     };
-    let user_rsp = user_stack_base + (phys_rsp - phys_stack_base);
-    let delta = user_stack_base.wrapping_sub(phys_stack_base);
+    let user_rsp = user_stack_base + (stack_rsp - stack_virt);
+    let delta = user_stack_base.wrapping_sub(stack_virt);
     let argc = argv.len().min(63);
     for i in 0..argc {
-        let slot = phys_rsp + 8 + (i as u64) * 8;
+        let slot = stack_rsp + 8 + (i as u64) * 8;
         let val = unsafe { core::ptr::read_volatile(slot as *mut u64) };
         unsafe {
             core::ptr::write_volatile(slot as *mut u64, val.wrapping_add(delta));
@@ -264,7 +261,8 @@ unsafe fn calc_elf_bounds(data: &[u8]) -> Result<LoadedElf, ElfError> {
 /// Load ELF segment data into memory at `phys_base`, offset by the
 /// difference between each segment's vaddr and the ELF's base vaddr.
 ///
-/// Writes through the identity mapping (virtual == physical for 0..1GB).
+/// Writes through the physmap: `phys_base` is a frame the boot path allocated, and the identity
+/// map this used to lean on is the one `PHYSMAP.md` P4 shrinks.
 unsafe fn load_elf_at(data: &[u8], phys_base: u64, elf_base_vaddr: u64) -> Result<(), ElfError> {
     let ehdr = parse_elf_header(data)?;
 
@@ -289,8 +287,7 @@ unsafe fn load_elf_at(data: &[u8], phys_base: u64, elf_base_vaddr: u64) -> Resul
 
         // Destination = phys_base + (segment_vaddr - elf_base_vaddr)
         let offset = phdr.p_vaddr.wrapping_sub(elf_base_vaddr);
-        let dst_addr = phys_base.wrapping_add(offset);
-        let dst = dst_addr as *mut u8;
+        let dst = frame_ptr(phys_base.wrapping_add(offset));
 
         if phdr.p_filesz > 0 {
             let src = unsafe { data.as_ptr().add(phdr.p_offset as usize) };
@@ -495,7 +492,7 @@ pub unsafe fn load_and_prepare_all(cfg: &BootProcessConfig) -> *mut Proc {
                 unsafe {
                     core::ptr::copy_nonoverlapping(
                         image.as_ptr(),
-                        ramdisk_phys as *mut u8,
+                        frame_ptr(ramdisk_phys),
                         image_len,
                     );
                 }
@@ -790,7 +787,7 @@ pub unsafe fn boot_create_page_table() -> u64 {
     // Walk the boot page table to find the bottom-level PD.
     let mut table_phys = boot_cr3_val;
     for lvl in (2..levels).rev() {
-        let table = table_phys as *const u64;
+        let table = table_ptr(table_phys);
         let idx = kernel::hal::pt_index(0, lvl);
         let entry = unsafe { core::ptr::read(table.add(idx)) };
         table_phys = kernel::hal::pte_to_phys(entry);
@@ -805,7 +802,7 @@ pub unsafe fn boot_create_page_table() -> u64 {
             Some(p) => p,
             None => return 0,
         };
-        unsafe { core::ptr::write_bytes(*entry as *mut u8, 0, page_sz) };
+        unsafe { core::ptr::write_bytes(frame_ptr(*entry), 0, page_sz) };
     }
 
     // Link hierarchy: root[0] → next[0] → ... → PD.
@@ -821,21 +818,21 @@ pub unsafe fn boot_create_page_table() -> u64 {
     for i in 0..(n_pages - 1) {
         unsafe {
             let pte = kernel::hal::build_pte(pages[i + 1], flags);
-            core::ptr::write(pages[i] as *mut u64, pte);
+            core::ptr::write(table_ptr(pages[i]), pte);
         }
     }
 
     // Deep-copy all 512 boot PD entries into new PD.
     unsafe {
-        let new_pd = pages[n_pages - 1] as *mut u64;
+        let new_pd = table_ptr(pages[n_pages - 1]);
         for i in 0..512 {
-            let entry = core::ptr::read((boot_pd_phys as *const u64).add(i));
+            let entry = core::ptr::read(table_ptr(boot_pd_phys).add(i));
             core::ptr::write(new_pd.add(i), entry);
         }
 
         // Share kernel high mappings (top half of root).
-        let boot_root = boot_cr3_val as *const u64;
-        let new_root = pages[0] as *mut u64;
+        let boot_root = table_ptr(boot_cr3_val);
+        let new_root = table_ptr(pages[0]);
         for i in 256..512 {
             let entry = core::ptr::read(boot_root.add(i));
             core::ptr::write(new_root.add(i), entry);
@@ -888,7 +885,7 @@ pub unsafe fn boot_create_restricted_page_table(
     let mut found_boot_pd = false;
     #[cfg(not(target_arch = "x86_64"))]
     for lvl in (2..levels).rev() {
-        let table = table_phys as *const u64;
+        let table = table_ptr(table_phys);
         let idx = kernel::hal::pt_index(0, lvl);
         let entry = unsafe { core::ptr::read(table.add(idx)) };
         // If the boot entry is a huge page leaf, there's no lower-level
@@ -925,11 +922,11 @@ pub unsafe fn boot_create_restricted_page_table(
         *entry = unsafe { kernel::hal::alloc_phys_page()? };
         #[cfg(not(target_arch = "aarch64"))]
         unsafe {
-            core::ptr::write_bytes(*entry as *mut u8, 0, page_sz)
+            core::ptr::write_bytes(frame_ptr(*entry), 0, page_sz)
         };
         #[cfg(target_arch = "aarch64")]
         for i in 0..(page_sz / 8) {
-            unsafe { core::ptr::write_volatile((*entry as *mut u64).add(i), 0) };
+            unsafe { core::ptr::write_volatile(table_ptr(*entry).add(i), 0) };
         }
     }
 
@@ -966,25 +963,25 @@ pub unsafe fn boot_create_restricted_page_table(
         // `VM_MAP_PHYS`), and a process's own pages are mapped with their own flags.
         unsafe {
             core::ptr::write(
-                pages[0] as *mut u64,
+                table_ptr(pages[0]),
                 kernel::hal::build_pte(pages[1], flags),
             );
             let boot_pdp_phys =
-                kernel::hal::pte_to_phys(core::ptr::read(boot_cr3_val as *const u64));
-            let boot_pdp = boot_pdp_phys as *const u64;
+                kernel::hal::pte_to_phys(core::ptr::read(table_ptr(boot_cr3_val)));
+            let boot_pdp = table_ptr(boot_pdp_phys);
             for i in 0..32usize {
                 let e = core::ptr::read(boot_pdp.add(i));
                 if e & kernel::hal::pte_present() == 0 {
                     continue;
                 }
-                let boot_pd = kernel::hal::pte_to_phys(e) as *const u64;
-                let new_pd = pages[2 + i] as *mut u64;
+                let boot_pd = table_ptr(kernel::hal::pte_to_phys(e));
+                let new_pd = table_ptr(pages[2 + i]);
                 for j in 0..512usize {
                     let entry = core::ptr::read(boot_pd.add(j)) & !kernel::hal::pte_user();
                     core::ptr::write(new_pd.add(j), entry);
                 }
                 core::ptr::write(
-                    (pages[1] as *mut u64).add(i),
+                    table_ptr(pages[1]).add(i),
                     kernel::hal::build_pte(pages[2 + i], flags),
                 );
             }
@@ -995,7 +992,7 @@ pub unsafe fn boot_create_restricted_page_table(
         for i in 0..(n_pages - 1) {
             unsafe {
                 let pte = kernel::hal::build_pte(pages[i + 1], flags);
-                core::ptr::write(pages[i] as *mut u64, pte);
+                core::ptr::write(table_ptr(pages[i]), pte);
             }
         }
 
@@ -1004,9 +1001,9 @@ pub unsafe fn boot_create_restricted_page_table(
             // This applies when boot page table has a non-leaf PD-level table
             // (e.g., x86_64 boot with 2MB huge pages split into PT entries).
             unsafe {
-                let new_pd = pages[n_pages - 1] as *mut u64;
+                let new_pd = table_ptr(pages[n_pages - 1]);
                 for i in 0..512 {
-                    let entry = core::ptr::read((boot_pd_phys as *const u64).add(i));
+                    let entry = core::ptr::read(table_ptr(boot_pd_phys).add(i));
                     core::ptr::write(new_pd.add(i), entry);
                 }
 
@@ -1037,8 +1034,8 @@ pub unsafe fn boot_create_restricted_page_table(
     //   device memory. We copy ALL entries so the kernel remains accessible.
     //   Index 0 (0x00000000-0x3FFFFFFF) covers UART, CLINT, PLIC MMIO
     //   regions needed by kernel trap handlers under per-process page tables.
-    let boot_root = boot_cr3_val as *const u64;
-    let new_root = pages[0] as *mut u64;
+    let boot_root = table_ptr(boot_cr3_val);
+    let new_root = table_ptr(pages[0]);
     #[cfg(target_arch = "x86_64")]
     let copy_range = 1..512;
     #[cfg(any(target_arch = "riscv64", target_arch = "aarch64"))]
@@ -1070,14 +1067,14 @@ pub unsafe fn boot_create_restricted_page_table(
             let private_pud = unsafe { kernel::hal::alloc_phys_page()? };
             // Zero private PUD.
             for i in 0..(page_sz / 8) {
-                unsafe { core::ptr::write_volatile((private_pud as *mut u64).add(i), 0) };
+                unsafe { core::ptr::write_volatile(table_ptr(private_pud).add(i), 0) };
             }
             // Copy boot PUD entries as-is: PUD[0] and the 1 GiB EL1-only
             // identity blocks PUD[2..32] (0x80000000..0x7FFFFFFFFF) so kernel
             // phys access to RAM above 2 GiB stays mapped under this
             // per-process table at large RAM sizes. PUD[1] is replaced below.
-            let entry0 = unsafe { core::ptr::read((boot_pud_phys as *const u64).add(0)) };
-            unsafe { core::ptr::write((private_pud as *mut u64).add(0), entry0) };
+            let entry0 = unsafe { core::ptr::read(table_ptr(boot_pud_phys).add(0)) };
+            unsafe { core::ptr::write(table_ptr(private_pud).add(0), entry0) };
 
             // Create a PMD page with 512 2MB block entries
             // for the kernel identity range (0x40000000-0x7FFFFFFF).
@@ -1118,21 +1115,21 @@ pub unsafe fn boot_create_restricted_page_table(
                     0 // not RAM: leave unmapped (faults loudly, never aliases)
                 };
                 unsafe {
-                    core::ptr::write_volatile((user_pmd as *mut u64).add(i), entry);
+                    core::ptr::write_volatile(table_ptr(user_pmd).add(i), entry);
                 }
             }
 
             // Set PUD[1] to point to the user PMD page.
             let pud1_flags = arch_aarch64::pte::PTE_VALID | arch_aarch64::pte::PTE_TYPE;
             let pud1_entry = kernel::hal::build_pte(user_pmd, pud1_flags);
-            unsafe { core::ptr::write((private_pud as *mut u64).add(1), pud1_entry) };
+            unsafe { core::ptr::write(table_ptr(private_pud).add(1), pud1_entry) };
 
             // Copy the remaining boot PUD blocks (2..32) — 1 GiB EL1-only
             // identity windows above 2 GiB. User mappings never land there
             // (the user mmap heap is at 0x30000000), so EL1-only is safe.
             for i in 2..32usize {
-                let e = unsafe { core::ptr::read((boot_pud_phys as *const u64).add(i)) };
-                unsafe { core::ptr::write((private_pud as *mut u64).add(i), e) };
+                let e = unsafe { core::ptr::read(table_ptr(boot_pud_phys).add(i)) };
+                unsafe { core::ptr::write(table_ptr(private_pud).add(i), e) };
             }
 
             // For driver processes, replace PUD[0] with a private PMD that
@@ -1144,7 +1141,7 @@ pub unsafe fn boot_create_restricted_page_table(
             if map_low_gb_dev_user {
                 let pmd_low = unsafe { kernel::hal::alloc_phys_page()? };
                 for i in 0..(page_sz / 8) {
-                    unsafe { core::ptr::write_volatile((pmd_low as *mut u64).add(i), 0) };
+                    unsafe { core::ptr::write_volatile(table_ptr(pmd_low).add(i), 0) };
                 }
                 const VIRTIO_MMIO_BASE: u64 = 0x0a00_0000;
                 for i in 0..512usize {
@@ -1155,11 +1152,11 @@ pub unsafe fn boot_create_restricted_page_table(
                         PMD_BLOCK_EL1
                     };
                     unsafe {
-                        core::ptr::write_volatile((pmd_low as *mut u64).add(i), va | flags);
+                        core::ptr::write_volatile(table_ptr(pmd_low).add(i), va | flags);
                     }
                 }
                 let pud0_entry = kernel::hal::build_pte(pmd_low, pud1_flags);
-                unsafe { core::ptr::write((private_pud as *mut u64).add(0), pud0_entry) };
+                unsafe { core::ptr::write(table_ptr(private_pud).add(0), pud0_entry) };
             }
 
             // Replace PGD[0] with private PUD.
@@ -1258,8 +1255,8 @@ pub unsafe fn boot_create_restricted_page_table(
 /// modifications so the page table walker sees the final state.
 #[cfg(target_arch = "aarch64")]
 pub unsafe fn clean_page_table_cache_aarch64(root_pa: u64) {
-    let pgd = root_pa as *const u64;
-    unsafe { arch_aarch64::hal::dcache_clean_invalidate_page(root_pa) };
+    let pgd = table_ptr(root_pa);
+    unsafe { arch_aarch64::hal::dcache_clean_invalidate_page(kernel::hal::phys_to_virt(root_pa)) };
 
     for pgd_idx in 0..512 {
         let pgd_entry = unsafe { core::ptr::read(pgd.add(pgd_idx)) };
@@ -1270,9 +1267,9 @@ pub unsafe fn clean_page_table_cache_aarch64(root_pa: u64) {
             continue;
         }
         let pud_pa = pgd_entry & 0x0000_FFFF_FFFF_F000;
-        unsafe { arch_aarch64::hal::dcache_clean_invalidate_page(pud_pa) };
+        unsafe { arch_aarch64::hal::dcache_clean_invalidate_page(kernel::hal::phys_to_virt(pud_pa)) };
 
-        let pud = pud_pa as *const u64;
+        let pud = table_ptr(pud_pa);
         for pud_idx in 0..512 {
             let pud_entry = unsafe { core::ptr::read(pud.add(pud_idx)) };
             if pud_entry & 1 == 0 {
@@ -1282,9 +1279,9 @@ pub unsafe fn clean_page_table_cache_aarch64(root_pa: u64) {
                 continue;
             }
             let pmd_pa = pud_entry & 0x0000_FFFF_FFFF_F000;
-            unsafe { arch_aarch64::hal::dcache_clean_invalidate_page(pmd_pa) };
+            unsafe { arch_aarch64::hal::dcache_clean_invalidate_page(kernel::hal::phys_to_virt(pmd_pa)) };
 
-            let pmd = pmd_pa as *const u64;
+            let pmd = table_ptr(pmd_pa);
             for pmd_idx in 0..512 {
                 let pmd_entry = unsafe { core::ptr::read(pmd.add(pmd_idx)) };
                 if pmd_entry & 1 == 0 {
@@ -1294,7 +1291,7 @@ pub unsafe fn clean_page_table_cache_aarch64(root_pa: u64) {
                     continue;
                 }
                 let pte_pa = pmd_entry & 0x0000_FFFF_FFFF_F000;
-                unsafe { arch_aarch64::hal::dcache_clean_invalidate_page(pte_pa) };
+                unsafe { arch_aarch64::hal::dcache_clean_invalidate_page(kernel::hal::phys_to_virt(pte_pa)) };
             }
         }
     }

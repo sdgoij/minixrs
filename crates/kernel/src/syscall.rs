@@ -1106,56 +1106,56 @@ pub unsafe fn exec_elf_for_target(
             va += 0x1000;
         }
 
-        // Allocate physical pages for the stack and write the exec frame
-        // directly into them under the boot identity map. Writing at the
-        // user-stack VA would land beyond RAM below 256 MiB on x86
-        // (0x0FE00000), 2.3 GiB on RISC-V and 252 MiB on AArch64, so the
-        // frame is built at the allocated physical pages and the RSP plus
-        // the argv/envp string pointers are converted to the user VA.
+        // Allocate physical pages for the stack and write the exec frame into them through the
+        // physmap. This used to switch to `boot_cr3` and write at the physical address, reaching the
+        // frames through the boot identity map; the physmap is in this process's own tables too, and
+        // it is the map that survives the identity shrink (`PHYSMAP.md` D3/P4).
+        // Writing at the user-stack VA instead would land beyond RAM below 256 MiB on x86
+        // (0x0FE00000), 2.3 GiB on RISC-V and 252 MiB on AArch64, so the frame is built at the
+        // allocated frames and the RSP plus the argv/envp string pointers are converted to the user VA.
         let stack_pages = ((stack_end - stack_start) / 4096) as usize;
         let phys_stack_base = match crate::hal::alloc_phys_contig(stack_pages) {
             Some(b) => b,
             None => return Err(-12),
         };
-        let saved_cr3 = crate::hal::read_cr3();
-        crate::hal::write_cr3(boot_cr3_val);
         // A new process's stack starts zeroed. `alloc_phys_contig` hands back physical pages some
         // other owner has already used — a server's message buffers among them — and the frames
         // below the exec frame are ordinary readable memory. Every other path that gives a user
         // page to a process (the demand-paging path, page-table pages) clears it first; without
         // this the process reads a previous owner's data, which is what made every allocation-heavy
         // tool die in `clap` on a word that appears nowhere in its binary.
-        core::ptr::write_bytes(phys_stack_base as *mut u8, 0, stack_pages * 0x1000);
-        let phys_rsp = match crate::elf::setup_user_stack_full(
-            phys_stack_base + user_stack_size as u64,
+        core::ptr::write_bytes(
+            crate::pagetable::frame_ptr(phys_stack_base),
+            0,
+            stack_pages * 0x1000,
+        );
+        let stack_virt = crate::pagetable::frame_ptr(phys_stack_base) as u64;
+        let stack_rsp = match crate::elf::setup_user_stack_full(
+            stack_virt + user_stack_size as u64,
             user_stack_size,
             argv_strs,
             envp_strs,
         ) {
             Ok(rsp) => rsp,
-            Err(_) => {
-                crate::hal::write_cr3(saved_cr3);
-                return Err(-38);
-            }
+            Err(_) => return Err(-38),
         };
-        let user_rsp = user_stack_base + (phys_rsp - phys_stack_base);
+        let user_rsp = user_stack_base + (stack_rsp - stack_virt);
         // setup_user_stack_full stored the string pointers as absolute
-        // addresses in the phys frame; remap them to the user stack VA.
-        let delta = user_stack_base.wrapping_sub(phys_stack_base);
+        // addresses in the frames; remap them to the user stack VA.
+        let delta = user_stack_base.wrapping_sub(stack_virt);
         let argc = argv_strs.len().min(63);
         for i in 0..argc {
-            let slot = phys_rsp + 8 + (i as u64) * 8;
+            let slot = stack_rsp + 8 + (i as u64) * 8;
             let val = core::ptr::read_volatile(slot as *mut u64);
             core::ptr::write_volatile(slot as *mut u64, val.wrapping_add(delta));
         }
-        let argv_null = phys_rsp + 8 + (argc as u64) * 8;
+        let argv_null = stack_rsp + 8 + (argc as u64) * 8;
         let envc = envp_strs.len().min(63);
         for j in 0..envc {
             let slot = argv_null + 8 + (j as u64) * 8;
             let val = core::ptr::read_volatile(slot as *mut u64);
             core::ptr::write_volatile(slot as *mut u64, val.wrapping_add(delta));
         }
-        crate::hal::write_cr3(saved_cr3);
 
         // Map the user stack into the new root: VA → allocated PA.
         let user_flags = crate::hal::pte_user_flags();
@@ -1180,10 +1180,7 @@ pub unsafe fn exec_elf_for_target(
         if let Some(brk_phys) = crate::hal::alloc_phys_contig(brk_pages) {
             // Same reason as the stack: the pre-mapped heap is where a new process's earliest
             // allocations land, and they must not be able to see what the pages held before.
-            let brk_saved_cr3 = crate::hal::read_cr3();
-            crate::hal::write_cr3(boot_cr3_val);
-            core::ptr::write_bytes(brk_phys as *mut u8, 0, brk_pages * 0x1000);
-            crate::hal::write_cr3(brk_saved_cr3);
+            core::ptr::write_bytes(crate::pagetable::frame_ptr(brk_phys), 0, brk_pages * 0x1000);
             let mut brk_va = brk_start;
             let mut brk_pa = brk_phys;
             while brk_va < brk_end {

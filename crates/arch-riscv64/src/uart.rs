@@ -34,14 +34,28 @@ const SCR: u64 = 7; // Scratch
 const LSR_DR: u8 = 0x01; // Data Ready
 const LSR_THRE: u8 = 0x20; // Transmit Holding Register Empty
 
+/// The address to reach a 16550 register through.
+///
+/// Before paging is on there is no translation, so a register is where its physical address says;
+/// after that the kernel reaches it through the physmap, because the identity map is not something
+/// it may lean on (`PHYSMAP.md` P4). `boot_cr3` is the test: the boot path stores it as it turns
+/// paging on and installs the window immediately after.
+fn uart_base() -> u64 {
+    if crate::hal::boot_cr3() == 0 {
+        UART_BASE
+    } else {
+        crate::hal::phys_to_virt(UART_BASE)
+    }
+}
+
 /// Read a byte from a UART register.
 unsafe fn uart_read(reg: u64) -> u8 {
-    unsafe { read_volatile((UART_BASE + reg) as *const u8) }
+    unsafe { read_volatile((uart_base() + reg) as *const u8) }
 }
 
 /// Write a byte to a UART register.
 unsafe fn uart_write(reg: u64, val: u8) {
-    unsafe { write_volatile((UART_BASE + reg) as *mut u8, val) }
+    unsafe { write_volatile((uart_base() + reg) as *mut u8, val) }
 }
 
 /// Initialize the UART (115200 baud, 8N1).

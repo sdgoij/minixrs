@@ -99,8 +99,12 @@ pub(crate) unsafe fn alloc_pt_page() -> Result<u64, PageTableError> {
 /// ordinary buffers whose "physical" address is the buffer's own (see `fill_fake_pt` in `grants`
 /// and `ipc`), so there the identity is what keeps those fixtures working. The kernel, the QEMU
 /// suite and the boot tests all take the translation, which is the behaviour that matters.
+///
+/// This is the only sanctioned way to turn a physical address into a pointer, in this crate and in
+/// `kernel-boot`: a caller that derefs a `pte_to_phys`/`alloc_phys_*` result directly is reaching
+/// through the identity map, which is the map `PHYSMAP.md` P4 shrinks.
 #[inline]
-pub(crate) fn table_ptr(table_phys: u64) -> *mut PtEntry {
+pub fn table_ptr(table_phys: u64) -> *mut PtEntry {
     #[cfg(test)]
     let ptr = table_phys as *mut PtEntry;
     #[cfg(not(test))]
@@ -114,7 +118,7 @@ pub(crate) fn table_ptr(table_phys: u64) -> *mut PtEntry {
 /// physical frame through the physmap, and a host test has no physmap and hands over the address of
 /// an ordinary buffer. Frames are P3's work in `PHYSMAP.md`, tables P2b's.
 #[inline]
-pub(crate) fn frame_ptr(pa: u64) -> *mut u8 {
+pub fn frame_ptr(pa: u64) -> *mut u8 {
     #[cfg(test)]
     let ptr = pa as *mut u8;
     #[cfg(not(test))]

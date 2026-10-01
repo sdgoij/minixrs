@@ -27,16 +27,30 @@ const IMSC_RXIM: u32 = 1 << 4; // Receive interrupt mask
 const LCR_FEN: u32 = 1 << 4; // FIFO enable
 const LCR_WLEN_8: u32 = 3 << 5; // 8-bit word length
 
+/// The address to reach a PL011 register through.
+///
+/// Before the MMU is on there is no translation, so a register is where its physical address says;
+/// after that the kernel reaches it through the physmap, because the identity map is not something
+/// it may lean on (`PHYSMAP.md` P4). `boot_cr3` is the test: the boot path stores it as it enables
+/// the MMU and installs the window immediately after.
+fn uart_reg(phys: usize) -> usize {
+    if boot_cr3() == 0 {
+        phys
+    } else {
+        phys_to_virt(phys as u64) as usize
+    }
+}
+
 /// Initialize the PL011 UART.
 pub fn uart_init() {
     unsafe {
         // 8-bit, FIFO enabled (LCR_H.FEN). Without FEN the PL011 runs in
         // single-byte mode (RX depth 1): a piped burst overruns and only the
         // first byte survives, which stalls the shell on burst console input.
-        core::ptr::write_volatile(UART_LCR_H as *mut u32, LCR_FEN | LCR_WLEN_8);
+        core::ptr::write_volatile(uart_reg(UART_LCR_H) as *mut u32, LCR_FEN | LCR_WLEN_8);
         // Enable UART: UARTEN | TXE | RXE
-        let cr: u32 = core::ptr::read_volatile(UART_CR as *const u32);
-        core::ptr::write_volatile(UART_CR as *mut u32, cr | (1 << 0) | (1 << 8) | (1 << 9));
+        let cr: u32 = core::ptr::read_volatile(uart_reg(UART_CR) as *const u32);
+        core::ptr::write_volatile(uart_reg(UART_CR) as *mut u32, cr | (1 << 0) | (1 << 8) | (1 << 9));
     }
 }
 
@@ -50,9 +64,9 @@ pub fn uart_init() {
 pub fn enable_rx_interrupt() {
     unsafe {
         // Clear any stale RX interrupt before unmasking.
-        core::ptr::write_volatile(UART_ICR as *mut u32, IMSC_RXIM);
-        let imsc: u32 = core::ptr::read_volatile(UART_IMSC as *const u32);
-        core::ptr::write_volatile(UART_IMSC as *mut u32, imsc | IMSC_RXIM);
+        core::ptr::write_volatile(uart_reg(UART_ICR) as *mut u32, IMSC_RXIM);
+        let imsc: u32 = core::ptr::read_volatile(uart_reg(UART_IMSC) as *const u32);
+        core::ptr::write_volatile(uart_reg(UART_IMSC) as *mut u32, imsc | IMSC_RXIM);
     }
 }
 
@@ -60,26 +74,26 @@ pub fn enable_rx_interrupt() {
 pub fn serial_write_byte(byte: u8) {
     unsafe {
         // Wait for TX FIFO not full.
-        while (core::ptr::read_volatile(UART_FR as *const u32) & FR_TXFF) != 0 {
+        while (core::ptr::read_volatile(uart_reg(UART_FR) as *const u32) & FR_TXFF) != 0 {
             core::hint::spin_loop();
         }
-        core::ptr::write_volatile(UART_DR as *mut u32, byte as u32);
+        core::ptr::write_volatile(uart_reg(UART_DR) as *mut u32, byte as u32);
     }
 }
 
 /// Read a single byte from the PL011 UART, blocking until data is available.
 pub fn serial_read_byte() -> u8 {
     unsafe {
-        while (core::ptr::read_volatile(UART_FR as *const u32) & FR_RXFE) != 0 {
+        while (core::ptr::read_volatile(uart_reg(UART_FR) as *const u32) & FR_RXFE) != 0 {
             core::hint::spin_loop();
         }
-        (core::ptr::read_volatile(UART_DR as *const u32) & 0xFF) as u8
+        (core::ptr::read_volatile(uart_reg(UART_DR) as *const u32) & 0xFF) as u8
     }
 }
 
 /// Non-blocking check: is a byte available on the PL011 UART?
 pub fn serial_byte_available() -> bool {
-    unsafe { (core::ptr::read_volatile(UART_FR as *const u32) & FR_RXFE) == 0 }
+    unsafe { (core::ptr::read_volatile(uart_reg(UART_FR) as *const u32) & FR_RXFE) == 0 }
 }
 
 /// Non-blocking poll: returns a byte if available from UART.
