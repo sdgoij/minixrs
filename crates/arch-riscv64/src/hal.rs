@@ -704,6 +704,72 @@ pub const MAP_NX: u64 = 0; // RISC-V: NX is absence of X bit
 // faults on access.
 pub const MAX_USER_ADDRESS: u64 = 0x40_0000_0000;
 
+/// Base of the kernel's physmap: the window through which a *physical*
+/// address is reached as a pointer (`PHYSMAP.md`).
+///
+/// This kernel runs on the calling process's page tables, so any virtual
+/// address it uses for physical memory is one a user window could also be
+/// given. The physmap is the mapping that makes that impossible: it sits at
+/// the sign-extended top of SV39, above [`MAX_USER_ADDRESS`], and nothing
+/// else is mapped there. `KNOWN_ISSUES.md` item 38 is what happens without
+/// it — a kernel read of a physical frame landing inside the sender's own
+/// image and returning zeros.
+///
+/// SV39's top half is 256 GiB starting at this address, so a 32 GiB window
+/// fits in the root table's entries 256..288 with no table of its own.
+pub const fn physmap_base() -> u64 {
+    0xFFFF_FFC0_0000_0000
+}
+
+/// Bytes of physical address space the physmap covers, from physical 0.
+///
+/// The same 0..32 GiB span the identity map covers, so every frame and
+/// device BAR the kernel can name is reachable through it — including the
+/// PLIC and UART at `0x0C00_0000` and the PCIe window above RAM.
+pub const fn physmap_size() -> u64 {
+    0x8_0000_0000
+}
+
+/// The virtual address of physical address `pa`.
+///
+/// This, and [`virt_to_phys`], are the port's only `phys`↔`virt`
+/// conversion. Dereferencing the result of `pte_to_phys` directly is item
+/// 38's bug.
+pub const fn phys_to_virt(pa: u64) -> u64 {
+    physmap_base() + pa
+}
+
+/// The physical address a physmap virtual address refers to.
+pub const fn virt_to_phys(va: u64) -> u64 {
+    va - physmap_base()
+}
+
+/// Whether `pa` is inside the window [`physmap_base`] maps.
+pub const fn physmap_covers(pa: u64) -> bool {
+    pa < physmap_size()
+}
+
+/// The physmap must be somewhere no user mapping can reach, or it is not a
+/// physmap. Everything else here follows from that: the span is whole 1 GiB
+/// blocks because that is how it is mapped, the base is SV39's top-half
+/// boundary so the window is canonical, and it must not wrap.
+const _: () = assert!(
+    physmap_base() > MAX_USER_ADDRESS,
+    "the physmap must be above every user address"
+);
+const _: () = assert!(
+    physmap_base() >= 0xFFFF_FFC0_0000_0000,
+    "the physmap must be in SV39's sign-extended top half"
+);
+const _: () = assert!(
+    physmap_base().is_multiple_of(1 << 30) && physmap_size().is_multiple_of(1 << 30),
+    "the physmap is mapped in 1 GiB blocks"
+);
+const _: () = assert!(
+    physmap_base() + physmap_size() > physmap_base(),
+    "the physmap must not wrap the address space"
+);
+
 pub fn boot_cr3() -> u64 {
     crate::BOOT_CR3.load(core::sync::atomic::Ordering::Relaxed)
 }
@@ -1338,6 +1404,36 @@ pub unsafe fn vm_paging_fork(parent_cr3: u64, child_cr3: u64, _msg: &mut [u8; 64
     }
 }
 
+/// Install the physmap into the root table at `cr3`.
+///
+/// SV39's root table *is* its 1 GiB level, so the window is 32 leaf entries
+/// written straight into it (indices 256..288) and no page is allocated.
+/// The leaves are supervisor-only, readable, writable and not executable;
+/// the Accessed and Dirty bits are set so a kernel access never takes a
+/// software-update fault for a mapping that is never torn down.
+///
+/// Returns `false` if the window does not fit the table.
+///
+/// # Safety
+///
+/// `cr3` must be the physical address of a page table the caller may write,
+/// reached through the identity map (the port's boot-time convention).
+pub unsafe fn install_physmap(cr3: u64) -> bool {
+    unsafe {
+        let blocks = (physmap_size() >> 30) as usize;
+        let first = pt_index(physmap_base(), 2);
+        if first + blocks > 512 {
+            return false;
+        }
+        let flags = pte::PTE_V | pte::PTE_R | pte::PTE_W | pte::PTE_A | pte::PTE_D;
+        let root = cr3 as *mut u64;
+        for i in 0..blocks {
+            core::ptr::write(root.add(first + i), build_pte((i as u64) << 30, flags));
+        }
+        true
+    }
+}
+
 /// Create the initial page table root for a new process via exec(2).
 /// Allocates an L2 page, copies kernel identity-map entries from the
 /// boot page table, and returns the L2 physical address.
@@ -1403,5 +1499,31 @@ mod tests {
         assert!(pte_is_writable(pte_set_writable(ro)));
         let k = pte::PTE_V | pte::PTE_R | pte::PTE_W | pte::PTE_A | pte::PTE_D;
         assert!(!pte_is_user(k));
+    }
+
+    #[test]
+    fn physmap_lives_above_the_user_window_and_round_trips() {
+        // Pinned: a base that drifted below MAX_USER_ADDRESS would be
+        // shadowable by a user mapping, which is the whole point of it.
+        assert_eq!(physmap_base(), 0xFFFF_FFC0_0000_0000);
+        assert!(physmap_base() > MAX_USER_ADDRESS);
+
+        for pa in [0, 0x1000, 0x20_0000, 0xFEFF_F000, physmap_size() - 0x1000] {
+            assert_eq!(virt_to_phys(phys_to_virt(pa)), pa);
+            assert!(physmap_covers(pa));
+        }
+        assert!(physmap_covers(physmap_size() - 1));
+        assert!(!physmap_covers(physmap_size()));
+    }
+
+    /// The window is 32 consecutive 1 GiB leaves, and the root table they go
+    /// in is the one SV39 starts the walk at — so the first index must leave
+    /// room for all of them.
+    #[test]
+    fn physmap_window_fits_the_root_table() {
+        let blocks = (physmap_size() >> 30) as usize;
+        assert_eq!(blocks, 32);
+        assert_eq!(pt_index(physmap_base(), 2), 256);
+        assert!(pt_index(physmap_base(), 2) + blocks <= 512);
     }
 }

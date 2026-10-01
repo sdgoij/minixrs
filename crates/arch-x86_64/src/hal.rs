@@ -917,6 +917,69 @@ pub const MAP_NX: u64 = 0x8000000000000000; // PG_NX
 /// Maximum user address (48-bit VA, top half reserved for kernel).
 pub const MAX_USER_ADDRESS: u64 = 0x0000800000000000;
 
+/// Base of the kernel's physmap: the window through which a *physical*
+/// address is reached as a pointer (`PHYSMAP.md`).
+///
+/// This kernel runs on the calling process's page tables, so any virtual
+/// address it uses for physical memory is one a user window could also be
+/// given. The physmap is the mapping that makes that impossible: it sits at
+/// the start of the canonical upper half, above [`MAX_USER_ADDRESS`], and
+/// nothing else is mapped there. `KNOWN_ISSUES.md` item 38 is what happens
+/// without it — a kernel read of a physical frame landing inside the
+/// sender's own image and returning zeros.
+///
+/// Equal to [`KERNBASE`], which is apt: this *is* the kernel's mapping of
+/// physical memory, and the port has never used the high kernel base for
+/// anything else.
+pub const fn physmap_base() -> u64 {
+    0xFFFF_8000_0000_0000
+}
+
+/// Bytes of physical address space the physmap covers, from physical 0.
+///
+/// The same 0..32 GiB span the identity map covers, so every frame and
+/// every device BAR the kernel can name is reachable through it — including
+/// the LAPIC at `0xFEE0_0000` and PCI BARs, which stop short of it.
+pub const fn physmap_size() -> u64 {
+    0x8_0000_0000
+}
+
+/// The virtual address of physical address `pa`.
+///
+/// This, and [`virt_to_phys`], are the port's only `phys`↔`virt`
+/// conversion. Dereferencing the result of `pte_to_phys` directly is item
+/// 38's bug.
+pub const fn phys_to_virt(pa: u64) -> u64 {
+    physmap_base() + pa
+}
+
+/// The physical address a physmap virtual address refers to.
+pub const fn virt_to_phys(va: u64) -> u64 {
+    va - physmap_base()
+}
+
+/// Whether `pa` is inside the window [`physmap_base`] maps.
+pub const fn physmap_covers(pa: u64) -> bool {
+    pa < physmap_size()
+}
+
+/// The physmap must be somewhere no user mapping can reach, or it is not a
+/// physmap. Everything else here follows from that: the span is whole 1 GiB
+/// blocks because that is how it is mapped, and the window must not wrap
+/// the virtual address space.
+const _: () = assert!(
+    physmap_base() > MAX_USER_ADDRESS,
+    "the physmap must be above every user address"
+);
+const _: () = assert!(
+    physmap_base().is_multiple_of(1 << 30) && physmap_size().is_multiple_of(1 << 30),
+    "the physmap is mapped in 1 GiB blocks"
+);
+const _: () = assert!(
+    physmap_base() + physmap_size() > physmap_base(),
+    "the physmap must not wrap the address space"
+);
+
 /// Get the boot page table root physical address.
 pub fn boot_cr3() -> u64 {
     crate::BOOT_CR3.load(core::sync::atomic::Ordering::Relaxed)
@@ -1496,6 +1559,52 @@ pub fn qemu_exit(code: u32) -> ! {
     }
 }
 
+/// Install the physmap into the page table rooted at `cr3`.
+///
+/// Maps physical `0..physmap_size()` at `physmap_base()` in **1 GiB
+/// blocks**: 32 entries in one new PDPT page, against the 32 PD pages the
+/// identity map spends on the same span. The blocks are supervisor-only,
+/// writable, global and no-execute — the window is the kernel's, identical
+/// in every address space, and nothing there is meant to run.
+///
+/// Returns `false` if the one page the window needs cannot be allocated, or
+/// if the slot is already occupied by a 1 GiB leaf that is not this window.
+///
+/// # Safety
+///
+/// `cr3` must be the physical address of a page table the caller may write,
+/// reached through the identity map (the port's boot-time convention).
+pub unsafe fn install_physmap(cr3: u64) -> bool {
+    unsafe {
+        let pml4_idx = pt_index(physmap_base(), 3);
+        let pdpt_idx = pt_index(physmap_base(), 2);
+
+        let pml4 = cr3 as *mut u64;
+        let entry = core::ptr::read(pml4.add(pml4_idx));
+        let pdpt_phys = if entry & pte_present() == 0 {
+            let page = match alloc_phys_page() {
+                Some(p) => p,
+                None => return false,
+            };
+            core::ptr::write_bytes(page as *mut u8, 0, PAGE_SIZE as usize);
+            core::ptr::write(pml4.add(pml4_idx), build_pte(page, pte_nonleaf_flags()));
+            page
+        } else if entry & pte_large_page() != 0 {
+            return false;
+        } else {
+            pte_to_phys(entry)
+        };
+
+        let pdpt = pdpt_phys as *mut u64;
+        let flags = pte_present() | pte_writable() | pte_large_page() | pte_global() | MAP_NX;
+        for i in 0..(physmap_size() >> 30) {
+            let entry = ((i << 30) & pte_frame_mask()) | flags;
+            core::ptr::write(pdpt.add(pdpt_idx + i as usize), entry);
+        }
+        true
+    }
+}
+
 /// Create the initial page table root for a new process via exec(2).
 /// Allocates PML4/PDPT/PD pages, copies kernel-half entries from
 /// the boot page table, and returns the PML4 physical address.
@@ -1729,5 +1838,20 @@ mod tests {
         assert!(!pte_is_writable(rw));
         assert!(pte_is_writable(pte_set_writable(rw)));
         assert_eq!(pte_set_writable(rw), rw | pte_writable());
+    }
+
+    #[test]
+    fn physmap_lives_above_the_user_window_and_round_trips() {
+        // Pinned: a base that drifted below MAX_USER_ADDRESS would be
+        // shadowable by a user mapping, which is the whole point of it.
+        assert_eq!(physmap_base(), 0xFFFF_8000_0000_0000);
+        assert!(physmap_base() > MAX_USER_ADDRESS);
+
+        for pa in [0, 0x1000, 0x20_0000, 0xFEFF_F000, physmap_size() - 0x1000] {
+            assert_eq!(virt_to_phys(phys_to_virt(pa)), pa);
+            assert!(physmap_covers(pa));
+        }
+        assert!(physmap_covers(physmap_size() - 1));
+        assert!(!physmap_covers(physmap_size()));
     }
 }

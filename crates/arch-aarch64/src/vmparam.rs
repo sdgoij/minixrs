@@ -101,6 +101,82 @@ pub const fn vm_scratch_base() -> u64 {
     0x1000_0000
 }
 
+/// Top of the kernel's identity map, which is also the port's physical-RAM
+/// ceiling: the boot table and every per-process table carry PUD[0..32] as
+/// EL1-only descriptors for 0..32 GiB, so the first virtual address the
+/// identity map does **not** answer for is 32 GiB.
+pub const fn identity_map_top() -> u64 {
+    0x8_0000_0000
+}
+
+/// Base of the kernel's physmap: the window through which a *physical*
+/// address is reached as a pointer (`PHYSMAP.md`).
+///
+/// This kernel runs on the calling process's page tables, so any virtual
+/// address it uses for physical memory is one a user window could also be
+/// given. The physmap is the mapping that makes that impossible: user space
+/// is the low 1 GiB ([`MAX_USER_ADDRESS`]) and the identity map is
+/// 0..[`identity_map_top`], so the window starts where both end.
+/// `KNOWN_ISSUES.md` item 38 is what happens without it — a kernel read of a
+/// physical frame landing inside the sender's own image and returning zeros.
+///
+/// It cannot be a high (TTBR1) address as on x86/riscv: `TCR_EL1` sets
+/// `EPD1`, so TTBR1 walks are disabled and every address above 2^48 faults.
+pub const fn physmap_base() -> u64 {
+    0x8_0000_0000
+}
+
+/// Bytes of physical address space the physmap covers, from physical 0.
+///
+/// The same 0..32 GiB span the identity map covers, so every frame and
+/// device BAR the kernel can name is reachable through it — including the
+/// GIC at `0x0800_0000` and the PL011 UART at `0x0900_0000`, which are below
+/// the RAM base.
+pub const fn physmap_size() -> u64 {
+    0x8_0000_0000
+}
+
+/// The virtual address of physical address `pa`.
+///
+/// This, and [`virt_to_phys`], are the port's only `phys`↔`virt`
+/// conversion. Dereferencing the result of `pte_to_phys` directly is item
+/// 38's bug.
+pub const fn phys_to_virt(pa: u64) -> u64 {
+    physmap_base() + pa
+}
+
+/// The physical address a physmap virtual address refers to.
+pub const fn virt_to_phys(va: u64) -> u64 {
+    va - physmap_base()
+}
+
+/// Whether `pa` is inside the window [`physmap_base`] maps.
+pub const fn physmap_covers(pa: u64) -> bool {
+    pa < physmap_size()
+}
+
+/// The physmap must be somewhere no user mapping can reach, or it is not a
+/// physmap. Here that is the gap the port already leaves: above the 1 GiB
+/// user window and above the 0..32 GiB identity map, but still inside the
+/// 48-bit TTBR0 range — TTBR1 is disabled, so a higher window would fault on
+/// every access rather than shadow.
+const _: () = assert!(
+    physmap_base() > MAX_USER_ADDRESS,
+    "the physmap must be above every user address"
+);
+const _: () = assert!(
+    physmap_base() >= identity_map_top(),
+    "the physmap must not overlap the identity map"
+);
+const _: () = assert!(
+    physmap_base().is_multiple_of(1 << 30) && physmap_size().is_multiple_of(1 << 30),
+    "the physmap is mapped in 1 GiB blocks"
+);
+const _: () = assert!(
+    physmap_base() + physmap_size() <= (1u64 << 48),
+    "the physmap must stay inside the 48-bit TTBR0 range"
+);
+
 pub const USRIOSIZE: u32 = 300;
 pub const VM_PHYS_SIZE: u64 = USRIOSIZE as u64 * PAGE_SIZE;
 pub const VM_MAX_KERNEL_BUF: u64 = 384 * 1024 * 1024;
@@ -146,5 +222,36 @@ mod tests {
         const _: () = assert!(vm_scratch_base() < MAX_USER_ADDRESS);
         // The old value covered the whole TTBR0 range — must not return.
         const _: () = assert!(MAX_USER_ADDRESS < 0x0000_0FFF_FFFF_FFFF);
+    }
+
+    #[test]
+    fn physmap_lives_above_the_user_window_and_round_trips() {
+        // Pinned: a base that drifted below MAX_USER_ADDRESS would be
+        // shadowable by a user mapping, which is the whole point of it.
+        assert_eq!(physmap_base(), 0x8_0000_0000);
+        assert!(physmap_base() > MAX_USER_ADDRESS);
+        assert!(physmap_base() >= identity_map_top());
+
+        for pa in [0, 0x1000, 0x20_0000, 0xFEFF_F000, physmap_size() - 0x1000] {
+            assert_eq!(virt_to_phys(phys_to_virt(pa)), pa);
+            assert!(physmap_covers(pa));
+        }
+        assert!(physmap_covers(physmap_size() - 1));
+        assert!(!physmap_covers(physmap_size()));
+    }
+
+    /// The window is 32 consecutive 1 GiB blocks in the PUD that PGD[0]
+    /// points at, so the first index must leave room for all of them.
+    #[test]
+    fn physmap_window_fits_the_pud() {
+        let blocks = (physmap_size() >> 30) as usize;
+        assert_eq!(blocks, 32);
+        assert_eq!(
+            crate::pte::l0_index(physmap_base()),
+            0,
+            "PGD[0] holds the PUD"
+        );
+        assert_eq!(crate::pte::l1_index(physmap_base()), 32);
+        assert!(crate::pte::l1_index(physmap_base()) + blocks <= 512);
     }
 }

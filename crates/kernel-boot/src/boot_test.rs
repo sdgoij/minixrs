@@ -102,6 +102,9 @@ pub unsafe fn run_boot_tests() {
     // N: Mouse wiring — the IRQ-12 hook must notify the input server.
     failures += test_mouse_irq_notifies_input();
 
+    // O: Physmap — a frame is the same memory seen at phys and phys_to_virt(phys)
+    failures += test_physmap();
+
     if failures != 0 {
         serial_write("FAILURES: ");
         print_dec(failures);
@@ -719,6 +722,59 @@ unsafe fn on_kernel_tables<T>(f: impl FnOnce() -> T) -> T {
         unsafe { kernel::hal::write_cr3(saved) };
     }
     out
+}
+
+/// The physmap maps a known frame, and the two views of that frame are the same memory.
+///
+/// Runs on the kernel's own tables, for two reasons: the identity view (`phys as *const u64`)
+/// is only guaranteed free of a user window there (`KNOWN_ISSUES.md` item 38), and the boot
+/// CR3 is the table `install_physmap` is handed in this stage.
+unsafe fn test_physmap() -> u32 {
+    unsafe {
+        on_kernel_tables(|| {
+            let cr3 = kernel::hal::boot_cr3();
+            if !kernel::hal::install_physmap(cr3) {
+                serial_write("  FAIL: install_physmap failed\r\n");
+                return 1;
+            }
+            let pa = match kernel::hal::alloc_phys_page() {
+                Some(p) => p,
+                None => {
+                    serial_write("  FAIL: physmap: no free frame\r\n");
+                    return 1;
+                }
+            };
+            let va = kernel::hal::phys_to_virt(pa);
+
+            let pattern: u64 = 0x5048_5953_4D41_5000; // "PHYSMAP\0"
+            core::ptr::write_volatile(pa as *mut u64, pattern);
+            let seen = core::ptr::read_volatile(va as *const u64);
+            if seen != pattern {
+                serial_write("  FAIL: physmap read ");
+                print_hex(seen);
+                serial_write(" at ");
+                print_hex(va);
+                serial_write(", want ");
+                print_hex(pattern);
+                serial_write("\r\n");
+                return 1;
+            }
+
+            core::ptr::write_volatile(va as *mut u64, !pattern);
+            let back = core::ptr::read_volatile(pa as *const u64);
+            if back != !pattern {
+                serial_write("  FAIL: identity view missed the physmap write\r\n");
+                return 1;
+            }
+
+            serial_write("  OK physmap: frame ");
+            print_hex(pa);
+            serial_write(" at ");
+            print_hex(va);
+            serial_write("\r\n");
+            0
+        })
+    }
 }
 
 fn test_initramfs_echo_exists() -> u32 {

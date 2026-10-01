@@ -713,8 +713,9 @@ pub fn set_alias_window(base: u64, usable: u64) {
 // this module is target-gated) and are re-exported so the kernel's
 // `hal::*` re-export and direct `arch_aarch64::hal::*` users keep working.
 pub use crate::vmparam::{
-    MAX_USER_ADDRESS, kern_vaddr, mmap_base, user_heap_base, user_heap_limit, user_stack_base,
-    user_stack_size, vm_scratch_base,
+    MAX_USER_ADDRESS, identity_map_top, kern_vaddr, mmap_base, phys_to_virt, physmap_base,
+    physmap_covers, physmap_size, user_heap_base, user_heap_limit, user_stack_base,
+    user_stack_size, virt_to_phys, vm_scratch_base,
 };
 
 /// User-space scheduling priority for boot processes.
@@ -1089,6 +1090,51 @@ pub unsafe fn create_low_gb_pmd_table() -> Option<u64> {
             core::ptr::write_volatile((pmd_low as *mut u64).add(i), pa | PMD_BLOCK);
         }
         Some(pmd_low)
+    }
+}
+
+/// Install the physmap into the table rooted at `cr3`.
+///
+/// The window is 32 consecutive 1 GiB blocks in the PUD that `PGD[0]` points
+/// at, so nothing is allocated. The blocks are EL1-only and readable and
+/// writable but not executable — the window is the kernel's, identical in
+/// every address space, and nothing there is meant to run.
+///
+/// Returns `false` if the root has no table to write into, or if the window
+/// does not fit the PUD.
+///
+/// # Safety
+///
+/// `cr3` must be the physical address of a page table the caller may write,
+/// reached through the identity map (the port's boot-time convention).
+pub unsafe fn install_physmap(cr3: u64) -> bool {
+    unsafe {
+        let pgd0 = core::ptr::read(cr3 as *const u64);
+        if (pgd0 & 0b11) != crate::pte::PTE_TABLE {
+            return false;
+        }
+        let pud = (pgd0 & crate::pte::PTE_ADDR_MASK) as *mut u64;
+
+        let blocks = (physmap_size() >> 30) as usize;
+        let first = pt_index(physmap_base(), 2);
+        if first + blocks > 512 {
+            return false;
+        }
+
+        // Built here rather than with `make_pte`, which masks the flags to
+        // bits[11:0] and would drop PXN/UXN.
+        let flags = crate::pte::PTE_BLOCK
+            | crate::pte::PTE_ATTR_NORMAL
+            | crate::pte::PTE_AP_EL1_ONLY
+            | crate::pte::PTE_SH_INNER
+            | crate::pte::PTE_AF
+            | crate::pte::PTE_PXN
+            | crate::pte::PTE_UXN;
+        for i in 0..blocks {
+            let pa = (i as u64) << 30;
+            core::ptr::write(pud.add(first + i), (pa & crate::pte::PTE_ADDR_MASK) | flags);
+        }
+        true
     }
 }
 

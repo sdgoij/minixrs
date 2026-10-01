@@ -1473,16 +1473,86 @@ are arch-specific, `[env]` is tooling/platform, not kernel.
     map, and a no-op on `arch-sim`, whose `boot_cr3` is 0. The gate is green and measures the
     archive again rather than the CR3 it happens to run under.
 
-    *B, the hazard, has not*, and it is a design decision with three shapes. Move the user VA base
-    above `__kernel_end`: that is `tools/minix-user.ld`'s `BASE_ADDRESS` plus the target spec's
-    `--image-base` (the fork, so a stage1 rebuild), plus every window constant and probe that
-    assumes `0x1000000`. Split `*(.minixfs)` out of the `[__initramfs_start, __initramfs_end)`
-    span so `initramfs_data()` is the cpio alone — which is not enough on its own: the cpio still
-    ends 857 KB past 16 MiB. Or stop putting every `/bin/*` binary in the initramfs, since the
-    kernel loads only the `/sbin/*` boot procs from it, and shrink the cpio under the line, which
-    also means deciding what `test_initramfs_boot_files`' list should be. Until one lands, a
-    kernel access to its own embedded blobs from a process context past 16 MiB reads another
-    process's memory and says nothing, which is the shape `silent-failure-traps` is about.
+    *B was attempted and reverted (2026-09-28).* The span split stayed and was committed on its
+    own: `tools/minix-raw.ld` gives `*(.minixfs)` its own output section, so `initramfs_data()` is
+    the cpio and not the cpio plus the disk image — correct whatever the base is, and the reason
+    the original failure's offset was 440 bytes past 16 MiB rather than inside the cpio. The user VA
+    base then moved up, 48 MiB rather than the 1 GiB first proposed, because x86's stack is at
+    `0x0FE0_0000`, RISC-V's at `0x8FE0_0000` and the AArch64 kernel at `0x4000_0000`, so no shared
+    1 GiB slot exists: `tools/minix-user.ld` to `0x0400_0000`, the loader to `0x0700_0000`,
+    `ldso`'s `DSO_BASE` to `0x0500_0000` under a `DSO_LIMIT` of `0x0700_0000`, the target spec's
+    `--image-base` to `0x4000000` (one `minix_opts`, shared by all three minix targets, so a stage1
+    rebuild went with it), and the AArch64 `user_image_base()` constant with its value-based tests.
+    All three arches booted, ran and passed their gates with it, and the archive no longer reached
+    past the base.
+
+    It was reverted anyway, because it broke a gate and the breakage could not be explained: **a
+    dynamic exec's child never reaches the loader's entry**, so `just test-dynlink-x86` and
+    `just test-cdyn-x86` hung on the first dynamic program (`/bin/dynclib` in a plain image was
+    enough to see it: nothing printed and the shell never prompted). Measured with the copy fix
+    below already in place — the kernel reported exec success for the dynamic image
+    (`entry=0x7000000`, span `0x3FFF000..0x700B000`, header page `0x3FFF000`), the target's
+    `p_rts_flags` was 0 afterwards and it was enqueued, and the entry page *was* absent in the
+    fresh table after the clear loop, so the first instruction fetch had to fault — yet no fault
+    was ever taken at `0x7000000`, while the sibling static execs faulted at their own entry. A
+    marker at the top of `ldso::rtld::run` never printed, so the loader executed nothing. It was
+    not the copy: the same hang reproduced with `ipc.rs` at `HEAD`. Reverting the layout makes both
+    gates green again, so the hang is the base move's doing and is **hidden, not fixed** —
+    `PHYSMAP.md`'s P2 and P4 change the same tables, and both stages should carry "re-check
+    dynlink" as a gate. The layout itself now belongs to that plan: moving the user window is one
+    decision, made once, with the physmap present, rather than twice (see `PHYSMAP.md` D1–D4).
+
+    **What the attempt exposed is worth keeping, and part of it landed.** The same shadowing works
+    in the other direction: this kernel dereferences *physical* addresses as pointers in several
+    places, which is sound only while the identity map answers for them, and a user window covers
+    physical addresses that boot processes own. Measured: the fb server's `VM_MAP_PHYS` message
+    sits on its stack, those stack pages are around `0x46AA000`, and that address is inside fb's
+    *own image* window (with the base at 64 MiB: `0x0400_0000..0x04B1C038`, the `.bss` alone 11.6
+    MB), so `copy_from_user`'s read of the physical frame landed in fb's image and the message
+    arrived all zeros. VM answered the empty request `ENOSYS`, `fb` reported `no bochs-display`
+    (its probe was fine — it finds `1234:1111` with `BAR0 0xfd000000`), and the visible symptom was
+    one line: `wserver: mmap /dev/fb failed`. The same read is one `mini_send` used to *discard* the
+    error of (`let _ = copy_from_user(..)`), which is why the fault announced itself as a server
+    answering nonsense rather than as a copy that failed.
+
+    *Landed and kept:* `copy_from_user` reads the caller's own virtual address — this kernel runs on
+    the caller's page tables, so the virtual address is what reaches the caller's bytes — and uses
+    the walk only to answer "is that page there at all", which is what tells a bad address
+    (`EFAULT`) from a good one. `mini_send` refuses a send it could not fetch instead of handing the
+    destination whatever the kernel-side buffer last held. Both are right at any base: with the
+    image at 16..27.6 MiB, frames in that window — part of the kernel's own image among them — are
+    shadowed for exactly the same reason. (Also kept: a comment correction in `syscall.rs`, which
+    claimed `exec_create_root` copies the identity map *with user access*; it strips `PG_U`, and the
+    wrong reason is what sent this investigation down the wrong path for an hour.)
+
+    **Still open, and the general shape:** the *page-table* dereferences are the same hazard and are
+    not fixed. `walk`, `map_page` and `clear_page` reach a table through `table_phys as *const u64`,
+    and the tables themselves are allocated around `0xFC00000` (252 MiB) with free RAM running to
+    256 MiB — so a table page handed out in `0x0FE00000` (254 MiB, inside *every* process's 1 MiB
+    stack window) would poison every walk in the system, silently. `pte_is_valid_phys`
+    (`phys < 0x8_0000_0000`) bounds the address but says nothing about whether a user mapping
+    shadows it. There are two honest shapes, and `PHYSMAP.md` works the choice through: stop
+    dereferencing physical addresses (walk-free user copies, and each page table reached through the
+    CR3 that owns it), or give the kernel a physmap at a virtual address no user window covers. The
+    reference does the second and a scratch-window version of the first — its kernel is linked at
+    `0xF0400000` ("map kernel high for max. user vir space"), `pg_map()` asserts
+    `vaddr < kern_vir_start`, `createpde()` maps a 4 MiB window into a reserved `freepdes` PDE
+    rather than dereferencing a physical address, and every process carries `p_cr3_v` so page tables
+    are never reached by physical address either.
+
+    One more thing the reverted attempt taught: the loader reports its errors on fd 2
+    (`rtld::write_bytes`), and nothing in this environment shows fd 2 — `ld.so: cannot load ...` is
+    invisible, so a loader that *did* start and fail would look exactly like the silence above. That
+    is `silent-failure-traps` material independently of this item.
+
+    *`PHYSMAP.md` now has its first stage landed (2026-09-29).* Each arch has a physmap — x86-64
+    `0xFFFF_8000_0000_0000`, riscv64 `0xFFFF_FFC0_0000_0000`, aarch64 `0x8_0000_0000` (low,
+    because `EPD1` disables TTBR1 there) — with `phys_to_virt`/`virt_to_phys` as the only
+    conversion, compile-time assertions that the base is above every user address, and
+    `install_physmap`, which maps the same 0..32 GiB the identity map covers in 1 GiB blocks. The
+    boot test writes through the window and reads the frame back through the identity map, and
+    the reverse, on all three arches. What it is not yet is *used*: the derefs are P2, and the
+    per-process install is P4.
 
 ---
 

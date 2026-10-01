@@ -46,6 +46,12 @@ pub const PTE_AF: u64 = 1 << 10;
 /// Not-Global bit (bit 11). nG=0 means global (not flushed on TLBI).
 pub const PTE_NG: u64 = 1 << 11;
 
+/// Privileged Execute-Never (bit 53) and Unprivileged Execute-Never
+/// (bit 54). Both are above `PTE_ATTR_MASK`, so a descriptor that sets them
+/// must be built directly rather than through `make_pte`.
+pub const PTE_PXN: u64 = 1 << 53;
+pub const PTE_UXN: u64 = 1 << 54;
+
 /// Output address mask: bits [47:12].
 pub const PTE_ADDR_MASK: u64 = 0x0000_FFFF_FFFF_F000;
 /// Lower attribute mask: bits [11:0].

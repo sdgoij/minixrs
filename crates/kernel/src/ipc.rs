@@ -379,12 +379,19 @@ pub unsafe fn mini_send(caller_ptr: *mut Proc, dst_e: i32, m_ptr: *const u8, fla
             if flags & FROM_KERNEL != 0 {
                 core::ptr::copy(m_ptr, dst_msg.as_mut_ptr(), MESSAGE_SIZE);
             } else {
-                let _ = crate::ipc::copy_from_user(
+                // A message that cannot be fetched is not a message: refuse the send rather than
+                // hand the destination whatever the kernel-side buffer last held. What reaching
+                // the destination with that stale buffer looks like is a request the server never
+                // saw, answered `ENOSYS` — the far side of a fault that was invisible here.
+                let r = crate::ipc::copy_from_user(
                     caller_ptr,
                     m_ptr as u64,
                     dst_msg.as_mut_ptr(),
                     MESSAGE_SIZE,
                 );
+                if r != OK {
+                    return r;
+                }
             }
 
             let src_ep = (*caller_ptr).p_endpoint;
@@ -471,12 +478,17 @@ pub unsafe fn mini_send(caller_ptr: *mut Proc, dst_e: i32, m_ptr: *const u8, fla
             if flags & FROM_KERNEL != 0 {
                 core::ptr::copy(m_ptr, caller_msg.as_mut_ptr(), MESSAGE_SIZE);
             } else {
-                let _ = crate::ipc::copy_from_user(
+                // Same refusal as the delivery branch: the caller must not be queued on a message
+                // that was never fetched out of its address space.
+                let r = crate::ipc::copy_from_user(
                     caller_ptr,
                     m_ptr as u64,
                     caller_msg.as_mut_ptr(),
                     MESSAGE_SIZE,
                 );
+                if r != OK {
+                    return r;
+                }
             }
 
             if flags & FROM_KERNEL != 0 {
@@ -915,21 +927,19 @@ pub unsafe fn copy_from_user(rp: *mut Proc, user_va: u64, dst: *mut u8, len: usi
         let mut off = 0usize;
         while remaining > 0 {
             let chunk = core::cmp::min(remaining, 4096 - ((va & 0xFFF) as usize));
-            match crate::pagetable::walk(cr3, va) {
-                Ok(result) => {
-                    // The walk result may be a 4KB leaf or a huge page
-                    // (2MB/1GB). The intra-page offset must use that page
-                    // size, not a fixed 4KB mask — a 4KB mask on a huge
-                    // page reads from the wrong physical address.
-                    let page_size = 0x1000u64 << (9 * (result.level as u64 - 1));
-                    let phys_addr =
-                        crate::hal::pte_to_phys(result.pte_value) | (va & (page_size - 1));
-                    core::ptr::copy_nonoverlapping(phys_addr as *const u8, dst.add(off), chunk);
-                }
-                Err(_) => {
-                    return EFAULT;
-                }
+            // The source is the caller's own virtual address, not the physical frame the walk
+            // resolves it to: this kernel runs on the caller's page tables, so the virtual address
+            // is what actually reaches the caller's bytes. Reading the *physical* address instead
+            // assumes the identity map answers for it, and a user mapping shadows the identity map
+            // wherever the two share a virtual address — which is every frame whose physical
+            // address falls inside the window a program occupies (item 38; measured as a message
+            // that arrived zeroed whenever the sender's frame was at a physical address its own
+            // image covered). The walk is still the answer to "is that page there at all", which
+            // is what a bad address has to be told apart from a good one by.
+            if crate::pagetable::walk(cr3, va).is_err() {
+                return EFAULT;
             }
+            core::ptr::copy_nonoverlapping(va as *const u8, dst.add(off), chunk);
             remaining -= chunk;
             va += chunk as u64;
             off += chunk;

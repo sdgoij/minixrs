@@ -1094,11 +1094,12 @@ pub unsafe fn exec_elf_for_target(
             r => r,
         };
 
-        // Clear the code range in the fresh table: exec_create_root copies
-        // the identity map with user access in the low window, so without
-        // clearing, the lazy file regions would silently alias identity RAM
-        // (no fault fires). Each access now faults and VM demand-pages from
-        // the file regions.
+        // Clear the code range in the fresh table. `exec_create_root` copies the boot identity
+        // map supervisor-only, so a user access to the range would fault either way — but a
+        // *present* entry faults with P=1 and reads as a protection violation rather than a
+        // demand miss, and a kernel access (VM's own fill) would silently alias identity RAM. An
+        // absent entry is what makes each access a real fault VM demand-pages from the file
+        // regions.
         let mut va = code_start;
         while va < code_end {
             let _ = crate::pagetable::clear_page(root, va);
