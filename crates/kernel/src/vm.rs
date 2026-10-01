@@ -373,14 +373,12 @@ pub unsafe fn vm_lookup(proc_nr: i32, virtaddr: u64) -> u64 {
 
 /// Fill `count` bytes of `proc`'s memory at `vaddr` with the byte `c`.
 ///
-/// `proc` is a process number, or a negative one for the kernel's own memory,
-/// and `vaddr` is virtual in that process's space — the shape C's
-/// `vm_memset(caller, who, ph, c, count)` has. The process argument is not
-/// decoration: it is what makes the write possible once the two address spaces
-/// are separate memories, because only the HAL can then reach the target. This
-/// is the fill counterpart of [`virtual_copy`], and it routes the same way:
-/// through [`write_to_proc`] where the arch says the copy is not the kernel's to
-/// make, and as a direct write where the page tables already join the two.
+/// `proc` is a process number, or the kernel's own space ([`KERNEL_ADDRESS_SPACE`]), and the
+/// address is C's `vm_memset(caller, who, ph, c, count)`'s `ph`: **physical** when the target is
+/// the kernel's own space, and a virtual address in that process's space otherwise. C never
+/// dereferences it — it maps the page into a scratch window (`createpde`) and writes through the
+/// mapping — so neither does this: the physical case goes through the physmap, and the other
+/// through [`write_to_proc`] where the arch says the copy is not the kernel's to make.
 ///
 /// Returns 0, or a negative errno.
 ///
@@ -392,25 +390,37 @@ pub unsafe fn vm_memset(proc: i32, vaddr: u64, c: u8, count: usize) -> i32 {
         if count == 0 {
             return 0;
         }
-        if crate::hal::CROSS_ADDRESS_SPACE_COPY.is_some() {
-            // The kernel has no writable view of another instance's memory, so
-            // the pattern is staged in a kernel buffer and each chunk handed to
-            // the copy seam. Chunked because the seam copies a byte range and
-            // this can be called with a count it would not be safe to stack.
-            const CHUNK: usize = 256;
-            let buf = [c; CHUNK];
-            let mut done = 0usize;
-            while done < count {
-                let n = core::cmp::min(count - done, CHUNK);
-                let r = write_to_proc(proc, vaddr + done as u64, buf.as_ptr(), n);
-                if r != 0 {
-                    return r;
-                }
-                done += n;
-            }
+        // The kernel's own space on an arch that has a physmap: `ph` is physical, and the physmap
+        // is how the kernel writes a physical address. Dereferencing it directly assumes the
+        // identity map answers for it, and a user window shadows the identity map wherever the two
+        // share an address (`KNOWN_ISSUES.md` item 38, `PHYSMAP.md` P3). An arch whose address
+        // spaces are separate memories has no such window and no physmap, so there the kernel's own
+        // space still goes to the copy seam below.
+        if crate::hal::CROSS_ADDRESS_SPACE_COPY.is_none()
+            && proc == arch_common::safecopies::KERNEL_ADDRESS_SPACE
+        {
+            core::ptr::write_bytes(crate::pagetable::frame_ptr(vaddr), c, count);
             return 0;
         }
-        core::ptr::write_bytes(vaddr as *mut u8, c, count);
+        // Everything left is a *process*'s space, where the address is a virtual one in that
+        // process and only lands in it if its tables are loaded. `write_to_proc` is the port's
+        // answer to that, and C's is to map the page into a scratch window (`createpde`) and write
+        // through the mapping — neither dereferences the address. The direct write this used to
+        // end with assumed the caller had already switched, so a caller that had not wrote the
+        // running process's memory at that address instead (`KNOWN_ISSUES.md` item 15's shape).
+        // Chunked because `write_to_proc` copies a byte range and this can be called with a count
+        // it would not be safe to stage in one buffer.
+        const CHUNK: usize = 256;
+        let buf = [c; CHUNK];
+        let mut done = 0usize;
+        while done < count {
+            let n = core::cmp::min(count - done, CHUNK);
+            let r = write_to_proc(proc, vaddr + done as u64, buf.as_ptr(), n);
+            if r != 0 {
+                return r;
+            }
+            done += n;
+        }
         0
     }
 }
@@ -1027,9 +1037,9 @@ mod tests {
         unsafe {
             let mut buf = [0u8; 64];
             let addr = buf.as_mut_ptr() as u64;
-            // `-1` is the kernel's own space; on an arch with no copy seam the
-            // target is written through directly, which is the identity case a
-            // host test can reach.
+            // `-1` is the kernel's own space, whose address is *physical* (C's `ph`). On an arch
+            // with no copy seam that write goes through the physmap; a host test has none, so it
+            // gives the buffer's own address, which is what the conversion passes through there.
             assert_eq!(vm_memset(-1, addr, 0xAB, 64), 0);
             for (i, &byte) in buf.iter().enumerate() {
                 assert_eq!(byte, 0xAB, "byte {} mismatch", i);

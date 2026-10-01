@@ -122,6 +122,8 @@ pub unsafe fn run_boot_tests() {
     failures += test_physmap_everywhere();
     // M3: A walk reaches its table through the physmap even when the identity map is shadowed
     failures += test_walk_through_the_physmap();
+    // M4: A fill with a process argument lands in *that* process's memory
+    failures += test_vm_memset_targets_the_named_process();
 
     // N: Mouse wiring — the IRQ-12 hook must notify the input server.
     failures += test_mouse_irq_notifies_input();
@@ -987,6 +989,98 @@ unsafe fn test_walk_through_the_physmap() -> u32 {
                 serial_write(" did not resolve from behind the identity map\r\n");
                 1
             }
+        })
+    }
+}
+
+/// `vm_memset` with a process argument must write *that* process's memory, not whatever address
+/// space the kernel happens to be running on.
+///
+/// The construction: take a frame the running (boot) tables map identity — one this test owns — and
+/// have the named process map the *same* virtual address to a different frame. A write that
+/// dereferences the address lands in the first frame; one that loads the named process's tables
+/// lands in the second. That is C's shape (`createpde` + `phys_memset`, neither of which
+/// dereferences the address) and `KNOWN_ISSUES.md` item 15's failure mode.
+unsafe fn test_vm_memset_targets_the_named_process() -> u32 {
+    unsafe {
+        on_kernel_tables(|| {
+            const PATTERN: u8 = 0x5A;
+            const LEN: usize = 64;
+
+            let mut frames = [0u64; 2];
+            for f in frames.iter_mut() {
+                match kernel::hal::alloc_phys_page() {
+                    Some(p) => *f = p,
+                    None => {
+                        serial_write("  FAIL: vm_memset: no free frame\r\n");
+                        return 1;
+                    }
+                }
+                zero_frame(*f);
+            }
+            // `va` is the shadow frame's own address, so on the running tables it *is* the frame.
+            let va = frames[0];
+            let target_pa = frames[1];
+
+            // A boot process to name: it has a page table of its own, and that table is not the
+            // boot one the kernel is running on here.
+            let mut named = None;
+            for &(proc_nr, name) in BOOTED_PROCS {
+                let rp = kernel::table::proc_addr(proc_nr);
+                if !rp.is_null() && (*rp).p_seg.p_cr3 != 0 {
+                    named = Some((proc_nr, name, (*rp).p_seg.p_cr3));
+                    break;
+                }
+            }
+            let (proc_nr, name, cr3) = match named {
+                Some(t) => t,
+                None => {
+                    serial_write("  SKIP: vm_memset: no boot process with its own table\r\n");
+                    return 0;
+                }
+            };
+
+            // In that process's tables the address maps somewhere else. `pte_user_flags` is the
+            // port's leaf set for a page a process is accessed through: it carries the Accessed and
+            // Dirty bits SV39 needs for a write not to fault.
+            let kernel_flags = kernel::pagetable::PG_P | kernel::pagetable::PG_RW;
+            if kernel::pagetable::map_page(cr3, va, target_pa, kernel::hal::pte_user_flags())
+                .is_err()
+            {
+                serial_write(
+                    "  FAIL: vm_memset: could not map the address in the named process\r\n",
+                );
+                return 1;
+            }
+
+            let r = kernel::vm::vm_memset(proc_nr, va, PATTERN, LEN);
+
+            // Put the named process's identity mapping back before reporting: the frame is RAM
+            // either way, and the rest of boot still runs with that table swapped in.
+            let _ = kernel::pagetable::map_page(cr3, va, va, kernel_flags);
+
+            if r != 0 {
+                serial_write("  FAIL: vm_memset returned an error\r\n");
+                return 1;
+            }
+
+            let target =
+                core::slice::from_raw_parts(kernel::hal::phys_to_virt(target_pa) as *const u8, LEN);
+            let shadow =
+                core::slice::from_raw_parts(kernel::hal::phys_to_virt(va) as *const u8, LEN);
+            if !target.iter().all(|&b| b == PATTERN) {
+                serial_write("  FAIL: vm_memset did not reach the named process's frame\r\n");
+                return 1;
+            }
+            if !shadow.iter().all(|&b| b == 0) {
+                serial_write("  FAIL: vm_memset wrote the running space instead\r\n");
+                return 1;
+            }
+
+            serial_write("  OK vm_memset wrote ");
+            serial_write(name);
+            serial_write("'s own frame, not the running space\r\n");
+            0
         })
     }
 }

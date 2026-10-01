@@ -108,6 +108,20 @@ pub(crate) fn table_ptr(table_phys: u64) -> *mut PtEntry {
     ptr
 }
 
+/// The kernel's pointer to the physical *frame* at `pa` — data, not a page table.
+///
+/// The same conversion, and the same host-test exception, as [`table_ptr`]: the kernel reaches a
+/// physical frame through the physmap, and a host test has no physmap and hands over the address of
+/// an ordinary buffer. Frames are P3's work in `PHYSMAP.md`, tables P2b's.
+#[inline]
+pub(crate) fn frame_ptr(pa: u64) -> *mut u8 {
+    #[cfg(test)]
+    let ptr = pa as *mut u8;
+    #[cfg(not(test))]
+    let ptr = crate::hal::phys_to_virt(pa) as *mut u8;
+    ptr
+}
+
 unsafe fn read_pte(pt_virt: *const PtEntry) -> PtEntry {
     unsafe { core::ptr::read(pt_virt) }
 }
