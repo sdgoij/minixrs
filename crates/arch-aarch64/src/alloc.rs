@@ -257,22 +257,17 @@ pub fn alias_window() -> (u64, u64) {
 }
 
 /// True when `frame` is a shared low-GB alias/identity frame for user VA
-/// `va` — a frame no process owns: the device-MMIO identity window
-/// (0x08000000..0x10000000), the RAM identity case (frame == va), or a RAM
-/// alias frame from `create_low_gb_pmd_table`. Single source of truth for
-/// `pte_user_owned` (teardown walks must not free these) and the aarch64
-/// fork (alias leaves are shared verbatim, not deep-copied). Returns false
-/// when the window is unknown (host builds — the cache is never set), so
-/// callers fall back to treating the page as process-owned.
+/// `va` — a frame no process owns: the RAM identity case (`frame == va`,
+/// which covers the virtio-mmio window), or a RAM alias frame from
+/// `create_low_gb_pmd_table`. Single source of truth for `pte_user_owned`
+/// (teardown walks must not free these) and the aarch64 fork (alias leaves
+/// are shared verbatim, not deep-copied). Returns false when the window is
+/// unknown (host builds — the cache is never set), so callers fall back to
+/// treating the page as process-owned.
 pub fn is_alias_frame(frame: u64, va: u64) -> bool {
-    const DEV_BASE: u64 = 0x0800_0000;
-    const DEV_END: u64 = 0x1000_0000;
     const USER_LOW: u64 = 0x100_0000;
     if frame == va {
-        return true; // identity mapping (RAM identity or device MMIO)
-    }
-    if (DEV_BASE..DEV_END).contains(&va) {
-        return true; // device MMIO window
+        return true; // identity mapping (RAM identity or the device window)
     }
     if va < USER_LOW {
         return false;
@@ -378,11 +373,13 @@ mod tests {
             "neighbor frame is owned"
         );
 
-        // Device MMIO window: any leaf in it is shared.
-        assert!(is_alias_frame(0x900_0000, 0x900_0000));
+        // The virtio-mmio leaf is identity, so it is shared. There is no blanket device-window
+        // case any more: the GIC and the PL011 are reached through the physmap now, and their VAs
+        // alias RAM like every other VA above `user_low`.
+        assert!(is_alias_frame(0xa00_0000, 0xa00_0000));
         assert!(
-            is_alias_frame(0x7000, 0x900_0000),
-            "dev window, other frame"
+            !is_alias_frame(0x7000, 0x0800_0000),
+            "the GIC VA is an ordinary alias VA, not a blanket device window"
         );
 
         // Identity (frame == va) is shared.

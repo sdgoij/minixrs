@@ -1391,6 +1391,26 @@ fn test_boot_procs_page_tables() -> u32 {
 #[cfg(target_arch = "aarch64")]
 fn test_no_kernel_mapping_in_user_window() -> u32 {
     unsafe {
+        /// 2 MiB steps: the offending mappings were 2 MB / 1 GB kernel blocks, so this granularity
+        /// cannot step over one.
+        fn check_root(cr3: u64, label: &str) -> u32 {
+            let mut va = 0u64;
+            while va < kernel::pagetable::MAX_USER_ADDRESS {
+                if let Ok(r) = unsafe { kernel::pagetable::walk(cr3, va) } {
+                    if r.pte_value & kernel::pagetable::PG_U == 0 {
+                        serial_write("  FAIL: ");
+                        serial_write(label);
+                        serial_write(" has an EL1-only mapping at user MiB ");
+                        print_dec((va >> 20) as u32);
+                        serial_write("\r\n");
+                        return 1;
+                    }
+                }
+                va += 0x20_0000;
+            }
+            0
+        }
+
         let mut failures = 0u32;
         for &(proc_nr, name) in BOOTED_PROCS {
             let rp = kernel::table::proc_addr(proc_nr);
@@ -1401,24 +1421,14 @@ fn test_no_kernel_mapping_in_user_window() -> u32 {
             if cr3 == 0 {
                 continue;
             }
+            failures += check_root(cr3, name);
+        }
 
-            // 2 MiB steps: the offending mappings were 2 MB / 1 GB kernel blocks, so this granularity
-            // cannot step over one.
-            let mut va = 0u64;
-            while va < kernel::pagetable::MAX_USER_ADDRESS {
-                if let Ok(r) = kernel::pagetable::walk(cr3, va) {
-                    if r.pte_value & kernel::pagetable::PG_U == 0 {
-                        serial_write("  FAIL: ");
-                        serial_write(name);
-                        serial_write(" has an EL1-only mapping at user MiB ");
-                        print_dec((va >> 20) as u32);
-                        serial_write("\r\n");
-                        failures += 1;
-                        break;
-                    }
-                }
-                va += 0x20_0000;
-            }
+        // The exec constructor builds PUD[0] through `create_low_gb_pmd_table` rather than from the
+        // boot block, and no boot process's table goes through it, so it gets its own check.
+        let exec_root = kernel::hal::exec_create_root(kernel::hal::boot_cr3());
+        if exec_root != 0 {
+            failures += check_root(exec_root, "an exec root");
         }
 
         if failures == 0 {

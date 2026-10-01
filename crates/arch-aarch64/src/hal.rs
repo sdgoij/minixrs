@@ -1057,9 +1057,12 @@ pub use crate::fork::vm_paging_fork;
 
 /// Build the PUD[0] PMD table used by per-process page tables: the low
 /// 1GB is a user-accessible RAM alias (tolerates stack underflow below the
-/// 64KB user stack at 0x3FC00000), except the device MMIO window (GIC at
-/// 0x08000000, PL011 UART at 0x09000000) which is identity-mapped so kernel
-/// device access keeps working while this process's page table is loaded.
+/// 64KB user stack at 0x3FC00000), except the virtio-mmio window at
+/// 0x0a000000, which is identity-mapped EL0 so a driver can probe its device
+/// from user mode. The GIC and the PL011 are *not* mapped here: the kernel
+/// reaches them through the physmap, and an identity block over 0..1 GiB
+/// would be a kernel mapping inside the user window (`PHYSMAP.md` P4, and
+/// what the boot test's user-window check reports).
 /// map_page() later splits the user code/stack pages out of this table.
 ///
 /// The alias window maps onto *free* RAM above the kernel image (the
@@ -1077,8 +1080,7 @@ pub unsafe fn create_low_gb_pmd_table() -> Option<u64> {
     unsafe {
         let pmd_low = alloc_phys_page()?;
         const PMD_BLOCK: u64 = 0b01u64 | (0b01u64 << 6) | (0b11u64 << 8) | (1u64 << 10); // 0x741
-        let dev_base: u64 = 0x0800_0000;
-        let dev_end: u64 = 0x1000_0000;
+        const VIRTIO_MMIO_BASE: u64 = 0x0a00_0000;
         // User binaries load at VA 0x1000000; VAs below that (the NULL page
         // and the gap under the image) are unmapped so accesses fault.
         let user_low: u64 = 0x100_0000;
@@ -1094,8 +1096,8 @@ pub unsafe fn create_low_gb_pmd_table() -> Option<u64> {
         let win_size: u64 = low_gb_window_size();
         for i in 0..512usize {
             let va = (i as u64) * 0x20_0000;
-            let pa = if va >= dev_base && va < dev_end {
-                va // identity: device MMIO
+            let pa = if va == VIRTIO_MMIO_BASE {
+                va // identity: the one device window an EL0 driver needs
             } else if va < user_low || win_size == 0 {
                 0 // unmapped: NULL page + gap below the image
             } else {
