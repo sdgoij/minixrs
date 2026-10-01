@@ -89,11 +89,15 @@ static APIC_ENABLED: AtomicBool = AtomicBool::new(false);
 ///
 /// # Safety
 ///
-/// `APIC_BASE` must be set to a valid, identity-mapped APIC base address.
-/// Calling this in x2APIC mode or without a mapped APIC produces UB.
+/// `APIC_BASE` must be set to the APIC's *physical* base address, and the physmap installed.
+/// Calling this in x2APIC mode, or before the window exists, produces UB.
 unsafe fn apic_read(offset: u32) -> u32 {
     unsafe {
-        let addr = (APIC_BASE.load(Ordering::Relaxed) + offset as u64) as *const u32;
+        // The base is a physical address, and the registers are reached through the physmap rather
+        // than through the identity address the kernel also happens to have — the one P4 shrinks
+        // away (`PHYSMAP.md` P3c).
+        let addr = crate::hal::phys_to_virt(APIC_BASE.load(Ordering::Relaxed) + offset as u64)
+            as *const u32;
         ptr::read_volatile(addr)
     }
 }
@@ -102,11 +106,12 @@ unsafe fn apic_read(offset: u32) -> u32 {
 ///
 /// # Safety
 ///
-/// `APIC_BASE` must be set to a valid, identity-mapped APIC base address.
-/// Calling this in x2APIC mode or without a mapped APIC produces UB.
+/// `APIC_BASE` must be set to the APIC's *physical* base address, and the physmap installed.
+/// Calling this in x2APIC mode, or before the window exists, produces UB.
 unsafe fn apic_write(offset: u32, val: u32) {
     unsafe {
-        let addr = (APIC_BASE.load(Ordering::Relaxed) + offset as u64) as *mut u32;
+        let addr =
+            crate::hal::phys_to_virt(APIC_BASE.load(Ordering::Relaxed) + offset as u64) as *mut u32;
         ptr::write_volatile(addr, val);
     }
 }
@@ -115,12 +120,13 @@ unsafe fn apic_write(offset: u32, val: u32) {
 ///
 /// # Safety
 ///
-/// `IOAPIC_BASE` must be set to a valid, identity-mapped I/O APIC base
-/// address. Calling without a mapped I/O APIC produces UB.
+/// `IOAPIC_BASE` must be set to the I/O APIC's *physical* base address, and the physmap
+/// installed. Calling before the window exists produces UB.
 unsafe fn ioapic_read(reg: u32) -> u32 {
     unsafe {
-        let sel_addr = (IOAPIC_BASE.load(Ordering::Relaxed) + IOAPIC_IOREGSEL) as *mut u32;
-        let win_addr = (IOAPIC_BASE.load(Ordering::Relaxed) + IOAPIC_IOWIN) as *mut u32;
+        let base = crate::hal::phys_to_virt(IOAPIC_BASE.load(Ordering::Relaxed));
+        let sel_addr = (base + IOAPIC_IOREGSEL) as *mut u32;
+        let win_addr = (base + IOAPIC_IOWIN) as *mut u32;
         ptr::write_volatile(sel_addr, reg);
         ptr::read_volatile(win_addr)
     }
@@ -130,12 +136,13 @@ unsafe fn ioapic_read(reg: u32) -> u32 {
 ///
 /// # Safety
 ///
-/// `IOAPIC_BASE` must be set to a valid, identity-mapped I/O APIC base
-/// address. Calling without a mapped I/O APIC produces UB.
+/// `IOAPIC_BASE` must be set to the I/O APIC's *physical* base address, and the physmap
+/// installed. Calling before the window exists produces UB.
 unsafe fn ioapic_write(reg: u32, val: u32) {
     unsafe {
-        let sel_addr = (IOAPIC_BASE.load(Ordering::Relaxed) + IOAPIC_IOREGSEL) as *mut u32;
-        let win_addr = (IOAPIC_BASE.load(Ordering::Relaxed) + IOAPIC_IOWIN) as *mut u32;
+        let base = crate::hal::phys_to_virt(IOAPIC_BASE.load(Ordering::Relaxed));
+        let sel_addr = (base + IOAPIC_IOREGSEL) as *mut u32;
+        let win_addr = (base + IOAPIC_IOWIN) as *mut u32;
         ptr::write_volatile(sel_addr, reg);
         ptr::write_volatile(win_addr, val);
     }
