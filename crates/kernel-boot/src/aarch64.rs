@@ -502,13 +502,11 @@ pub unsafe extern "C" fn kmain(arg_dtb: u64) -> ! {
                 boot_ttbr0 & 0x0000_FFFF_FFFF_F000,
                 core::sync::atomic::Ordering::Relaxed,
             );
-        }
-        serial_write("  MMU enabled\r\n");
-        // Before the in-kernel suite: its page-table tests walk, and a walk reaches every table
-        // through the physmap (`PHYSMAP.md` D4).
-        unsafe {
+            // Before the next line of output: the MMU is on, so everything from here that reaches a
+            // frame or a device register needs the window (`PHYSMAP.md` P4).
             kernel_boot::boot_init::install_physmap_in_boot_tables();
         }
+        serial_write("  MMU enabled\r\n");
 
         serial_write("Running AArch64 integration tests...\r\n");
         let mut failures = kernel::tests::run_all();
@@ -544,14 +542,11 @@ pub unsafe extern "C" fn kmain(arg_dtb: u64) -> ! {
                 boot_ttbr0 & 0x0000_FFFF_FFFF_F000,
                 core::sync::atomic::Ordering::Relaxed,
             );
-        }
-        serial_write("  MMU enabled\r\n");
-
-        // Before any per-process table is built: the boot servers' tables must carry the window,
-        // and `load_and_prepare_all` walks to build them (`PHYSMAP.md` D2/D4).
-        unsafe {
+            // Before the next line of output: the MMU is on, so everything from here that reaches a
+            // frame or a device register needs the window (`PHYSMAP.md` P4).
             kernel_boot::boot_init::install_physmap_in_boot_tables();
         }
+        serial_write("  MMU enabled\r\n");
 
         // Set CPU frequency so clock::ms_2_cpu_time converts ms to cntpct_el0
         // cycles (QEMU virt generic timer = 62.5 MHz, matching

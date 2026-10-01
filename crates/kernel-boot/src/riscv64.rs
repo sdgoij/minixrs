@@ -603,15 +603,14 @@ pub unsafe extern "C" fn kmain(hart_id: u64, dtb_ptr: u64) -> ! {
             if let Some(boot_pt) = create_boot_page_table() {
                 arch_riscv64::BOOT_CR3.store(boot_pt, core::sync::atomic::Ordering::Relaxed);
                 kernel::hal::write_cr3(boot_pt);
+                // The window goes in before the next line of output: with paging on, everything from
+                // here that reaches a frame or a device register needs it, and taking it this early
+                // is what lets the boot path stop leaning on the identity map (`PHYSMAP.md` P4).
+                kernel_boot::boot_init::install_physmap_in_boot_tables();
                 serial_write("  SV39 enabled\r\n");
             } else {
                 boot_abort("boot page table");
             }
-        }
-        // Before the in-kernel suite: its page-table tests walk, and a walk reaches every table
-        // through the physmap (`PHYSMAP.md` D4).
-        unsafe {
-            kernel_boot::boot_init::install_physmap_in_boot_tables();
         }
 
         serial_write("Running RISC-V integration tests...\r\n");
@@ -670,6 +669,10 @@ pub unsafe extern "C" fn kmain(hart_id: u64, dtb_ptr: u64) -> ! {
                 // that needs to switch to the identity-mapped page table.
                 arch_riscv64::BOOT_CR3.store(boot_pt, core::sync::atomic::Ordering::Relaxed);
                 kernel::hal::write_cr3(boot_pt);
+                // Before the UART and PLIC setup below, and before the next line of output: with
+                // paging on, everything from here that reaches a frame or a device register needs the
+                // window (`PHYSMAP.md` P4).
+                kernel_boot::boot_init::install_physmap_in_boot_tables();
                 // Enable UART FIFO for piped input support
                 arch_riscv64::uart::init_uart();
                 // Enable UART RX interrupts: the 16550 must raise IRQ 10
@@ -684,12 +687,6 @@ pub unsafe extern "C" fn kmain(hart_id: u64, dtb_ptr: u64) -> ! {
             } else {
                 boot_abort("boot page table");
             }
-        }
-
-        // Before any per-process table is built: the boot servers' tables must carry the window,
-        // and `load_and_prepare_all` walks to build them (`PHYSMAP.md` D2/D4).
-        unsafe {
-            kernel_boot::boot_init::install_physmap_in_boot_tables();
         }
 
         let boot_cfg = kernel_boot::boot_init::BootProcessConfig {
