@@ -141,9 +141,12 @@ pub fn alloc_phys_page() -> Option<u64> {
             }
         }
     }
-    // Fallback: use a known-safe page outside PMP regions
-    // The page at 0x8FF00000 is in RAM, above OpenSBI's PMP regions (0x80000000-0x8004FFFF).
-    Some(0x8FF00000u64)
+    // Exhaustion is a failure, not a page. This used to return a fixed "known-safe" frame
+    // instead, which handed every caller *the same* physical address once the bitmap ran out:
+    // two page tables at one PA, the second write silently winning (`KNOWN_ISSUES.md` item
+    // 40). Every caller has a failure path -- `exec`, `fork` and `map_page` all report
+    // ENOMEM -- so returning `None` is what makes exhaustion visible instead of corrupting.
+    None
 }
 
 /// Allocate contiguous physical pages.

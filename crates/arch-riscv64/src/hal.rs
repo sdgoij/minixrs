@@ -6,6 +6,7 @@
 
 use core::sync::atomic::Ordering;
 
+use crate::fork::free_fork_tables;
 use crate::pte;
 
 /// Initialize RISC-V64 architecture subsystem (SBI, PLIC, CLINT, etc.).
@@ -1323,7 +1324,10 @@ pub unsafe fn vm_paging_fork(parent_cr3: u64, child_cr3: u64, _msg: &mut [u8; 64
                 let parent_l1 = phys_to_virt(parent_l1_pa) as *const u64;
                 let child_l1_pa = match alloc_phys_page() {
                     Some(p) => p,
-                    None => return -12,
+                    None => {
+                        free_fork_tables(parent, child_root);
+                        return -12;
+                    }
                 };
                 let child_l1 = phys_to_virt(child_l1_pa) as *mut u64;
                 core::ptr::copy_nonoverlapping(parent_l1, child_l1, 512);
@@ -1341,7 +1345,10 @@ pub unsafe fn vm_paging_fork(parent_cr3: u64, child_cr3: u64, _msg: &mut [u8; 64
                         let parent_l0 = phys_to_virt(parent_l0_pa) as *const u64;
                         let child_l0_pa = match alloc_phys_page() {
                             Some(p) => p,
-                            None => return -12,
+                            None => {
+                                free_fork_tables(parent, child_root);
+                                return -12;
+                            }
                         };
                         let child_l0 = phys_to_virt(child_l0_pa) as *mut u64;
                         core::ptr::copy_nonoverlapping(parent_l0, child_l0, 512);
@@ -1365,7 +1372,10 @@ pub unsafe fn vm_paging_fork(parent_cr3: u64, child_cr3: u64, _msg: &mut [u8; 64
                     let src_1gb = pte_to_phys(e2);
                     let l1_pa = match alloc_phys_page() {
                         Some(p) => p,
-                        None => return -12,
+                        None => {
+                            free_fork_tables(parent, child_root);
+                            return -12;
+                        }
                     };
                     let l1 = phys_to_virt(l1_pa) as *mut u64;
                     let is_writable = (e2 & W) != 0;
