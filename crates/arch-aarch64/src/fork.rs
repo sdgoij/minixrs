@@ -19,6 +19,51 @@ fn phys_ptr(pa: u64) -> *mut u64 {
     ptr
 }
 
+/// Release every table page the fork walk created under `child_root`.
+///
+/// The walk cannot simply descend the child. The fork *copies the whole root* first and replaces an
+/// entry only when it deep-copies the table below it, so an entry it has not reached still points
+/// at the parent's table, and following it would release the parent's live memory. An entry is this
+/// walk's to release exactly when it differs from the parent's at the same slot -- every
+/// replacement is a freshly allocated page, so it always differs -- and a block entry is a leaf and
+/// is never followed (`KNOWN_ISSUES.md` item 39).
+///
+/// `child_root` itself is the caller's root page and is not released here.
+unsafe fn free_fork_tables(parent_root: *const u64, child_root: *mut u64) {
+    unsafe {
+        for pgd_idx in 0..512 {
+            let child_e = core::ptr::read(child_root.add(pgd_idx));
+            let parent_e = core::ptr::read(parent_root.add(pgd_idx));
+            if child_e == parent_e || child_e & PTE_VALID == 0 || (child_e & 0b11) == PTE_BLOCK {
+                continue;
+            }
+            let child_pud_pa = child_e & PTE_ADDR_MASK;
+            let child_pud = phys_ptr(child_pud_pa);
+            let parent_pud = phys_ptr(parent_e & PTE_ADDR_MASK);
+            for pud_idx in 0..512 {
+                let child_e = core::ptr::read(child_pud.add(pud_idx));
+                let parent_e = core::ptr::read(parent_pud.add(pud_idx));
+                if child_e == parent_e || child_e & PTE_VALID == 0 || (child_e & 0b11) == PTE_BLOCK {
+                    continue;
+                }
+                let child_pmd_pa = child_e & PTE_ADDR_MASK;
+                let child_pmd = phys_ptr(child_pmd_pa);
+                let parent_pmd = phys_ptr(parent_e & PTE_ADDR_MASK);
+                for pmd_idx in 0..512 {
+                    let child_e = core::ptr::read(child_pmd.add(pmd_idx));
+                    let parent_e = core::ptr::read(parent_pmd.add(pmd_idx));
+                    if child_e == parent_e || child_e & PTE_VALID == 0 || (child_e & 0b11) == PTE_BLOCK {
+                        continue;
+                    }
+                    crate::alloc::free_phys_contig(child_e & PTE_ADDR_MASK, 1);
+                }
+                crate::alloc::free_phys_contig(child_pmd_pa, 1);
+            }
+            crate::alloc::free_phys_contig(child_pud_pa, 1);
+        }
+    }
+}
+
 /// Build the child's page table for fork. Walks PGD -> PUD -> PMD -> PTE,
 /// giving the child its own copy of every table page, then COW-protects the
 /// child's view of each owned user 4KB page (same frame, AP = read-only) —
@@ -26,7 +71,9 @@ fn phys_ptr(pa: u64) -> *mut u64 {
 /// pages are shared verbatim so the child keeps the same access to the
 /// kernel identity map, device MMIO, and low-GB RAM alias as the parent.
 ///
-/// Returns 0 on success, -12 (ENOMEM) on allocation failure.
+/// Returns 0 on success, -12 (ENOMEM) on allocation failure, with every table it allocated before
+/// the failure already released (`free_fork_tables`): the caller has nothing to unwind but the root
+/// page it allocated itself.
 ///
 /// # Safety
 ///
@@ -47,7 +94,10 @@ pub unsafe fn vm_paging_fork(parent_cr3: u64, child_cr3: u64, _msg: &mut [u8; 64
             let parent_pud = phys_ptr(pgd_e & PTE_ADDR_MASK);
             let child_pud_pa = match crate::alloc::alloc_phys_page() {
                 Some(pa) => pa,
-                None => return -12,
+                None => {
+                    free_fork_tables(parent_root, child_root);
+                    return -12;
+                }
             };
             let child_pud = phys_ptr(child_pud_pa);
             core::ptr::copy_nonoverlapping(parent_pud, child_pud, 512);
@@ -64,7 +114,10 @@ pub unsafe fn vm_paging_fork(parent_cr3: u64, child_cr3: u64, _msg: &mut [u8; 64
                 let parent_pmd = phys_ptr(pud_e & PTE_ADDR_MASK);
                 let child_pmd_pa = match crate::alloc::alloc_phys_page() {
                     Some(pa) => pa,
-                    None => return -12,
+                    None => {
+                        free_fork_tables(parent_root, child_root);
+                        return -12;
+                    }
                 };
                 let child_pmd = phys_ptr(child_pmd_pa);
                 core::ptr::copy_nonoverlapping(parent_pmd, child_pmd, 512);
@@ -81,7 +134,10 @@ pub unsafe fn vm_paging_fork(parent_cr3: u64, child_cr3: u64, _msg: &mut [u8; 64
                     let parent_pt = phys_ptr(pmd_e & PTE_ADDR_MASK);
                     let child_pt_pa = match crate::alloc::alloc_phys_page() {
                         Some(pa) => pa,
-                        None => return -12,
+                        None => {
+                            free_fork_tables(parent_root, child_root);
+                            return -12;
+                        }
                     };
                     let child_pt = phys_ptr(child_pt_pa);
                     core::ptr::copy_nonoverlapping(parent_pt, child_pt, 512);
@@ -286,6 +342,7 @@ mod tests {
         unsafe {
             let (parent_pgd, _pte) = build_parent();
             let child_pgd = alloc_page();
+            let spare = alloc_page();
             zero_page(child_pgd);
 
             // Exhaust the fake allocator so the first internal allocation fails.
@@ -294,6 +351,21 @@ mod tests {
             let mut msg = [0u8; 64];
             let r = vm_paging_fork(parent_pgd, child_pgd, &mut msg);
             assert_eq!(r, -12, "fork must fail with ENOMEM when out of pages");
+
+            // Give exactly one page back, so the fork's first table allocation succeeds and the
+            // next one fails: the failing call has to return the table it did build, and nothing
+            // more (`KNOWN_ISSUES.md` item 39). With no free pages at all the walk never runs.
+            crate::alloc::free_phys_contig(spare, 1);
+            let r = vm_paging_fork(parent_pgd, child_pgd, &mut msg);
+            assert_eq!(r, -12, "the second table allocation must still fail");
+            assert!(
+                crate::alloc::alloc_phys_page().is_some(),
+                "the fork did not give back the table it built"
+            );
+            assert!(
+                crate::alloc::alloc_phys_page().is_none(),
+                "the fork gave back more than it took"
+            );
         }
     }
 

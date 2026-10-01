@@ -1575,7 +1575,7 @@ are arch-specific, `[env]` is tooling/platform, not kernel.
     pointer — is what closed it.
 
 39. **`vm_paging_fork` leaked what it built when an allocation fails mid-walk (2026-10-01, FIXED for
-    x86; open on RISC-V and AArch64).**
+    x86 and AArch64; not reachable on RISC-V).**
     `crates/arch-x86_64/src/hal.rs`'s `vm_paging_fork` writes each child table's parent entry as it
     descends and calls `fresh_table()` at three nesting levels; the first failure returns `-12`
     immediately, leaving every frame allocated so far — the child PML4, and any PDP/PD/PT already
@@ -1606,13 +1606,47 @@ are arch-specific, `[env]` is tooling/platform, not kernel.
     an address that is not memory (`alloc.rs::test_global`): `release_table_page` records into a
     `#[cfg(test)]` log instead.
 
-    **RISC-V and AArch64 still leak, and RISC-V needs a different fix.** Their walks fail the same
-    way, but the child root alone is not enough to undo them: RISC-V's fork *splits the parent's* 1
-    GiB leaves, allocating an L1 table and linking it into both roots, so a rollback that followed
-    the child root would free a table the parent is still using. A fix there has to track what that
-    pass allocated, or split the parent only once the child's tables are all in hand. Both arches'
-    dynlink gates are red at `HEAD` for unrelated reasons, so neither path can be validated the way
-    x86's was.
+    *AArch64 is fixed as well (2026-10-01).* Its walk needs one rule more than x86's, and the same
+    rule RISC-V would need: its fork copies the **whole** root first and replaces an entry only when
+    it deep-copies the table below it, so an entry the fork has not reached still points at the
+    parent's table. An entry is the walk's to release exactly when it differs from the parent's at
+    the same slot -- every replacement is a freshly allocated page, so it always differs -- and a
+    block entry is a leaf and is never followed. Its existing harness made the rollback checkable
+    without new scaffolding: `test_vm_paging_fork_returns_enomem_when_exhausted` now gives the fake
+    allocator exactly one page back before the failing call, so the fork's first table is taken and
+    the second fails, and requires exactly one page to be available afterwards -- not zero (the
+    table was not returned) and not two (more was returned than was taken).
+
+    **On RISC-V the leak cannot be reached, and that arch's real defect is elsewhere.** Its walk
+    fails the same way, and it would need the same parent-comparison rule, but nothing can make it
+    run: `alloc_phys_page` never returns `None`. When the bitmap is exhausted it falls back to
+    `Some(0x8FF00000)`, so a fork's `None` arm is dead code and no leak can happen through it. That
+    fallback is the bug worth chasing on this arch and has its own entry (item 40). Two things would
+    have to change before the walk is worth adding: the fallback removed, so a failure is possible
+    at all, and `vm_paging_fork` moved out of `hal` -- `crates/arch-riscv64/src/lib.rs` gates that
+    module to `target_arch = "riscv64"`, which is exactly why AArch64's fork lives in its own
+    module, and RISC-V's `phys_to_virt` lives in the same gated module and would have to move too.
+
+40. **An exhausted RISC-V allocator hands out the same frame forever (2026-10-01, open).**
+    `crates/arch-riscv64/src/alloc.rs`'s `alloc_phys_page` ends with
+
+        // Fallback: use a known-safe page outside PMP regions
+        // The page at 0x8FF00000 is in RAM, above OpenSBI's PMP regions (0x80000000-0x8004FFFF).
+        Some(0x8FF00000u64)
+
+    That is not a fallback, it is an unbounded source of aliases: every call after the bitmap runs
+    out returns the *same* physical address, so two page tables -- or two frames of any kind -- end
+    up at one PA and the second write silently overwrites the first. It also makes every `None` arm
+    above it dead, which is why item 39's RISC-V leak cannot be reached. `alloc_phys_contig` has no
+    such fallback and returns `None`, so the two entry points agree only while the bitmap has room.
+
+    It hides well: it is silent (no error, no panic, no log), and it needs RAM to be exhausted
+    before it can fire, so a guest with headroom never sees it. The honest fix is to delete it and
+    return `None` -- every caller already has a failure path (`exec`, `fork`, `map_page` all report
+    ENOMEM) -- but check first whether anything depends on it, since it was added deliberately for
+    PMP reasons. `arch-riscv64`'s dynlink gate is red at `HEAD` for an unrelated cause, so this
+    cannot be validated end to end the way the x86 gates can; the host suite and `just test-arches`
+    are the reachable cover.
 
 ---
 
