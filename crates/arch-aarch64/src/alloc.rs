@@ -49,7 +49,6 @@ impl Default for PhysicalMemoryMap {
 }
 
 struct AllocState {
-    bitmap_ptr: *mut u64,
     bitmap_len: usize,
     base: u64,
     total_pages: usize,
@@ -61,7 +60,6 @@ unsafe impl Sync for AllocCell {}
 impl AllocCell {
     const fn new() -> Self {
         Self(UnsafeCell::new(AllocState {
-            bitmap_ptr: core::ptr::null_mut(),
             bitmap_len: 0,
             base: 0,
             total_pages: 0,
@@ -72,6 +70,34 @@ impl AllocCell {
         self.0.get()
     }
 }
+
+/// The page bitmap, held in the kernel image rather than at the top of RAM.
+///
+/// It used to be placed at the top of the free range and reached through a raw pointer holding its
+/// physical address — the identity map, which `PHYSMAP.md` P4 shrinks to the kernel image. It cannot
+/// simply become `phys_to_virt(bitmap_pa)`: `init_allocator` runs *before* the window is installed
+/// and uses the bitmap then. A static in `.bss` is inside the kernel image, so the same address
+/// works before the window exists and after, and nothing has to recover a physical address from a
+/// pointer (which the old `usable_size` did). The kernel image is excluded from the allocator's
+/// range — `kernel-boot` starts it at `kernel_end` — so the frames the bitmap occupies are never
+/// handed out.
+const MAX_PAGES: usize = 8_388_608; // 32 GiB / 4 KiB, the span RISC-V's bitmap covers
+const BITMAP_WORDS: usize = MAX_PAGES / 64;
+
+struct AllocBitmapCell(UnsafeCell<[u64; BITMAP_WORDS]>);
+unsafe impl Sync for AllocBitmapCell {}
+
+impl AllocBitmapCell {
+    const fn new() -> Self {
+        Self(UnsafeCell::new([0u64; BITMAP_WORDS]))
+    }
+
+    fn get(&self) -> *mut u64 {
+        self.0.get() as *mut u64
+    }
+}
+
+static ALLOC_BITMAP: AllocBitmapCell = AllocBitmapCell::new();
 
 static ALLOC: AllocCell = AllocCell::new();
 
@@ -95,34 +121,32 @@ pub unsafe fn init_allocator(mmap: &PhysicalMemoryMap) {
     if base >= end {
         return;
     }
-    let total_pages = ((end - base) / 4096) as usize;
+    // The bitmap is a fixed static, so the range it covers is bounded. A machine larger than
+    // `MAX_PAGES` keeps the low `MAX_PAGES` rather than losing the allocator; the boot banner prints
+    // the detected size, so a shortfall is visible there.
+    let total_pages = min(((end - base) / 4096) as usize, MAX_PAGES);
     let bitmap_words = total_pages.div_ceil(64);
-    let bitmap_bytes = bitmap_words * 8;
 
-    // Place the bitmap at the end of the free range.
-    let bitmap_addr = (end - bitmap_bytes as u64) & !4095;
-    let usable_end = bitmap_addr;
-    let usable_pages = ((usable_end - base) / 4096) as usize;
+    let bitmap = ALLOC_BITMAP.get();
 
     // Zero the bitmap with a manual loop (avoids compiler_builtins memset).
     for i in 0..bitmap_words {
         unsafe {
-            core::ptr::write_volatile((bitmap_addr as *mut u64).add(i), 0);
+            core::ptr::write_volatile(bitmap.add(i), 0);
         }
     }
 
-    // Mark all usable pages as free.
-    let usable_bits = min(usable_pages, total_pages);
-    for i in 0..usable_bits {
+    // Mark every page in the range free. The kernel image, and the bitmap inside it, are not in the
+    // range, so nothing here has to be excluded.
+    for i in 0..total_pages {
         unsafe {
-            let word = (bitmap_addr as *mut u64).add(i / 64);
+            let word = bitmap.add(i / 64);
             core::ptr::write_volatile(word, core::ptr::read_volatile(word) | (1u64 << (i % 64)));
         }
     }
 
     let state = ALLOC.get();
     unsafe {
-        write_field(&raw mut (*state).bitmap_ptr, bitmap_addr as *mut u64);
         write_field(&raw mut (*state).bitmap_len, bitmap_words);
         write_field(&raw mut (*state).base, base);
         write_field(&raw mut (*state).total_pages, total_pages);
@@ -136,9 +160,8 @@ pub unsafe fn init_allocator(mmap: &PhysicalMemoryMap) {
 /// Must be called after init_allocator.
 unsafe fn bitmap_slice() -> &'static mut [u64] {
     let state = ALLOC.get();
-    let ptr = unsafe { read_field(&raw const (*state).bitmap_ptr) };
     let len = unsafe { read_field(&raw const (*state).bitmap_len) };
-    unsafe { core::slice::from_raw_parts_mut(ptr, len) }
+    unsafe { core::slice::from_raw_parts_mut(ALLOC_BITMAP.get(), len) }
 }
 
 pub fn total_pages() -> usize {
@@ -146,14 +169,12 @@ pub fn total_pages() -> usize {
     unsafe { read_field(&raw const (*state).total_pages) }
 }
 
-/// Size (bytes) of the *usable* free-RAM window — the allocator's bitmap
-/// lives at the top of the window, and aliases must never wrap onto it.
-/// Equals `bitmap_addr - base`.
+/// Size (bytes) of the free-RAM window the allocator hands out.
+///
+/// Equals `end - base` of the range it was given: the bitmap used to sit at the top of the window
+/// and be subtracted here, and it is now a static in the kernel image, which is outside the range.
 pub fn usable_size() -> u64 {
-    let state = ALLOC.get();
-    let bitmap_addr = unsafe { read_field(&raw const (*state).bitmap_ptr) } as u64;
-    let base = unsafe { read_field(&raw const (*state).base) };
-    bitmap_addr.saturating_sub(base)
+    total_pages() as u64 * 4096
 }
 
 pub fn base() -> u64 {
