@@ -6,6 +6,19 @@
 
 use crate::pte::{PTE_ADDR_MASK, PTE_AP_MASK, PTE_AP_RO, PTE_ATTR_MASK, PTE_BLOCK, PTE_VALID};
 
+/// The pointer this walker writes a table or frame at, through the physmap.
+///
+/// Host tests are the exception, as in `kernel::pagetable::table_ptr`: they have no physmap and hand
+/// over the address of an ordinary buffer, so there the identity keeps those fixtures working.
+#[inline]
+fn phys_ptr(pa: u64) -> *mut u64 {
+    #[cfg(test)]
+    let ptr = pa as *mut u64;
+    #[cfg(not(test))]
+    let ptr = crate::vmparam::phys_to_virt(pa) as *mut u64;
+    ptr
+}
+
 /// Build the child's page table for fork. Walks PGD -> PUD -> PMD -> PTE,
 /// giving the child its own copy of every table page, then COW-protects the
 /// child's view of each owned user 4KB page (same frame, AP = read-only) —
@@ -21,8 +34,8 @@ use crate::pte::{PTE_ADDR_MASK, PTE_AP_MASK, PTE_AP_RO, PTE_ATTR_MASK, PTE_BLOCK
 /// allocated zero-filled root page.
 pub unsafe fn vm_paging_fork(parent_cr3: u64, child_cr3: u64, _msg: &mut [u8; 64]) -> i32 {
     unsafe {
-        let parent_root = parent_cr3 as *const u64;
-        let child_root = child_cr3 as *mut u64;
+        let parent_root = phys_ptr(parent_cr3);
+        let child_root = phys_ptr(child_cr3);
         // Copy the root PGD entries; table entries are deep-copied below.
         core::ptr::copy_nonoverlapping(parent_root, child_root, 512);
 
@@ -31,15 +44,16 @@ pub unsafe fn vm_paging_fork(parent_cr3: u64, child_cr3: u64, _msg: &mut [u8; 64
             if pgd_e & PTE_VALID == 0 || (pgd_e & 0b11) == PTE_BLOCK {
                 continue;
             }
-            let parent_pud = (pgd_e & PTE_ADDR_MASK) as *const u64;
-            let child_pud = match crate::alloc::alloc_phys_page() {
-                Some(pa) => pa as *mut u64,
+            let parent_pud = phys_ptr(pgd_e & PTE_ADDR_MASK);
+            let child_pud_pa = match crate::alloc::alloc_phys_page() {
+                Some(pa) => pa,
                 None => return -12,
             };
+            let child_pud = phys_ptr(child_pud_pa);
             core::ptr::copy_nonoverlapping(parent_pud, child_pud, 512);
             core::ptr::write(
                 child_root.add(pgd_idx),
-                (child_pud as u64) | (pgd_e & PTE_ATTR_MASK),
+                child_pud_pa | (pgd_e & PTE_ATTR_MASK),
             );
 
             for pud_idx in 0..512 {
@@ -47,15 +61,16 @@ pub unsafe fn vm_paging_fork(parent_cr3: u64, child_cr3: u64, _msg: &mut [u8; 64
                 if pud_e & PTE_VALID == 0 || (pud_e & 0b11) == PTE_BLOCK {
                     continue;
                 }
-                let parent_pmd = (pud_e & PTE_ADDR_MASK) as *const u64;
-                let child_pmd = match crate::alloc::alloc_phys_page() {
-                    Some(pa) => pa as *mut u64,
+                let parent_pmd = phys_ptr(pud_e & PTE_ADDR_MASK);
+                let child_pmd_pa = match crate::alloc::alloc_phys_page() {
+                    Some(pa) => pa,
                     None => return -12,
                 };
+                let child_pmd = phys_ptr(child_pmd_pa);
                 core::ptr::copy_nonoverlapping(parent_pmd, child_pmd, 512);
                 core::ptr::write(
                     child_pud.add(pud_idx),
-                    (child_pmd as u64) | (pud_e & PTE_ATTR_MASK),
+                    child_pmd_pa | (pud_e & PTE_ATTR_MASK),
                 );
 
                 for pmd_idx in 0..512 {
@@ -63,15 +78,16 @@ pub unsafe fn vm_paging_fork(parent_cr3: u64, child_cr3: u64, _msg: &mut [u8; 64
                     if pmd_e & PTE_VALID == 0 || (pmd_e & 0b11) == PTE_BLOCK {
                         continue;
                     }
-                    let parent_pt = (pmd_e & PTE_ADDR_MASK) as *const u64;
-                    let child_pt = match crate::alloc::alloc_phys_page() {
-                        Some(pa) => pa as *mut u64,
+                    let parent_pt = phys_ptr(pmd_e & PTE_ADDR_MASK);
+                    let child_pt_pa = match crate::alloc::alloc_phys_page() {
+                        Some(pa) => pa,
                         None => return -12,
                     };
+                    let child_pt = phys_ptr(child_pt_pa);
                     core::ptr::copy_nonoverlapping(parent_pt, child_pt, 512);
                     core::ptr::write(
                         child_pmd.add(pmd_idx),
-                        (child_pt as u64) | (pmd_e & PTE_ATTR_MASK),
+                        child_pt_pa | (pmd_e & PTE_ATTR_MASK),
                     );
 
                     // COW-share each EL0-accessible user 4KB page: the

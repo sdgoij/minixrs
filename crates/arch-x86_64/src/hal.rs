@@ -1017,7 +1017,9 @@ pub unsafe fn tlb_flush_page(va: u64) {
 ///
 /// # Safety
 ///
-/// `cr3` must point to a valid page table. `va` must be a mapped virtual address.
+/// `cr3` must point to a valid page table, reached through the physmap: the kernel runs on the
+/// calling process's tables, so a table's physical address is not a usable pointer. `va` must be a
+/// mapped virtual address.
 pub unsafe fn clear_rw(cr3: u64, va: u64) -> Result<(), PageNotMapped> {
     let pml4_idx = pt_index(va, 3);
     let pdpt_idx = pt_index(va, 2);
@@ -1025,13 +1027,13 @@ pub unsafe fn clear_rw(cr3: u64, va: u64) -> Result<(), PageNotMapped> {
     let pt_idx = pt_index(va, 0);
 
     unsafe {
-        let pml4 = cr3 as *const u64;
+        let pml4 = phys_to_virt(cr3) as *const u64;
         let pml4e = core::ptr::read(pml4.add(pml4_idx));
         if pml4e & pte_present() == 0 {
             return Err(PageNotMapped);
         }
 
-        let pdpt = (pml4e & pte_frame_mask()) as *const u64;
+        let pdpt = phys_to_virt(pml4e & pte_frame_mask()) as *const u64;
         let pdpte = core::ptr::read(pdpt.add(pdpt_idx));
         if pdpte & pte_present() == 0 {
             return Err(PageNotMapped);
@@ -1040,7 +1042,7 @@ pub unsafe fn clear_rw(cr3: u64, va: u64) -> Result<(), PageNotMapped> {
             return Err(PageNotMapped); // 1GB huge page
         }
 
-        let pd = (pdpte & pte_frame_mask()) as *mut u64;
+        let pd = phys_to_virt(pdpte & pte_frame_mask()) as *mut u64;
         let pde = core::ptr::read(pd.add(pd_idx));
         if pde & pte_present() == 0 {
             return Err(PageNotMapped);
@@ -1049,7 +1051,7 @@ pub unsafe fn clear_rw(cr3: u64, va: u64) -> Result<(), PageNotMapped> {
             return Err(PageNotMapped); // 2MB huge page
         }
 
-        let pt = (pde & pte_frame_mask()) as *mut u64;
+        let pt = phys_to_virt(pde & pte_frame_mask()) as *mut u64;
         let pte_ptr = pt.add(pt_idx);
         let pte_val = core::ptr::read(pte_ptr);
         if pte_val & pte_present() == 0 {
@@ -1385,7 +1387,7 @@ pub fn bss_end() -> u64 {
 ///
 /// # Safety
 ///
-/// `parent_cr3` and `child_cr3` must point to valid page tables.
+/// `parent_cr3` and `child_cr3` must point to valid page tables, reached through the physmap.
 /// `child_cr3` must be a freshly-allocated zero-filled page.
 pub unsafe fn vm_paging_fork(parent_cr3: u64, child_cr3: u64, _msg: &mut [u8; 64]) -> i32 {
     const USER_ENTRIES: usize = 256;
@@ -1396,8 +1398,8 @@ pub unsafe fn vm_paging_fork(parent_cr3: u64, child_cr3: u64, _msg: &mut [u8; 64
     const PG_FRAME: u64 = 0x000FFFFFFFFFF000;
 
     unsafe {
-        let parent = parent_cr3 as *const u64;
-        let child = child_cr3 as *mut u64;
+        let parent = phys_to_virt(parent_cr3) as *const u64;
+        let child = phys_to_virt(child_cr3) as *mut u64;
 
         // A page-table page must never be handed to a walk holding anything but its own entries.
         // This allocator recycles pages and does not clear them, and the child's tables are filled
@@ -1405,12 +1407,12 @@ pub unsafe fn vm_paging_fork(parent_cr3: u64, child_cr3: u64, _msg: &mut [u8; 64
         // page's previous owner left there — words with bit 0 set, which a walk reads as present
         // leaves pointing at arbitrary frames. `map_page` zeroes the tables it creates for the
         // same reason.
-        unsafe fn fresh_table() -> Option<*mut u64> {
+        unsafe fn fresh_table() -> Option<u64> {
             unsafe {
                 match alloc_phys_page() {
                     Some(pa) => {
-                        core::ptr::write_bytes(pa as *mut u8, 0, 4096);
-                        Some(pa as *mut u64)
+                        core::ptr::write_bytes(phys_to_virt(pa) as *mut u8, 0, 4096);
+                        Some(pa)
                     }
                     None => None,
                 }
@@ -1431,23 +1433,25 @@ pub unsafe fn vm_paging_fork(parent_cr3: u64, child_cr3: u64, _msg: &mut [u8; 64
             if e4 & PG_P == 0 {
                 continue;
             }
-            let parent_p3 = (e4 & PG_FRAME) as *const u64;
-            let child_p3 = match fresh_table() {
+            let parent_p3 = phys_to_virt(e4 & PG_FRAME) as *const u64;
+            let child_p3_pa = match fresh_table() {
                 Some(p) => p,
                 None => return -12,
             };
-            core::ptr::write(child.add(l4), (child_p3 as u64) | (e4 & !PG_FRAME));
+            let child_p3 = phys_to_virt(child_p3_pa) as *mut u64;
+            core::ptr::write(child.add(l4), child_p3_pa | (e4 & !PG_FRAME));
             for l3 in 0..512 {
                 let e3 = core::ptr::read(parent_p3.add(l3));
                 if e3 & PG_P == 0 {
                     continue;
                 }
-                let parent_p2 = (e3 & PG_FRAME) as *const u64;
-                let child_p2 = match fresh_table() {
+                let parent_p2 = phys_to_virt(e3 & PG_FRAME) as *const u64;
+                let child_p2_pa = match fresh_table() {
                     Some(p) => p,
                     None => return -12,
                 };
-                core::ptr::write(child_p3.add(l3), (child_p2 as u64) | (e3 & !PG_FRAME));
+                let child_p2 = phys_to_virt(child_p2_pa) as *mut u64;
+                core::ptr::write(child_p3.add(l3), child_p2_pa | (e3 & !PG_FRAME));
                 if e3 & PG_PS != 0 {
                     // 1GB page — COW-protect if user-writable.
                     if e3 & PG_U != 0 && e3 & PG_RW != 0 {
@@ -1471,12 +1475,13 @@ pub unsafe fn vm_paging_fork(parent_cr3: u64, child_cr3: u64, _msg: &mut [u8; 64
                         }
                         continue;
                     }
-                    let parent_p1 = (e2 & PG_FRAME) as *const u64;
-                    let child_p1 = match fresh_table() {
+                    let parent_p1 = phys_to_virt(e2 & PG_FRAME) as *const u64;
+                    let child_p1_pa = match fresh_table() {
                         Some(p) => p,
                         None => return -12,
                     };
-                    core::ptr::write(child_p2.add(l2), (child_p1 as u64) | (e2 & !PG_FRAME));
+                    let child_p1 = phys_to_virt(child_p1_pa) as *mut u64;
+                    core::ptr::write(child_p2.add(l2), child_p1_pa | (e2 & !PG_FRAME));
                     // Copy 4KB PTEs and COW-protect user-writable entries.
                     core::ptr::copy_nonoverlapping(parent_p1, child_p1, 512);
                     for l1 in 0..512 {
@@ -1559,6 +1564,14 @@ pub fn qemu_exit(code: u32) -> ! {
     }
 }
 
+/// The pointer a builder writes a physical address through, per `PhysAccess`.
+fn phys_ptr(pa: u64, access: arch_common::PhysAccess) -> *mut u64 {
+    match access {
+        arch_common::PhysAccess::Identity => pa as *mut u64,
+        arch_common::PhysAccess::Physmap => phys_to_virt(pa) as *mut u64,
+    }
+}
+
 /// Install the physmap into the page table rooted at `cr3`.
 ///
 /// Maps physical `0..physmap_size()` at `physmap_base()` in **1 GiB
@@ -1572,21 +1585,22 @@ pub fn qemu_exit(code: u32) -> ! {
 ///
 /// # Safety
 ///
-/// `cr3` must be the physical address of a page table the caller may write,
-/// reached through the identity map (the port's boot-time convention).
-pub unsafe fn install_physmap(cr3: u64) -> bool {
+/// `cr3` must be the physical address of a page table the caller may write. `access` says how it
+/// is reached: `PhysAccess::Identity` only for the boot tables, before the window exists, and
+/// `PhysAccess::Physmap` for every caller that already has it.
+pub unsafe fn install_physmap(cr3: u64, access: arch_common::PhysAccess) -> bool {
     unsafe {
         let pml4_idx = pt_index(physmap_base(), 3);
         let pdpt_idx = pt_index(physmap_base(), 2);
 
-        let pml4 = cr3 as *mut u64;
+        let pml4 = phys_ptr(cr3, access);
         let entry = core::ptr::read(pml4.add(pml4_idx));
         let pdpt_phys = if entry & pte_present() == 0 {
             let page = match alloc_phys_page() {
                 Some(p) => p,
                 None => return false,
             };
-            core::ptr::write_bytes(page as *mut u8, 0, PAGE_SIZE as usize);
+            core::ptr::write_bytes(phys_ptr(page, access).cast::<u8>(), 0, PAGE_SIZE as usize);
             core::ptr::write(pml4.add(pml4_idx), build_pte(page, pte_nonleaf_flags()));
             page
         } else if entry & pte_large_page() != 0 {
@@ -1595,7 +1609,7 @@ pub unsafe fn install_physmap(cr3: u64) -> bool {
             pte_to_phys(entry)
         };
 
-        let pdpt = pdpt_phys as *mut u64;
+        let pdpt = phys_ptr(pdpt_phys, access);
         let flags = pte_present() | pte_writable() | pte_large_page() | pte_global() | MAP_NX;
         for i in 0..(physmap_size() >> 30) {
             let entry = ((i << 30) & pte_frame_mask()) | flags;
@@ -1609,6 +1623,10 @@ pub unsafe fn install_physmap(cr3: u64) -> bool {
 /// Allocates PML4/PDPT/PD pages, copies kernel-half entries from
 /// the boot page table, and returns the PML4 physical address.
 /// Returns 0 on allocation failure.
+///
+/// The boot table and every frame allocated here are reached through the physmap, not at their
+/// physical addresses: exec runs with the window present, and the identity map is the map
+/// `PHYSMAP.md` P4 shrinks.
 ///
 /// # Safety
 ///
@@ -1624,12 +1642,12 @@ pub unsafe fn exec_create_root(boot_cr3: u64) -> u64 {
             Some(p) => p,
             None => return 0,
         };
-        core::ptr::write_bytes(pml4 as *mut u8, 0, 4096);
+        core::ptr::write_bytes(phys_to_virt(pml4) as *mut u8, 0, 4096);
         let pdpt_page = match alloc_phys_page() {
             Some(p) => p,
             None => return 0,
         };
-        core::ptr::write_bytes(pdpt_page as *mut u8, 0, 4096);
+        core::ptr::write_bytes(phys_to_virt(pdpt_page) as *mut u8, 0, 4096);
         // One PD per 1 GiB window of the boot identity map (0..32 GiB).
         let mut pd_pages = [0u64; 32];
         for pd in pd_pages.iter_mut() {
@@ -1637,19 +1655,19 @@ pub unsafe fn exec_create_root(boot_cr3: u64) -> u64 {
                 Some(p) => p,
                 None => return 0,
             };
-            core::ptr::write_bytes(*pd as *mut u8, 0, 4096);
+            core::ptr::write_bytes(phys_to_virt(*pd) as *mut u8, 0, 4096);
         }
         let flags = PG_P | PG_RW | PG_U;
-        core::ptr::write(pml4 as *mut u64, pdpt_page | flags);
-        let boot_pml4 = boot_cr3 as *const u64;
-        let boot_pdpt = (core::ptr::read(boot_pml4) & PG_FRAME) as *const u64;
+        core::ptr::write(phys_to_virt(pml4) as *mut u64, pdpt_page | flags);
+        let boot_pml4 = phys_to_virt(boot_cr3) as *const u64;
+        let boot_pdpt = core::ptr::read(boot_pml4) & PG_FRAME;
         for (i, new_pd) in pd_pages.iter().enumerate() {
-            let pdpte = core::ptr::read(boot_pdpt.add(i));
+            let pdpte = core::ptr::read((phys_to_virt(boot_pdpt) as *const u64).add(i));
             if pdpte & PG_P == 0 {
                 continue;
             }
-            let boot_pd = (pdpte & PG_FRAME) as *const u64;
-            let new_pd = *new_pd as *mut u64;
+            let boot_pd = phys_to_virt(pdpte & PG_FRAME) as *const u64;
+            let new_pd = phys_to_virt(*new_pd) as *mut u64;
             for j in 0usize..512 {
                 let mut e = core::ptr::read(boot_pd.add(j));
                 // The identity map is the kernel's and must stay mapped in every address space
@@ -1662,16 +1680,16 @@ pub unsafe fn exec_create_root(boot_cr3: u64) -> u64 {
                 e &= !PG_U;
                 core::ptr::write(new_pd.add(j), e);
             }
-            core::ptr::write((pdpt_page as *mut u64).add(i), pd_pages[i] | flags);
+            core::ptr::write((phys_to_virt(pdpt_page) as *mut u64).add(i), pd_pages[i] | flags);
         }
         for i in 256usize..512 {
             let e = core::ptr::read(boot_pml4.add(i));
-            core::ptr::write((pml4 as *mut u64).add(i), e);
+            core::ptr::write((phys_to_virt(pml4) as *mut u64).add(i), e);
         }
         // The physmap lives in that upper half, so the copy above brings it in; installing it
         // here as well keeps it a property of this constructor rather than of the copy's range
         // (`PHYSMAP.md` D2).
-        if !install_physmap(pml4) {
+        if !install_physmap(pml4, arch_common::PhysAccess::Physmap) {
             return 0;
         }
         pml4

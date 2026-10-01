@@ -350,7 +350,14 @@ pub struct BootProcessConfig {
 ///
 /// The boot page tables must be the active ones, and the arch physical allocator initialized.
 pub unsafe fn install_physmap_in_boot_tables() {
-    if !unsafe { kernel::hal::install_physmap(kernel::hal::boot_cr3()) } {
+    // The one identity caller: this is the call that installs the window, so there is nothing to
+    // reach the boot root through yet (`arch_common::PhysAccess`).
+    if !unsafe {
+        kernel::hal::install_physmap(
+            kernel::hal::boot_cr3(),
+            arch_common::PhysAccess::Identity,
+        )
+    } {
         boot_abort("physmap into the boot tables");
     }
 }
@@ -1243,7 +1250,7 @@ pub unsafe fn boot_create_restricted_page_table(
     // rather than copied, so this is the only thing that puts it there. Installing it
     // unconditionally keeps that a property of this constructor instead of a consequence of
     // which entry range each arch happens to copy (`PHYSMAP.md` D2).
-    if !unsafe { kernel::hal::install_physmap(pages[0]) } {
+    if !unsafe { kernel::hal::install_physmap(pages[0], arch_common::PhysAccess::Physmap) } {
         return None;
     }
 

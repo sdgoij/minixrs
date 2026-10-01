@@ -1250,8 +1250,8 @@ pub unsafe fn vm_paging_fork(parent_cr3: u64, child_cr3: u64, _msg: &mut [u8; 64
     const PPN_MASK: u64 = 0x003FFFFFFFFFFC00;
 
     unsafe {
-        let parent = parent_cr3 as *const u64;
-        let child_root = child_cr3 as *mut u64;
+        let parent = phys_to_virt(parent_cr3) as *const u64;
+        let child_root = phys_to_virt(child_cr3) as *mut u64;
 
         // Phase 1: Copy the parent's root page table (L2) to the child.
         core::ptr::copy_nonoverlapping(parent, child_root, 512);
@@ -1265,12 +1265,12 @@ pub unsafe fn vm_paging_fork(parent_cr3: u64, child_cr3: u64, _msg: &mut [u8; 64
             let l2_leaf = (e2 & (R | W | X)) != 0;
             if !l2_leaf {
                 let parent_l1_pa = pte_to_phys(e2);
-                let parent_l1 = parent_l1_pa as *const u64;
+                let parent_l1 = phys_to_virt(parent_l1_pa) as *const u64;
                 let child_l1_pa = match alloc_phys_page() {
                     Some(p) => p,
                     None => return -12,
                 };
-                let child_l1 = child_l1_pa as *mut u64;
+                let child_l1 = phys_to_virt(child_l1_pa) as *mut u64;
                 core::ptr::copy_nonoverlapping(parent_l1, child_l1, 512);
                 let l2_flags = e2 & !PPN_MASK;
                 core::ptr::write(child_root.add(l2), build_pte(child_l1_pa, l2_flags));
@@ -1283,12 +1283,12 @@ pub unsafe fn vm_paging_fork(parent_cr3: u64, child_cr3: u64, _msg: &mut [u8; 64
                     let l1_leaf = (e1 & (R | W | X)) != 0;
                     if !l1_leaf {
                         let parent_l0_pa = pte_to_phys(e1);
-                        let parent_l0 = parent_l0_pa as *const u64;
+                        let parent_l0 = phys_to_virt(parent_l0_pa) as *const u64;
                         let child_l0_pa = match alloc_phys_page() {
                             Some(p) => p,
                             None => return -12,
                         };
-                        let child_l0 = child_l0_pa as *mut u64;
+                        let child_l0 = phys_to_virt(child_l0_pa) as *mut u64;
                         core::ptr::copy_nonoverlapping(parent_l0, child_l0, 512);
                         let l1_flags = e1 & !PPN_MASK;
                         core::ptr::write(child_l1.add(l1), build_pte(child_l0_pa, l1_flags));
@@ -1312,7 +1312,7 @@ pub unsafe fn vm_paging_fork(parent_cr3: u64, child_cr3: u64, _msg: &mut [u8; 64
                         Some(p) => p,
                         None => return -12,
                     };
-                    let l1 = l1_pa as *mut u64;
+                    let l1 = phys_to_virt(l1_pa) as *mut u64;
                     let is_writable = (e2 & W) != 0;
                     for l1_idx in 0..512 {
                         let pa_2mb = src_1gb + (l1_idx as u64) * 0x200000;
@@ -1332,7 +1332,7 @@ pub unsafe fn vm_paging_fork(parent_cr3: u64, child_cr3: u64, _msg: &mut [u8; 64
                 continue;
             }
             let parent_l1_pa = pte_to_phys(e2);
-            let parent_l1 = parent_l1_pa as *const u64;
+            let parent_l1 = phys_to_virt(parent_l1_pa) as *const u64;
 
             for l1 in 0..512 {
                 let e1 = core::ptr::read(parent_l1.add(l1));
@@ -1344,16 +1344,16 @@ pub unsafe fn vm_paging_fork(parent_cr3: u64, child_cr3: u64, _msg: &mut [u8; 64
                 if l1_leaf {
                     if e1 & U != 0 && e1 & W != 0 {
                         let cow = e1 & !W;
-                        let child_l2e = core::ptr::read((child_cr3 as *const u64).add(l2));
+                        let child_l2e = core::ptr::read(child_root.add(l2));
                         let child_l1_pa = pte_to_phys(child_l2e);
                         if child_l1_pa != 0 {
-                            core::ptr::write((child_l1_pa as *mut u64).add(l1), cow);
+                            core::ptr::write((phys_to_virt(child_l1_pa) as *mut u64).add(l1), cow);
                         }
                     }
                     continue;
                 }
                 let parent_l0_pa = pte_to_phys(e1);
-                let parent_l0 = parent_l0_pa as *const u64;
+                let parent_l0 = phys_to_virt(parent_l0_pa) as *const u64;
 
                 for l0 in 0..512 {
                     let e0 = core::ptr::read(parent_l0.add(l0));
@@ -1363,21 +1363,21 @@ pub unsafe fn vm_paging_fork(parent_cr3: u64, child_cr3: u64, _msg: &mut [u8; 64
                     let pa = pte_to_phys(e0);
                     if e0 & U == 0 || e0 & W == 0 {
                         // Kernel page or already read-only: share directly.
-                        let child_l2e = core::ptr::read((child_cr3 as *const u64).add(l2));
+                        let child_l2e = core::ptr::read(child_root.add(l2));
                         let child_l1_pa = pte_to_phys(child_l2e);
-                        let child_l1e = core::ptr::read((child_l1_pa as *const u64).add(l1));
+                        let child_l1e = core::ptr::read((phys_to_virt(child_l1_pa) as *const u64).add(l1));
                         let child_l0_pa = pte_to_phys(child_l1e);
-                        let child_l0_ptr = (child_l0_pa as *mut u64).add(l0);
+                        let child_l0_ptr = (phys_to_virt(child_l0_pa) as *mut u64).add(l0);
                         core::ptr::write(child_l0_ptr, build_pte(pa, e0 & !PPN_MASK));
                         continue;
                     }
                     // User writable 4KB page — COW in child only.
                     let cow_e0 = e0 & !W;
-                    let child_l2e = core::ptr::read((child_cr3 as *const u64).add(l2));
+                    let child_l2e = core::ptr::read(child_root.add(l2));
                     let child_l1_pa = pte_to_phys(child_l2e);
-                    let child_l1e = core::ptr::read((child_l1_pa as *const u64).add(l1));
+                    let child_l1e = core::ptr::read((phys_to_virt(child_l1_pa) as *const u64).add(l1));
                     let child_l0_pa = pte_to_phys(child_l1e);
-                    let child_l0_ptr = (child_l0_pa as *mut u64).add(l0);
+                    let child_l0_ptr = (phys_to_virt(child_l0_pa) as *mut u64).add(l0);
                     core::ptr::write(child_l0_ptr, build_pte(pa, cow_e0 & !PPN_MASK));
                 }
             }
@@ -1387,8 +1387,8 @@ pub unsafe fn vm_paging_fork(parent_cr3: u64, child_cr3: u64, _msg: &mut [u8; 64
         // after COW splitting may have removed them.
         let boot_cr3 = crate::BOOT_CR3.load(core::sync::atomic::Ordering::Relaxed);
         if boot_cr3 != 0 {
-            let boot = boot_cr3 as *const u64;
-            let cr = child_cr3 as *mut u64;
+            let boot = phys_to_virt(boot_cr3) as *const u64;
+            let cr = phys_to_virt(child_cr3) as *mut u64;
             for i in 0..4 {
                 let child_entry = core::ptr::read(cr.add(i));
                 if child_entry & V == 0 {
@@ -1404,6 +1404,14 @@ pub unsafe fn vm_paging_fork(parent_cr3: u64, child_cr3: u64, _msg: &mut [u8; 64
     }
 }
 
+/// The pointer a builder writes a physical address through, per `PhysAccess`.
+fn phys_ptr(pa: u64, access: arch_common::PhysAccess) -> *mut u64 {
+    match access {
+        arch_common::PhysAccess::Identity => pa as *mut u64,
+        arch_common::PhysAccess::Physmap => phys_to_virt(pa) as *mut u64,
+    }
+}
+
 /// Install the physmap into the root table at `cr3`.
 ///
 /// SV39's root table *is* its 1 GiB level, so the window is 32 leaf entries
@@ -1416,9 +1424,10 @@ pub unsafe fn vm_paging_fork(parent_cr3: u64, child_cr3: u64, _msg: &mut [u8; 64
 ///
 /// # Safety
 ///
-/// `cr3` must be the physical address of a page table the caller may write,
-/// reached through the identity map (the port's boot-time convention).
-pub unsafe fn install_physmap(cr3: u64) -> bool {
+/// `cr3` must be the physical address of a page table the caller may write. `access` says how it
+/// is reached: `PhysAccess::Identity` only for the boot tables, before the window exists, and
+/// `PhysAccess::Physmap` for every caller that already has it.
+pub unsafe fn install_physmap(cr3: u64, access: arch_common::PhysAccess) -> bool {
     unsafe {
         let blocks = (physmap_size() >> 30) as usize;
         let first = pt_index(physmap_base(), 2);
@@ -1426,7 +1435,7 @@ pub unsafe fn install_physmap(cr3: u64) -> bool {
             return false;
         }
         let flags = pte::PTE_V | pte::PTE_R | pte::PTE_W | pte::PTE_A | pte::PTE_D;
-        let root = cr3 as *mut u64;
+        let root = phys_ptr(cr3, access);
         for i in 0..blocks {
             core::ptr::write(root.add(first + i), build_pte((i as u64) << 30, flags));
         }
@@ -1448,18 +1457,18 @@ pub unsafe fn exec_create_root(boot_cr3: u64) -> u64 {
             Some(p) => p,
             None => return 0,
         };
-        core::ptr::write_bytes(new_root as *mut u8, 0, PAGE_SIZE as usize);
-        let boot_root = boot_cr3 as *const u64;
+        core::ptr::write_bytes(phys_to_virt(new_root) as *mut u8, 0, PAGE_SIZE as usize);
+        let boot_root = phys_to_virt(boot_cr3) as *const u64;
         // Copy the full identity map (0..32 GiB, one 1 GiB block per L2
         // entry); the entries are supervisor-only, matching the boot table.
         for i in 0usize..32 {
             let e = core::ptr::read(boot_root.add(i));
-            core::ptr::write((new_root as *mut u64).add(i), e);
+            core::ptr::write((phys_to_virt(new_root) as *mut u64).add(i), e);
         }
         // The physmap sits above the identity map, in entries 256..288, which the copy above
         // does not reach, so it goes in explicitly: every address space the kernel runs on must
         // have it (`PHYSMAP.md` D2).
-        if !install_physmap(new_root) {
+        if !install_physmap(new_root, arch_common::PhysAccess::Physmap) {
             return 0;
         }
         new_root

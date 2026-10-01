@@ -759,7 +759,7 @@ unsafe fn test_physmap() -> u32 {
     unsafe {
         on_kernel_tables(|| {
             let cr3 = kernel::hal::boot_cr3();
-            if !kernel::hal::install_physmap(cr3) {
+            if !kernel::hal::install_physmap(cr3, arch_common::PhysAccess::Physmap) {
                 serial_write("  FAIL: install_physmap failed\r\n");
                 return 1;
             }

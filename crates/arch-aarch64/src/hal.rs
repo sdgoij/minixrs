@@ -1101,9 +1101,17 @@ pub unsafe fn create_low_gb_pmd_table() -> Option<u64> {
             } else {
                 win_base + ((va - user_low) % win_size)
             };
-            core::ptr::write_volatile((pmd_low as *mut u64).add(i), pa | PMD_BLOCK);
+            core::ptr::write_volatile((phys_to_virt(pmd_low) as *mut u64).add(i), pa | PMD_BLOCK);
         }
         Some(pmd_low)
+    }
+}
+
+/// The pointer a builder writes a physical address through, per `PhysAccess`.
+fn phys_ptr(pa: u64, access: arch_common::PhysAccess) -> *mut u64 {
+    match access {
+        arch_common::PhysAccess::Identity => pa as *mut u64,
+        arch_common::PhysAccess::Physmap => phys_to_virt(pa) as *mut u64,
     }
 }
 
@@ -1119,15 +1127,16 @@ pub unsafe fn create_low_gb_pmd_table() -> Option<u64> {
 ///
 /// # Safety
 ///
-/// `cr3` must be the physical address of a page table the caller may write,
-/// reached through the identity map (the port's boot-time convention).
-pub unsafe fn install_physmap(cr3: u64) -> bool {
+/// `cr3` must be the physical address of a page table the caller may write. `access` says how it
+/// is reached: `PhysAccess::Identity` only for the boot tables, before the window exists, and
+/// `PhysAccess::Physmap` for every caller that already has it.
+pub unsafe fn install_physmap(cr3: u64, access: arch_common::PhysAccess) -> bool {
     unsafe {
-        let pgd0 = core::ptr::read(cr3 as *const u64);
+        let pgd0 = core::ptr::read(phys_ptr(cr3, access));
         if (pgd0 & 0b11) != crate::pte::PTE_TABLE {
             return false;
         }
-        let pud = (pgd0 & crate::pte::PTE_ADDR_MASK) as *mut u64;
+        let pud = phys_ptr(pgd0 & crate::pte::PTE_ADDR_MASK, access);
 
         let blocks = (physmap_size() >> 30) as usize;
         let first = pt_index(physmap_base(), 2);
@@ -1163,7 +1172,7 @@ pub unsafe fn exec_create_root(boot_cr3: u64) -> u64 {
             None => return 0,
         };
         for i in 0..512 {
-            core::ptr::write_volatile((new_pgd as *mut u64).add(i), 0);
+            core::ptr::write_volatile((phys_to_virt(new_pgd) as *mut u64).add(i), 0);
         }
 
         let private_pud = match alloc_phys_page() {
@@ -1171,22 +1180,22 @@ pub unsafe fn exec_create_root(boot_cr3: u64) -> u64 {
             None => return 0,
         };
         for i in 0..512 {
-            core::ptr::write_volatile((private_pud as *mut u64).add(i), 0);
+            core::ptr::write_volatile((phys_to_virt(private_pud) as *mut u64).add(i), 0);
         }
 
         // Copy boot PUD entries: PUD[1] = 1GB BLOCK for kernel identity.
-        let boot_pgd = boot_cr3 as *const u64;
+        let boot_pgd = phys_to_virt(boot_cr3) as *const u64;
         let boot_pgd0 = core::ptr::read(boot_pgd);
         let boot_pud_phys = pte_to_phys(boot_pgd0);
-        let kern_entry = core::ptr::read((boot_pud_phys as *const u64).add(1));
-        core::ptr::write((private_pud as *mut u64).add(1), kern_entry);
+        let kern_entry = core::ptr::read((phys_to_virt(boot_pud_phys) as *const u64).add(1));
+        core::ptr::write((phys_to_virt(private_pud) as *mut u64).add(1), kern_entry);
 
         // PUD[2..32] = 1 GB EL1-only blocks (RAM above 2 GiB) so the kernel
         // keeps identity access to high physical memory under this process's
         // page table; user mappings never land there.
         for i in 2..32usize {
-            let e = core::ptr::read((boot_pud_phys as *const u64).add(i));
-            core::ptr::write((private_pud as *mut u64).add(i), e);
+            let e = core::ptr::read((phys_to_virt(boot_pud_phys) as *const u64).add(i));
+            core::ptr::write((phys_to_virt(private_pud) as *mut u64).add(i), e);
         }
 
         // PUD[0] = user-accessible low-GB PMD table (see create_low_gb_pmd_table).
@@ -1195,16 +1204,16 @@ pub unsafe fn exec_create_root(boot_cr3: u64) -> u64 {
             None => return 0,
         };
         let pud0_table = crate::pte::make_pte(pmd_low, pte_nonleaf_flags());
-        core::ptr::write((private_pud as *mut u64).add(0), pud0_table);
+        core::ptr::write((phys_to_virt(private_pud) as *mut u64).add(0), pud0_table);
 
         // PGD[0] → private PUD.
         let pgd0_entry = crate::pte::make_pte(private_pud, pte_nonleaf_flags());
-        core::ptr::write(new_pgd as *mut u64, pgd0_entry);
+        core::ptr::write(phys_to_virt(new_pgd) as *mut u64, pgd0_entry);
 
         // The physmap lives in PUD[32..64], and this PUD was built rather than copied from
         // boot, so it goes in explicitly: every address space the kernel runs on must have it
         // (`PHYSMAP.md` D2).
-        if !install_physmap(new_pgd) {
+        if !install_physmap(new_pgd, arch_common::PhysAccess::Physmap) {
             return 0;
         }
 
