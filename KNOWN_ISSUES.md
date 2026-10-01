@@ -1649,8 +1649,8 @@ are arch-specific, `[env]` is tooling/platform, not kernel.
     *Fixed (2026-10-01): the fallback is gone and exhaustion returns `None`*, with the comment that
     replaced it naming the reason (every caller -- `exec`, `fork`, `map_page` -- already reports
     ENOMEM). Nothing depended on it: a 256 MiB riscv64 guest boots to the shell with 223 MiB usable
-    and reports `OK allocator page=0x0000000086498000`, and `just test-arches` is green. That is the
-    reachable cover here, since this arch's dynlink gate is red at `HEAD` for an unrelated cause.
+    and reports `OK allocator page=0x0000000086498000`, and `just test-arches` and
+    `just test-dynlink-riscv64` are green.
 
 41. **`VM_GETPHYS` puts the address and the reply in different fields on each side (2026-10-01,
     open).** `crates/servers/src/ipc.rs`'s `vm_getphys` (`vm_getphys_stub`'s target arm) and

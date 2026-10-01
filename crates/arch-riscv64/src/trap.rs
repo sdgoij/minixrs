@@ -300,22 +300,14 @@ pub unsafe extern "C" fn trap_handler(frame: &mut [u8; 296]) {
                 let saved_sstatus = u64::from_ne_bytes(frame[264..272].try_into().unwrap());
                 let spp = (saved_sstatus >> 8) & 1;
 
-                // Build error_code matching x86_64 format:
-                //   bit 0: present (1 = page-protection violation)
-                //   bit 1: write
-                //   bit 2: user
-                //   bit 4: instruction fetch
-                // Kernel-mode faults omit the user bit; the write bit is kept
-                // so VM's COW/demand-paging makes the page writable and the
-                // retried store succeeds.
-                let error_code = match (code, spp) {
-                    (cause::INSTR_PAGE_FAULT, 0) => 0x14, // user | instruction
-                    (cause::INSTR_PAGE_FAULT, _) => 0x10, // instruction
-                    (cause::STORE_PAGE_FAULT, 0) => 0x07, // present | write | user
-                    (cause::STORE_PAGE_FAULT, _) => 0x03, // present | write
-                    (_, 0) => 0x05,                       // load: present | user
-                    _ => 0x01,                            // load: present
+                // The cause-to-code table is in `faultcode` so the host suite can
+                // cover it: this module is compiled only for the target.
+                let access = match code {
+                    cause::INSTR_PAGE_FAULT => crate::faultcode::Access::Fetch,
+                    cause::STORE_PAGE_FAULT => crate::faultcode::Access::Store,
+                    _ => crate::faultcode::Access::Load,
                 };
+                let error_code = crate::faultcode::page_fault_code(access, spp == 0);
 
                 match unsafe { *PF_HANDLER.get() } {
                     Some(handler) => {
