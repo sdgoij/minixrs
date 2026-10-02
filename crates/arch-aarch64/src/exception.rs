@@ -175,7 +175,7 @@ el1_sync_vector:
     // On entry from EL1: SP = SP_EL1 (kernel stack). The frame is
     // allocated BELOW the interrupted context (free stack), so no
     // exception-stack switch is needed.
-    sub     sp, sp, #672
+    sub     sp, sp, #800
 
     // Save GPRs x0-x30
     stp     x0,  x1,  [sp, #0]
@@ -195,10 +195,10 @@ el1_sync_vector:
     stp     x28, x29, [sp, #224]
     str     x30,      [sp, #240]
 
-    // Capture the interrupted kernel SP (frame base + 672) at frame[272]
+    // Capture the interrupted kernel SP (frame base + 800) at frame[272]
     // so a kernel-mode resume can restore it before eret. Done after the
     // GPR stores (x10's interrupted value is already in the frame).
-    add     x10, sp, #672
+    add     x10, sp, #800
     str     x10, [sp, #272]
 
     // Save SP_EL0 (the syscalling process's user SP)
@@ -210,7 +210,7 @@ el1_sync_vector:
     mrs     x1, spsr_el1
     stp     x0, x1, [sp, #256]
 
-    // Save the caller-saved SIMD/FP registers (q0-q7, q16-q31).
+    // Save the SIMD/FP registers (q0-q7, q8-q15, q16-q31).
     stp     q0, q1,   [sp, #288]
     stp     q2, q3,   [sp, #320]
     stp     q4, q5,   [sp, #352]
@@ -223,6 +223,10 @@ el1_sync_vector:
     stp     q26, q27, [sp, #576]
     stp     q28, q29, [sp, #608]
     stp     q30, q31, [sp, #640]
+    stp     q8,  q9,  [sp, #672]
+    stp     q10, q11, [sp, #704]
+    stp     q12, q13, [sp, #736]
+    stp     q14, q15, [sp, #768]
 
     // Read ESR_EL1 to determine the exception class.
     mrs     x0, esr_el1
@@ -246,7 +250,7 @@ el1_sync_vector:
 
 // Common return path from EL1 exception.
 el1_sync_return:
-    // Restore caller-saved SIMD/FP registers first.
+    // Restore SIMD/FP registers first.
     ldp     q0, q1,   [sp, #288]
     ldp     q2, q3,   [sp, #320]
     ldp     q4, q5,   [sp, #352]
@@ -259,6 +263,10 @@ el1_sync_return:
     ldp     q26, q27, [sp, #576]
     ldp     q28, q29, [sp, #608]
     ldp     q30, q31, [sp, #640]
+    ldp     q8,  q9,  [sp, #672]
+    ldp     q10, q11, [sp, #704]
+    ldp     q12, q13, [sp, #736]
+    ldp     q14, q15, [sp, #768]
 
     // Restore GPRs (x10-x11 loaded after the MSRs).
     ldp     x0,  x1,  [sp, #0]
@@ -297,17 +305,17 @@ el1_sync_return:
     cmp     x10, #4
     b.ne    8f
     // Kernel resume: SP_EL1 = frame[272], then reload x10/x11 from the
-    // frame (now 672 bytes below the restored SP_EL1).
+    // frame (now 800 bytes below the restored SP_EL1).
     ldr     x10, [sp, #272]
     msr     sp_el1, x10
-    sub     x10, sp, #592
+    sub     x10, sp, #720
     ldr     x10, [x10]
-    sub     x11, sp, #584
+    sub     x11, sp, #712
     ldr     x11, [x11]
     eret
 8:  // User resume: restore x10/x11, then unwind the frame.
     ldp     x10, x11, [sp, #80]
-    add     sp, sp, #672
+    add     sp, sp, #800
     eret
 "#
 );
@@ -356,7 +364,7 @@ global_asm!(
 el1_irq_handler:
     // Build a full context frame on the kernel stack.
     // We were in either EL0 or EL1.  Save the interrupted context.
-    sub     sp, sp, #672
+    sub     sp, sp, #800
 
     // Save GPRs x0-x30
     stp     x0,  x1,  [sp, #0]
@@ -376,10 +384,10 @@ el1_irq_handler:
     stp     x28, x29, [sp, #224]
     str     x30,      [sp, #240]
 
-    // Capture the interrupted kernel SP (frame base + 672) at frame[272]
+    // Capture the interrupted kernel SP (frame base + 800) at frame[272]
     // so a kernel-mode resume can restore it before eret. Done after the
     // GPR stores (x10's interrupted value is already in the frame).
-    add     x10, sp, #672
+    add     x10, sp, #800
     str     x10, [sp, #272]
 
     // Read ELR_EL1 and SPSR_EL1
@@ -393,11 +401,14 @@ el1_irq_handler:
     mrs     x0, sp_el0
     str     x0, [sp, #248]
 
-    // Save the caller-saved SIMD/FP registers (q0-q7, q16-q31). The
+    // Save the SIMD/FP registers (q0-q7, q8-q15, q16-q31). The
     // kernel's C code (memcpy/memset for IPC message copies) uses SIMD
     // registers, which would otherwise clobber the interrupted user's
-    // FP state. q8-q15 are callee-saved (preserved by the C ABI), so
-    // they need no save here.
+    // FP state. q8-q15 are also saved: they are callee-saved *by the C ABI*,
+    // which holds for a call within one process but not across a context switch --
+    // the kernel hands the CPU to another process that clobbers the hardware
+    // q8-q15, and nothing restores them, so a live user value kept there comes
+    // back as the other process's (KNOWN_ISSUES [aarch64]).
     stp     q0, q1,   [sp, #288]
     stp     q2, q3,   [sp, #320]
     stp     q4, q5,   [sp, #352]
@@ -410,12 +421,16 @@ el1_irq_handler:
     stp     q26, q27, [sp, #576]
     stp     q28, q29, [sp, #608]
     stp     q30, q31, [sp, #640]
+    stp     q8,  q9,  [sp, #672]
+    stp     q10, q11, [sp, #704]
+    stp     q12, q13, [sp, #736]
+    stp     q14, q15, [sp, #768]
 
     // Call the C-level IRQ handler with frame pointer in x0.
     mov     x0, sp
     bl      el1_irq_handler_c
 
-    // Restore caller-saved SIMD/FP registers before the GPRs.
+    // Restore SIMD/FP registers before the GPRs.
     ldp     q0, q1,   [sp, #288]
     ldp     q2, q3,   [sp, #320]
     ldp     q4, q5,   [sp, #352]
@@ -428,6 +443,10 @@ el1_irq_handler:
     ldp     q26, q27, [sp, #576]
     ldp     q28, q29, [sp, #608]
     ldp     q30, q31, [sp, #640]
+    ldp     q8,  q9,  [sp, #672]
+    ldp     q10, q11, [sp, #704]
+    ldp     q12, q13, [sp, #736]
+    ldp     q14, q15, [sp, #768]
 
     // Return from IRQ: the C handler may have modified the frame
     // (in particular: ELR_EL1, SPSR_EL1, and SP_EL0).
@@ -472,17 +491,17 @@ el1_irq_handler:
     cmp     x10, #4
     b.ne    8f
     // Kernel resume: SP_EL1 = frame[272], then reload x10/x11 from the
-    // frame (now 672 bytes below the restored SP_EL1).
+    // frame (now 800 bytes below the restored SP_EL1).
     ldr     x10, [sp, #272]
     msr     sp_el1, x10
-    sub     x10, sp, #592
+    sub     x10, sp, #720
     ldr     x10, [x10]
-    sub     x11, sp, #584
+    sub     x11, sp, #712
     ldr     x11, [x11]
     eret
 8:  // User resume: reload x10/x11, then unwind the frame.
     ldp     x10, x11, [sp, #80]
-    add     sp, sp, #672
+    add     sp, sp, #800
     eret
 "#
 );
@@ -525,7 +544,7 @@ global_asm!(
 el0_sync_handler:
     // On entry from EL0: SP = SP_EL1 (kernel stack).
     // Save full context on kernel stack.
-    sub     sp, sp, #672
+    sub     sp, sp, #800
 
     // Save GPRs x0-x30
     stp     x0,  x1,  [sp, #0]
@@ -554,13 +573,16 @@ el0_sync_handler:
     mrs     x1, spsr_el1
     stp     x0, x1, [sp, #256]
 
-    // Save the caller-saved SIMD/FP registers (q0-q7, q16-q31). The
+    // Save the SIMD/FP registers (q0-q7, q8-q15, q16-q31). The
     // kernel's C code (memcpy/memset for IPC message copies) uses SIMD
     // registers, which would otherwise clobber the user's FP state
     // across the syscall (observed: the virtio_net driver's memset
     // wrote garbage into its safecopy message after a RECEIVE).
-    // q8-q15 are callee-saved (preserved by the C ABI), so they need
-    // no save here.
+    // q8-q15 are also saved: they are callee-saved *by the C ABI*, which holds
+    // for a call within one process but not across a context switch -- the kernel
+    // hands the CPU to another process that clobbers the hardware q8-q15, and
+    // nothing restores them, so a live user value kept there comes back as the
+    // other process's (KNOWN_ISSUES [aarch64]).
     stp     q0, q1,   [sp, #288]
     stp     q2, q3,   [sp, #320]
     stp     q4, q5,   [sp, #352]
@@ -573,6 +595,10 @@ el0_sync_handler:
     stp     q26, q27, [sp, #576]
     stp     q28, q29, [sp, #608]
     stp     q30, q31, [sp, #640]
+    stp     q8,  q9,  [sp, #672]
+    stp     q10, q11, [sp, #704]
+    stp     q12, q13, [sp, #736]
+    stp     q14, q15, [sp, #768]
 
     // Read ESR_EL1 to determine exception class
     mrs     x0, esr_el1
@@ -613,7 +639,7 @@ el0_sync_handler:
 
 // Common return path from EL0 exception.
 el0_sync_return:
-    // Restore caller-saved SIMD/FP registers first (sp still points at
+    // Restore SIMD/FP registers first (sp still points at
     // the frame base; only GPRs are used below).
     ldp     q0, q1,   [sp, #288]
     ldp     q2, q3,   [sp, #320]
@@ -627,6 +653,10 @@ el0_sync_return:
     ldp     q26, q27, [sp, #576]
     ldp     q28, q29, [sp, #608]
     ldp     q30, q31, [sp, #640]
+    ldp     q8,  q9,  [sp, #672]
+    ldp     q10, q11, [sp, #704]
+    ldp     q12, q13, [sp, #736]
+    ldp     q14, q15, [sp, #768]
 
     // Restore GPRs (except scratch)
     ldp     x0,  x1,  [sp, #0]
@@ -667,17 +697,17 @@ el0_sync_return:
     cmp     x10, #4
     b.ne    8f
     // Kernel resume: SP_EL1 = frame[272], then reload x10/x11 from the
-    // frame (now 672 bytes below the restored SP_EL1).
+    // frame (now 800 bytes below the restored SP_EL1).
     ldr     x10, [sp, #272]
     msr     sp_el1, x10
-    sub     x10, sp, #592
+    sub     x10, sp, #720
     ldr     x10, [x10]
-    sub     x11, sp, #584
+    sub     x11, sp, #712
     ldr     x11, [x11]
     eret
 8:  // User resume: restore x10/x11, then unwind the frame.
     ldp     x10, x11, [sp, #80]
-    add     sp, sp, #672
+    add     sp, sp, #800
     eret
 "#
 );

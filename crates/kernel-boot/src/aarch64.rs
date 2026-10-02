@@ -207,6 +207,9 @@ pub unsafe extern "C" fn kmain(arg_dtb: u64) -> ! {
                     frame.as_mut_ptr(),
                     288,
                 );
+                // An exec'd image must not start with the replaced image's FP state.
+                kernel::fpu::reset(caller);
+                kernel::fpu::frame_load(caller, frame.as_mut_ptr());
                 let new_cr3 = (*caller).p_seg.p_cr3;
                 if new_cr3 != 0 {
                     kernel::hal::write_cr3(new_cr3);
@@ -249,6 +252,10 @@ pub unsafe extern "C" fn kmain(arg_dtb: u64) -> ! {
                     288,
                 );
             }
+            // The frame's SIMD block is this process's FP state for the resumed frame;
+            // a switch must swap it too, or the next process runs with these registers
+            // (KNOWN_ISSUES item 42).
+            unsafe { kernel::fpu::frame_save(caller, frame.as_ptr()) };
 
             if let Some(next_proc) = unsafe { kernel::sched::pick_proc() } {
                 unsafe {
@@ -274,6 +281,7 @@ pub unsafe extern "C" fn kmain(arg_dtb: u64) -> ! {
                         frame.as_mut_ptr(),
                         288,
                     );
+                    unsafe { kernel::fpu::frame_load(next_proc, frame.as_mut_ptr()) };
                     // tpidr_el0 is not part of the trap frame: reload the
                     // new thread's thread pointer on every switch so its
                     // TLS accesses land in its own block (matches x86's
@@ -331,6 +339,7 @@ pub unsafe extern "C" fn kmain(arg_dtb: u64) -> ! {
                                 frame.as_mut_ptr(),
                                 288,
                             );
+                            unsafe { kernel::fpu::frame_load(next_proc, frame.as_mut_ptr()) };
                             let tls = (*next_proc).p_tls;
                             if tls != 0 {
                                 arch_aarch64::hal::set_tls_current(tls);
@@ -424,6 +433,9 @@ pub unsafe extern "C" fn kmain(arg_dtb: u64) -> ! {
                 288,
             );
         }
+        // The frame's SIMD block is this process's FP state for the resumed frame;
+        // a switch must swap it too (KNOWN_ISSUES item 42).
+        unsafe { kernel::fpu::frame_save(caller, frame.as_ptr()) };
         if let Some(next_proc) = unsafe { kernel::sched::pick_proc() } {
             if next_proc != caller {
                 unsafe {
@@ -449,6 +461,7 @@ pub unsafe extern "C" fn kmain(arg_dtb: u64) -> ! {
                         frame.as_mut_ptr(),
                         288,
                     );
+                    unsafe { kernel::fpu::frame_load(next_proc, frame.as_mut_ptr()) };
                     let tls = (*next_proc).p_tls;
                     if tls != 0 {
                         arch_aarch64::hal::set_tls_current(tls);

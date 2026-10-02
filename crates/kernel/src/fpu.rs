@@ -56,6 +56,73 @@ const RISCV_FCSR_OFF: usize = 256;
 #[cfg(target_arch = "riscv64")]
 const RISCV_IMAGE_SIZE: usize = RISCV_FCSR_OFF + 8;
 
+/// aarch64: the exception frame's SIMD block. The asm entry saves q0-q31 from
+/// `AARCH64_SIMD_OFF` and its return reloads them, so the frame -- not the live
+/// registers -- is where a user process's FP state lives. A context switch
+/// repurposes that frame for another process, so it must swap this block the
+/// same way it swaps the 288-byte `p_reg`; otherwise the resumed process runs
+/// with whatever process last occupied the frame (KNOWN_ISSUES item 42).
+#[cfg(target_arch = "aarch64")]
+pub const AARCH64_SIMD_OFF: usize = 288;
+/// q0-q31, 16 bytes each.
+#[cfg(target_arch = "aarch64")]
+pub const AARCH64_SIMD_LEN: usize = 512;
+
+/// The aarch64 SIMD area for `rp`, allocating and zeroing a page on first use.
+#[cfg(target_arch = "aarch64")]
+unsafe fn aarch64_area(rp: *mut Proc) -> *mut u8 {
+    let mut area = unsafe { (*rp).p_seg.fpu_state };
+    if area.is_null() {
+        let Some(page) = crate::hal::alloc_phys_contig(1) else {
+            return core::ptr::null_mut();
+        };
+        area = crate::hal::phys_to_virt(page) as *mut u8;
+        unsafe { core::ptr::write_bytes(area, 0, 1 << 12) };
+        unsafe { (*rp).p_seg.fpu_state = area };
+    }
+    area
+}
+
+/// aarch64: copy the exception frame's SIMD block into `rp`'s own area.
+///
+/// # Safety
+///
+/// `rp` must be a valid `Proc`; `frame` must point at a live exception frame.
+#[cfg(target_arch = "aarch64")]
+pub unsafe fn frame_save(rp: *mut Proc, frame: *const u8) {
+    unsafe {
+        if rp.is_null() {
+            return;
+        }
+        let area = aarch64_area(rp);
+        if area.is_null() {
+            return;
+        }
+        core::ptr::copy_nonoverlapping(frame.add(AARCH64_SIMD_OFF), area, AARCH64_SIMD_LEN);
+    }
+}
+
+/// aarch64: copy `rp`'s own SIMD area into the exception frame, so the return
+/// path restores this process's registers rather than the frame's previous
+/// occupant's.
+///
+/// # Safety
+///
+/// `rp` must be a valid `Proc`; `frame` must point at a live exception frame.
+#[cfg(target_arch = "aarch64")]
+pub unsafe fn frame_load(rp: *mut Proc, frame: *mut u8) {
+    unsafe {
+        if rp.is_null() {
+            return;
+        }
+        let area = aarch64_area(rp);
+        if area.is_null() {
+            return;
+        }
+        core::ptr::copy_nonoverlapping(area, frame.add(AARCH64_SIMD_OFF), AARCH64_SIMD_LEN);
+    }
+}
+
 /// Save the live FPU/SIMD state into `rp`'s area, allocating the area on first use.
 ///
 /// # Safety
@@ -290,7 +357,25 @@ pub unsafe fn fork_inherit(parent: *mut Proc, child: *mut Proc) {
         core::ptr::copy_nonoverlapping(src, dst, crate::hal::FPU_STATE_SIZE);
         (*child).p_seg.fpu_state = dst;
     }
-    #[cfg(not(any(target_arch = "x86_64", target_arch = "riscv64")))]
+    #[cfg(target_arch = "aarch64")]
+    unsafe {
+        if parent.is_null() || child.is_null() {
+            return;
+        }
+        (*child).p_seg.fpu_state = core::ptr::null_mut();
+        let src = (*parent).p_seg.fpu_state;
+        if src.is_null() {
+            return;
+        }
+        let Some(page) = crate::hal::alloc_phys_contig(1) else {
+            return;
+        };
+        let dst = crate::hal::phys_to_virt(page) as *mut u8;
+        core::ptr::write_bytes(dst, 0, 1 << 12);
+        core::ptr::copy_nonoverlapping(src, dst, AARCH64_SIMD_LEN);
+        (*child).p_seg.fpu_state = dst;
+    }
+    #[cfg(not(any(target_arch = "x86_64", target_arch = "riscv64", target_arch = "aarch64")))]
     {
         let _ = (parent, child);
     }
@@ -323,7 +408,17 @@ pub unsafe fn reset(rp: *mut Proc) {
             core::ptr::write_bytes(area, 0, RISCV_IMAGE_SIZE);
         }
     }
-    #[cfg(not(any(target_arch = "x86_64", target_arch = "riscv64")))]
+    #[cfg(target_arch = "aarch64")]
+    unsafe {
+        if rp.is_null() {
+            return;
+        }
+        let area = (*rp).p_seg.fpu_state;
+        if !area.is_null() {
+            core::ptr::write_bytes(area, 0, AARCH64_SIMD_LEN);
+        }
+    }
+    #[cfg(not(any(target_arch = "x86_64", target_arch = "riscv64", target_arch = "aarch64")))]
     {
         let _ = rp;
     }

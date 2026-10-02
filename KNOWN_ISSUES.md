@@ -1710,28 +1710,44 @@ are arch-specific, `[env]` is tooling/platform, not kernel.
     host arm returns 0 -- but it is a wrong answer rather than a missing feature, which is the
     shape that survives longest. Fix it with the P5 reply convention when something needs it.
 
-42. **On aarch64 a fork child that page-faults clobbers the parent's stack -- open, found 2026-10-02.**
+42. **On aarch64 a fork child that page-faults clobbered the parent's stack -- FIXED (2026-10-02).**
     Measuring item 16 made `/bin/winprobe`'s children fault for the first time on aarch64 (before the
     fix all four probed VAs were mapped, so no child ever faulted). With the fix, the per-VA
-    diagnostic line -- built in a stack array in `winprobe.rs` -- reaches the console with its first
-    8 bytes overwritten, while the `MARKER` literal written next to it (from `.rodata`, no buffer)
-    and the run summary (a different stack slot) stay clean. Moving the buffer from the stack to a
-    `static` (`.bss`) leaves it clean, so the writer targets the parent's *user stack page*, not the
-    console write path. It is aarch64-only: x86_64 and riscv64 run the same probe with faulting
-    children and clean output. The overwriting value is deterministic per build -- `{0x10, 0x10}` in
-    the shipped probe, `0xffff_ffff_ffff_ffff` once `is_alias_frame` was temporarily reduced to
-    `frame == va` -- so it is the child's own data, and it is *not* the alias classification
-    (removing that changed the bytes, not whether the corruption happened).
+    diagnostic line -- built in a stack array -- reached the console with its first 8 bytes
+    overwritten, while a `.rodata` literal and a `.bss` buffer stayed clean. It was not memory
+    corruption: the compiler kept the line's prefix constant (`winprobe`) live in **`q8`**, a
+    callee-saved SIMD register, across the `fork()` syscall, and aarch64 did not preserve it. Two
+    gaps had to close together:
 
-    The shape points at the child's user stack page being writable in both the parent and the child:
-    a child that faults runs enough user code first (the `fork` return and the `body` call) to store
-    its own data there. `vm_paging_fork` (`arch-aarch64/src/fork.rs`) makes only the *child's* PTE
-    read-only and leaves the parent's writable, so a shared page is protected from the child only by
-    the child taking a COW fault. Not root-caused; the fix is in that fork/COW path, not the probe.
-    Gate: `tools/smoke/winprobe.tsv`'s `reachable=0` verdict is correct and stable (its summary line
-    is a different stack slot), so the gate holds -- the corrupted diagnostics are the evidence.
-    Reproduce: `just test-winprobe aarch64`, then read the `# /bin/winprobe` block in
-    `target/test-winprobe-aarch64.log`.
+      * The exception frames saved only `q0-q7` and `q16-q31`, on the comment "q8-q15 are
+        callee-saved (preserved by the C ABI), so they need no save here" -- true for a call within
+        one process, not for the kernel clobbering them.
+      * The frame is where a user process's SIMD lives between the asm entry and its return, and a
+        context switch *repurposes the frame*: `aarch64_post_syscall` / `aarch64_timer_callback` swap
+        only the 288-byte GPR half (`p_reg`) between processes, so the SIMD half stayed whatever the
+        previous occupant left. A resumed process therefore ran with another process's `q0-q31`; only
+        `q8-q15` mattered, because that is where the compiler may keep live values across a call
+        (caller-saved `q0-q7`/`q16-q31` it spills around one).
+    Disassembling `winprobe` pinned it: `mov`/`movk x29, "winprobe"` hoisted out of the loop,
+    `str d8, [sp, #0xd0]` in it, and a `cmp x8, x29` self-check that read back the child's bytes. This
+    is the aarch64 form of item 12 (the x86 `XMM` clobber) and the class `fpu.rs` exists for; its
+    `save`/`restore`/`fork_inherit` were no-ops on aarch64, on the assumption that the exception frame
+    covered the FP state.
+
+    *Fixed (2026-10-02).* Three changes:
+      * `arch-aarch64/src/exception.rs`: the three exception frames (`el1_sync`, `el1_irq`,
+        `el0_sync`) grow from 672 to 800 bytes and save/restore `q8-q15` next to the caller-saved
+        block, so all 32 `q` registers survive one process's own kernel entry.
+      * `kernel/src/fpu.rs`: `frame_save`/`frame_load` copy the frame's SIMD block (offset 288, 512
+        bytes) to and from a per-process `p_seg.fpu_state` page; the aarch64 arms of `reset` (exec)
+        and `fork_inherit` are implemented too.
+      * `kernel-boot/src/aarch64.rs`: `aarch64_post_syscall` and `aarch64_timer_callback` swap the
+        SIMD block alongside `p_reg` on every switch, and the exec path zeroes it for the new image.
+    Verified: `just test-winprobe aarch64` prints all four diagnostic lines clean across repeated
+    runs and `probed=4 reachable=0`; `just test-arches` (12 gates) is green. `tools/smoke/winprobe.tsv`
+    now also asserts a per-VA diagnostic line, so a regression fails the gate instead of only
+    corrupting the log. Not fixed here: a fresh process entered through the boot `switch_to_user`
+    still begins with whatever the hardware `q` registers hold rather than a zeroed image.
 
 ---
 

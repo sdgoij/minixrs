@@ -15,8 +15,10 @@
 # The VAs are in the band between the loader and the brk heap, which every arch's layout leaves
 # empty (above x86's 80..128 MiB DSO/loader region, below the 512 MiB heap base).
 #
-# The step asserts the summary line, so one expectation holds on every arch: `reachable=0` is the
-# invariant, and a count that is not 0 names how many VAs answered. The line per VA is in the log
-# as the diagnostic, and says whether the VA was readable and whether it was writable, which is
-# what separates "mapped read-only" from "the kernel's alias, writable from EL0".
+# The first step asserts the summary line, so one expectation holds on every arch: `reachable=0`
+# is the invariant, and a count that is not 0 names how many VAs answered. The second re-runs the
+# probe and asserts a per-VA diagnostic line verbatim: those lines carry the probe's own prefix,
+# so a kernel that loses the callee-saved SIMD registers across the fork (KNOWN_ISSUES item 42)
+# corrupts them, and the step then fails instead of the log quietly showing a mangled prefix.
 /bin/winprobe	winprobe: probed=4 reachable=0
+/bin/winprobe	winprobe: va=0x9000000 read=err write=err
