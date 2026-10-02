@@ -201,7 +201,9 @@ pub unsafe fn save(rp: *mut Proc) {
 ///
 /// x86_64 reloads inside its `restore()` asm (`FXRSTOR` from `FPU_STATE_OFF`), so this is a no-op
 /// there; riscv64's trap return is generic asm with no per-arch offset to hook, so its switch sites
-/// call this in Rust instead.
+/// call this in Rust instead. aarch64's exception return does reload the frame's SIMD block, but the
+/// boot entry (`switch_to_user`) does not go through a frame, so it calls this to give the first
+/// process a restored image -- zeroed for one that has not run yet.
 ///
 /// # Safety
 ///
@@ -281,7 +283,44 @@ pub unsafe fn restore(rp: *mut Proc) {
             options(nostack, preserves_flags),
         );
     }
-    #[cfg(not(target_arch = "riscv64"))]
+    #[cfg(target_arch = "aarch64")]
+    unsafe {
+        if rp.is_null() {
+            return;
+        }
+        // The area is zeroed on first use, so a process that has not run gets a
+        // clean image rather than whatever the boot code left in the hardware q
+        // registers.
+        let fresh = (*rp).p_seg.fpu_state.is_null();
+        let area = aarch64_area(rp);
+        if area.is_null() {
+            return;
+        }
+        core::arch::asm!(
+            "ldp q0,  q1,  [{p}, #0]",
+            "ldp q2,  q3,  [{p}, #32]",
+            "ldp q4,  q5,  [{p}, #64]",
+            "ldp q6,  q7,  [{p}, #96]",
+            "ldp q8,  q9,  [{p}, #128]",
+            "ldp q10, q11, [{p}, #160]",
+            "ldp q12, q13, [{p}, #192]",
+            "ldp q14, q15, [{p}, #224]",
+            "ldp q16, q17, [{p}, #256]",
+            "ldp q18, q19, [{p}, #288]",
+            "ldp q20, q21, [{p}, #320]",
+            "ldp q22, q23, [{p}, #352]",
+            "ldp q24, q25, [{p}, #384]",
+            "ldp q26, q27, [{p}, #416]",
+            "ldp q28, q29, [{p}, #448]",
+            "ldp q30, q31, [{p}, #480]",
+            p = in(reg) area,
+            options(nostack, preserves_flags),
+        );
+        if fresh {
+            core::arch::asm!("msr fpsr, xzr", "msr fpcr, xzr", options(nostack, preserves_flags));
+        }
+    }
+    #[cfg(not(any(target_arch = "riscv64", target_arch = "aarch64")))]
     {
         let _ = rp;
     }

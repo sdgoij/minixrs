@@ -281,7 +281,7 @@ pub unsafe extern "C" fn kmain(arg_dtb: u64) -> ! {
                         frame.as_mut_ptr(),
                         288,
                     );
-                    unsafe { kernel::fpu::frame_load(next_proc, frame.as_mut_ptr()) };
+                    kernel::fpu::frame_load(next_proc, frame.as_mut_ptr());
                     // tpidr_el0 is not part of the trap frame: reload the
                     // new thread's thread pointer on every switch so its
                     // TLS accesses land in its own block (matches x86's
@@ -339,7 +339,7 @@ pub unsafe extern "C" fn kmain(arg_dtb: u64) -> ! {
                                 frame.as_mut_ptr(),
                                 288,
                             );
-                            unsafe { kernel::fpu::frame_load(next_proc, frame.as_mut_ptr()) };
+                            kernel::fpu::frame_load(next_proc, frame.as_mut_ptr());
                             let tls = (*next_proc).p_tls;
                             if tls != 0 {
                                 arch_aarch64::hal::set_tls_current(tls);
@@ -461,7 +461,7 @@ pub unsafe extern "C" fn kmain(arg_dtb: u64) -> ! {
                         frame.as_mut_ptr(),
                         288,
                     );
-                    unsafe { kernel::fpu::frame_load(next_proc, frame.as_mut_ptr()) };
+                    kernel::fpu::frame_load(next_proc, frame.as_mut_ptr());
                     let tls = (*next_proc).p_tls;
                     if tls != 0 {
                         arch_aarch64::hal::set_tls_current(tls);
@@ -613,6 +613,11 @@ pub unsafe extern "C" fn kmain(arg_dtb: u64) -> ! {
 
         serial_write("  switching to userspace...\r\n");
         unsafe {
+            // The process entered here has no saved FP image yet; restoring it
+            // gives it a zeroed one rather than whatever the boot code left in the
+            // hardware q registers. Later entries go through the post-syscall
+            // hook, which swaps the frame's SIMD block itself.
+            kernel::fpu::restore(next_proc as *mut kernel::proc::Proc);
             arch_aarch64::switch::switch_to_user(next_proc as *const u8);
         }
         // switch_to_user never returns — we should never reach here.

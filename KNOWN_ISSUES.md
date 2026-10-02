@@ -1746,8 +1746,10 @@ are arch-specific, `[env]` is tooling/platform, not kernel.
     Verified: `just test-winprobe aarch64` prints all four diagnostic lines clean across repeated
     runs and `probed=4 reachable=0`; `just test-arches` (12 gates) is green. `tools/smoke/winprobe.tsv`
     now also asserts a per-VA diagnostic line, so a regression fails the gate instead of only
-    corrupting the log. Not fixed here: a fresh process entered through the boot `switch_to_user`
-    still begins with whatever the hardware `q` registers hold rather than a zeroed image.
+    corrupting the log. The boot entry does not go through a frame, so `switch_to_user`'s caller now
+    restores the target's SIMD image itself (`fpu::restore`'s aarch64 arm, zeroed for a process that
+    has not run), closing that last leak; the frame's SIMD block was also relaid out in `q0..q31`
+    order so a verbatim copy to the per-process area is linear.
 
 ---
 
