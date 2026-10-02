@@ -67,17 +67,81 @@ unsafe fn remove_dir(rldirp_idx: u16, rip_idx: u16, dir_name: &[u8]) -> i32 {
     OK
 }
 
+/// Read a little-endian field from a request payload.
+///
+/// VFS writes these fields little-endian (`crates/servers/src/vfs/request.rs`'s `w_*`), and a
+/// payload shorter than the field being read yields zero rather than panicking, as this file's
+/// other parsers do.
+fn payload_u32(raw: &[u8], off: usize) -> u32 {
+    u32::from_le_bytes(
+        raw.get(off..off + 4)
+            .and_then(|s| s.try_into().ok())
+            .unwrap_or([0u8; 4]),
+    )
+}
+
+fn payload_i32(raw: &[u8], off: usize) -> i32 {
+    payload_u32(raw, off) as i32
+}
+
+fn payload_u64(raw: &[u8], off: usize) -> u64 {
+    u64::from_le_bytes(
+        raw.get(off..off + 8)
+            .and_then(|s| s.try_into().ok())
+            .unwrap_or([0u8; 8]),
+    )
+}
+
+/// Copy a request's name into `buf` through its grant, and return how many bytes of `buf` hold
+/// it.
+///
+/// The name is the last component of a path VFS resolved, sent NUL-terminated with that NUL
+/// counted, and a name that fills `buf` is truncated rather than left unterminated — C's
+/// `NUL(string, len, sizeof(string))`. `req_link` and `req_rename` parse their own payload
+/// because `mfs_main` unpacks none for them (`KNOWN_ISSUES.md` item 37).
+fn copy_name(buf: &mut [u8; MFS_NAME_MAX], grant: i32, len: usize) -> Result<usize, i32> {
+    let len = len.min(MFS_NAME_MAX);
+    #[cfg(target_os = "minix")]
+    let r = safecopy_from_grant(grant, 0, buf.as_mut_ptr(), len);
+    #[cfg(not(target_os = "minix"))]
+    let r = {
+        // No kernel to copy through on the host, so a request that names a file arrives empty
+        // and is refused rather than acted on with a name it never carried.
+        let _ = grant;
+        if len > 0 { EIO } else { OK }
+    };
+    if r != OK {
+        return Err(r);
+    }
+    if len >= MFS_NAME_MAX {
+        buf[MFS_NAME_MAX - 1] = 0;
+    }
+    Ok(buf.iter().position(|&c| c == 0).unwrap_or(MFS_NAME_MAX))
+}
+
+/// Create a hard link.
+///
+/// Message layout (VFS `req_link`): inode at payload[0], directory inode at payload[4], name
+/// grant at payload[8], name length at payload[16]. The name arrives through a grant, which is
+/// the only way VFS's own bytes reach a filesystem server, and it is the last component of the
+/// path VFS resolved.
+///
+/// Reference: `minix/fs/mfs/link.c` `fs_link()`
 pub fn fs_link() -> i32 {
     unsafe {
-        let ino = (*glo::mfs_ptr()).cch[0] as u32;
-        let dir_ino = (*glo::mfs_ptr()).cch[1] as u32;
+        let raw = (*glo::mfs_ptr()).m_in.m_payload.raw;
+        let ino = payload_u32(&raw, 0);
+        let dir_ino = payload_u32(&raw, 4);
+        let grant_path = payload_i32(&raw, 8);
+        let path_len = payload_u64(&raw, 16) as usize;
         let dev = (*glo::mfs_ptr()).fs_dev;
-        let user_path = &(*glo::mfs_ptr()).user_path;
-        let len = user_path
-            .iter()
-            .position(|&c| c == 0)
-            .unwrap_or(user_path.len());
-        let string = &user_path[..len];
+
+        let mut name_buf = [0u8; MFS_NAME_MAX];
+        let name_len = match copy_name(&mut name_buf, grant_path, path_len) {
+            Ok(n) => n,
+            Err(e) => return e,
+        };
+        let string = &name_buf[..name_len];
 
         let rip = match get_inode(dev, ino) {
             Some(r) => r,
@@ -282,23 +346,37 @@ pub fn fs_rdlink() -> i32 {
     }
 }
 
+/// Rename a file or directory.
+///
+/// Message layout (VFS `req_rename`): old directory inode at payload[0], new directory inode
+/// at payload[4], old name length at payload[8], new name length at payload[16], old name grant
+/// at payload[24], new name grant at payload[28]. Both names are the last component of the path
+/// VFS resolved and both arrive through grants.
+///
+/// Reference: `minix/fs/mfs/link.c` `fs_rename()`
 pub fn fs_rename() -> i32 {
     unsafe {
-        let dir_old = (*glo::mfs_ptr()).cch[0] as u32;
-        let dir_new = (*glo::mfs_ptr()).cch[1] as u32;
+        let raw = (*glo::mfs_ptr()).m_in.m_payload.raw;
+        let dir_old = payload_u32(&raw, 0);
+        let dir_new = payload_u32(&raw, 4);
+        let len_old = payload_u64(&raw, 8) as usize;
+        let len_new = payload_u64(&raw, 16) as usize;
+        let grant_old = payload_i32(&raw, 24);
+        let grant_new = payload_i32(&raw, 28);
         let dev = (*glo::mfs_ptr()).fs_dev;
-        let user_path = &(*glo::mfs_ptr()).user_path;
 
-        let old_name = {
-            let nlen = core::cmp::min(user_path.len(), MFS_NAME_MAX);
-            &user_path[0..nlen]
+        let mut old_buf = [0u8; MFS_NAME_MAX];
+        let old_len = match copy_name(&mut old_buf, grant_old, len_old) {
+            Ok(n) => n,
+            Err(e) => return e,
         };
-        let new_name = {
-            let start = core::cmp::min(MFS_NAME_MAX, user_path.len());
-            let remain = user_path.len() - start;
-            let nlen = core::cmp::min(remain, MFS_NAME_MAX);
-            &user_path[start..start + nlen]
+        let mut new_buf = [0u8; MFS_NAME_MAX];
+        let new_len = match copy_name(&mut new_buf, grant_new, len_new) {
+            Ok(n) => n,
+            Err(e) => return e,
         };
+        let old_name = &old_buf[..old_len];
+        let new_name = &new_buf[..new_len];
 
         let old_dirp = match get_inode(dev, dir_old) {
             Some(d) => d,

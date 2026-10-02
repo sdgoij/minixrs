@@ -404,11 +404,14 @@ test-symlink-x86 boot-timeout="20": build-x86
     FEED_SCENARIO=tools/smoke/symlink.tsv sh tools/smoke/feed.sh target/test-symlink-x86.log {{boot-timeout}} qemu-system-x86_64 -nographic -m 256M -no-reboot -vga none -device bochs-display,id=fb0 -kernel target/images/x86_64-pc-minix/minix-x86.elf -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0 -device virtio-tablet-pci,display=fb0
     @echo "symlink: a client created a link in /tmp, read its target back through the grant, and got the three refusals (x86_64)"
 
-# `link(2)` and `rename(2)`, the acceptance test for KNOWN_ISSUES.md item 37 - and *red* on
-# purpose until that is fixed: these steps are the behaviour the calls should have, so they are
-# not edited when the fix lands. Kept out of `test-arches`, as `test-coreutils-wedge` was while
-# it was red, so a failure here is never reported as a boot or arch failure. x86 only: the fault
-# is in VFS/MFS, which the other arches share.
+# `link(2)` and `rename(2)`, the acceptance test for KNOWN_ISSUES.md item 37 - green since that
+# item's faults were fixed (2026-10-02). It was *red* on purpose until then, and written to the
+# behaviour the calls should have rather than the behaviour they had, so no step here was edited
+# when the fix landed: the same file that measured the fault is what now passes.
+#
+# A step's fields are separate claims - each call's own errno, the state it left, and a
+# neighbour file's bytes - so a call that ran against the wrong name cannot read as one that
+# worked. x86 only: the fault was in VFS/MFS, which the other arches share.
 test-link-x86 boot-timeout="20": build-x86
     mkdir -p target/images/x86_64-pc-minix
     cp target/trampoline.elf target/images/x86_64-pc-minix/minix-x86.elf
@@ -920,27 +923,58 @@ test-boot-aarch64: build-aarch64-boot mkfs-aarch64
     /usr/bin/timeout -s 9 {{qemu-timeout}} qemu-system-aarch64 -machine virt -cpu cortex-a57 -m 256M -nographic -no-reboot -global virtio-mmio.force-legacy=off -drive if=none,id=disk0,file=target/images/aarch64-unknown-minix/disk.img,format=raw,cache=writethrough -device virtio-blk-device,drive=disk0 -device virtio-gpu-device -device virtio-keyboard-device -kernel target/aarch64-unknown-minix/release/kernel-boot-aarch64-boot 2>&1 | tee target/test-boot-aarch64.log
     @just _assert-qemu-log target/test-boot-aarch64.log "ALL TESTS PASSED"
 
-# Both QEMU suites for all three arches: the six gates a change to a VA layout, a
-# HAL constant or anything arch-gated has to be followed by. They cover different
-# things and neither substitutes for the other - `test-qemu` runs the in-kernel
-# suite (`crates/kernel/src/tests.rs`, behind the `qemu-tests` feature), `test-boot`
-# boots to a shell and runs `boot_test.rs` - and the host suite cannot stand in for
-# the first, because `tests.rs` is compiled only under `qemu-tests`. That is
-# exactly how `syscall_brk` came to assert x86_64's heap base and fail on aarch64
+# The per-arch QEMU gates a change to a VA layout, a HAL constant or anything arch-gated
+# has to be followed by. They cover different things and none substitutes for another:
+# `test-qemu` runs the in-kernel suite (`crates/kernel/src/tests.rs`, behind the
+# `qemu-tests` feature), `test-boot` boots to a shell and runs `boot_test.rs`, and
+# `test-fork` forks a process and checks both directions of the copy. The host suite
+# cannot stand in for the first, because `tests.rs` is compiled only under `qemu-tests` -
+# which is exactly how `syscall_brk` came to assert x86_64's heap base and fail on aarch64
 # alone: `cargo test` never saw it.
 #
 # Grouped by arch so each arch's userland/coreutils build is reused, and stops at
 # the first failing gate like the individual recipes (the failing log is on
 # stdout).
 #
-# All six QEMU gates in one command.
+# All nine QEMU gates in one command.
 test-arches:
     @just test-qemu x86
     @just test-boot x86
+    @just test-fork x86
     @just test-qemu riscv64
     @just test-boot riscv64
+    @just test-fork riscv64
     @just test-qemu aarch64
     @just test-boot aarch64
+    @just test-fork aarch64
+
+# Fork isolation, per arch: `tools/smoke/fork.tsv` runs `/bin/forktest`, which forks and checks
+# both directions of the copy - the child's write must not reach the parent, and the parent's
+# post-fork write must not reach a child that only reads that page. The second direction is what
+# catches a fork sharing frames instead of copying them, and it is per arch because each arch's
+# `vm_paging_fork` builds the COW mapping itself (aarch64's AP[2:1] encoding is its own).
+#
+# `/bin/forktest` is a `BOOT_BINS` entry, so every image carries it, and this is the gate the
+# per-arch fork entries in `KNOWN_ISSUES.md` point at.
+test-fork arch="x86" boot-timeout="40":
+    @just test-fork-{{arch}} {{boot-timeout}}
+
+test-fork-x86 boot-timeout="40": build-x86
+    mkdir -p target/images/x86_64-pc-minix
+    cp target/trampoline.elf target/images/x86_64-pc-minix/minix-x86.elf
+    @just _assert-qemu-version qemu-system-x86_64
+    FEED_SCENARIO=tools/smoke/fork.tsv sh tools/smoke/feed.sh target/test-fork-x86.log {{boot-timeout}} qemu-system-x86_64 -nographic -m 256M -no-reboot -vga none -device bochs-display,id=fb0 -kernel target/images/x86_64-pc-minix/minix-x86.elf -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0 -device virtio-tablet-pci,display=fb0
+    @echo "fork: both directions of the copy held (x86_64)"
+
+test-fork-riscv64 boot-timeout="60": build-riscv64
+    @just _assert-qemu-version qemu-system-riscv64
+    FEED_SCENARIO=tools/smoke/fork.tsv sh tools/smoke/feed.sh target/test-fork-riscv64.log {{boot-timeout}} qemu-system-riscv64 -machine virt -m 256M -nographic -global virtio-mmio.force-legacy=off -netdev user,id=net0 -device virtio-net-device,netdev=net0 -device virtio-gpu-device -device virtio-keyboard-device -kernel target/riscv64gc-unknown-minix/release/kernel-boot-riscv64
+    @echo "fork: both directions of the copy held (riscv64)"
+
+test-fork-aarch64 boot-timeout="60": build-aarch64
+    @just _assert-qemu-version qemu-system-aarch64
+    FEED_SCENARIO=tools/smoke/fork.tsv sh tools/smoke/feed.sh target/test-fork-aarch64.log {{boot-timeout}} qemu-system-aarch64 -machine virt -cpu cortex-a57 -m 256M -nographic -no-reboot -global virtio-mmio.force-legacy=off -netdev user,id=net0 -device virtio-net-device,netdev=net0 -device virtio-gpu-device -device virtio-keyboard-device -kernel target/aarch64-unknown-minix/release/kernel-boot-aarch64
+    @echo "fork: both directions of the copy held (aarch64)"
 
 test target="x86":
     @just test-{{target}}

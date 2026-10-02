@@ -1961,7 +1961,27 @@ pub fn do_link() -> i32 {
         return ENOENT;
     }
     let dir_ino = unsafe { (*dirp).v_inode_nr };
-    let r = unsafe { crate::vfs::request::req_link(src_fs_e, dir_ino, core::ptr::null(), src_ino) };
+    // The name is `name2`'s last component: its parent is what was resolved above, so the
+    // entry to add is the suffix after that path's last separator (C's `lastc`).
+    let name_start = name2_buf[..actual2]
+        .iter()
+        .rposition(|&b| b == b'/')
+        .map(|i| i + 1)
+        .unwrap_or(0);
+    if name_start == actual2 {
+        // A trailing slash leaves no name to link under.
+        unsafe { mount::put_vnode(dirp) };
+        unsafe { mount::put_vnode(vp) };
+        return ENOENT;
+    }
+    let r = unsafe {
+        crate::vfs::request::req_link(
+            src_fs_e,
+            dir_ino,
+            name2_buf.as_ptr().add(name_start),
+            src_ino,
+        )
+    };
     unsafe { mount::put_vnode(dirp) };
     unsafe { mount::put_vnode(vp) };
     norm_fs_errno(r)
@@ -2076,13 +2096,31 @@ pub fn do_rename() -> i32 {
     }
     let new_parent_ino = unsafe { (*dirp2).v_inode_nr };
 
+    // Both names are their path's last component: each parent is what was resolved above, so
+    // the entry moved is the suffix after that path's last separator (C's `lastc`).
+    let old_start = buf[..actual]
+        .iter()
+        .rposition(|&b| b == b'/')
+        .map(|i| i + 1)
+        .unwrap_or(0);
+    let new_start = buf2[..actual2]
+        .iter()
+        .rposition(|&b| b == b'/')
+        .map(|i| i + 1)
+        .unwrap_or(0);
+    if old_start == actual || new_start == actual2 {
+        // A trailing slash leaves no name to move.
+        unsafe { mount::put_vnode(dirp2) };
+        unsafe { mount::put_vnode(dirp) };
+        return ENOENT;
+    }
     let r = unsafe {
         crate::vfs::request::req_rename(
             old_parent_fs,
             old_parent_ino,
-            core::ptr::null(),
+            buf.as_ptr().add(old_start),
             new_parent_ino,
-            core::ptr::null(),
+            buf2.as_ptr().add(new_start),
         )
     };
     unsafe { mount::put_vnode(dirp2) };

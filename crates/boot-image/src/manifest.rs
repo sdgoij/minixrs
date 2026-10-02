@@ -221,6 +221,13 @@ pub const BOOT_BINS: &[(&str, &str)] = &[
     // said *and* what they left behind — the measurement `KNOWN_ISSUES.md` item 37 is waiting on,
     // and the one program in the image that reaches `fs_link`/`fs_rename`.
     ("/bin/linktest", "linktest"),
+    // `/bin/forktest` fills two separately aligned 4 KiB writable pages, forks, and checks both
+    // directions of the copy: the child's write must not reach the parent, and the parent's
+    // post-fork write must not reach a child that only reads that page. The second direction is
+    // what catches a fork sharing frames instead of copying them, and it is the check
+    // `KNOWN_ISSUES.md`'s per-arch fork entries point at. `just test-fork <arch>` drives it,
+    // once per arch, because each arch's `vm_paging_fork` builds the COW mapping itself.
+    ("/bin/forktest", "forktest"),
 ];
 
 /// Programs a **wasm32** image carries: destination path → module file name in the target's

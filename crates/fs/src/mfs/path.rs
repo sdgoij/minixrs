@@ -323,10 +323,14 @@ pub fn advance(dirp_idx: u16, string: &[u8], chk_perm: i32) -> Option<u16> {
     }
     let mut numb: u32 = 0;
     let r = search_dir(dirp_idx, string, Some(&mut numb), LOOK_UP, chk_perm);
+    unsafe {
+        // C assigns the lookup's status to `err_code` (`path.c` `advance`), so a successful
+        // one *clears* it. Two callers take their whole verdict from the code rather than from
+        // the result — `fs_rename` and `fs_unlink` read it after a lookup that worked — and a
+        // stale error there fails a call whose every step succeeded.
+        (*glo::mfs_ptr()).err_code = r;
+    }
     if r != OK {
-        unsafe {
-            (*glo::mfs_ptr()).err_code = r;
-        }
         return None;
     }
     let dev = unsafe { (*glo::get_inode_ptr(dirp_idx as usize)).i_dev };

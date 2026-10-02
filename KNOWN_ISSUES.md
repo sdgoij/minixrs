@@ -1388,7 +1388,7 @@ are arch-specific, `[env]` is tooling/platform, not kernel.
     the master in an `EAGAIN` loop instead of polling, which is what hid it. It polls now.
 
 37. **`link(2)` and `rename(2)` send the filesystem no name, and it reads a stale one
-    (2026-09-28, open — measured).** VFS's `do_link` and `do_rename`
+    (2026-09-28, FIXED 2026-10-02 — measured).** VFS's `do_link` and `do_rename`
     resolve the names and then pass `core::ptr::null()` where the name goes (`call.rs`'s
     `req_link(src_fs_e, dir_ino, core::ptr::null(), src_ino)` and `req_rename(..., null, ..., null)`), and
     `request.rs` takes the length *from* that pointer (`if _lastc.is_null() { 0 }`), so the
@@ -1417,9 +1417,9 @@ are arch-specific, `[env]` is tooling/platform, not kernel.
     wrong-directory half of the fault fires first here; that the *name* half is wrong as well is
     still only read from the code.
 
-    The gate is red on purpose and out of `test-arches`, as `test-coreutils-wedge` was while it
-    was red: its step is the behaviour the calls should have, so fixing this flips it green with
-    no edit to the scenario.
+    The gate was red on purpose until this was fixed: its step is the behaviour the calls
+    should have, so the fix flipped it green with no edit to the scenario - the measurement
+    that failed and the one that now passes are the same file (`tools/smoke/link.tsv`).
 
     One side effect worth recording: the probe could not be added to `BOOT_BINS` at first,
     because `/bin` was exactly one directory zone full — 62 programs plus `.` and `..`, 64 slots
@@ -1427,13 +1427,37 @@ are arch-specific, `[env]` is tooling/platform, not kernel.
     second zone the way MFS's `search_dir` grows them, pinned by
     `a_directory_grows_past_one_zone`.
 
-    Fix both sides at once, as symlink had to: pass the resolved name (both names, for rename)
-    from VFS the way `do_slink` now does, and have MFS read the message rather than
-    `cch[]`/`user_path`. The gate belongs in `/bin/symlinktest`'s shape — a client that links
+    Both sides had to be fixed at once, as symlink's were: the resolved name (both names,
+    for rename) travels from VFS the way `do_slink`'s does, and MFS reads the message rather
+    than `cch[]`/`user_path`. The gate is in `/bin/symlinktest`'s shape - a client that links
     and renames a file it made and reads the result back, each step with its own marker so an
     earlier step's output cannot satisfy a later one (`silent-failure-traps`).
     (`crates/servers/src/vfs/call.rs`, `crates/servers/src/vfs/request.rs`,
     `crates/fs/src/mfs/main.rs`, `crates/fs/src/mfs/link.rs`)
+
+    *Fixed (2026-10-02).* Both sides carry the name now, and finding that was not the whole
+    fault. VFS resolves the path to its parent and sends the name's last component as a
+    `direct` grant, because the bytes are VFS's own (`req_link`/`req_rename`, the shape
+    `req_slink` already used); MFS parses its own payload and copies the name through the
+    grant (`fs_link`/`fs_rename`, one `copy_name` for both). With that, the link worked and the
+    rename still failed with `ENOENT`, which is the third fault: `advance` assigned `err_code`
+    only when the lookup *failed*, where C assigns `search_dir`'s status (`path.c`), so a
+    successful lookup left the *previous* request's error behind - and `fs_rename`/`fs_unlink`
+    take their whole verdict from `err_code` rather than from the result, so both failed on a
+    call whose every step had succeeded. `advance` assigns it either way now.
+
+    Measured: `just test-link-x86` prints `linktest: ln=ok tgt=ok rn=ok mv=ok keep=ok` where it
+    printed `ln=err 20 tgt=none rn=err 20 mv=none keep=ok`, and the intermediate state
+    (`ln=ok tgt=ok rn=err 2 mv=none keep=ok`) is recorded in `tools/smoke/link.tsv` - which is
+    why that gate is whole-line: a fix that carried the names and stopped there would have left
+    `ln=ok` to be read as "the calls work". The scenario was not edited.
+
+    Two things are inherited rather than fixed, and worth recording as such. `req_link` carries
+    no uid/gid, so `fs_link`'s "only the super-user may link to a directory" check reads whatever
+    `caller_uid` the last credentialed request left - which is what C does too (only `req_slink`
+    sends credentials), so it is MINIX's shape rather than the port's. And `do_rename` never
+    compares the two parents' filesystems, where C returns `EXDEV`; one filesystem is mounted
+    today, so that is unreachable rather than live.
 
 38. **The kernel image reaches past the user VA base, so a process's own code shadows its
     embedded initramfs (2026-09-28, resolved 2026-10-01 — measured).** `just test-boot-x86` reports exactly one
@@ -1852,7 +1876,9 @@ are arch-specific, `[env]` is tooling/platform, not kernel.
    (`alloc::is_alias_frame` — never copied, never COW'd). VM's
    `cow_setup_fork` + the COW message-buffer prefault are active. Verified
    by `/bin/forktest` (fork + write isolation, both directions) on all three arches
-   and the flat exec loop. (`crates/arch-aarch64/src/fork.rs`, `crates/servers/src/vm/cow.rs`)
+   and the flat exec loop. That is `just test-fork aarch64` now, and it runs in `test-arches`,
+   so the claim is checked rather than remembered.
+   (`crates/arch-aarch64/src/fork.rs`, `crates/servers/src/vm/cow.rs`)
 2. **Per-exec leak: 0** — the exec loop is flat at leak 0.0 KiB/exec at
    256M/1G/4G.
 3. **Kernel-range fault gate — FIXED (D3, 2026-08-17).** aarch64's
@@ -1961,8 +1987,10 @@ are arch-specific, `[env]` is tooling/platform, not kernel.
   fork-time contents. That last step is the one that catches a fork whose pages
   are shared rather than copied: a page the child writes gets a private copy
   either way, so only a read of an untouched page shows the parent's post-fork
-  write reaching the child (item 27). It runs as a normal command (shell fork →
-  exec); for image injection use `MINIXFS_EXTRA=/bin/forktest=...`.
+  write reaching the child (item 27). It is a `BOOT_BINS` entry, so every image carries it and
+  it runs as a normal command (shell fork + exec); `just test-fork <arch>` is the gate, and it
+  runs in `test-arches`. Before that entry existed the only way to reach it was
+  `MINIXFS_EXTRA=/bin/forktest=...`, which is why no recipe named it.
 - Two cross-arch bugs found while landing the aarch64 COW fork (fixed):
   (1) `do_vfs_mmap` removed a whole overlapping region when a later
   PT_LOAD segment shared its rounded-up tail page (data memsz spanning the

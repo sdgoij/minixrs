@@ -1,17 +1,18 @@
-# The `just test-link-x86` scenario: `link(2)` and `rename(2)`, which KNOWN_ISSUES.md item 37
-# says carry no name today.
+# The `just test-link-x86` scenario: `link(2)` and `rename(2)`, the acceptance test for
+# KNOWN_ISSUES.md item 37 - green since that item's faults were fixed (2026-10-02).
 #
-# This is a *red* gate on purpose, kept out of `test-arches` the way `test-coreutils-wedge` was
-# while it was red, so a failure here is never read as a boot or arch failure. It is written to
-# the behaviour the calls should have and not the behaviour they have, so the fix flips it green
-# without an edit to this file - and it stays red until then, which is the point of measuring
-# before fixing.
+# It was a *red* gate until then, written to the behaviour the calls should have and not the
+# behaviour they had, so no step here was edited when the fix landed: the same file that
+# measured the fault is what now passes. `just test-coreutils-wedge` was measured the same way
+# while it was red.
 #
-# The two faults it measures, both read from the code: VFS's `do_link`/`do_rename` pass
-# `core::ptr::null()` where the name goes (`request.rs` then derives the length from that
-# pointer, so the request carries a zero-length grant), and MFS has no parser for
-# `REQ_LINK`/`REQ_RENAME` - `mfs_main` unpacks `cch[]`/`user_path` for lookup/mknod/create/mkdir
-# only - so `fs_link`/`fs_rename` read those slots from whatever request ran before them.
+# The faults it measured, all read from the code and then confirmed by it: VFS's
+# `do_link`/`do_rename` passed `core::ptr::null()` where the name goes (`request.rs` then
+# derived the length from that pointer, so the request carried a zero-length grant), MFS had no
+# parser for `REQ_LINK`/`REQ_RENAME` - `mfs_main` unpacks `cch[]`/`user_path` for
+# lookup/mknod/create/mkdir only - so `fs_link`/`fs_rename` read those slots from whatever
+# request ran before them, and `advance` left `err_code` as the *previous* request left it on a
+# lookup that succeeded, which is the code `fs_rename` takes its whole verdict from.
 #
 # That second half is why the client reports the *state after the call* and not only the errno:
 # a call that ran against a stale name can report success and then link or move the wrong file.
@@ -25,10 +26,18 @@
 # are coreutils multicall applets, and measuring through them would confound their bugs with
 # these two syscalls'.
 #
-# Measured 2026-09-28, the state this gate is red in: `linktest: ln=err 20 tgt=none rn=err 20
-# mv=none keep=ok` - both calls fail with ENOTDIR, and the file neither of them names is
-# untouched. ENOTDIR rather than EINVAL says the stale directory number resolved to a live
-# inode that is not a directory, which `search_dir` refuses before writing an entry.
+# Measured 2026-09-28, the state this gate was red in: `linktest: ln=err 20 tgt=none rn=err 20
+# mv=none keep=ok` - both calls failed with ENOTDIR, and the file neither of them names was
+# untouched. ENOTDIR rather than EINVAL says the stale directory number resolved to a live inode
+# that is not a directory, which `search_dir` refuses before writing an entry.
+#
+# Measured 2026-10-02, with the names carried but `err_code` not yet fixed: `linktest: ln=ok
+# tgt=ok rn=err 2 mv=none keep=ok` - the link worked, and the rename reported ENOENT without
+# having looked for anything, because `advance`'s success left the previous request's error in
+# `err_code`. That intermediate state is why the gate is whole-line: a fix that carried the
+# names and stopped there would have left `ln=ok` to be read as "the calls work".
+#
+# Passing now: `linktest: ln=ok tgt=ok rn=ok mv=ok keep=ok`.
 #
 # Each field is a separate claim, and `checked()` prints `ok`/`bad`/`none` so a step that did not
 # run cannot read as one that passed.

@@ -584,26 +584,31 @@ pub unsafe fn req_inhibread(fs_e: i32, inode_nr: u32) -> i32 {
 
 /// Create a hard link.
 ///
+/// `lastc` is VFS's own NUL-terminated copy of the link's name — the last component of the
+/// path it resolved — so it is granted *direct*, the way `req_slink`'s name is: it is the
+/// granter's own memory, and the caller's bytes never pass through VFS.
+///
 /// # Safety
 ///
 /// `lastc` must point to a valid NUL-terminated string.  Caller must ensure
 /// `fs_e` is a valid FS endpoint.
-pub unsafe fn req_link(fs_e: i32, link_parent: u32, _lastc: *const u8, linked_file: u32) -> i32 {
+pub unsafe fn req_link(fs_e: i32, link_parent: u32, lastc: *const u8, linked_file: u32) -> i32 {
     #[cfg(target_os = "minix")]
     {
-        let path_len = if _lastc.is_null() {
+        let path_len = if lastc.is_null() {
             0
         } else {
-            core::ffi::CStr::from_ptr(_lastc.cast::<core::ffi::c_char>())
+            core::ffi::CStr::from_ptr(lastc.cast::<core::ffi::c_char>())
                 .to_bytes()
                 .len()
                 + 1
         };
-        let grant_id = crate::vfs::grant::cpf_grant_magic(
+        let grant_id = cpf_grant_direct(
             arch_common::com::VFS_PROC_NR,
             fs_e,
-            _lastc as u64,
+            lastc as u64,
             path_len,
+            false,
         );
 
         let mut msg = [0u8; 56];
@@ -619,7 +624,7 @@ pub unsafe fn req_link(fs_e: i32, link_parent: u32, _lastc: *const u8, linked_fi
     }
     #[cfg(not(target_os = "minix"))]
     {
-        let _ = (fs_e, link_parent, _lastc, linked_file);
+        let _ = (fs_e, link_parent, lastc, linked_file);
         ENOSYS
     }
 }
@@ -1145,6 +1150,9 @@ pub unsafe fn req_readsuper(
 
 /// Rename a file or directory.
 ///
+/// `old_name` and `new_name` are VFS's own NUL-terminated copies of the two paths' last
+/// components, so both are granted *direct*, as `req_slink`'s name is.
+///
 /// # Safety
 ///
 /// `old_name` and `new_name` must point to valid NUL-terminated strings.
@@ -1152,39 +1160,41 @@ pub unsafe fn req_readsuper(
 pub unsafe fn req_rename(
     fs_e: i32,
     old_parent: u32,
-    _old_name: *const u8,
+    old_name: *const u8,
     new_parent: u32,
-    _new_name: *const u8,
+    new_name: *const u8,
 ) -> i32 {
     #[cfg(target_os = "minix")]
     {
-        let len_old = if _old_name.is_null() {
+        let len_old = if old_name.is_null() {
             0
         } else {
-            core::ffi::CStr::from_ptr(_old_name.cast::<core::ffi::c_char>())
+            core::ffi::CStr::from_ptr(old_name.cast::<core::ffi::c_char>())
                 .to_bytes()
                 .len()
                 + 1
         };
-        let len_new = if _new_name.is_null() {
+        let len_new = if new_name.is_null() {
             0
         } else {
-            core::ffi::CStr::from_ptr(_new_name.cast::<core::ffi::c_char>())
+            core::ffi::CStr::from_ptr(new_name.cast::<core::ffi::c_char>())
                 .to_bytes()
                 .len()
                 + 1
         };
-        let gid_old = crate::vfs::grant::cpf_grant_magic(
+        let gid_old = cpf_grant_direct(
             arch_common::com::VFS_PROC_NR,
             fs_e,
-            _old_name as u64,
+            old_name as u64,
             len_old,
+            false,
         );
-        let gid_new = crate::vfs::grant::cpf_grant_magic(
+        let gid_new = cpf_grant_direct(
             arch_common::com::VFS_PROC_NR,
             fs_e,
-            _new_name as u64,
+            new_name as u64,
             len_new,
+            false,
         );
 
         let mut msg = [0u8; 56];
@@ -1203,7 +1213,7 @@ pub unsafe fn req_rename(
     }
     #[cfg(not(target_os = "minix"))]
     {
-        let _ = (fs_e, old_parent, _old_name, new_parent, _new_name);
+        let _ = (fs_e, old_parent, old_name, new_parent, new_name);
         ENOSYS
     }
 }
