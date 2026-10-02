@@ -228,6 +228,11 @@ pub const BOOT_BINS: &[(&str, &str)] = &[
     // `KNOWN_ISSUES.md`'s per-arch fork entries point at. `just test-fork <arch>` drives it,
     // once per arch, because each arch's `vm_paging_fork` builds the COW mapping itself.
     ("/bin/forktest", "forktest"),
+    // `/bin/winprobe` measures whether a user VA no region covers is reachable - the property
+    // `KNOWN_ISSUES.md` item 16 records as unaudited, because aarch64's fresh exec root fills
+    // the window with EL0-RW blocks aliasing the kernel's allocator. `just test-winprobe
+    // <arch>` drives it and the summary line's `reachable=0` is the invariant.
+    ("/bin/winprobe", "winprobe"),
 ];
 
 /// Programs a **wasm32** image carries: destination path → module file name in the target's

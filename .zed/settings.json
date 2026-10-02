@@ -10,4 +10,13 @@
       "enable_language_server": false,
     }
   },
+  "lsp": {
+    "rust-analyzer": {
+      "initialization_options": {
+        "check": {
+          "command": "clippy",
+        },
+      },
+    },
+  },
 }

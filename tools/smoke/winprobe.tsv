@@ -1,0 +1,22 @@
+# The user-window alias scenario, driven by `just test-winprobe <arch>`.
+#
+# `/bin/winprobe` asks the question `KNOWN_ISSUES.md` item 16 left open (fixed 2026-10-02): is a VA in the user
+# window that no region covers *reachable*? The invariant is that it is not - a present entry
+# there that the process was never given is a mapping the kernel built for itself, and on
+# aarch64 `create_low_gb_pmd_table` built exactly that: 2 MB blocks with `AP[2:1] = EL0_RW`
+# whose physical address is `win_base + ((va - user_low) % win_size)`, aliasing the kernel's
+# physical allocator into every process's user window.
+#
+# The probe forks a child per VA, because the fault a missing mapping raises kills the process:
+# the child dies with `SIGSEGV` and the parent reads that as the refusal. Its read is harmless
+# whatever it hits, and its write stores back the byte it just read, so finding a page writable
+# cannot change what the alias points at.
+#
+# The VAs are in the band between the loader and the brk heap, which every arch's layout leaves
+# empty (above x86's 80..128 MiB DSO/loader region, below the 512 MiB heap base).
+#
+# The step asserts the summary line, so one expectation holds on every arch: `reachable=0` is the
+# invariant, and a count that is not 0 names how many VAs answered. The line per VA is in the log
+# as the diagnostic, and says whether the VA was readable and whether it was writable, which is
+# what separates "mapped read-only" from "the kernel's alias, writable from EL0".
+/bin/winprobe	winprobe: probed=4 reachable=0

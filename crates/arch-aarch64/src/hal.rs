@@ -702,22 +702,8 @@ pub fn pte_user_owned(pte: u64, va: u64) -> bool {
     !crate::alloc::is_alias_frame(frame, va)
 }
 
-/// Size of the low-GB alias window: usable free RAM (bitmap-excluded)
-/// rounded down to 2 MiB, so every alias block in `create_low_gb_pmd_table`
-/// lands wholly inside RAM. `pte_user_owned` must agree with the table
-/// builder: a mismatch (e.g. the full-RAM window, which includes the
-/// bitmap) makes teardown walks misclassify real alias leaves as owned and
-/// free their frames — double-freeing live allocator frames.
-///
-/// Reads the cached window (set by the kernel at boot and by VM via
-/// VM_PAGING_MEMINFO): the kernel's allocator state is authoritative, and
-/// VM's copy of the allocator is never initialized.
-fn low_gb_window_size() -> u64 {
-    (crate::alloc::alias_window().1 / 0x20_0000) * 0x20_0000
-}
-
 /// Record the low-GB alias window (kernel allocator geometry) for use by
-/// `create_low_gb_pmd_table` and `pte_user_owned` in every binary (kernel
+/// `is_alias_frame`/`pte_user_owned` in every binary (kernel
 /// and servers) that links the arch crate.
 pub fn set_alias_window(base: u64, usable: u64) {
     crate::alloc::set_alias_window(base, usable);
@@ -1055,23 +1041,17 @@ pub fn qemu_exit(code: u32) -> ! {
 /// Deep-copy the parent's page table for fork. See `crate::fork::vm_paging_fork`.
 pub use crate::fork::vm_paging_fork;
 
-/// Build the PUD[0] PMD table used by per-process page tables: the low
-/// 1GB is a user-accessible RAM alias (tolerates stack underflow below the
-/// 64KB user stack at 0x3FC00000), except the virtio-mmio window at
-/// 0x0a000000, which is identity-mapped EL0 so a driver can probe its device
-/// from user mode. The GIC and the PL011 are *not* mapped here: the kernel
-/// reaches them through the physmap, and an identity block over 0..1 GiB
-/// would be a kernel mapping inside the user window (`PHYSMAP.md` P4, and
-/// what the boot test's user-window check reports).
-/// map_page() later splits the user code/stack pages out of this table.
-///
-/// The alias window maps onto *free* RAM above the kernel image (the
-/// physical allocator's range, which boot sets to start just past the
-/// kernel), never onto the kernel image itself: the first 16 MiB of the low
-/// GB (the NULL page and the gap below the image base 0x1000000) is left
-/// unmapped, and every other VA wraps within the free-RAM window. This keeps
-/// a stray user (or kernel copy) write to a low user VA from corrupting
-/// kernel text at PA 0x40000000.
+/// Build the PUD[0] PMD table used by per-process (exec) page tables: only
+/// the virtio-mmio window at 0x0a000000 is mapped, identity and EL0_RW, so
+/// a driver can probe its device from user mode. Every other low-GB VA is
+/// left invalid, so a VA no region covers faults instead of aliasing RAM
+/// (`KNOWN_ISSUES.md` item 16: the alias handed every exec'd process the
+/// kernel's physical allocator at EL0). `map_page` allocates a level-3
+/// table when a real mapping lands in an invalid block, so user code, heap,
+/// stack and mmap install on demand. The GIC and the PL011 are *not* mapped
+/// here: the kernel reaches them through the physmap, and an identity block
+/// over 0..1 GiB would be a kernel mapping inside the user window
+/// (`PHYSMAP.md` P4, and what the boot test's user-window check reports).
 ///
 /// # Safety
 ///
@@ -1081,29 +1061,17 @@ pub unsafe fn create_low_gb_pmd_table() -> Option<u64> {
         let pmd_low = alloc_phys_page()?;
         const PMD_BLOCK: u64 = 0b01u64 | (0b01u64 << 6) | (0b11u64 << 8) | (1u64 << 10); // 0x741
         const VIRTIO_MMIO_BASE: u64 = 0x0a00_0000;
-        // User binaries load at VA 0x1000000; VAs below that (the NULL page
-        // and the gap under the image) are unmapped so accesses fault.
-        let user_low: u64 = 0x100_0000;
-        // Free RAM starts just past the kernel image (the allocator base);
-        // the low-GB alias wraps within it. Cap the window at the
-        // *usable* (bitmap-excluded) region, rounded down to 2 MiB so every
-        // alias block lands wholly inside it: at large RAM sizes the
-        // un-capped window's top blocks wrapped onto the allocator bitmap,
-        // and splitting such a block (exec maps the brk at 0x3FE00000,
-        // which at 1 GiB sits in the wrap tail) exposed the bitmap as
-        // user-writable alias leaves — corrupting allocation state.
-        let win_base: u64 = crate::alloc::alias_window().0;
-        let win_size: u64 = low_gb_window_size();
         for i in 0..512usize {
             let va = (i as u64) * 0x20_0000;
-            let pa = if va == VIRTIO_MMIO_BASE {
-                va // identity: the one device window an EL0 driver needs
-            } else if va < user_low || win_size == 0 {
-                0 // unmapped: NULL page + gap below the image
+            // Only the device window is mapped; the boot procs' tables
+            // already do this (`boot_create_restricted_page_table`), and an
+            // exec'd process must match, not receive RAM at EL0.
+            let entry = if va == VIRTIO_MMIO_BASE {
+                va | PMD_BLOCK // identity: the one device window an EL0 driver needs
             } else {
-                win_base + ((va - user_low) % win_size)
+                0 // invalid: faults, never aliases RAM
             };
-            core::ptr::write_volatile((phys_to_virt(pmd_low) as *mut u64).add(i), pa | PMD_BLOCK);
+            core::ptr::write_volatile((phys_to_virt(pmd_low) as *mut u64).add(i), entry);
         }
         Some(pmd_low)
     }

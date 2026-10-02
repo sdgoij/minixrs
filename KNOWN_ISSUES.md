@@ -985,25 +985,37 @@ are arch-specific, `[env]` is tooling/platform, not kernel.
     root while two of its three callers pass *another* process's number (`do_setgrant_handler`,
     `system.rs`'s memset handler) — the same defect, and it should take the same switch.
 
-16. **A new process's root maps low physical memory with *user* access (2026-09-22, open —
-    unaudited).** `exec_elf_for_target` builds the fresh root with `exec_create_root`, whose own
-    comment says it copies "the identity map with **user access** in the low window". If that window
-    is user-readable, and especially if it is user-*writable*, then any process can reach low physical
-    memory — other processes' frames and kernel data among it — at `VA == PA`, with no kernel-mediated
-    copy involved at all. That is the one channel by which bytes could move between two processes
-    without passing through `virtual_copy`/`delivermsg`/`kernel_call_finish`/the grant paths, all of
-    which are trapped empty for the wedge's corrupt value (item 12). It is therefore worth excluding
-    on its own rather than assuming it is safe: `VM_PAGING_CLEAR`'s comment ("the supervisor identity
-    map above 1 GiB") suggests the window is deliberate and bounded, but where the bound falls, and
-    whether the leaves are writable, is not established. Measure: walk a fresh root for a low physical
-    page and read the U/S and RW bits, and check what fraction of the frame allocator's range the
-    window covers.
+16. **A new process's root mapped low physical memory with *user* access -- FIXED (2026-10-02).**
+    `exec_elf_for_target` builds the fresh root with `exec_create_root`, whose own comment said it
+    copies "the identity map with **user access** in the low window". Measured live on aarch64 with
+    `/bin/winprobe` (`just test-winprobe <arch>`): a shell-exec'd process could read *and write* the
+    kernel's physical allocator through VAs it was never given. `create_low_gb_pmd_table`
+    (`arch-aarch64/src/hal.rs`) filled PUD[0] with 2 MB blocks carrying `PMD_BLOCK = 0x741`
+    (`AP[2:1] = 01` = `PTE_AP_EL0_RW`) whose physical address was
+    `win_base + ((va - user_low) % win_size)`, so the whole low GB aliased free RAM. The branches it
+    called "unmapped" (below `user_low`, and `win_size == 0`) wrote `0 | PMD_BLOCK` -- a *valid*
+    EL0-RW block at physical 0, not an invalid entry. riscv64 and x86 were unaffected (`read=err`):
+    riscv64's `exec_create_root` does not copy the window's entry at all (`PHYSMAP.md` P4) and x86's
+    identity map stops at the user base.
 
-    *Working tree, pending review (2026-09-22):* `exec_create_root` (`arch-x86_64/src/hal.rs`),
-    `boot_create_restricted_page_table` (`kernel-boot/src/boot_init.rs`) and
-    `exec_setup_new_page_table` (`kernel/src/exec.rs`) now clear `PG_U` on every copied identity
-    entry, which is what this item asks for; that leaves the measurement above relevant only for
-    confirming no other low-window mapping still carries user access.
+    *Fixed (2026-10-02).* The table now maps only the virtio-mmio window (identity, EL0_RW) and
+    leaves every other low-GB VA invalid -- the shape `boot_create_restricted_page_table` already
+    built for the boot processes, so an exec'd process now matches instead of receiving RAM at EL0.
+    `map_page` allocates a level-3 table when a real mapping lands in an invalid block, so the image,
+    heap, stack and mmap still install on demand. Measured after: `just test-winprobe aarch64`
+    reports `probed=4 reachable=0` on all four VAs (it was red on purpose before), and
+    `just test-arches` (boot to shell, dynlink, fork) stays green. `test-winprobe` is promoted into
+    `test-arches`.
+
+    The boot test's M1 check could not see it: loop 1 *required* a present entry in the user window
+    to carry `PG_U`, and loop 2 walks kernel VAs only, so a user VA aliasing kernel physical memory
+    satisfied both. Loop 1 is now tightened for the fresh exec root: every present entry in the user
+    window must be the device window (`test_user_and_kernel_mappings_do_not_overlap`).
+
+    The alias *recognition* machinery -- `is_alias_frame`'s RAM branch, `alias_window`/
+    `set_alias_window`, and VM's `VM_PAGING_MEMINFO` -- is now unreachable in practice (no mapping
+    classifies as an alias), and can be removed in a follow-up; only the `frame == va` identity case
+    is still needed, for the device window's split leaves.
 17. **The kernel's `brk` handler keeps one global `CURRENT_BRK` for a per-process quantity
     (2026-09-22, open — possibly vestigial).** `syscall.rs`'s `CURRENT_BRK` is a process-global
     `AtomicU64` used by `sys_brk_handler` (NR_BRK, registered as basic syscall 36) for both the query
@@ -1697,6 +1709,29 @@ are arch-specific, `[env]` is tooling/platform, not kernel.
     It is latent rather than live -- nothing calls `vm_getphys` except its own stub arm, and the
     host arm returns 0 -- but it is a wrong answer rather than a missing feature, which is the
     shape that survives longest. Fix it with the P5 reply convention when something needs it.
+
+42. **On aarch64 a fork child that page-faults clobbers the parent's stack -- open, found 2026-10-02.**
+    Measuring item 16 made `/bin/winprobe`'s children fault for the first time on aarch64 (before the
+    fix all four probed VAs were mapped, so no child ever faulted). With the fix, the per-VA
+    diagnostic line -- built in a stack array in `winprobe.rs` -- reaches the console with its first
+    8 bytes overwritten, while the `MARKER` literal written next to it (from `.rodata`, no buffer)
+    and the run summary (a different stack slot) stay clean. Moving the buffer from the stack to a
+    `static` (`.bss`) leaves it clean, so the writer targets the parent's *user stack page*, not the
+    console write path. It is aarch64-only: x86_64 and riscv64 run the same probe with faulting
+    children and clean output. The overwriting value is deterministic per build -- `{0x10, 0x10}` in
+    the shipped probe, `0xffff_ffff_ffff_ffff` once `is_alias_frame` was temporarily reduced to
+    `frame == va` -- so it is the child's own data, and it is *not* the alias classification
+    (removing that changed the bytes, not whether the corruption happened).
+
+    The shape points at the child's user stack page being writable in both the parent and the child:
+    a child that faults runs enough user code first (the `fork` return and the `body` call) to store
+    its own data there. `vm_paging_fork` (`arch-aarch64/src/fork.rs`) makes only the *child's* PTE
+    read-only and leaves the parent's writable, so a shared page is protected from the child only by
+    the child taking a COW fault. Not root-caused; the fix is in that fork/COW path, not the probe.
+    Gate: `tools/smoke/winprobe.tsv`'s `reachable=0` verdict is correct and stable (its summary line
+    is a different stack slot), so the gate holds -- the corrupted diagnostics are the evidence.
+    Reproduce: `just test-winprobe aarch64`, then read the `# /bin/winprobe` block in
+    `target/test-winprobe-aarch64.log`.
 
 ---
 

@@ -198,6 +198,13 @@ name = "forktest"
 path = "src/bin/forktest.rs"
 test = false
 
+# winprobe is the user-window alias probe (KNOWN_ISSUES.md item 16): it measures whether a VA
+# the process was never given is reachable, which is a property of the fresh exec root.
+[[bin]]
+name = "winprobe"
+path = "src/bin/winprobe.rs"
+test = false
+
 # forkthread is a fork-from-worker test: spawns a thread, forks from it,
 # and verifies the child is a copy of the worker (Phase F2). Embedded as
 # /bin/forkthread.

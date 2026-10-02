@@ -936,17 +936,20 @@ test-boot-aarch64: build-aarch64-boot mkfs-aarch64
 # the first failing gate like the individual recipes (the failing log is on
 # stdout).
 #
-# All nine QEMU gates in one command.
+# All twelve QEMU gates in one command.
 test-arches:
     @just test-qemu x86
     @just test-boot x86
     @just test-fork x86
+    @just test-winprobe x86
     @just test-qemu riscv64
     @just test-boot riscv64
     @just test-fork riscv64
+    @just test-winprobe riscv64
     @just test-qemu aarch64
     @just test-boot aarch64
     @just test-fork aarch64
+    @just test-winprobe aarch64
 
 # Fork isolation, per arch: `tools/smoke/fork.tsv` runs `/bin/forktest`, which forks and checks
 # both directions of the copy - the child's write must not reach the parent, and the parent's
@@ -958,6 +961,32 @@ test-arches:
 # per-arch fork entries in `KNOWN_ISSUES.md` point at.
 test-fork arch="x86" boot-timeout="40":
     @just test-fork-{{arch}} {{boot-timeout}}
+
+# The user-window alias probe, per arch: `tools/smoke/winprobe.tsv` runs `/bin/winprobe`, which
+# asks whether a VA the process was never given is reachable. The invariant is that it is not -
+# `KNOWN_ISSUES.md` item 16 - and it is per arch because the fresh exec root is built per arch:
+# aarch64 used to fill the window with EL0-RW blocks aliasing the kernel's physical allocator
+# (item 16, fixed 2026-10-02), RISC-V does not copy the window's entry at all, and x86's
+# identity map stops at the user base. All three answer `reachable=0` now.
+test-winprobe arch="x86" boot-timeout="40":
+    @just test-winprobe-{{arch}} {{boot-timeout}}
+
+test-winprobe-x86 boot-timeout="40": build-x86
+    mkdir -p target/images/x86_64-pc-minix
+    cp target/trampoline.elf target/images/x86_64-pc-minix/minix-x86.elf
+    @just _assert-qemu-version qemu-system-x86_64
+    FEED_SCENARIO=tools/smoke/winprobe.tsv sh tools/smoke/feed.sh target/test-winprobe-x86.log {{boot-timeout}} qemu-system-x86_64 -nographic -m 256M -no-reboot -vga none -device bochs-display,id=fb0 -kernel target/images/x86_64-pc-minix/minix-x86.elf -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0 -device virtio-tablet-pci,display=fb0
+    @echo "winprobe: no user VA outside a region is reachable (x86_64)"
+
+test-winprobe-riscv64 boot-timeout="60": build-riscv64
+    @just _assert-qemu-version qemu-system-riscv64
+    FEED_SCENARIO=tools/smoke/winprobe.tsv sh tools/smoke/feed.sh target/test-winprobe-riscv64.log {{boot-timeout}} qemu-system-riscv64 -machine virt -m 256M -nographic -global virtio-mmio.force-legacy=off -netdev user,id=net0 -device virtio-net-device,netdev=net0 -device virtio-gpu-device -device virtio-keyboard-device -kernel target/riscv64gc-unknown-minix/release/kernel-boot-riscv64
+    @echo "winprobe: no user VA outside a region is reachable (riscv64)"
+
+test-winprobe-aarch64 boot-timeout="60": build-aarch64
+    @just _assert-qemu-version qemu-system-aarch64
+    FEED_SCENARIO=tools/smoke/winprobe.tsv sh tools/smoke/feed.sh target/test-winprobe-aarch64.log {{boot-timeout}} qemu-system-aarch64 -machine virt -cpu cortex-a57 -m 256M -nographic -no-reboot -global virtio-mmio.force-legacy=off -netdev user,id=net0 -device virtio-net-device,netdev=net0 -device virtio-gpu-device -device virtio-keyboard-device -kernel target/aarch64-unknown-minix/release/kernel-boot-aarch64
+    @echo "winprobe: no user VA outside a region is reachable (aarch64)"
 
 test-fork-x86 boot-timeout="40": build-x86
     mkdir -p target/images/x86_64-pc-minix
@@ -1134,11 +1163,14 @@ test-linux:
 # build), and nothing else notices when an export and its declaration drift
 # apart. The checker parses the Rust sources, so it needs no cbindgen.
 #
+# Clippy runs with `--all-targets` so the lint set matches CI's `host-tests`
+# job, which lints tests, examples and bins as well as the libraries.
+#
 # The physmap rule is the same kind of gate (`PHYSMAP.md` P6): a physical address is a
 # number, not a pointer, and check-physmap.py rejects one cast to a pointer unless the line
 # converts it (`phys_to_virt`/`frame_ptr`/`table_ptr`) or says `physmap-ok: <reason>`.
 check:
-    cargo clippy -- -D warnings
+    cargo clippy --all-targets -- -D warnings
     python tools/check-c-headers.py
     python tools/check-physmap.py
     @test -n "{{stage1-rustc}}" || (echo 'error: stage1 rustc not found — run `just bootstrap` first' >&2 && exit 1)

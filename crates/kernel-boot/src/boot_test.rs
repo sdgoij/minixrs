@@ -1527,6 +1527,29 @@ fn test_user_and_kernel_mappings_do_not_overlap() -> u32 {
             failures += check(exec_root, "an exec root");
         }
 
+        // A fresh exec root has no user regions yet, so in the user window only the
+        // virtio-mmio device block may be present. `check` alone cannot see item 16's
+        // RAM alias: loop 1 *requires* a present entry to carry PG_U, which an EL0-RW
+        // alias block does, so it passes. Requiring emptiness catches the alias's
+        // return before any process runs.
+        #[cfg(target_arch = "aarch64")]
+        if exec_root != 0 {
+            const VIRTIO_MMIO_BASE: u64 = 0x0a00_0000;
+            let mut va = 0u64;
+            while va < kernel::pagetable::MAX_USER_ADDRESS {
+                if va != VIRTIO_MMIO_BASE
+                    && unsafe { kernel::pagetable::walk(exec_root, va) }.is_ok()
+                {
+                    serial_write("  FAIL: a fresh exec root maps user MiB ");
+                    print_dec((va >> 20) as u32);
+                    serial_write(" outside the device window\r\n");
+                    failures += 1;
+                    break;
+                }
+                va += 0x20_0000;
+            }
+        }
+
         if failures == 0 {
             serial_write("  OK user and kernel mappings do not overlap\r\n");
         }
