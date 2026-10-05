@@ -488,12 +488,16 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
   # One build of the pinned bash per arch, and only when the pin has no release yet.
-  # Calls the workflow the operator can also run by hand, so the build and its
-  # publishing rules keep one home.
+  # It waits for the stage1 the build fetches, exactly as the arch jobs do (a skip
+  # is fine; a failure is not). Calls the workflow the operator can also run by hand,
+  # so the build and its publishing rules keep one home.
   bash-release:
     name: bash release
-    needs: bash-pin
+    needs: [rust-pin, stage1, bash-pin]
     if: >-
+      !cancelled() &&
+      needs.rust-pin.result == 'success' &&
+      (needs.stage1.result == 'success' || needs.stage1.result == 'skipped') &&
       needs.bash-pin.outputs.needed == 'true' &&
       (github.event_name == 'workflow_dispatch' || github.ref == 'refs/heads/main' || github.ref_type == 'tag')
     permissions:
@@ -621,13 +625,18 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
   # One build of the pinned Mesa/libdrm (+ libc++) per arch, and only when the pin
-  # has no release yet - it runs before anything that would consume one. This calls
-  # the workflow the operator can also run by hand, so the build and its publishing
-  # rules keep one home.
+  # has no release yet - it runs before anything that would consume one, and waits
+  # for the stage1 the build fetches (the arch jobs' `needs`/`if`, so a moved rust
+  # pin publishes the toolchain first and a skipped `stage1` is not a failure).
+  # This calls the workflow the operator can also run by hand, so the build and its
+  # publishing rules keep one home.
   mesa:
     name: mesa
-    needs: mesa-pin
+    needs: [rust-pin, stage1, mesa-pin]
     if: >-
+      !cancelled() &&
+      needs.rust-pin.result == 'success' &&
+      (needs.stage1.result == 'success' || needs.stage1.result == 'skipped') &&
       needs.mesa-pin.outputs.needed == 'true' &&
       (github.event_name == 'workflow_dispatch' || github.ref == 'refs/heads/main' || github.ref_type == 'tag')
     permissions:
