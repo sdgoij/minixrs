@@ -11,7 +11,9 @@
 //
 // Usage: rustc tools/mkboot.rs --edition 2024 -o target/mkboot
 //        target/mkboot [features] [stem]
-//          features: comma-joined feature list (default: embed_initramfs,embed_minixfs)
+//          features: comma-joined feature list (default: embed_initramfs; add
+//                    embed_minixfs for a self-contained artifact with an
+//                    embedded root, which is capped at the 16 MiB ramdisk window)
 //          stem:     output name — <stem>.bin + <stem>-trampoline.elf (default: kernel,
 //                    which keeps the historical names kernel.bin + trampoline.elf)
 
@@ -57,15 +59,16 @@ fn main() {
     } else {
         "kernel".to_string()
     };
+    // `embed_minixfs` is not forced: a boot image for a disk-root boot embeds
+    // only the initramfs, and the root filesystem is a separate system image.
+    // An embedded root is still available by naming the feature explicitly, but
+    // it is capped by the kernel's 16 MiB ramdisk window (`RAMDISK_IMAGE_SIZE`).
     let features = if extra_args.is_empty() {
-        "embed_initramfs,embed_minixfs,x86".to_string()
+        "embed_initramfs,x86".to_string()
     } else {
         let mut all = extra_args.join(",");
         if !all.contains("embed_initramfs") {
             all = format!("embed_initramfs,{}", all);
-        }
-        if !all.contains("embed_minixfs") {
-            all = format!("{},embed_minixfs", all);
         }
         // The kernel-boot bin is feature-gated like the riscv64/aarch64
         // ones, so plain workspace builds skip the no_main kernel image.

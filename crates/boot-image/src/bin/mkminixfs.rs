@@ -5,8 +5,10 @@
 //! Reads the already-built userland + server binaries from the shared
 //! `target/<triple>/release/` dir (built by `just build <target>`) and
 //! writes `target/images/<triple>/minixfs.img`. The kernel build pipeline
-//! assembles the same image directly via `crates/kernel/build.rs`; this CLI
-//! exists for one-off inspection.
+//! assembles the same image directly via `crates/kernel/build.rs` when it embeds
+//! a root; this CLI is the *disk* image builder, and reads `MINIXFS_EXTRA` and
+//! `DYNLINK_BINS` (`dest=path;…`) plus `MINIXFS_BLOCKS`, so a system image larger
+//! than the kernel's 16 MiB ramdisk window needs no kernel change.
 //!
 //! `wasm32` is the one arch whose image is not built by `just build`: the files it wants are
 //! *modules* (`manifest::WASM_MODULES`), the module build is a separate cargo workspace, and the
@@ -42,8 +44,22 @@ fn main() -> ExitCode {
         manifest::BOOT_BINS
     };
 
-    let mut files = Vec::new();
+    let mut files: Vec<(&'static str, Vec<u8>)> = Vec::new();
     for &(dest, bin_name) in wanted {
+        // The C smoke tests are x86_64-only (their builders are), so an image for
+        // another arch never has them to carry. `coreutils` is carried on every other
+        // arch, but aarch64's multicall loses output (KNOWN_ISSUES aarch64 #9) and is
+        // therefore opt-in there: set `MINIXFS_COREUTILS_AARCH64` to include it while
+        // chasing the bug.
+        if matches!(dest, "/bin/helloc" | "/bin/ctest") && t.arch != "x86_64" {
+            continue;
+        }
+        if dest == "/bin/coreutils"
+            && t.arch == "aarch64"
+            && std::env::var_os("MINIXFS_COREUTILS_AARCH64").is_none()
+        {
+            continue;
+        }
         let src = release.join(bin_name);
         if src.exists() {
             match std::fs::read(&src) {
@@ -69,6 +85,54 @@ fn main() -> ExitCode {
                 "mkminixfs: WARNING: {bin_name} not found at {} (run `just build {arch}`)",
                 src.display()
             );
+        }
+    }
+
+    // MINIXFS_EXTRA / DYNLINK_BINS: extra "dest=path" files for the *disk* image.
+    // The image builder reads them here, not `crates/kernel/build.rs`, so a system
+    // image larger than the kernel's 16 MiB ramdisk window (the Mesa DSOs are ~36 MiB)
+    // needs no kernel change and no embedded root. A POSIX-style dest is converted by
+    // MSYS on the way to a native tool, so a dest that is not one of the image's
+    // directories is refused while its provenance is still known.
+    if t.arch != "wasm32" {
+        for (var, prefixes) in [
+            (
+                "DYNLINK_BINS",
+                &["/bin/", "/sbin/", "/lib/", "/libexec/"][..],
+            ),
+            (
+                "MINIXFS_EXTRA",
+                &["/bin/", "/sbin/", "/etc/", "/lib/", "/libexec/"][..],
+            ),
+        ] {
+            let Ok(list) = std::env::var(var) else {
+                continue;
+            };
+            for entry in list.split(';').filter(|s| !s.is_empty()) {
+                let (dest, path) = entry
+                    .split_once('=')
+                    .unwrap_or_else(|| panic!("mkminixfs: {var} entry must be dest=path"));
+                if !prefixes.iter().any(|dir| dest.starts_with(dir)) {
+                    panic!(
+                        "mkminixfs: {var}: {dest:?} is not one of {prefixes:?}. A POSIX-style \
+                         value is converted on the way to a native tool, and a converted dest \
+                         lands in the root filesystem. Set MSYS2_ENV_CONV_EXCL={var}."
+                    );
+                }
+                // `build_minixfs` wants `&'static str` dests; the env string is
+                // transient, so leak each one (the CLI runs once).
+                let dest: &'static str = Box::leak(dest.to_owned().into_boxed_str());
+                let p = Path::new(path);
+                let p = if p.is_absolute() {
+                    p.to_path_buf()
+                } else {
+                    workspace.join(p)
+                };
+                let data = std::fs::read(&p).unwrap_or_else(|e| {
+                    panic!("mkminixfs: {var}: reading {} failed ({e})", p.display())
+                });
+                files.push((dest, data));
+            }
         }
     }
 

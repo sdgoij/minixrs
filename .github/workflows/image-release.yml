@@ -1,5 +1,8 @@
-# Builds each arch's single-file boot artifact and publishes all three as one
-# release, so downloading an ELF and pointing QEMU at it is the whole setup.
+# Builds each arch's images and publishes them as one release: a single-file ELF
+# (downloading an ELF and pointing QEMU at it is the whole setup) and the split
+# pair - a small boot ELF plus a system image attached as a virtio-blk disk. The
+# system image is the form not capped by the 16 MiB embedded window, so it is where
+# the full userland (coreutils and GNU bash) lives.
 #
 # The published images carry the bash that `ci.yml`'s `bash` job built for the same arch
 # (its `bash-<arch>` artifact, injected here through `MINIXFS_EXTRA`), so the release ships
@@ -41,9 +44,10 @@
 #     plain `v0.2.0` release.
 # Either way the version is the same string in the release tag and the asset names.
 #
-# Each job *boots* what it built and drives it: `just image-<arch>` runs the artifact in
-# QEMU, types the userspace smoke scenario (`tools/smoke/scenario.tsv`) into its shell,
-# and fails unless every step answers - so a release can only contain images whose
+# Each job *boots* what it built and drives it: `just image-<arch>` runs the self-contained
+# artifact in QEMU, and `just test-system-image-<arch>` boots the split pair with its system
+# image attached - each typing the userspace smoke scenario (`tools/smoke/scenario.tsv`) into
+# its shell, and failing unless every step answers - so a release can only contain images whose
 # shell execs a program from the image, writes a file and reads it back. That
 # self-check's 15 s timeout is calibrated for a dev machine with KVM, so the job passes
 # a larger `boot-timeout`: a runner emulates the guest.
@@ -122,6 +126,15 @@ jobs:
           MINIXFS_EXTRA: /bin/bash=target/bash/${{ matrix.arch }}/bash
         run: just image ${{ matrix.arch }} 120
 
+      # The split form: a small boot image and a full system image (coreutils, plus GNU
+      # bash because the `bash` artifact above is in place; `MINIXFS_EXTRA` can inject
+      # more, as the Mesa recipe does). The system image is the artifact the 16 MiB
+      # embedded window cannot hold. `120` is the runner's emulation speed, not a budget.
+      # The recipe boots what it builds and drives the smoke scenario, so the release
+      # cannot ship a system image that was never booted.
+      - name: Build and boot the boot image and system image
+        run: just test-system-image-${{ matrix.arch }} 120
+
       # Named without the version: the publish job is the only place that knows
       # whether this is a tag or a commit, so it renames on the way into the
       # release. `if-no-files-found: error` because the recipe's own check would
@@ -130,6 +143,18 @@ jobs:
         with:
           name: minix-${{ matrix.arch }}.elf
           path: target/images/*/minix-${{ matrix.arch }}.elf
+          if-no-files-found: error
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: minix-${{ matrix.arch }}-boot.elf
+          path: target/images/*/minix-${{ matrix.arch }}-boot.elf
+          if-no-files-found: error
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: minix-${{ matrix.arch }}-system.img
+          path: target/images/*/disk.img
           if-no-files-found: error
 
   # One job, not three: a release is created once, and a partial one is worse than
@@ -146,8 +171,10 @@ jobs:
       - uses: actions/download-artifact@v8
         with:
           # Only the images: the `bash` job's `bash-<arch>` artifacts live in the same run,
-          # and merging those into `images/` would leave shells beside the ELFs.
-          pattern: minix-*.elf
+          # and merging those into `images/` would leave shells beside the images. The
+          # pattern is `minix-*`, so it takes the self-contained ELF, the boot image and
+          # the system image for every arch.
+          pattern: minix-*
           merge-multiple: true
           path: images
 
@@ -177,12 +204,23 @@ jobs:
           # either side of this shows up as the layout rather than as "not found".
           find . -type f | sort
           for arch in x86 riscv64 aarch64; do
-            src=$(find . -type f -name "minix-${arch}.elf" | head -1)
-            [ -n "$src" ] || { echo "!! no minix-${arch}.elf in the download"; exit 1; }
-            mv "$src" "minix-${arch}-${VERSION}.elf"
+            # The self-contained ELF and the boot image keep the arch in their name, so
+            # `find -name` locates them wherever the runner's upload placed them. The
+            # system image is `disk.img`, with no arch in its name, so it is found
+            # beside the boot image (the same `target/images/<triple>/` directory) rather
+            # than by name - merging three arches would otherwise collide on `disk.img`.
+            elf=$(find . -type f -name "minix-${arch}.elf" | head -1)
+            boot=$(find . -type f -name "minix-${arch}-boot.elf" | head -1)
+            [ -n "$elf" ] || { echo "!! no minix-${arch}.elf in the download"; exit 1; }
+            [ -n "$boot" ] || { echo "!! no minix-${arch}-boot.elf in the download"; exit 1; }
+            disk="$(dirname "$boot")/disk.img"
+            [ -f "$disk" ] || { echo "!! no system image beside $boot"; exit 1; }
+            mv "$elf" "minix-${arch}-${VERSION}.elf"
+            mv "$boot" "minix-${arch}-${VERSION}-boot.elf"
+            mv "$disk" "minix-${arch}-${VERSION}-system.img"
           done
           ls -lh
-          sha256sum minix-*.elf > SHA256SUMS
+          sha256sum minix-* > SHA256SUMS
           cat SHA256SUMS
 
       - name: Publish the release
@@ -204,16 +242,34 @@ jobs:
             tag="image-${GITHUB_SHA}"
             subject="commit ${GITHUB_SHA:0:12}"
           fi
-          assets=("images/minix-x86-${VERSION}.elf" "images/minix-riscv64-${VERSION}.elf" \
-            "images/minix-aarch64-${VERSION}.elf" images/SHA256SUMS)
+          assets=(
+            "images/minix-x86-${VERSION}.elf"
+            "images/minix-x86-${VERSION}-boot.elf"
+            "images/minix-x86-${VERSION}-system.img"
+            "images/minix-riscv64-${VERSION}.elf"
+            "images/minix-riscv64-${VERSION}-boot.elf"
+            "images/minix-riscv64-${VERSION}-system.img"
+            "images/minix-aarch64-${VERSION}.elf"
+            "images/minix-aarch64-${VERSION}-boot.elf"
+            "images/minix-aarch64-${VERSION}-system.img"
+            images/SHA256SUMS
+          )
           notes="$(printf '%s\n' \
             "MINIX/Rust boot images for ${subject}." \
             "" \
-            "One self-contained ELF per arch: the initramfs and the MinixFS root image are" \
-            "embedded, so QEMU needs no disk attached. Each carries GNU bash" \
-            "(\`/bin/bash\`, built for the arch by the same run) and was booted by that run -" \
-            "it fails unless the window server comes up - and each needs QEMU 11" \
-            "or newer, the floor the test suites enforce as well." \
+            "Per arch there are three artifacts:" \
+            "" \
+            "- \`minix-<arch>-<ver>.elf\` - one self-contained ELF: the initramfs and the" \
+            "  MinixFS root image are embedded, so QEMU needs no disk attached." \
+            "- \`minix-<arch>-<ver>-boot.elf\` and \`minix-<arch>-<ver>-system.img\` - the split" \
+            "  form: \`-kernel\` the boot image and attach the system image with the" \
+            "  \`-drive\`/\`-device virtio-blk\` pair below. The system image is the full" \
+            "  userland (coreutils and GNU bash included); it is the artifact not capped by" \
+            "  the 16 MiB embedded window, so it is where large additions belong." \
+            "" \
+            "Each was booted by the run that built it - the split pair with the system image" \
+            "attached - and each needs QEMU 11 or newer, the floor the test suites enforce" \
+            "as well." \
             "" \
             "Check the download with \`sha256sum -c SHA256SUMS\`, then boot it with the" \
             "command line below. The shell is on stdio; \`-nographic\` is what makes it" \
@@ -221,17 +277,29 @@ jobs:
             "build verified (without virtio-gpu the framebuffer does not come up on" \
             "riscv64/aarch64)." \
             "" \
-            "x86_64:" \
+            "x86_64 (self-contained):" \
             "" \
             "    qemu-system-x86_64 -nographic -m 256M -no-reboot -vga none -device bochs-display,id=fb0 -kernel minix-x86-${VERSION}.elf -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0 -device virtio-tablet-pci,display=fb0" \
             "" \
-            "RISC-V64:" \
+            "x86_64 (split):" \
+            "" \
+            "    qemu-system-x86_64 -nographic -m 256M -no-reboot -vga none -device bochs-display,id=fb0 -kernel minix-x86-${VERSION}-boot.elf -drive if=none,id=disk0,file=minix-x86-${VERSION}-system.img,format=raw,cache=writethrough -device virtio-blk-pci,disable-legacy=on,drive=disk0 -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0 -device virtio-tablet-pci,display=fb0" \
+            "" \
+            "RISC-V64 (self-contained):" \
             "" \
             "    qemu-system-riscv64 -machine virt -m 256M -nographic -global virtio-mmio.force-legacy=off -netdev user,id=net0 -device virtio-net-device,netdev=net0 -device virtio-gpu-device -device virtio-keyboard-device -kernel minix-riscv64-${VERSION}.elf" \
             "" \
-            "AArch64:" \
+            "RISC-V64 (split):" \
             "" \
-            "    qemu-system-aarch64 -machine virt -cpu cortex-a57 -m 256M -nographic -no-reboot -global virtio-mmio.force-legacy=off -netdev user,id=net0 -device virtio-net-device,netdev=net0 -device virtio-gpu-device -device virtio-keyboard-device -kernel minix-aarch64-${VERSION}.elf")"
+            "    qemu-system-riscv64 -machine virt -m 256M -nographic -global virtio-mmio.force-legacy=off -drive if=none,id=disk0,file=minix-riscv64-${VERSION}-system.img,format=raw,cache=writethrough -device virtio-blk-device,drive=disk0 -netdev user,id=net0 -device virtio-net-device,netdev=net0 -device virtio-gpu-device -device virtio-keyboard-device -kernel minix-riscv64-${VERSION}-boot.elf" \
+            "" \
+            "AArch64 (self-contained):" \
+            "" \
+            "    qemu-system-aarch64 -machine virt -cpu cortex-a57 -m 256M -nographic -no-reboot -global virtio-mmio.force-legacy=off -netdev user,id=net0 -device virtio-net-device,netdev=net0 -device virtio-gpu-device -device virtio-keyboard-device -kernel minix-aarch64-${VERSION}.elf" \
+            "" \
+            "AArch64 (split):" \
+            "" \
+            "    qemu-system-aarch64 -machine virt -cpu cortex-a57 -m 256M -nographic -no-reboot -global virtio-mmio.force-legacy=off -drive if=none,id=disk0,file=minix-aarch64-${VERSION}-system.img,format=raw,cache=writethrough -device virtio-blk-device,drive=disk0 -netdev user,id=net0 -device virtio-net-device,netdev=net0 -device virtio-gpu-device -device virtio-keyboard-device -kernel minix-aarch64-${VERSION}-boot.elf")"
           # Re-running a tag or a commit replaces the assets rather than failing: the
           # release name is derived, so a second run is a rebuild, not a new release.
           if gh release view "${tag}" -R "$GITHUB_REPOSITORY" > /dev/null 2>&1; then

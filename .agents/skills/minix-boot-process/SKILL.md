@@ -94,7 +94,14 @@ Servers start executing their `_start` entry point (provided by `minix-rt`), whi
 
 ### RAM Disk for MFS
 
-The kernel maps the MINIX FS image (`minixfs_data.rs` → `.minixfs` section) into MFS's address space at `MFS_RAMDISK_VA`. MFS initializes a `BlockIoFn` callback (`ram_disk_io`) that reads/writes blocks from this memory region.
+Two boot images exist (`Justfile`'s `build-*` and `boot-image-*`). The self-contained one embeds
+the MINIX FS image (`minixfs_data.rs` → `.minixfs` section); the kernel maps it into the ramdisk
+server's address space at the ramdisk image VA (4 GiB) and MFS reaches it through a `BlockIoFn`
+(`ram_disk_io`). The **boot image** the `run-*` recipes use embeds no root — the system image is a
+separate disk — so the kernel maps one zeroed probe page there instead: `ramdisk_image_size` reads
+the non-V3 magic as "no image here" and the device has length 0. An *embedded* root is capped at
+`RAMDISK_IMAGE_SIZE` (16 MiB), because that window sits inside the user window at `mmap_base()`;
+a larger root must be the disk system image.
 
 ## Stage 5: VFS Root Mount
 
@@ -102,8 +109,8 @@ VFS's `sef_cb_init_fresh()` (simplified from C):
 1. Manually initializes `fproc[]` table
 2. Sets PM's entry: `fproc[0].fp_endpoint = PM_PROC_NR`
 3. Calls `init_dmap()` then `mount_root()`
-4. `mount_root()` calls `req_readsuper(MFS_PROC_NR, dev=0)` — the RAM disk
-5. MFS reads superblock from RAM disk, loads root inode, replies
+4. `mount_root()` calls `req_readsuper(MFS_PROC_NR, dev=0)`; MFS picks the driver with `bdev_driver_root` — the virtio-blk device when one is attached, the ramdisk otherwise
+5. MFS reads the superblock from that device, loads the root inode, replies
 6. VFS populates root vnode, sets `fp_rdir` / `fp_cdir` for boot processes
 7. VFS enters main loop
 
@@ -129,9 +136,9 @@ unchanged (`DYNAMIC_LINKING.md`).
 | `crates/kernel-boot/src/main.rs` | kmain(), syscall handlers, boot test runner |
 | `crates/kernel-boot/src/boot_init.rs` | Server loading, page table creation |
 | `crates/kernel-boot/src/boot_test.rs` | In-kernel boot verification tests |
-| `crates/kernel/build.rs` | Boot image assembly (initramfs CPIO + MinixFS) |
-| `tools/mkboot.rs` | x86 post-link: kmain extract, trampoline, kernel.bin |
-| `crates/boot-image/` | CPIO + MinixFS image builders (host lib + CLIs) |
+| `crates/kernel/build.rs` | Boot image assembly (initramfs CPIO + embedded MinixFS, when the embed features are on) |
+| `tools/mkboot.rs` | x86 post-link: kmain extract, trampoline, kernel.bin (stem-suffixed for the boot image) |
+| `crates/boot-image/` | CPIO + MinixFS builders; `mkminixfs` also builds the disk *system image* (reads `MINIXFS_EXTRA` / `DYNLINK_BINS` / `MINIXFS_BLOCKS`) |
 | `crates/ldso/` | The dynamic loader (`/libexec/ld.so`): maps and relocates `DT_NEEDED` objects after a dynamic `exec` |
 | `tools/minix-raw.ld` | Kernel linker script (link address 0x200000) |
 

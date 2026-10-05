@@ -513,6 +513,25 @@ pub unsafe fn load_and_prepare_all(cfg: &BootProcessConfig) -> *mut Proc {
                     }
                 }
                 print!("  RAM disk mapped for ramdisk server\r\n");
+            } else {
+                // The split's boot image carries no root, but the server still probes
+                // `RAMDISK_IMAGE_VA` for its superblock: `ramdisk_image_size` reads a
+                // non-V3 magic as "no image here" and returns length 0. That read has to
+                // be *readable*, so map one zeroed page — otherwise the server faults at
+                // startup, which RISC-V and AArch64 halt on (an unhandled user page fault).
+                let probe = match unsafe { kernel::hal::alloc_phys_contig(1) } {
+                    Some(base) => base,
+                    None => boot_abort("out of memory for the RAM disk probe page"),
+                };
+                unsafe { core::ptr::write_bytes(frame_ptr(probe), 0, 4096) };
+                if unsafe {
+                    kernel::pagetable::map_page(pt_phys, RAMDISK_IMAGE_VA, probe, user_flags)
+                }
+                .is_err()
+                {
+                    boot_abort("RAM disk probe page mapping");
+                }
+                print!("  RAM disk probe page mapped (no embedded root)\r\n");
             }
         }
 

@@ -11,9 +11,11 @@
 #     resolved from its build tree, with PATH only as a fallback (see `minix-lld`
 #     below)
 #
-# The recipes orchestrate plain `cargo` invocations; all image assembly
-# (initramfs CPIO + MinixFS) lives in `crates/kernel/build.rs`. x86
-# post-link work (trampoline + kernel.bin) lives in `tools/mkboot.rs`.
+# The recipes orchestrate plain `cargo` invocations. The kernel-embedded image
+# (initramfs CPIO + MinixFS) is assembled by `crates/kernel/build.rs`; the *disk*
+# system image is assembled by `boot-image`'s `mkminixfs`, which reads
+# `MINIXFS_EXTRA` / `DYNLINK_BINS` / `MINIXFS_BLOCKS`. x86 post-link work
+# (trampoline + kernel.bin) lives in `tools/mkboot.rs`.
 
 # Path to the rust fork's stage1 rustc (built by `just bootstrap`); used as
 # the RUSTC for userland/server builds so the in-tree minix targets and
@@ -207,6 +209,71 @@ build-x86-boot: userland-x86 coreutils-x86 dynlib-x86
     "{{stage1-rustc}}" tools/mkboot.rs --edition 2024 -o target/mkboot
     target/mkboot embed_initramfs,embed_minixfs,boot-test kernel-boot
 
+# The boot image: kernel + initramfs only. This is what a disk-root boot needs, so
+# the kernel carries no root filesystem and is not capped by the 16 MiB ramdisk
+# window (`RAMDISK_IMAGE_SIZE`; an embedded root past it lands on the user mmap
+# region at 4 GiB). Output: target/boot-kernel.bin + target/boot-kernel-trampoline.elf,
+# mirrored to target/images/<triple>/minix-x86-boot.elf for the release.
+boot-image-x86: userland-x86 coreutils-x86 dynlib-x86
+    rm -f target/mkboot target/mkboot.exe
+    "{{stage1-rustc}}" tools/mkboot.rs --edition 2024 -o target/mkboot
+    target/mkboot embed_initramfs boot-kernel
+    mkdir -p target/images/x86_64-pc-minix
+    cp target/boot-kernel-trampoline.elf target/images/x86_64-pc-minix/minix-x86-boot.elf
+
+# The system image: the full root filesystem on a raw disk for virtio-blk. coreutils
+# is part of it, and so is anything a caller injects (`MINIXFS_EXTRA`, merged ahead of
+# the caller's own value; the Mesa DSOs are the ~36 MiB case, `WAYLAND.md` §6.10 stage
+# 3c-2). GNU bash is included when its artifact is present — `just build-bash <arch>`
+# locally, or the release's downloaded `bash-<arch>` — and its heavy C build is never
+# forced onto the `run-<arch>` path. The image builder reads `MINIXFS_EXTRA` /
+# `DYNLINK_BINS` / `MINIXFS_BLOCKS` itself, so a root larger than the 16 MiB embedded
+# window needs no kernel change.
+system-image-x86: boot-image-x86
+    extras=""; if [ -f target/bash/x86/bash ]; then extras=/bin/bash=target/bash/x86/bash; else echo "system-image: no /bin/bash (run 'just build-bash x86' to include it)"; fi; MINIXFS_EXTRA="${extras}${MINIXFS_EXTRA:+;$MINIXFS_EXTRA}" MINIXFS_BLOCKS="${MINIXFS_BLOCKS:-8192}" cargo run -q -p boot-image --bin mkminixfs --release -- x86_64
+    @just mkfs-x86
+
+# riscv64 / aarch64, the same split without mkboot: the kernel ELF *is* the artifact
+# (`-kernel`). The boot image is copied to a distinct name so it does not collide with
+# the self-contained `release/kernel-boot-<arch>` that the tests and `image-<arch>` boot.
+boot-image-riscv64: userland-riscv64 coreutils-riscv64 dynlib-riscv64
+    RUSTC="{{stage1-rustc}}" cargo build -p kernel-boot --bin kernel-boot-riscv64 --target riscv64gc-unknown-minix --features embed_initramfs,riscv64 --release
+    cp target/riscv64gc-unknown-minix/release/kernel-boot-riscv64 target/boot-kernel-riscv64.elf
+    mkdir -p target/images/riscv64gc-unknown-minix
+    cp target/boot-kernel-riscv64.elf target/images/riscv64gc-unknown-minix/minix-riscv64-boot.elf
+
+system-image-riscv64: boot-image-riscv64
+    extras=""; if [ -f target/bash/riscv64/bash ]; then extras=/bin/bash=target/bash/riscv64/bash; else echo "system-image: no /bin/bash (run 'just build-bash riscv64' to include it)"; fi; MINIXFS_EXTRA="${extras}${MINIXFS_EXTRA:+;$MINIXFS_EXTRA}" MINIXFS_BLOCKS="${MINIXFS_BLOCKS:-8192}" cargo run -q -p boot-image --bin mkminixfs --release -- riscv64
+    @just mkfs-riscv64
+
+boot-image-aarch64: userland-aarch64 dynlib-aarch64
+    RUSTC="{{stage1-rustc}}" cargo build -p kernel-boot --bin kernel-boot-aarch64 --target aarch64-unknown-minix --features embed_initramfs,aarch64 --release
+    cp target/aarch64-unknown-minix/release/kernel-boot-aarch64 target/boot-kernel-aarch64.elf
+    mkdir -p target/images/aarch64-unknown-minix
+    cp target/boot-kernel-aarch64.elf target/images/aarch64-unknown-minix/minix-aarch64-boot.elf
+
+system-image-aarch64: boot-image-aarch64
+    extras=""; if [ -f target/bash/aarch64/bash ]; then extras=/bin/bash=target/bash/aarch64/bash; else echo "system-image: no /bin/bash (run 'just build-bash aarch64' to include it)"; fi; MINIXFS_EXTRA="${extras}${MINIXFS_EXTRA:+;$MINIXFS_EXTRA}" MINIXFS_BLOCKS="${MINIXFS_BLOCKS:-8192}" cargo run -q -p boot-image --bin mkminixfs --release -- aarch64
+    @just mkfs-aarch64
+
+# Boot the split pair and drive the userspace smoke scenario into its shell, so a
+# release only ships a system image that was actually booted (the self-contained
+# `image-<arch>` is booted the same way). The dependency builds both images first.
+test-system-image-x86 boot-timeout="40": system-image-x86
+    @just _assert-qemu-version qemu-system-x86_64
+    sh tools/smoke/feed.sh target/test-system-image-x86.log {{boot-timeout}} qemu-system-x86_64 -nographic -m 256M -no-reboot -vga none -device bochs-display,id=fb0 -kernel target/images/x86_64-pc-minix/minix-x86-boot.elf -drive if=none,id=disk0,file=target/images/x86_64-pc-minix/disk.img,format=raw,cache=writethrough -device virtio-blk-pci,disable-legacy=on,drive=disk0 -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0 -device virtio-tablet-pci,display=fb0
+    @just _assert-qemu-log target/test-system-image-x86.log "wserver: ready"
+
+test-system-image-riscv64 boot-timeout="60": system-image-riscv64
+    @just _assert-qemu-version qemu-system-riscv64
+    sh tools/smoke/feed.sh target/test-system-image-riscv64.log {{boot-timeout}} qemu-system-riscv64 -machine virt -m 256M -nographic -global virtio-mmio.force-legacy=off -drive if=none,id=disk0,file=target/images/riscv64gc-unknown-minix/disk.img,format=raw,cache=writethrough -device virtio-blk-device,drive=disk0 -netdev user,id=net0 -device virtio-net-device,netdev=net0 -device virtio-gpu-device -device virtio-keyboard-device -kernel target/images/riscv64gc-unknown-minix/minix-riscv64-boot.elf
+    @just _assert-qemu-log target/test-system-image-riscv64.log "wserver: ready"
+
+test-system-image-aarch64 boot-timeout="60": system-image-aarch64
+    @just _assert-qemu-version qemu-system-aarch64
+    sh tools/smoke/feed.sh target/test-system-image-aarch64.log {{boot-timeout}} qemu-system-aarch64 -machine virt -cpu cortex-a57 -m 256M -nographic -no-reboot -global virtio-mmio.force-legacy=off -drive if=none,id=disk0,file=target/images/aarch64-unknown-minix/disk.img,format=raw,cache=writethrough -device virtio-blk-device,drive=disk0 -netdev user,id=net0 -device virtio-net-device,netdev=net0 -device virtio-gpu-device -device virtio-keyboard-device -kernel target/images/aarch64-unknown-minix/minix-aarch64-boot.elf
+    @just _assert-qemu-log target/test-system-image-aarch64.log "wserver: ready"
+
 build-riscv64: userland-riscv64 coreutils-riscv64 dynlib-riscv64
     RUSTC="{{stage1-rustc}}" cargo build -p kernel-boot --bin kernel-boot-riscv64 --target riscv64gc-unknown-minix --features embed_initramfs,embed_minixfs,riscv64 --release
 
@@ -218,14 +285,14 @@ build-aarch64: userland-aarch64 dynlib-aarch64
 run target="x86" memory="256M":
     @just run-{{target}} {{memory}}
 
-run-x86 memory: build-x86 mkfs-x86
-    qemu-system-x86_64 -nographic -m {{memory}} -no-reboot -vga none -device bochs-display,id=fb0 -kernel target/trampoline.elf -device loader,file=target/kernel.bin,addr=0x200000 -drive if=none,id=disk0,file=target/images/x86_64-pc-minix/disk.img,format=raw,cache=writethrough -device virtio-blk-pci,disable-legacy=on,drive=disk0 -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0 -device virtio-tablet-pci,display=fb0
+run-x86 memory: boot-image-x86 system-image-x86
+    qemu-system-x86_64 -nographic -m {{memory}} -no-reboot -vga none -device bochs-display,id=fb0 -kernel target/boot-kernel-trampoline.elf -device loader,file=target/boot-kernel.bin,addr=0x200000 -drive if=none,id=disk0,file=target/images/x86_64-pc-minix/disk.img,format=raw,cache=writethrough -device virtio-blk-pci,disable-legacy=on,drive=disk0 -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0 -device virtio-tablet-pci,display=fb0
 
-run-riscv64 memory: build-riscv64 mkfs-riscv64
-    qemu-system-riscv64 -machine virt -m {{memory}} -nographic -global virtio-mmio.force-legacy=off -drive if=none,id=disk0,file=target/images/riscv64gc-unknown-minix/disk.img,format=raw,cache=writethrough -device virtio-blk-device,drive=disk0 -netdev user,id=net0 -device virtio-net-device,netdev=net0 -device virtio-gpu-device -device virtio-keyboard-device -kernel target/riscv64gc-unknown-minix/release/kernel-boot-riscv64
+run-riscv64 memory: boot-image-riscv64 system-image-riscv64
+    qemu-system-riscv64 -machine virt -m {{memory}} -nographic -global virtio-mmio.force-legacy=off -drive if=none,id=disk0,file=target/images/riscv64gc-unknown-minix/disk.img,format=raw,cache=writethrough -device virtio-blk-device,drive=disk0 -netdev user,id=net0 -device virtio-net-device,netdev=net0 -device virtio-gpu-device -device virtio-keyboard-device -kernel target/boot-kernel-riscv64.elf
 
-run-aarch64 memory: build-aarch64 mkfs-aarch64
-    qemu-system-aarch64 -machine virt -cpu cortex-a57 -m {{memory}} -nographic -no-reboot -global virtio-mmio.force-legacy=off -drive if=none,id=disk0,file=target/images/aarch64-unknown-minix/disk.img,format=raw,cache=writethrough -device virtio-blk-device,drive=disk0 -netdev user,id=net0 -device virtio-net-device,netdev=net0 -device virtio-gpu-device -device virtio-keyboard-device -kernel target/aarch64-unknown-minix/release/kernel-boot-aarch64
+run-aarch64 memory: boot-image-aarch64 system-image-aarch64
+    qemu-system-aarch64 -machine virt -cpu cortex-a57 -m {{memory}} -nographic -no-reboot -global virtio-mmio.force-legacy=off -drive if=none,id=disk0,file=target/images/aarch64-unknown-minix/disk.img,format=raw,cache=writethrough -device virtio-blk-device,drive=disk0 -netdev user,id=net0 -device virtio-net-device,netdev=net0 -device virtio-gpu-device -device virtio-keyboard-device -kernel target/boot-kernel-aarch64.elf
 
 # One self-contained, bootable artifact per arch: the kernel with the initramfs
 # and root filesystem embedded, so QEMU needs no separate disk. With no virtio
@@ -608,31 +675,33 @@ test-cdyn-x86 boot-timeout="40": dynlib-x86
 # gltriangle: build the surfaceless-EGL GLES2 triangle client and stage the Mesa
 # DSOs it runs against (§6.10 stage 3c-2).
 #
-# The boot gate exists (`tools/smoke/gltriangle.tsv`) but is blocked on the
-# port's root filesystem, not on Mesa: the client needs ~33 MiB of DSOs — two
-# copies of the 16.5 MiB `libgallium` (`libEGL`/`libGLESv2` name it in
-# DT_NEEDED, and EGL *also* dlopens it as `swrast_dri.so`), the only two names
-# the loader and Mesa will accept. A root image past the 16 MiB
-# `RAMDISK_IMAGE_SIZE` default stalls the boot before `wserver` reports ready —
-# embedded, or attached as the virtio-blk root, alike (verified both ways).
-# Raise that ceiling (MFS) and the boot below runs the scenario.
+# The client needs ~36 MiB of DSOs — two copies of the 17 MiB `libgallium`
+# (`libEGL`/`libGLESv2` name it in DT_NEEDED, and EGL *also* dlopens it as
+# `swrast_dri.so`), the only two names the loader and Mesa will accept. They live in
+# the *system image* (`system-image-x86`), not in the kernel: a boot image that
+# embedded them would exceed the 16 MiB ramdisk window and stall before `wserver`.
+# The split procedure, which the recipe below runs by hand until the gate is wired:
 #
-#   MINIXFS_EXTRA='<the seven /lib entries + /bin/gltriangle>' MINIXFS_BLOCKS=12288 just build-x86
-#   MINIXFS_EXTRA='...' MINIXFS_BLOCKS=12288 target/mkboot embed_initramfs
-#   just mkfs-x86
-#   FEED_SCENARIO=tools/smoke/gltriangle.tsv sh tools/smoke/feed.sh target/test-gltriangle-x86.log 180 \
+#   MINIXFS_EXTRA='<the seven /lib entries + /bin/gltriangle>' MINIXFS_BLOCKS=16384 just system-image-x86
+#   FEED_SCENARIO=tools/smoke/gltriangle.tsv sh tools/smoke/feed.sh target/test-gltriangle-x86.log 120 \
 #     qemu-system-x86_64 -nographic -m 512M -no-reboot -vga none -device bochs-display,id=fb0 \
-#     -kernel target/trampoline.elf -device loader,file=target/kernel.bin,addr=0x200000 \
+#     -kernel target/boot-kernel-trampoline.elf -device loader,file=target/boot-kernel.bin,addr=0x200000 \
 #     -drive if=none,id=disk0,file=target/images/x86_64-pc-minix/disk.img,format=raw,cache=writethrough \
 #     -device virtio-blk-pci,disable-legacy=on,drive=disk0 -netdev user,id=net0 \
 #     -device virtio-net-pci,disable-legacy=on,netdev=net0 -device virtio-tablet-pci,display=fb0
+#
+# The image ceiling is gone (this split): the boot image + 64 MiB system image mount,
+# reach the shell and exec /bin/gltriangle. What stops the scenario now is the loader:
+# `ld.so: unsupported relocation type 17` (`R_X86_64_DTPOFF64`), from
+# `_mesa_glapi_tls_Dispatch` in libEGL/libGLESv2. Static-TLS relocation resolution is
+# the next task, not part of the split.
 #
 # Needs `just build-mesa x86 --build` first.
 gltriangle-x86: dynlib-x86
     python tools/build-mesa.py x86 --stage
     @test -f target/mesa/x86/lib/libEGL.so.1 || (echo 'gltriangle: no Mesa DSOs — run `just build-mesa x86 --build` first' >&2; exit 1)
     python tools/build-gltest.py x86
-    @echo "gltriangle: /bin/gltriangle built and the Mesa DSOs staged (boot gate blocked on the 16 MiB root-fs ceiling)"
+    @echo "gltriangle: /bin/gltriangle built and the Mesa DSOs staged (system image; scenario stops at the loader's DTPOFF64 gap)"
 
 # UNIX-domain sockets: /bin/udstest round-trips a socketpair and a
 # bind/listen/connect/accept connection through the /dev/uds server — Phase 0 of
