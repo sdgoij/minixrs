@@ -49,14 +49,21 @@ INTERP = "/libexec/ld.so"
 LIBC = "libc.so"
 WORK_ROOT = ROOT / "target" / "cc-dso"
 
-# The port's C++ runtime, built by `just libcxx-x86` (libc++ + libc++abi merged
+# The port's C++ runtime, built by `just libcxx <arch>` (libc++ + libc++abi merged
 # into one archive). C++ compiles need the headers; every link gets the archive
 # so a C++ object's `std::` references resolve (an unreferenced archive member
-# costs nothing).
+# costs nothing). All three are per-arch: the generated `__config_site` encodes
+# the target and the runtime is target code.
 LIBCXX_INCLUDE = ROOT / "rust" / "src" / "llvm-project" / "libcxx" / "include"
 LIBCXXABI_INCLUDE = ROOT / "rust" / "src" / "llvm-project" / "libcxxabi" / "include"
-LIBCXX_CONFIG_INCLUDE = ROOT / "target" / "cxx" / "libcxx-build" / "include" / "c++" / "v1"
-LIBCXX_RUNTIME = ROOT / "target" / "cxx" / "minix-runtime" / "libstdc++.a"
+
+
+def libcxx_config_include(arch: Arch) -> pathlib.Path:
+    return ROOT / "target" / "cxx" / arch.name / "libcxx-build" / "include" / "c++" / "v1"
+
+
+def libcxx_runtime(arch: Arch) -> pathlib.Path:
+    return ROOT / "target" / "cxx" / arch.name / "minix-runtime" / "libstdc++.a"
 
 # A `cc` line is two commands in one, so every argument has to be classified: a
 # compile-class flag (`-I`, `-O2`, `-fPIC`) must not reach the linker, and a
@@ -121,9 +128,9 @@ def cxx_include_flags() -> list[str]:
             "-I", str(LIBCXXABI_INCLUDE)]
 
 
-def cxx_config_flags() -> list[str]:
+def cxx_config_flags(arch: Arch) -> list[str]:
     """The generated `__config_site` include dir, after the C headers."""
-    return ["-I", str(LIBCXX_CONFIG_INCLUDE)]
+    return ["-I", str(libcxx_config_include(arch))]
 
 
 def classify(argv: list[str]) -> tuple[list[str], list[str], list[str], str | None]:
@@ -228,7 +235,7 @@ def ensure_libc_shims(dir: pathlib.Path) -> None:
 def compile_object(arch: Arch, cc: str, src: str, flags: list[str],
                    out: pathlib.Path, cxx: bool = False) -> int:
     includes = cxx_include_flags() if cxx else []
-    config = cxx_config_flags() if cxx else []
+    config = cxx_config_flags(arch) if cxx else []
     return run([cc, *pic_cflags(arch), *includes, *compile_flags(), *config, *flags,
                 "-c", src, "-o", str(out)])
 
@@ -342,8 +349,9 @@ def link(arch: Arch, lld: pathlib.Path, cc: str, comp: list[str], argv: list[str
             return 1
         cmd.append(str(crt0))
     cmd += ["-o", str(out), *args]
-    if LIBCXX_RUNTIME.is_file():
-        cmd.append(str(LIBCXX_RUNTIME))
+    runtime = libcxx_runtime(arch)
+    if runtime.is_file():
+        cmd.append(str(runtime))
     cmd += ["-L" + str(dir), "-l:" + LIBC, "--allow-shlib-undefined"]
     return run(cmd)
 
@@ -374,7 +382,7 @@ def main(argv: list[str]) -> int:
 
     if any(a in COMPILE_ONLY for a in argv):
         includes = cxx_include_flags() if cxx else []
-        config = cxx_config_flags() if cxx else []
+        config = cxx_config_flags(arch) if cxx else []
         cmd = [cc, *pic_cflags(arch), *includes, *compile_flags(), *config, *comp, *inputs]
         if out:
             cmd += ["-o", out]

@@ -26,6 +26,13 @@
 # a release, so a PR that bumps the pin fails its suites until the merge builds
 # the toolchain - a fork PR could not write one at all.
 #
+# The `gltriangle` job consumes the Mesa/libdrm DSOs the same way, from the
+# `mesa-<pin>` release `mesa-release.yml` publishes for the pair
+# `tools/mesa_pin.py` pins. Its `mesa-pin`/`mesa` pair is the `rust-pin`/`stage1`
+# pattern again: `just fetch-mesa <arch>` downloads the arch's DSOs, and a Mesa
+# build runs only when the pin has no release yet (a pin bump, a new
+# `cc-dso-minix.py` feature, or a manual `mesa release` run).
+#
 # The image jobs depend on the suites for the same reason. Both suites also run
 # locally (`just test-boot-<arch>`, `just test-qemu-<arch>`, on Windows too); they
 # gate on the guest's serial log via `just _assert-qemu-log`.
@@ -517,6 +524,127 @@ jobs:
       - name: Interactive bash
         run: just test-interactive-bash-${{ matrix.arch }} 120
 
+  # Decides whether the pinned Mesa/libdrm pair needs a release before anything
+  # consumes one. Read-only, so it needs no write permission; `mesa` below does the
+  # publishing. The trigger is the missing release, not a moved pin: a pair whose
+  # release was published earlier needs no rebuild.
+  mesa-pin:
+    name: mesa pin
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    outputs:
+      pin: ${{ steps.check.outputs.pin }}
+      needed: ${{ steps.check.outputs.needed }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: false
+
+      - name: Decide whether a Mesa release has to be built
+        id: check
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          pin="$(python3 tools/mesa_pin.py)"
+          echo "pin=${pin}" >> "$GITHUB_OUTPUT"
+
+          published=false
+          if gh release view "${pin}" > /dev/null 2>&1; then
+            published=true
+          fi
+          needed=true
+          [ "${published}" = true ] && needed=false
+          echo "needed=${needed}" >> "$GITHUB_OUTPUT"
+
+          {
+            echo "### Mesa \`${pin}\`"
+            echo
+            echo "- release published: **${published}**"
+            echo "- build needed: **${needed}**"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # One build of the pinned Mesa/libdrm (+ libc++) per arch, and only when the pin
+  # has no release yet - it runs before anything that would consume one. This calls
+  # the workflow the operator can also run by hand, so the build and its publishing
+  # rules keep one home.
+  mesa:
+    name: mesa
+    needs: mesa-pin
+    if: >-
+      needs.mesa-pin.outputs.needed == 'true' &&
+      (github.event_name == 'workflow_dispatch' || github.ref == 'refs/heads/main' || github.ref_type == 'tag')
+    permissions:
+      contents: write
+    uses: ./.github/workflows/mesa-release.yml
+    secrets: inherit
+
+  # The C graphics stack (§6.10 stage 3c-2): the pinned Mesa/libdrm DSOs (fetched,
+  # not built - the `mesa` job above publishes them) plus the current
+  # `tools/gl_triangle.c`, booted through surfaceless EGL on `softpipe`. It is the
+  # gate that exercises the loader's `dlopen`/TLS and the C++ toolchain's output at
+  # their real width, and it republishes each arch's seven DSOs as the `mesa-<arch>`
+  # artifact, which the release workflow injects into the system image it publishes.
+  gltriangle:
+    name: gltriangle (${{ matrix.arch }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    needs: [rust-pin, stage1, mesa-pin, mesa]
+    if: >-
+      !cancelled() &&
+      needs.rust-pin.result == 'success' &&
+      (needs.stage1.result == 'success' || needs.stage1.result == 'skipped') &&
+      needs.mesa-pin.result == 'success' &&
+      (needs.mesa.result == 'success' || needs.mesa.result == 'skipped')
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [x86, riscv64, aarch64]
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: false
+          token: ${{ secrets.SUBMODULE_TOKEN || github.token }}
+
+      - name: Check out the submodules
+        run: |
+          set -euo pipefail
+          git config --global url."https://github.com/".insteadOf "git@github.com:"
+          git submodule update --init --depth 1 rust coreutils
+
+      - uses: extractions/setup-just@v4
+
+      - uses: ./.github/actions/install-clang
+
+      - uses: ./.github/actions/install-qemu
+        with:
+          arch: ${{ matrix.arch }}
+
+      - name: Make python resolve
+        run: sudo ln -sf /usr/bin/python3 /usr/local/bin/python
+
+      - name: Install the prebuilt stage1
+        run: just fetch-stage1 ${{ matrix.arch }}
+
+      # The pinned Mesa/libdrm DSOs, from the `mesa-<pin>` release. Building them
+      # here is tens of minutes per arch; fetching is seconds.
+      - name: Install the prebuilt Mesa DSOs
+        run: just fetch-mesa ${{ matrix.arch }}
+
+      # Boots the split pair with the client and the seven DSOs in the system image and
+      # drives `tools/smoke/gltriangle.tsv`, which wants the client's `gltriangle: pass`.
+      - name: Boot the triangle through surfaceless EGL
+        run: just test-gltriangle-${{ matrix.arch }} 180
+
+      # The seven DSOs, for the release workflow to inject into the system image it
+      # publishes. `if-no-files-found: error` because a rename on either side should fail
+      # loudly rather than let a release image ship without the GL stack it was promised.
+      - uses: actions/upload-artifact@v7
+        with:
+          name: mesa-${{ matrix.arch }}
+          path: target/mesa/${{ matrix.arch }}/lib/*
+          if-no-files-found: error
+
   # The images and the release live in `.github/workflows/image-release.yml`, which
   # this calls: the release logic keeps one home, and `needs` is what makes the
   # release downstream of the tests and the suites rather than something that could
@@ -525,7 +653,7 @@ jobs:
   # pressing anything. This job does nothing else; the work is in that file.
   release:
     name: release
-    needs: [host-tests, arch-tests, wasm-tests, wasm-wire-tests, bash]
+    needs: [host-tests, arch-tests, wasm-tests, wasm-wire-tests, bash, gltriangle]
     if: github.event_name == 'workflow_dispatch' || github.ref == 'refs/heads/main' || github.ref_type == 'tag'
     # The called workflow writes a release, so the caller has to allow that much.
     permissions:

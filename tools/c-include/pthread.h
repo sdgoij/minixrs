@@ -7,6 +7,10 @@
 
 #include <time.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 typedef unsigned long pthread_t;
 typedef struct pthread_attr_t { int __x; } pthread_attr_t;
 
@@ -117,5 +121,9 @@ void *pthread_getspecific(pthread_key_t key);
  * thread here (THREADS.md), so this is PM's signal delivery aimed at the
  * thread's tid. */
 int pthread_kill(pthread_t thread, int sig);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif

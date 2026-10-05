@@ -50,17 +50,20 @@ sys.path.insert(0, str(TOOLS))
 from ccarch import ALL, Arch, resolve_argv  # noqa: E402
 
 
-# Mesa and libdrm, pinned by *tag* and asserted against the commit that tag
-# resolved to when this was written. A shallow `--branch <tag>` clone is enough
-# (unlike bash's commit pin, the tag is the fetchable name), and the assert is
-# what turns a moved tag into a failure rather than a silently different build.
-MESA_GIT = "https://gitlab.freedesktop.org/mesa/mesa.git"
-MESA_TAG = "mesa-25.3.6"
-MESA_COMMIT = "06f9e28304d5d3f109c33535c1c25b9df5769af2"
-
-DRM_GIT = "https://gitlab.freedesktop.org/mesa/drm.git"
-DRM_TAG = "libdrm-2.4.129"
-DRM_COMMIT = "a8e5e10a873f67f557dc70e5407af4553f35edd9"
+# Mesa and libdrm are pinned in `tools/mesa_pin.py`, which the fetch
+# (`tools/fetch-mesa.py`) and the release workflow read too: pinned by *tag* and
+# asserted against the commit that tag resolved to when the pin was written. A
+# shallow `--branch <tag>` clone is enough (unlike bash's commit pin, the tag is
+# the fetchable name), and the assert is what turns a moved tag into a failure
+# rather than a silently different build.
+from mesa_pin import (  # noqa: E402
+    DRM_COMMIT,
+    DRM_GIT,
+    DRM_TAG,
+    MESA_COMMIT,
+    MESA_GIT,
+    MESA_TAG,
+)
 
 MESA_SRC = ROOT / "target" / "mesa-src"
 DRM_SRC = ROOT / "target" / "drm-src"

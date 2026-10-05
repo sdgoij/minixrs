@@ -53,14 +53,23 @@ def main(argv: list[str]) -> int:
 
     libc_dir = ROOT / "target" / arch.triple / "release"
     mesa_lib = ROOT / "target" / "mesa" / arch.name / "lib"
-    mesa_include = ROOT / "target" / "mesa-src" / "include"
+    # The headers come from the Mesa source checkout (`just build-mesa`) or from the
+    # published artifact (`just fetch-mesa`), which carries the EGL/GLES2/KHR subset the
+    # client compiles against.
+    mesa_include = ROOT / "target" / "mesa" / arch.name / "include"
+    if not (mesa_include / "EGL" / "egl.h").is_file():
+        mesa_include = ROOT / "target" / "mesa-src" / "include"
     if not (libc_dir / LIBC).is_file():
         print(f"error: no {libc_dir / LIBC} — run `just dynlib-{arch.name}` first",
               file=sys.stderr)
         return 1
     if not (mesa_lib / "libEGL.so.1").is_file():
-        print(f"error: no {mesa_lib / 'libEGL.so.1'} — run `just build-mesa {arch.name} --stage`",
-              file=sys.stderr)
+        print(f"error: no {mesa_lib / 'libEGL.so.1'} — run `just build-mesa {arch.name} --stage` "
+              f"or `just fetch-mesa {arch.name}`", file=sys.stderr)
+        return 1
+    if not (mesa_include / "EGL" / "egl.h").is_file():
+        print(f"error: no Mesa headers under {mesa_include} — run `just build-mesa "
+              f"{arch.name} --build` or `just fetch-mesa {arch.name}`", file=sys.stderr)
         return 1
 
     work = ROOT / "target" / "mesa" / arch.name / "bin"

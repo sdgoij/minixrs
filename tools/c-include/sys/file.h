@@ -9,6 +9,10 @@
 
 #include <fcntl.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 #define LOCK_SH 1
 #define LOCK_EX 2
 #define LOCK_NB 4
@@ -17,5 +21,9 @@
 /* The VFS has no file locks, so flock() is granted unconditionally; see the
  * comment on the implementation in minix-libc. */
 int flock(int fd, int operation);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif

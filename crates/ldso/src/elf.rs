@@ -66,6 +66,10 @@ pub const R_X86_64_RELATIVE: u32 = 8;
 /// general- (or local-) dynamic TLS model reaches its thread-locals through
 /// `__tls_get_addr`, and this is the id it is handed.
 pub const R_X86_64_DTPMOD64: u32 = 16;
+/// Fills a `tls_index`'s `ti_offset` with the variable's distance from its module's
+/// storage. The other half of the pair above: without it a general-dynamic access has a
+/// module and no place in it.
+pub const R_X86_64_DTPOFF64: u32 = 17;
 
 // The same set for the other two targets, whose numbering is their own. Taken
 // from the psABI headers as the fork's LLVM carries them
@@ -80,6 +84,9 @@ pub const R_RISCV_RELATIVE: u32 = 3;
 pub const R_RISCV_COPY: u32 = 4;
 pub const R_RISCV_JUMP_SLOT: u32 = 5;
 pub const R_RISCV_TLS_DTPMOD64: u32 = 7;
+/// RISC-V's `DTPREL`: the same distance as x86_64's, stated `0x800` short of it (its psABI's
+/// `dtpOffset`); `layout::DTV_OFFSET` is that bias, added back by `__tls_get_addr`.
+pub const R_RISCV_TLS_DTPREL64: u32 = 9;
 
 pub const R_AARCH64_NONE: u32 = 0;
 pub const R_AARCH64_ABS64: u32 = 0x101;
@@ -88,6 +95,8 @@ pub const R_AARCH64_GLOB_DAT: u32 = 0x401;
 pub const R_AARCH64_JUMP_SLOT: u32 = 0x402;
 pub const R_AARCH64_RELATIVE: u32 = 0x403;
 pub const R_AARCH64_TLS_DTPMOD64: u32 = 0x404;
+/// AArch64's `DTPREL` (GNU's `TLS_IMPDEF2`), the distance from the module's storage.
+pub const R_AARCH64_TLS_DTPREL64: u32 = 0x405;
 // AArch64's thread-local accesses go through a *descriptor* (the `TLSDESC`
 // dialect) rather than `__tls_get_addr`: the relocation fills a two-word GOT
 // entry, the resolver and its argument.
@@ -144,6 +153,9 @@ impl Sym {
 
     pub const STB_GLOBAL: u8 = 1;
     pub const STB_WEAK: u8 = 2;
+    /// A thread-local (`st_info`'s low nibble): `st_value` is then an offset within the
+    /// defining module's TLS block, not an address.
+    pub const STT_TLS: u8 = 6;
 
     pub fn bind(&self) -> u8 {
         self.st_info >> 4

@@ -1,0 +1,195 @@
+# Builds the pinned Mesa + libdrm shared objects (and the C++ runtime they link)
+# once per arch and publishes them as a release in this repository, so CI and
+# local work can install them in seconds instead of building Mesa from source.
+#
+# This is the `toolchain-release.yml` pattern applied to the GL stack. The pin is
+# `tools/mesa_pin.py`: the Mesa and libdrm commits, whose pair the release tag is
+# derived from, so an artifact can only match the sources in the tree. Manual or
+# automatic: `workflow_dispatch` rebuilds on demand (after a pin bump or a
+# `tools/cc-dso-minix.py` change), and `ci.yml` calls it - through `workflow_call`
+# - when the pinned tag has no release yet, before anything consumes one.
+#
+# The asset is per-arch (`mesa-<pin>-<arch>.tar.xz`, the seven DSOs under `lib/`),
+# because they are target code; the C++ runtime is linked into them statically, so
+# there is no second artifact. `tools/fetch-mesa.py` derives the tag from the same
+# pin, downloads one arch's asset, and verifies `SHA256SUMS`.
+#
+# The release lives here rather than on a fork, because the built-in
+# `GITHUB_TOKEN` can only write its own repository - no personal access tokens,
+# and consuming the asset needs no credentials (this repository is public).
+
+name: mesa release
+
+on:
+  workflow_dispatch:
+  # Called by `ci.yml`; the caller has to grant `contents: write` for the publish
+  # step, since a called workflow cannot widen its own permissions.
+  workflow_call:
+
+concurrency:
+  group: mesa-release
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: mesa (${{ matrix.arch }})
+    runs-on: ubuntu-24.04
+    # A from-source Mesa + libc++ build dominates this; being killed halfway wastes it.
+    timeout-minutes: 240
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [x86, riscv64, aarch64]
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: false
+          token: ${{ secrets.SUBMODULE_TOKEN || github.token }}
+
+      # The build needs far more room than a runner has free.
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+            /usr/local/share/boost /opt/hostedtoolcache/CodeQL
+          df -h /
+
+      - uses: ./.github/actions/install-clang
+
+      # The C++ runtime build needs an LLVM archiver; the clang package above does
+      # not install one and the prebuilt stage1 ships none.
+      - name: Install the LLVM archiver
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends llvm-22
+          for t in llvm-ar llvm-ranlib; do
+            sudo ln -sf "/usr/lib/llvm-22/bin/$t" "/usr/local/bin/$t"
+          done
+
+      # The runner has cmake but no meson, and its apt meson is older than Mesa asks for.
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install meson, ninja and cmake
+        run: |
+          pip install meson ninja
+          sudo apt-get install -y --no-install-recommends cmake pkg-config
+
+      - name: Rewrite submodule SSH URLs to HTTPS
+        run: |
+          git config --global url."https://github.com/".insteadOf "git@github.com:"
+
+      # `rust` supplies the libc++ headers (`rust/src/llvm-project`) and the commit
+      # `just fetch-stage1` resolves the toolchain release from. Shallow, like the
+      # other third-party checkouts.
+      - name: Check out the submodules shallowly
+        run: |
+          set -euo pipefail
+          git submodule update --init --depth 1 rust
+          git -C rust submodule update --init --depth 1 src/llvm-project
+
+      - uses: extractions/setup-just@v4
+
+      - name: Install the prebuilt stage1
+        run: just fetch-stage1 ${{ matrix.arch }}
+
+      # The DSOs link against the port's `libc.so`, and libc++ builds first because
+      # Mesa's shared objects link it statically.
+      - name: Build libc.so, the C++ runtime, then Mesa
+        run: |
+          set -euo pipefail
+          just dynlib-${{ matrix.arch }}
+          just libcxx ${{ matrix.arch }}
+          just build-mesa ${{ matrix.arch }} --build
+
+      - name: Package
+        id: package
+        run: |
+          set -euo pipefail
+          pin="$(python3 tools/mesa_pin.py)"
+          asset="${pin}-${{ matrix.arch }}.tar.xz"
+          stage="target/mesa/${{ matrix.arch }}"
+          test -f "${stage}/lib/libEGL.so.1" || { echo "!! no staged DSOs at ${stage}/lib"; exit 1; }
+          # `lib/` and the EGL/GLES2/KHR headers the surfaceless client compiles
+          # against, so a consumer can build `tools/gl_triangle.c` without the Mesa
+          # source checkout. `tools/fetch-mesa.py` extracts both into
+          # `target/mesa/<arch>`.
+          publish="target/mesa-publish"
+          rm -rf "${publish}"
+          mkdir -p "${publish}/lib" "${publish}/include"
+          cp "${stage}"/lib/* "${publish}/lib/"
+          cp -r target/mesa-src/include/EGL target/mesa-src/include/GLES2 \
+                target/mesa-src/include/KHR "${publish}/include/"
+          tar -cJf "${asset}" -C "${publish}" lib include
+          ls -lh "${asset}"
+          echo "asset=${asset}" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: mesa-asset-${{ matrix.arch }}
+          path: ${{ steps.package.outputs.asset }}
+          if-no-files-found: error
+
+  # One release, so one job: a matrix job cannot create it without racing the
+  # others. All three arch assets are in hand by the time this runs (`needs`).
+  publish:
+    name: publish
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: false
+
+      - name: Resolve the pin
+        id: pin
+        run: echo "tag=$(python3 tools/mesa_pin.py)" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: mesa-asset-*
+          merge-multiple: true
+
+      - name: Publish the release
+        env:
+          # `github.token`, not `secrets.GITHUB_TOKEN`: a called workflow is always
+          # handed the caller's token (see toolchain-release.yml).
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag='${{ steps.pin.outputs.tag }}'
+          shopt -s nullglob
+          assets=(mesa-*.tar.xz)
+          test "${#assets[@]}" -eq 3 || {
+            echo "!! expected 3 arch assets, found ${#assets[@]}"; ls -l; exit 1; }
+          sha256sum "${assets[@]}" > SHA256SUMS
+          notes="$(printf '%s\n' \
+            "Prebuilt Mesa + libdrm shared objects for the pins in \`tools/mesa_pin.py\`" \
+            "(the release tag is derived from the two commits):" \
+            "" \
+            "- Mesa \`${MESA_TAG}\` (\`${MESA_COMMIT}\`)" \
+            "- libdrm \`${DRM_TAG}\` (\`${DRM_COMMIT}\`)" \
+            "- arches: x86_64, riscv64, aarch64 (one asset each, seven DSOs under \`lib/\`)" \
+            "" \
+            "Install one arch with \`just fetch-mesa <arch>\`, which derives this tag and" \
+            "verifies \`SHA256SUMS\`. \`just build-mesa <arch> --build\` remains the" \
+            "authoritative path when the pin or the C toolchain changes.")"
+          # Prereleases, like the stage1 and `image-<sha>` builds: an artifact for a
+          # pin, not a milestone. `edit` repairs a re-run as well as `create`.
+          if gh release view "${tag}" > /dev/null 2>&1; then
+            gh release upload "${tag}" --clobber "${assets[@]}" SHA256SUMS
+            gh release edit "${tag}" --prerelease --notes "${notes}"
+          else
+            gh release create "${tag}" \
+              --prerelease \
+              --title "${tag}" \
+              --notes "${notes}" \
+              "${assets[@]}" SHA256SUMS
+          fi
+          echo "published ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/releases/tag/${tag}"

@@ -115,6 +115,15 @@ jobs:
           name: bash-${{ matrix.arch }}
           path: target/bash/${{ matrix.arch }}
 
+      # The `gltriangle` job in `ci.yml` built this arch's GL stack and published its seven
+      # DSOs as `mesa-<arch>`; the `release` job that calls this file `needs` that job, so
+      # they exist by the time this one runs. Injecting them into the system image is what
+      # lets a released image run the C graphics stack.
+      - uses: actions/download-artifact@v8
+        with:
+          name: mesa-${{ matrix.arch }}
+          path: target/mesa/${{ matrix.arch }}/lib
+
       # 120 s against a dev machine's 15 s: it is the runner's emulation speed, not
       # a budget the image has to meet. A boot that is actually broken still fails
       # here, only later.
@@ -126,14 +135,24 @@ jobs:
           MINIXFS_EXTRA: /bin/bash=target/bash/${{ matrix.arch }}/bash
         run: just image ${{ matrix.arch }} 120
 
-      # The split form: a small boot image and a full system image (coreutils, plus GNU
-      # bash because the `bash` artifact above is in place; `MINIXFS_EXTRA` can inject
-      # more, as the Mesa recipe does). The system image is the artifact the 16 MiB
-      # embedded window cannot hold. `120` is the runner's emulation speed, not a budget.
-      # The recipe boots what it builds and drives the smoke scenario, so the release
-      # cannot ship a system image that was never booted.
+      # The split form: a small boot image and a full system image (coreutils, GNU bash
+      # because the `bash` artifact above is in place, and the seven Mesa DSOs because the
+      # `mesa-<arch>` artifact is). The DSOs are ~36 MiB, so `MINIXFS_BLOCKS` is raised from
+      # the recipe's 32 MiB default - the system image is the artifact the 16 MiB embedded
+      # window cannot hold. `180` is the runner's emulation speed, not a budget. The recipe
+      # boots what it builds and drives the smoke scenario, so the release cannot ship a
+      # system image that was never booted.
       - name: Build and boot the boot image and system image
-        run: just test-system-image-${{ matrix.arch }} 120
+        run: |
+          set -euo pipefail
+          # Each DSO at the `/lib/<soname>` name its `DT_NEEDED` and `LIBGL_DRIVERS_PATH`
+          # look it up by, so the loader finds it where it searches.
+          extra=""
+          for so in target/mesa/${{ matrix.arch }}/lib/*; do
+            extra="${extra};/lib/$(basename "$so")=$so"
+          done
+          MINIXFS_EXTRA="${extra#;}" MINIXFS_BLOCKS=16384 \
+            just test-system-image-${{ matrix.arch }} 180
 
       # Named without the version: the publish job is the only place that knows
       # whether this is a tag or a commit, so it renames on the way into the

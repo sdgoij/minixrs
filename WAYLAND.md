@@ -1,9 +1,13 @@
 # Wayland on minixrs — design proposal and gap analysis
 
-Status: **Phases 0–2 landed, and Phase 3 through stage 3b.** The loader support it
+Status: **Phases 0–2 landed, and Phase 3 through stage 3c-2 on all three arches.** The
+loader support it
 depends on has landed (dynamic linking, `dlopen`, multi-module TLS, an 18-object
 budget — §6.9). §7 carries the per-phase state; what remains is Phase 2's
-multi-output, stage 3c (Mesa + `libdrm` as DSOs) and 3d, and Phases 4–5. This
+multi-output, stage 3c-3 (virgl) and 3d, and Phases 4–5. The softpipe triangle
+(3c-2) passes `just test-gltriangle-<arch>` on x86_64, riscv64 and aarch64 — EGL
+1.5 / GLES 3.1 on `softpipe`, a red centroid over a black corner — and CI builds
+the stack per arch and injects it into the released system image. This
 document proposes how to get a Wayland compositor — and eventually a desktop —
 running on this port, and records what the reference tree has that we do not, so
 the deviations are deliberate rather than accidental.
@@ -817,7 +821,7 @@ least of the kernel:
 |---|---|---|
 | **3c-0** | The build plumbing: Mesa and `libdrm` pinned and fetched under `target/` (the way `tools/build-bash.py` pins bash, `target/bash-src`), and a `tools/build-mesa.py` that drives their build against the minix C toolchain — including the `cc` that produces `*-minix-elf` shared objects. | `just build-mesa x86` reaches configure and either completes it or fails at a *named* missing libc symbol, with the log written where the next stage reads it |
 | **3c-1** | **The software rasteriser first — `softpipe`, not llvmpipe.** Mesa builds llvmpipe only with LLVM (`-Dllvm=enabled`), and an LLVM port is a much larger project than Mesa; `softpipe` is the same software family with no JIT (and so no `mprotect`). `surfaceless_probe_device_sw` opens no DRM node and loads it under `LIBGL_ALWAYS_SOFTWARE=1`, so this runs before the `/sys` question is settled. Build the `softpipe` gallium driver, `libEGL`/`libGLESv2` and `libglapi` as DSOs, surfaceless-only (`-Dplatforms=`, `-Dgallium-drivers=softpipe`). | In a guest with `LIBGL_ALWAYS_SOFTWARE=1`: `eglGetDisplay(EGL_DEFAULT_DISPLAY)` + `eglInitialize` + `eglQueryString` return a real EGL, and the `libgallium_dri.so` `PT_TLS` block measures ≤ 2048 bytes (`readelf -l`), which is what the loader's surplus TLS slot allows |
-| **3c-2** | The triangle over llvmpipe: a client makes an FBO, draws a GLES2 triangle, `glReadPixels`, writes `/dev/fb`, `FBIOFLUSH`. | The triangle is on screen in QEMU (read back from `/dev/fb`), with no DRM node opened |
+| **3c-2** | **Landed on all three arches** (`just test-gltriangle-<arch>`). The triangle over `softpipe`: the client makes a pbuffer, draws a GLES2 triangle, `glReadPixels`, and checks a red centroid against a black corner. | The triangle reads back red-on-black in QEMU with no DRM node opened (the `/dev/fb` present path is 3d's, not this one) |
 | **3c-3** | **virgl**: `libdrm` (D6 — a dependency, not a reimplementation), Mesa's `virgl` gallium driver, and the DRM device question — `/dev/dri/renderD128` plus either a minimal `/sys` `device/subsystem` node in `devman` or the recorded `drmParseSubsystemType` patch. | The same triangle runs through virgl (`-device virtio-gpu-gl-pci`), differing from 3c-2 only in which gallium driver Mesa loads |
 
 softpipe is first deliberately: §6.10's measurement is that the software branch

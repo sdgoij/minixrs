@@ -990,6 +990,20 @@ refused load or a neighbour's storage. A static program is untouched. `TPOFF64`/
 initial-exec stays unimplemented: nothing the port builds asks for it, and it would be a
 second relocation path to maintain.
 
+**The offset half was missing until Mesa.** `DTPMOD64` (the module word) landed with the
+above, but not `DTPREL` (`R_X86_64_DTPOFF64`, `R_AARCH64_TLS_DTPREL64`, `R_RISCV_TLS_DTPREL64`) —
+the variable's distance from its module's storage, the *other* word of the same `tls_index`.
+A general-dynamic access needs both, and Mesa's `_mesa_glapi_tls_Dispatch` (defined in
+`libgallium`, referenced by `libEGL`/`libGLESv2`) was the first object to reach for it, so
+stage 3c's gate stopped at `ld.so: unsupported relocation type 17`. Two facts the module word
+had hidden: a symbol'd `DTPMOD64` names the *defining* object's module, not the relocating
+object's (libgallium's, not `libEGL`'s), and RISC-V's psABI states `DTPREL` `0x800` short of
+the distance — the same bias `DTV_OFFSET` adds back, kept in the per-target relocation table
+so the write is right and not merely close. aarch64's `TLSDESC` dialect has the same two
+forms — the port had refused a descriptor naming a symbol another object defines — and the
+walk now fills it with the *definer's* displacement plus the symbol's own offset, which is
+why `Def` carries a thread-local's module, offset and displacement together.
+
 **Gate.** `tools/smoke/dyn.tsv`'s `tls` step is the opposite of what it was. `tools/libtls1.so`
 is `dlopen`ed and never `DT_NEEDED`, its `__thread` counter is read — which must say the
 initialiser, 7, *before* anything writes it, so a zero is a slot that was never initialised —

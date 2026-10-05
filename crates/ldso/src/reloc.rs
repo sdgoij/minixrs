@@ -10,9 +10,10 @@
 use crate::elf::{
     EM_AARCH64, EM_RISCV, EM_X86_64, R_AARCH64_ABS64, R_AARCH64_COPY, R_AARCH64_GLOB_DAT,
     R_AARCH64_JUMP_SLOT, R_AARCH64_NONE, R_AARCH64_RELATIVE, R_AARCH64_TLS_DTPMOD64,
-    R_AARCH64_TLSDESC, R_RISCV_64, R_RISCV_COPY, R_RISCV_JUMP_SLOT, R_RISCV_NONE, R_RISCV_RELATIVE,
-    R_RISCV_TLS_DTPMOD64, R_X86_64_64, R_X86_64_COPY, R_X86_64_DTPMOD64, R_X86_64_GLOB_DAT,
-    R_X86_64_JUMP_SLOT, R_X86_64_NONE, R_X86_64_RELATIVE, RELA_SIZE, Rela,
+    R_AARCH64_TLS_DTPREL64, R_AARCH64_TLSDESC, R_RISCV_64, R_RISCV_COPY, R_RISCV_JUMP_SLOT,
+    R_RISCV_NONE, R_RISCV_RELATIVE, R_RISCV_TLS_DTPMOD64, R_RISCV_TLS_DTPREL64, R_X86_64_64,
+    R_X86_64_COPY, R_X86_64_DTPMOD64, R_X86_64_DTPOFF64, R_X86_64_GLOB_DAT, R_X86_64_JUMP_SLOT,
+    R_X86_64_NONE, R_X86_64_RELATIVE, RELA_SIZE, Rela,
 };
 
 /// One target's relocation numbering.
@@ -47,6 +48,14 @@ pub struct Relocs {
     /// Fill a `tls_index`'s module number, which is the loader's to say rather than the
     /// relocation's (see [`RelocImage::tls_module`]).
     pub dtpmod64: u32,
+    /// Fill a `tls_index`'s *offset* word: the variable's distance from its module's storage.
+    /// The pair above and this one are what a general-dynamic access hands `__tls_get_addr`.
+    pub dtprel64: u32,
+    /// What this target's `dtprel64` is *short by*, in bytes. Zero on x86_64 and aarch64,
+    /// where the relocation value is the distance; `0x800` on RISC-V, whose psABI states
+    /// `DTPREL` as `TPREL - DTP_OFFSET` (`layout::DTV_OFFSET` is the same bias, added back by
+    /// `__tls_get_addr`).
+    pub dtprel_off: i64,
     /// A `TLSDESC` descriptor: a *pair* of words, the resolver and its argument,
     /// which a thread-local access calls instead of `__tls_get_addr` (AArch64's
     /// default dialect). [`Relocs::none`] on a target that has no such relocation.
@@ -63,6 +72,8 @@ pub const X86_64: Relocs = Relocs {
     jump_slot: R_X86_64_JUMP_SLOT,
     copy: R_X86_64_COPY,
     dtpmod64: R_X86_64_DTPMOD64,
+    dtprel64: R_X86_64_DTPOFF64,
+    dtprel_off: 0,
     tlsdesc: R_X86_64_NONE,
 };
 
@@ -78,6 +89,8 @@ pub const RISCV64: Relocs = Relocs {
     jump_slot: R_RISCV_JUMP_SLOT,
     copy: R_RISCV_COPY,
     dtpmod64: R_RISCV_TLS_DTPMOD64,
+    dtprel64: R_RISCV_TLS_DTPREL64,
+    dtprel_off: 0x800,
     tlsdesc: R_RISCV_NONE,
 };
 
@@ -91,6 +104,8 @@ pub const AARCH64: Relocs = Relocs {
     jump_slot: R_AARCH64_JUMP_SLOT,
     copy: R_AARCH64_COPY,
     dtpmod64: R_AARCH64_TLS_DTPMOD64,
+    dtprel64: R_AARCH64_TLS_DTPREL64,
+    dtprel_off: 0,
     tlsdesc: R_AARCH64_TLSDESC,
 };
 
@@ -113,6 +128,11 @@ pub enum Action {
     /// the one value in a thread-local access the layout decides rather than the object's own
     /// code.
     WriteModule,
+    /// Write a thread-local's module-relative offset (`DTPREL`), paired with `WriteModule` in a
+    /// `tls_index`. Its payload is the target's [`Relocs::dtprel_off`] — the bias its `DTPREL`
+    /// is short by — which the walk subtracts from the definition's own offset. The walk
+    /// resolves the symbol, since the offset is the definition's rather than the relocation's.
+    WriteTlsOffset(i64),
     /// A byte copy (`COPY`): the walk resolves the symbol with
     /// [`Scope::ExcludeSelf`] and moves the definition's bytes to `r_offset`.
     Copy,
@@ -156,6 +176,13 @@ pub fn action(r: Relocs, typ: u32, base: u64, sym_value: u64, addend: i64) -> Ac
     // not what goes here.
     if typ == r.dtpmod64 {
         return Action::WriteModule;
+    }
+    // The other half of a general-dynamic access: the variable's distance from its module's
+    // storage. It is a symbol's to state (`st_value` for an `STT_TLS` symbol is exactly that
+    // distance), so the walk resolves it; the per-target bias is the whole of the decision
+    // here.
+    if typ == r.dtprel64 {
+        return Action::WriteTlsOffset(r.dtprel_off);
     }
     if typ == r.tlsdesc {
         // A thread-local access in the `TLSDESC` dialect asks a per-descriptor
@@ -222,10 +249,54 @@ pub const fn lookup_pass(obj_group: u16, obj_global: bool, owner_group: u16) -> 
 /// A symbol's definition, as its defining object states it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Def {
-    /// Its runtime address in the object that defines it.
+    /// The value `S` a relocation reads: the symbol's runtime address for an ordinary symbol,
+    /// or — for a thread-local (`STT_TLS`) symbol — its distance from the *defining module's*
+    /// storage, which is what [`tls`](Self::tls) states. They are not interchangeable: an address
+    /// has the object's base added and a thread-local's offset does not.
     pub addr: u64,
     /// `st_size` — how many bytes a `COPY` moves.
     pub size: u64,
+    /// Whether the symbol is thread-local, so `addr` is a module-relative offset rather than an
+    /// address.
+    pub tls: bool,
+    /// The module number of the object that defines a thread-local symbol (`0` otherwise). A
+    /// `DTPMOD64` against a symbol needs the *defining* module, which is not necessarily the
+    /// object being relocated — `libEGL` references a thread-local `libgallium` defines.
+    pub tls_module: u64,
+    /// The defining module's distance from the thread pointer (`crate::layout::tls_layout`). A
+    /// `TLSDESC` descriptor names the variable's offset from the thread pointer, so it needs
+    /// the *definer's* displacement and not the relocating object's.
+    pub tls_disp: i64,
+}
+
+impl Def {
+    /// An ordinary symbol: `addr` is its runtime address.
+    pub const fn at(addr: u64, size: u64) -> Self {
+        Self {
+            addr,
+            size,
+            tls: false,
+            tls_module: 0,
+            tls_disp: 0,
+        }
+    }
+
+    /// A loader-defined function, which has no `st_size` to state.
+    pub const fn fun(addr: u64) -> Self {
+        Self::at(addr, 0)
+    }
+
+    /// A thread-local symbol: `offset` is its distance from the defining module's storage,
+    /// which sits `disp` bytes from the thread pointer.
+    pub const fn thread_local(offset: u64, size: u64, module: u64, disp: i64) -> Self {
+        Self {
+            addr: offset,
+            size,
+            tls: true,
+            tls_module: module,
+            tls_disp: disp,
+        }
+    }
 }
 
 /// Longest symbol name a walk copies. A name that does not fit fails the load
@@ -306,9 +377,9 @@ pub enum RelocError {
     Unresolved(SymName),
     /// The relocation's target is outside the image it belongs to.
     OutOfRange(u64),
-    /// A `TLSDESC` for a symbol another object defines. The port places one
-    /// object's thread-local storage, so there is no block for the symbol's.
-    TlsDescForASymbol,
+    /// A `DTPMOD`/`DTPREL`/`TLSDESC` relocation named a symbol that is not thread-local, so
+    /// there is no module, module-relative offset or thread-pointer offset to write.
+    TlsRelocForANonTlsSymbol,
 }
 
 /// What a relocation walk needs from a loaded image.
@@ -397,9 +468,46 @@ where
                 }
             }
             Action::WriteModule => {
+                // `sym() == 0` is the local-dynamic form: the module is the one being
+                // relocated. A symbol names the *defining* module, which is what a
+                // cross-object thread-local needs and the relocating object's own module does
+                // not answer.
+                let module = if r.sym() == 0 {
+                    img.tls_module()
+                } else {
+                    img.sym_name(r.sym(), &mut name)
+                        .map_err(|e| RelocError::BadSymbol(r.sym(), e))?;
+                    match resolve(name.as_bytes(), Scope::All) {
+                        Some(def) if def.tls => def.tls_module,
+                        Some(_) => return Err(RelocError::TlsRelocForANonTlsSymbol),
+                        // A weak, undefined thread-local is `S = 0`, which names no module.
+                        None if img.sym_is_weak(r.sym()) => 0,
+                        None => return Err(RelocError::Unresolved(name)),
+                    }
+                };
                 let at = base.wrapping_add(r.r_offset);
-                let module = img.tls_module();
                 if !img.store(at, module) {
+                    return Err(RelocError::OutOfRange(at));
+                }
+            }
+            Action::WriteTlsOffset(off) => {
+                // The variable's distance from its module's storage is the definition's to
+                // state, so the walk reads it — `uses_symbol` is false and the generic step
+                // above skipped it. `off` is the target's bias (`0` on x86_64 and aarch64,
+                // `0x800` on RISC-V), the same one `__tls_get_addr` adds back.
+                img.sym_name(r.sym(), &mut name)
+                    .map_err(|e| RelocError::BadSymbol(r.sym(), e))?;
+                let offset = match resolve(name.as_bytes(), Scope::All) {
+                    Some(def) if def.tls => def.addr,
+                    Some(_) => return Err(RelocError::TlsRelocForANonTlsSymbol),
+                    None if img.sym_is_weak(r.sym()) => 0,
+                    None => return Err(RelocError::Unresolved(name)),
+                };
+                let value = offset
+                    .wrapping_add(r.r_addend as u64)
+                    .wrapping_sub(off as u64);
+                let at = base.wrapping_add(r.r_offset);
+                if !img.store(at, value) {
                     return Err(RelocError::OutOfRange(at));
                 }
             }
@@ -414,19 +522,32 @@ where
                 }
             }
             Action::TlsDesc(offset) => {
-                // The symbol's form needs the defining object's storage, which a descriptor
-                // does not carry — and it is the dialect this port's compiler does not emit for
-                // a thread-local the object defines itself. Refused rather than half-answered.
-                if r.sym() != 0 {
-                    return Err(RelocError::TlsDescForASymbol);
-                }
+                // Two forms, both ending with the variable's offset from the thread pointer.
+                // *With* a symbol, the variable belongs to some object — often another one, as
+                // `_mesa_glapi_tls_Dispatch` in `libEGL` is `libgallium`'s — and the offset is
+                // its distance from that module's storage plus that module's displacement, all
+                // of which the definition states. Without a symbol the linker resolved the
+                // object's own variable into the addend, taken as relative to module 0, so the
+                // object's own displacement is the missing part. The layout is computed before
+                // the walk, which is what lets either form be answered here.
+                let arg = if r.sym() == 0 {
+                    (offset as i64).wrapping_add(img.tls_disp()) as u64
+                } else {
+                    img.sym_name(r.sym(), &mut name)
+                        .map_err(|e| RelocError::BadSymbol(r.sym(), e))?;
+                    let def = match resolve(name.as_bytes(), Scope::All) {
+                        Some(def) if def.tls => def,
+                        Some(_) => return Err(RelocError::TlsRelocForANonTlsSymbol),
+                        None if img.sym_is_weak(r.sym()) => {
+                            Def::thread_local(0, 0, 0, img.tls_disp())
+                        }
+                        None => return Err(RelocError::Unresolved(name)),
+                    };
+                    def.addr
+                        .wrapping_add(r.r_addend as u64)
+                        .wrapping_add(def.tls_disp as u64)
+                };
                 let resolver = img.tlsdesc_static();
-                // The linker's addend is the variable's offset from the thread pointer on the
-                // assumption that the module starts *there* — module 0's placement. Every other
-                // module's storage begins `disp` bytes along, so the descriptor has to say so.
-                // This is the one relocation whose value the layout decides, which is why the
-                // layout is computed before the walk.
-                let arg = (offset as i64).wrapping_add(img.tls_disp()) as u64;
                 let at = base.wrapping_add(r.r_offset);
                 if !img.store(at, resolver) || !img.store(at + 8, arg) {
                     return Err(RelocError::OutOfRange(at));
@@ -455,7 +576,7 @@ mod tests {
     const RELA_VA: u64 = 0x1c0;
     const PLT_VA: u64 = 0x220;
     const FILE_LEN: usize = 0x400;
-    const NSYM: usize = 6;
+    const NSYM: usize = 7;
 
     // Where the relocations write. `SLOT_NONE` is a no-op's target: it must come
     // out untouched, which is how "applied to the right offset" is checked for
@@ -467,6 +588,10 @@ mod tests {
     const SLOT_NONE: u64 = 0x3a0;
     const SLOT_COPY: u64 = 0x3a8;
     const SLOT_WEAK: u64 = 0x3b0;
+    /// The two words of a `tls_index` a general-dynamic access builds: the defining module and
+    /// the variable's distance from that module's storage.
+    const SLOT_TLSMOD: u64 = 0x3c8;
+    const SLOT_TLSOFF: u64 = 0x3d0;
     /// The COPY's source — the "other object's" own bytes, staged by the test. A
     /// copy is memory to memory, so where they live does not matter here: what the
     /// walk must get right is which objects it may resolve the name in.
@@ -480,6 +605,16 @@ mod tests {
     /// The module number the test image claims, and the placement it claims: the *first*
     /// module, at the thread pointer, which is what an object's own code assumes.
     const TLS_MODULE: u64 = 1;
+    /// A thread-local's defining module in the test resolver — deliberately *not* the image's
+    /// own, so a symbol'd `DTPMOD64` that wrote the relocating object's module instead of the
+    /// definer's is visible rather than coincidentally right.
+    const TLS_OTHER_MODULE: u64 = 7;
+    /// That thread-local's own offset within its module's storage.
+    const TLS_VAR_OFFSET: u64 = 0x18;
+    /// Where that module's storage sits from the thread pointer. A `TLSDESC` argument is
+    /// thread-pointer-relative, so a cross-object descriptor needs this and the relocating
+    /// object's own is a different number by construction.
+    const TLS_OTHER_DISP: i64 = 0x1000;
     const SENTINEL: u8 = 0xaa;
 
     fn wr16(b: &mut [u8], o: usize, v: u16) {
@@ -525,7 +660,8 @@ mod tests {
         wr64(&mut b, PHOFF + 48, 0x1000);
 
         let strtab = STRTAB_VA as usize;
-        b[strtab..strtab + 40].copy_from_slice(b"\0dyn_message\0cross\0nowhere\0copied\0maybe\0");
+        b[strtab..strtab + 48]
+            .copy_from_slice(b"\0dyn_message\0cross\0nowhere\0copied\0maybe\0tls_var\0");
 
         let sym = SYMTAB_VA as usize;
         wr32(&mut b, sym + SYM_SIZE, 1); // st_name -> "dyn_message"
@@ -541,6 +677,11 @@ mod tests {
         b[sym + 4 * SYM_SIZE + 4] = 0x11;
         wr32(&mut b, sym + 5 * SYM_SIZE, 34); // "maybe", undefined and WEAK
         b[sym + 5 * SYM_SIZE + 4] = 0x21; // WEAK | OBJECT
+        wr32(&mut b, sym + 6 * SYM_SIZE, 40); // "tls_var", defined
+        b[sym + 6 * SYM_SIZE + 4] = 0x16; // GLOBAL | TLS
+        wr16(&mut b, sym + 6 * SYM_SIZE + 6, 1);
+        wr64(&mut b, sym + 6 * SYM_SIZE + 8, TLS_VAR_OFFSET);
+        wr64(&mut b, sym + 6 * SYM_SIZE + 16, 8);
 
         let rela = RELA_VA as usize;
         wr64(&mut b, rela, SLOT_RELATIVE);
@@ -565,6 +706,21 @@ mod tests {
             plt + 2 * RELA_SIZE + 8,
             r_info(5, R_X86_64_GLOB_DAT),
         );
+        // A thread-local pair: the module the definition names, then its distance from that
+        // module's storage — the two words `_mesa_glapi_tls_Dispatch` in `libEGL` needs.
+        wr64(&mut b, plt + 3 * RELA_SIZE, SLOT_TLSMOD);
+        wr64(
+            &mut b,
+            plt + 3 * RELA_SIZE + 8,
+            r_info(6, R_X86_64_DTPMOD64),
+        );
+        wr64(&mut b, plt + 4 * RELA_SIZE, SLOT_TLSOFF);
+        wr64(
+            &mut b,
+            plt + 4 * RELA_SIZE + 8,
+            r_info(6, R_X86_64_DTPOFF64),
+        );
+        wr64(&mut b, plt + 4 * RELA_SIZE + 16, 8);
         b
     }
 
@@ -656,19 +812,18 @@ mod tests {
 
     fn resolve(name: &[u8], _scope: Scope) -> Option<Def> {
         match name {
-            b"dyn_message" => Some(Def {
-                addr: RESOLVED_MESSAGE,
-                size: 0,
-            }),
-            b"cross" => Some(Def {
-                addr: RESOLVED_CROSS,
-                size: 0,
-            }),
+            b"dyn_message" => Some(Def::at(RESOLVED_MESSAGE, 0)),
+            b"cross" => Some(Def::at(RESOLVED_CROSS, 0)),
             // A COPY's definition: eight bytes the test staged at `SOURCE`.
-            b"copied" => Some(Def {
-                addr: BASE + SOURCE,
-                size: 8,
-            }),
+            b"copied" => Some(Def::at(BASE + SOURCE, 8)),
+            // A thread-local another module defines: `tls_offset` is its distance from that
+            // module's storage and `TLS_OTHER_MODULE` is which module that is.
+            b"tls_var" => Some(Def::thread_local(
+                TLS_VAR_OFFSET,
+                8,
+                TLS_OTHER_MODULE,
+                TLS_OTHER_DISP,
+            )),
             _ => None,
         }
     }
@@ -751,6 +906,48 @@ mod tests {
         );
     }
 
+    /// A `DTPREL` carries the target's bias and nothing else: the value is the defining
+    /// symbol's offset, which is the walk's to read from the definition rather than the
+    /// relocation's to state. RISC-V's bias is the one non-zero case.
+    #[test]
+    fn dtprel_carries_only_the_targets_bias() {
+        assert_eq!(
+            action(X86_64, R_X86_64_DTPOFF64, BASE, 0xdead, 0x10),
+            Action::WriteTlsOffset(0)
+        );
+        assert_eq!(
+            action(AARCH64, R_AARCH64_TLS_DTPREL64, BASE, 0xdead, 0x10),
+            Action::WriteTlsOffset(0)
+        );
+        assert_eq!(
+            action(RISCV64, R_RISCV_TLS_DTPREL64, BASE, 0xdead, 0x10),
+            Action::WriteTlsOffset(0x800)
+        );
+        // A symbol is named, but the generic path must not resolve it as an address: the
+        // walk does that itself, because the value is an offset and not an address.
+        for r in [X86_64, RISCV64, AARCH64] {
+            assert!(!uses_symbol_in(r, r.dtprel64), "{}", r.name);
+        }
+    }
+
+    /// A `DTPMOD`/`DTPREL` against an ordinary symbol has no module or module-relative offset
+    /// to write, so the walk refuses it rather than storing an address into a `tls_index`.
+    #[test]
+    fn a_tls_relocation_against_an_ordinary_symbol_is_refused() {
+        let mut file = file_image();
+        // Point the `DTPREL`'s symbol at `dyn_message` (index 1), which is not thread-local.
+        wr64(
+            &mut file,
+            PLT_VA as usize + 4 * RELA_SIZE + 8,
+            r_info(1, R_X86_64_DTPOFF64),
+        );
+        let mut loaded = vec![SENTINEL; FILE_LEN];
+        assert_eq!(
+            apply(&file, &mut loaded, PLT_VA, 5 * RELA_SIZE).0,
+            Err(RelocError::TlsRelocForANonTlsSymbol)
+        );
+    }
+
     /// Every target's numbering resolves to the same rules.
     ///
     /// The tables are data, so this covers all three machines on the host: a
@@ -784,6 +981,12 @@ mod tests {
             assert_eq!(
                 action(r, r.dtpmod64, BASE, 0x2004, 0),
                 Action::WriteModule,
+                "{}",
+                r.name
+            );
+            assert_eq!(
+                action(r, r.dtprel64, BASE, 0x2004, 0),
+                Action::WriteTlsOffset(r.dtprel_off),
                 "{}",
                 r.name
             );
@@ -837,10 +1040,11 @@ mod tests {
                 RISCV64.relative,
                 RISCV64.copy,
                 RISCV64.jump_slot,
-                RISCV64.dtpmod64
+                RISCV64.dtpmod64,
+                RISCV64.dtprel64
             ),
             // RISC-V has no GLOB_DAT; `R_RISCV_64` fills both roles.
-            (0, 2, 2, 3, 4, 5, 7)
+            (0, 2, 2, 3, 4, 5, 7, 9)
         );
         assert_eq!(AARCH64.e_machine, 183);
         assert_eq!(
@@ -851,11 +1055,13 @@ mod tests {
                 AARCH64.copy,
                 AARCH64.glob_dat,
                 AARCH64.jump_slot,
-                AARCH64.dtpmod64
+                AARCH64.dtpmod64,
+                AARCH64.dtprel64
             ),
-            (0, 0x101, 0x403, 0x400, 0x401, 0x402, 0x404)
+            (0, 0x101, 0x403, 0x400, 0x401, 0x402, 0x404, 0x405)
         );
         assert_eq!(AARCH64.tlsdesc, 0x407);
+        assert_eq!(X86_64.dtprel64, 17);
     }
 
     /// Every type this loader claims to handle is applied, at its own offset,
@@ -867,7 +1073,7 @@ mod tests {
         let mut loaded = vec![SENTINEL; FILE_LEN];
         let (r, scopes) = apply(&file, &mut loaded, RELA_VA, 4 * RELA_SIZE);
         r.expect("dyn table");
-        let (r, plt_scopes) = apply(&file, &mut loaded, PLT_VA, 3 * RELA_SIZE);
+        let (r, plt_scopes) = apply(&file, &mut loaded, PLT_VA, 5 * RELA_SIZE);
         r.expect("plt table");
 
         assert_eq!(
@@ -883,6 +1089,16 @@ mod tests {
         assert_eq!(slot(&loaded, SLOT_JUMP), RESOLVED_CROSS, "JUMP_SLOT");
         assert_eq!(slot(&loaded, SLOT_GLOB), RESOLVED_MESSAGE, "GLOB_DAT");
         assert_eq!(
+            slot(&loaded, SLOT_TLSMOD),
+            TLS_OTHER_MODULE,
+            "DTPMOD names the *defining* module, not the object being relocated"
+        );
+        assert_eq!(
+            slot(&loaded, SLOT_TLSOFF),
+            TLS_VAR_OFFSET + 8,
+            "DTPREL is the definition's own offset plus the addend"
+        );
+        assert_eq!(
             slot(&loaded, SLOT_WEAK),
             0,
             "a weak undefined symbol is 0, not an error"
@@ -896,7 +1112,10 @@ mod tests {
         // A value is resolved across every object; a COPY must not resolve to the
         // image it is writing into.
         assert_eq!(scopes, vec![Scope::All, Scope::ExcludeSelf]);
-        assert_eq!(plt_scopes, vec![Scope::All, Scope::All, Scope::All]);
+        assert_eq!(
+            plt_scopes,
+            vec![Scope::All, Scope::All, Scope::All, Scope::All, Scope::All]
+        );
 
         let touched = [
             SLOT_RELATIVE,
@@ -906,6 +1125,8 @@ mod tests {
             SLOT_NONE,
             SLOT_COPY,
             SLOT_WEAK,
+            SLOT_TLSMOD,
+            SLOT_TLSOFF,
             SOURCE,
         ];
         for (i, eight) in loaded.chunks_exact(8).enumerate() {

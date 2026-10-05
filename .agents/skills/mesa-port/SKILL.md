@@ -1,6 +1,6 @@
 ---
 name: mesa-port
-description: Cross-building Mesa and libdrm for minix — the Wayland §6.10 phase-3 GL stack, its libc++ runtime, the cc-dso-minix DSO wrapper, and the surfaceless-EGL client. Use when running `just build-mesa`, `just libcxx-x86` or `just gltriangle-x86`, when a Mesa/libdrm compile or link fails, when changing tools/build-mesa.py or tools/cc-dso-minix.py, or when working on the GL/EGL stack.
+description: Cross-building Mesa and libdrm for minix — the Wayland §6.10 phase-3 GL stack, its libc++ runtime, the cc-dso-minix DSO wrapper, and the surfaceless-EGL client, on all three arches. Use when running `just build-mesa`, `just libcxx` or `just gltriangle`/`just test-gltriangle`, when a Mesa/libdrm compile or link fails, when changing tools/build-mesa.py, tools/build-libcxx.py or tools/cc-dso-minix.py, or when working on the GL/EGL stack.
 ---
 
 # Mesa + libdrm for minix
@@ -18,17 +18,34 @@ toolchain. `WAYLAND.md` §6.10 is the design; these are the recipes and the trap
   `target/mesa/x86/`. `--stage` (also run after a build) copies the seven DSOs
   into `target/mesa/x86/lib/` under their guest sonames, because the Windows
   `build-x86` cannot read WSL's native tree.
-- `just libcxx-x86` — builds libc++/libc++abi as one static `libstdc++.a`
-  (`target/cxx/minix-runtime/`), from `tools/libcxx-toolchain.py`'s generated
-  cross file. Mesa is C++ (its GLSL compiler), so this is a prerequisite.
+- `just fetch-mesa <arch>` — installs the pinned DSOs (and the EGL/GLES2/KHR
+  headers the client compiles against) from the `mesa-<pin>` release instead of
+  building them, the way `just fetch-stage1` installs the toolchain. This is the
+  cheap path CI and dev machines use; `just build-mesa` stays authoritative.
+- **The pin is `tools/mesa_pin.py`.** It holds the Mesa and libdrm tags/commits;
+  the release tag is derived from the commit pair, so an artifact can only match
+  the pinned sources. `.github/workflows/mesa-release.yml` builds and publishes a
+  pin's seven DSOs per arch once, `ci.yml`'s `mesa-pin` job decides whether that
+  is needed, and only a pin bump (or a `cc-dso-minix.py` change) triggers a
+  rebuild — same shape as the stage1/toolchain-release pair.
+- `just libcxx <arch>` — builds libc++/libc++abi as one static `libstdc++.a`
+  (`target/cxx/<arch>/minix-runtime/`), from `tools/build-libcxx.py` and
+  `tools/libcxx-toolchain.py`'s generated cross file. Mesa is C++ (its GLSL
+  compiler), so this is a prerequisite; per-arch, so the runtime matches the DSOs.
+  It is linked into the DSOs statically, so it is not a separate released artifact.
 - `tools/cc-dso-minix.py` — the `cc` meson drives: compiles C **and C++**
   (`--cxx`) to `-fPIC` objects and links minix **shared objects** against
   `libc.so`. It is the piece that grows a feature every time Mesa asks for one.
-- `just gltriangle-x86` — builds the surfaceless-EGL GLES2 triangle client
+- `just gltriangle <arch>` — builds the surfaceless-EGL GLES2 triangle client
   (`tools/gl_triangle.c`, `tools/build-gltest.py`) and stages the DSOs.
 
 ## Traps that cost a session
 
+- **A C header a C++ TU includes must carry `extern "C"`, or the C++ consumer mangles the name.** Then nothing defines it and the loader reports an unresolved symbol like `_Z16__errno_locationv` (or `_Z18pthread_mutex_lockP15pthread_mutex_t`). `tools/c-include` is mostly guarded already; `errno.h`, `pthread.h`, `sched.h` and `sys/file.h` were the ones that were not, and only the C++ build (`just libcxx <arch>`, then the Mesa relink) surfaced them. `tools/check-c-headers.py` is the contract check, not this.
+- **The libc++ runtime is a separate build from Mesa's.** A `tools/c-include` fix
+  reaches libc++ only after `just libcxx <arch>`; Mesa alone will still link the old
+  `target/cxx/<arch>/minix-runtime/libstdc++.a` and keep the mangled reference.
+  Rebuild libc++, then relink Mesa.
 - **lld does not re-export hidden symbols through a version script or
   `--dynamic-list`; GNU ld does.** Mesa sets `gnu_symbol_visibility: 'hidden'`
   and relies on its `.sym`/`.dyn` export lists, so under lld the DSOs export
@@ -73,22 +90,28 @@ toolchain. `WAYLAND.md` §6.10 is the design; these are the recipes and the trap
   (compiled with `-Werror=return-type`) trips on a function whose only exit is
   `std::abort()`.
 
-## The runtime gate is blocked on the root filesystem
+## The runtime gate
 
-`tools/smoke/gltriangle.tsv` and the client exist, but a guest cannot yet carry
-them: the DSOs are ~33 MiB — **two** copies of the 16.5 MiB `libgallium`, because
-`libEGL`/`libGLESv2` name it in `DT_NEEDED` *and* EGL dlopens it as
-`swrast_dri.so` — and a root image past the 16 MiB `RAMDISK_IMAGE_SIZE` default
-stalls the boot before `wserver` reports ready (verified embedded *and* as a
-virtio-blk root; `MINIXFS_EXTRA` can put the DSOs in the disk image, but the
-image is the same blob either way). Raise the root-fs ceiling (MFS) first; the
-boot recipe is in the `gltriangle-x86` doc comment.
+`just test-gltriangle-<arch>` boots the split pair with `/bin/gltriangle` and the
+seven Mesa DSOs in the *system* image (`MINIXFS_BLOCKS=16384`, ~64 MiB — the two
+copies of `libgallium` alone are ~33 MiB, one named by `libEGL`/`libGLESv2` in
+`DT_NEEDED` and one `dlopen`ed as `swrast_dri.so`) and drives
+`tools/smoke/gltriangle.tsv`, which wants the client's `gltriangle: pass` line.
+It passes on x86_64, riscv64 and aarch64: EGL 1.5 / GLES 3.1 on `softpipe`, a red
+centroid and a black corner. The split (`system-image-<arch>`) is what made it
+fit — the image ceiling is gone, so a root past the 16 MiB `RAMDISK_IMAGE_SIZE` is
+a system image, not a blocker. It needs `just libcxx <arch>` and `just build-mesa
+<arch> --build` first, and CI's `gltriangle` job runs it for every arch and
+publishes the seven DSOs as `mesa-<arch>`, which the release injects into the
+system image it publishes.
 
 ## Validating a change
 
 ```
-just build-mesa x86 --build          # compiles everything; 0 FAILED in the log
-just libcxx-x86                      # the C++ runtime
+just libcxx <arch>                  # the C++ runtime (x86|riscv64|aarch64)
+just build-mesa <arch> --build       # compiles everything; 0 FAILED in the log
+just fetch-mesa <arch>               # or the pinned DSOs, without building
+just test-gltriangle-<arch>          # boots the triangle through surfaceless EGL
 just check                           # host clippy + header contract + physmap
 ```
 

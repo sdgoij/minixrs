@@ -693,35 +693,64 @@ test-cdyn-x86 boot-timeout="40": dynlib-x86
     @echo "cdyn: a program built by the recipe ran against the shipped libc.so (x86_64)"
 
 # gltriangle: build the surfaceless-EGL GLES2 triangle client and stage the Mesa
-# DSOs it runs against (§6.10 stage 3c-2).
+# DSOs it runs against (§6.10 stage 3c-2) for one target.
 #
 # The client needs ~36 MiB of DSOs — two copies of the 17 MiB `libgallium`
-# (`libEGL`/`libGLESv2` name it in DT_NEEDED, and EGL *also* dlopens it as
-# `swrast_dri.so`), the only two names the loader and Mesa will accept. They live in
-# the *system image* (`system-image-x86`), not in the kernel: a boot image that
-# embedded them would exceed the 16 MiB ramdisk window and stall before `wserver`.
-# The split procedure, which the recipe below runs by hand until the gate is wired:
-#
-#   MINIXFS_EXTRA='<the seven /lib entries + /bin/gltriangle>' MINIXFS_BLOCKS=16384 just system-image-x86
-#   FEED_SCENARIO=tools/smoke/gltriangle.tsv sh tools/smoke/feed.sh target/test-gltriangle-x86.log 120 \
-#     qemu-system-x86_64 -nographic -m 512M -no-reboot -vga none -device bochs-display,id=fb0 \
-#     -kernel target/boot-kernel-trampoline.elf -device loader,file=target/boot-kernel.bin,addr=0x200000 \
-#     -drive if=none,id=disk0,file=target/images/x86_64-pc-minix/disk.img,format=raw,cache=writethrough \
-#     -device virtio-blk-pci,disable-legacy=on,drive=disk0 -netdev user,id=net0 \
-#     -device virtio-net-pci,disable-legacy=on,netdev=net0 -device virtio-tablet-pci,display=fb0
-#
-# The image ceiling is gone (this split): the boot image + 64 MiB system image mount,
-# reach the shell and exec /bin/gltriangle. What stops the scenario now is the loader:
-# `ld.so: unsupported relocation type 17` (`R_X86_64_DTPOFF64`), from
-# `_mesa_glapi_tls_Dispatch` in libEGL/libGLESv2. Static-TLS relocation resolution is
-# the next task, not part of the split.
-#
-# Needs `just build-mesa x86 --build` first.
+# (`libEGL`/`libGLESv2` name it in `DT_NEEDED`, and EGL *also* `dlopen`s it as
+# `swrast_dri.so`) — which is why they live in the *system image*, never the kernel:
+# a boot image that embedded them would exceed the 16 MiB ramdisk window. Build them
+# with `just build-mesa <arch> --build` and `just libcxx <arch>` first.
+gltriangle arch="x86":
+    @just gltriangle-{{arch}}
+
 gltriangle-x86: dynlib-x86
     python tools/build-mesa.py x86 --stage
     @test -f target/mesa/x86/lib/libEGL.so.1 || (echo 'gltriangle: no Mesa DSOs — run `just build-mesa x86 --build` first' >&2; exit 1)
     python tools/build-gltest.py x86
-    @echo "gltriangle: /bin/gltriangle built and the Mesa DSOs staged (system image; scenario stops at the loader's DTPOFF64 gap)"
+    @echo "gltriangle: /bin/gltriangle built and the Mesa DSOs staged (x86_64)"
+
+gltriangle-riscv64: dynlib-riscv64
+    python tools/build-mesa.py riscv64 --stage
+    @test -f target/mesa/riscv64/lib/libEGL.so.1 || (echo 'gltriangle: no Mesa DSOs — run `just build-mesa riscv64 --build` first' >&2; exit 1)
+    python tools/build-gltest.py riscv64
+    @echo "gltriangle: /bin/gltriangle built and the Mesa DSOs staged (riscv64)"
+
+gltriangle-aarch64: dynlib-aarch64
+    python tools/build-mesa.py aarch64 --stage
+    @test -f target/mesa/aarch64/lib/libEGL.so.1 || (echo 'gltriangle: no Mesa DSOs — run `just build-mesa aarch64 --build` first' >&2; exit 1)
+    python tools/build-gltest.py aarch64
+    @echo "gltriangle: /bin/gltriangle built and the Mesa DSOs staged (aarch64)"
+
+# The §6.10 stage 3c-2 gate: boot the split pair with /bin/gltriangle and the seven
+# Mesa DSOs in the *system* image and drive `tools/smoke/gltriangle.tsv`, whose one
+# step wants the client's `gltriangle: pass` line. This is the end-to-end proof of the
+# C GL stack — surfaceless EGL, the gallium `softpipe` driver, GLSL and a checked
+# readback — and of the loader's `DTPREL` (a general-dynamic thread-local access).
+# The DSOs are ~36 MiB, so the system image carries them with `MINIXFS_BLOCKS` raised.
+# Needs `just build-mesa <arch> --build` and `just libcxx <arch>` first.
+test-gltriangle arch="x86" boot-timeout="180":
+    @just test-gltriangle-{{arch}} {{boot-timeout}}
+
+test-gltriangle-x86 boot-timeout="180": gltriangle-x86 boot-image-x86
+    @just _assert-qemu-version qemu-system-x86_64
+    M=target/mesa/x86; E="/lib/libdrm.so.2=$M/lib/libdrm.so.2;/lib/libEGL.so.1=$M/lib/libEGL.so.1;/lib/libexpat.so.1=$M/lib/libexpat.so.1;/lib/libgallium-25.3.6.so=$M/lib/libgallium-25.3.6.so;/lib/libGLESv2.so.2=$M/lib/libGLESv2.so.2;/lib/libz.so.1=$M/lib/libz.so.1;/lib/swrast_dri.so=$M/lib/swrast_dri.so;/bin/gltriangle=$M/bin/gltriangle"; MINIXFS_EXTRA="$E" MINIXFS_BLOCKS=16384 cargo run -q -p boot-image --bin mkminixfs --release -- x86_64
+    @just mkfs-x86
+    FEED_SCENARIO=tools/smoke/gltriangle.tsv sh tools/smoke/feed.sh target/test-gltriangle-x86.log {{boot-timeout}} qemu-system-x86_64 -nographic -m 512M -no-reboot -vga none -device bochs-display,id=fb0 -kernel target/images/x86_64-pc-minix/minix-x86-boot.elf -drive if=none,id=disk0,file=target/images/x86_64-pc-minix/disk.img,format=raw,cache=writethrough -device virtio-blk-pci,disable-legacy=on,drive=disk0 -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0 -device virtio-tablet-pci,display=fb0
+    @echo "gltriangle: the GLES2 triangle rendered through surfaceless EGL on softpipe (x86_64)"
+
+test-gltriangle-riscv64 boot-timeout="180": gltriangle-riscv64 boot-image-riscv64
+    @just _assert-qemu-version qemu-system-riscv64
+    M=target/mesa/riscv64; E="/lib/libdrm.so.2=$M/lib/libdrm.so.2;/lib/libEGL.so.1=$M/lib/libEGL.so.1;/lib/libexpat.so.1=$M/lib/libexpat.so.1;/lib/libgallium-25.3.6.so=$M/lib/libgallium-25.3.6.so;/lib/libGLESv2.so.2=$M/lib/libGLESv2.so.2;/lib/libz.so.1=$M/lib/libz.so.1;/lib/swrast_dri.so=$M/lib/swrast_dri.so;/bin/gltriangle=$M/bin/gltriangle"; MINIXFS_EXTRA="$E" MINIXFS_BLOCKS=16384 cargo run -q -p boot-image --bin mkminixfs --release -- riscv64
+    @just mkfs-riscv64
+    FEED_SCENARIO=tools/smoke/gltriangle.tsv sh tools/smoke/feed.sh target/test-gltriangle-riscv64.log {{boot-timeout}} qemu-system-riscv64 -machine virt -m 512M -nographic -global virtio-mmio.force-legacy=off -drive if=none,id=disk0,file=target/images/riscv64gc-unknown-minix/disk.img,format=raw,cache=writethrough -device virtio-blk-device,drive=disk0 -netdev user,id=net0 -device virtio-net-device,netdev=net0 -device virtio-gpu-device -device virtio-keyboard-device -kernel target/images/riscv64gc-unknown-minix/minix-riscv64-boot.elf
+    @echo "gltriangle: the GLES2 triangle rendered through surfaceless EGL on softpipe (riscv64)"
+
+test-gltriangle-aarch64 boot-timeout="180": gltriangle-aarch64 boot-image-aarch64
+    @just _assert-qemu-version qemu-system-aarch64
+    M=target/mesa/aarch64; E="/lib/libdrm.so.2=$M/lib/libdrm.so.2;/lib/libEGL.so.1=$M/lib/libEGL.so.1;/lib/libexpat.so.1=$M/lib/libexpat.so.1;/lib/libgallium-25.3.6.so=$M/lib/libgallium-25.3.6.so;/lib/libGLESv2.so.2=$M/lib/libGLESv2.so.2;/lib/libz.so.1=$M/lib/libz.so.1;/lib/swrast_dri.so=$M/lib/swrast_dri.so;/bin/gltriangle=$M/bin/gltriangle"; MINIXFS_EXTRA="$E" MINIXFS_BLOCKS=16384 cargo run -q -p boot-image --bin mkminixfs --release -- aarch64
+    @just mkfs-aarch64
+    FEED_SCENARIO=tools/smoke/gltriangle.tsv sh tools/smoke/feed.sh target/test-gltriangle-aarch64.log {{boot-timeout}} qemu-system-aarch64 -machine virt -cpu cortex-a57 -m 512M -nographic -no-reboot -global virtio-mmio.force-legacy=off -drive if=none,id=disk0,file=target/images/aarch64-unknown-minix/disk.img,format=raw,cache=writethrough -device virtio-blk-device,drive=disk0 -netdev user,id=net0 -device virtio-net-device,netdev=net0 -device virtio-gpu-device -device virtio-keyboard-device -kernel target/images/aarch64-unknown-minix/minix-aarch64-boot.elf
+    @echo "gltriangle: the GLES2 triangle rendered through surfaceless EGL on softpipe (aarch64)"
 
 # UNIX-domain sockets: /bin/udstest round-trips a socketpair and a
 # bind/listen/connect/accept connection through the /dev/uds server — Phase 0 of
@@ -1200,6 +1229,14 @@ build-bash arch="x86":
 build-mesa arch="x86" *args:
     python tools/build-mesa.py {{arch}} {{args}}
 
+# Install the prebuilt Mesa + libdrm DSOs for the pinned version
+# (`tools/mesa_pin.py`) instead of building them: the release
+# `.github/workflows/mesa-release.yml` publishes, tagged by the pinned Mesa and
+# libdrm commits. `just build-mesa` stays authoritative (it is what a pin bump or
+# a `cc-dso-minix.py` change needs); this is the cache CI and dev machines use.
+fetch-mesa arch="x86" *args:
+    python tools/fetch-mesa.py {{arch}} {{args}}
+
 # The dynamic-linking artifacts an *image* carries: the loader (`/libexec/ld.so`,
 # `crates/ldso` linked with its own script, `tools/minix-ldso.ld`), the shared C library
 # (`/lib/libc.so`) and a C program linked against it (`/bin/dynclib`). All three are in
@@ -1238,12 +1275,14 @@ dynlink-x86: dynlib-x86
 cdyn src arch="x86":
     python tools/cdyn.py {{arch}} {{src}}
 
-# Build the C++ runtime (libc++ + libc++abi) for the x86_64 Minix cross
-# toolchain and merge them into target/cxx/minix-runtime/libstdc++.a.
+# Build the C++ runtime (libc++ + libc++abi) for one minix target and merge them
+# into target/cxx/<arch>/minix-runtime/libstdc++.a — the archive Mesa's shared
+# objects link (tools/cc-dso-minix.py). x86 was the first arch; the others build
+# the same way and only differ in the red-zone/march flags (tools/ccarch.py).
 #
-# Freestanding CMake cross builds (host clang targeting x86_64-unknown-none)
-# against the Minix C headers (tools/c-include); requires
-# target/cxx/toolchain-x86_64.cmake. Quirks handled here:
+# Freestanding CMake cross builds (host clang targeting <machine>-unknown-none)
+# against the Minix C headers (tools/c-include), driven by
+# tools/build-libcxx.py, which owns the quirks this recipe used to spell out:
 #   - both libs need a distinct *_SHARED_OUTPUT_NAME: the never-built shared
 #     target collides with the static archive name on the Generic platform
 #     (ninja "multiple rules generate lib/libc++.a")
@@ -1253,20 +1292,11 @@ cdyn src arch="x86":
 #   - include order must be libc++ -> c-include -> libcxx-build config, or
 #     libc++'s <string.h> guard skips the C headers and ::size_t is missing
 #   - the IWYU mapping step needs Python3_EXECUTABLE; the standalone libcxx
-#     cmake never sets it, and the host's only python (the embeddable CPython
-#     beside LLVM, whose python311._pth pins sys.path) cannot import libcxx's
-#     local modules, so tools/libcxx-iwyu.cmd stubs the step
-libcxx-x86:
-    python tools/libcxx-toolchain.py
-    rm -rf target/cxx/libcxx-build
-    cmake -G Ninja -S rust/src/llvm-project/libcxx -B target/cxx/libcxx-build -DCMAKE_TOOLCHAIN_FILE={{ROOT}}/target/cxx/toolchain-x86_64.cmake -DCMAKE_BUILD_TYPE=Release -DLIBCXX_ENABLE_SHARED=OFF -DLIBCXX_ENABLE_STATIC=ON -DLIBCXX_ENABLE_EXCEPTIONS=OFF -DLIBCXX_ENABLE_RTTI=OFF -DLIBCXX_ENABLE_FILESYSTEM=OFF -DLIBCXX_ENABLE_LOCALIZATION=OFF -DLIBCXX_ENABLE_MONOTONIC_CLOCK=ON -DLIBCXX_ENABLE_NEW_DELETE_DEFINITIONS=OFF -DLIBCXX_ENABLE_RANDOM_DEVICE=ON -DLIBCXX_ENABLE_ABI_LINKER_SCRIPT=OFF -DLIBCXX_ENABLE_THREADS=ON -DLIBCXX_HAS_PTHREAD_API=ON -DLIBCXX_ABI_VERSION=1 -DLIBCXX_ABI_NAMESPACE=__1 -DLIBCXX_CXX_ABI=system-libcxxabi -DLIBCXX_CXX_ABI_INCLUDE_PATHS={{ROOT}}/rust/src/llvm-project/libcxxabi/include -DLIBCXX_AVAILABILITY_MINIMUM_HEADER_VERSION=2 -DLIBCXX_SHARED_OUTPUT_NAME=cxx-shared -DLIBCXX_INCLUDE_TESTS=OFF "-DLIBCXX_ADDITIONAL_COMPILE_FLAGS=-I{{ROOT}}/rust/src/llvm-project/libcxxabi/include;-D_POSIX_TIMERS=200809L" "-DPython3_EXECUTABLE={{ROOT}}/tools/libcxx-iwyu.cmd"
-    ninja -C target/cxx/libcxx-build
-    rm -rf target/cxx/libcxxabi-build
-    cmake -G Ninja -S rust/src/llvm-project/libcxxabi -B target/cxx/libcxxabi-build -DCMAKE_TOOLCHAIN_FILE={{ROOT}}/target/cxx/toolchain-x86_64.cmake -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_FLAGS="-ffreestanding -fPIC -mno-red-zone -fno-stack-protector -O2 -I{{ROOT}}/tools/c-include" -DCMAKE_CXX_FLAGS="-ffreestanding -fPIC -mno-red-zone -fno-stack-protector -O2 -std=c++23 -nostdinc++ -I{{ROOT}}/rust/src/llvm-project/libcxx/include -I{{ROOT}}/tools/c-include -I{{ROOT}}/target/cxx/libcxx-build/include/c++/v1" -DLIBCXXABI_ENABLE_SHARED=OFF -DLIBCXXABI_ENABLE_STATIC=ON -DLIBCXXABI_BAREMETAL=ON -DLIBCXXABI_ENABLE_THREADS=OFF -DLIBCXXABI_ENABLE_EXCEPTIONS=OFF -DLIBCXXABI_ENABLE_NEW_DELETE_DEFINITIONS=ON -DLIBCXXABI_AVAILABILITY_MINIMUM_HEADER_VERSION=2 -DLIBCXXABI_INCLUDE_TESTS=OFF -DLIBCXXABI_USE_LLVM_UNWINDER=OFF -DLIBCXXABI_ENABLE_STATIC_UNWINDER=OFF -DLIBCXXABI_SHARED_OUTPUT_NAME=cxxabi-shared
-    ninja -C target/cxx/libcxxabi-build
-    rm -rf target/cxx/merge-tmp
-    mkdir -p target/cxx/merge-tmp
-    cd target/cxx/merge-tmp && llvm-ar x ../libcxxabi-build/lib/libc++abi.a && llvm-ar x ../libcxx-build/lib/libc++.a && mkdir -p ../minix-runtime && llvm-ar rcs ../minix-runtime/libstdc++.a *.obj && cd .. && rm -rf merge-tmp
+#     cmake never sets it, and on Windows the only python (the embeddable
+#     CPython beside LLVM, whose python311._pth pins sys.path) cannot import
+#     libcxx's local modules, so tools/libcxx-iwyu.cmd stubs the step
+libcxx arch="x86":
+    python tools/build-libcxx.py {{arch}}
 
 # ---------- check ----------
 

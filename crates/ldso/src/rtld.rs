@@ -237,8 +237,8 @@ fn set_error(e: &LoadError) -> &'static [u8] {
             w.hex(*a);
             w.put(b"\n");
         }
-        LoadError::Reloc(RelocError::TlsDescForASymbol) => {
-            w.put(b"ld.so: a TLS descriptor names a symbol another object defines\n")
+        LoadError::Reloc(RelocError::TlsRelocForANonTlsSymbol) => {
+            w.put(b"ld.so: a TLS relocation names a symbol that is not thread-local\n")
         }
     }
     cell.len = w.len;
@@ -522,8 +522,28 @@ unsafe fn find_symbol(objects: &[Object], name: &[u8], scope: Scope, owner: usiz
                     && n == name
                 {
                     let st = o.bias + o.symtab + (idx as u64) * SYM_SIZE as u64;
-                    let value = o.bias + unsafe { rd_u64(st + 8) };
+                    let info = unsafe { rd_u8(st + 4) };
+                    let value = unsafe { rd_u64(st + 8) };
                     let size = unsafe { rd_u64(st + 16) };
+                    if info & 0xf == Sym::STT_TLS {
+                        // A thread-local's `st_value` is its distance from the *defining*
+                        // module's storage, not an address: adding the base would point it
+                        // into the wrong end of the image and the bounds check below would
+                        // read a valid definition as one outside the object. What bounds it is
+                        // the object's own `PT_TLS`, and what a `DTPMOD64` needs is this
+                        // object's module — the definer's, not the relocating object's.
+                        let Some(tls) = o.tls else { return None };
+                        if value.checked_add(size).is_none_or(|e| e > tls.memsz) {
+                            return None;
+                        }
+                        return Some(Def::thread_local(
+                            value,
+                            size,
+                            o.tls_module as u64,
+                            o.tls_disp,
+                        ));
+                    }
+                    let value = o.bias + value;
                     // A definition outside the object that states it is not one to
                     // trust: a value would point out of the object and a COPY would
                     // move bytes from somewhere else.
@@ -531,7 +551,7 @@ unsafe fn find_symbol(objects: &[Object], name: &[u8], scope: Scope, owner: usiz
                     {
                         return None;
                     }
-                    return Some(Def { addr: value, size });
+                    return Some(Def::at(value, size));
                 }
             }
         }
@@ -549,18 +569,12 @@ unsafe fn find_symbol(objects: &[Object], name: &[u8], scope: Scope, owner: usiz
 /// `PT_TLS`, which is where those bounds really come from anyway.
 fn loader_defined(objects: &[Object], owner: usize, name: &[u8]) -> Option<Def> {
     if name == b"__tls_get_addr" {
-        return Some(Def {
-            addr: __tls_get_addr as *const () as u64,
-            size: 0,
-        });
+        return Some(Def::fun(__tls_get_addr as *const () as u64));
     }
     // A thread `pthread_create` is starting gets its block from here, because only the loader
     // knows the layout every module was numbered against (`tls_alloc_thread`).
     if name == b"__rtld_tls_alloc_thread" {
-        return Some(Def {
-            addr: tls_alloc_thread as *const () as u64,
-            size: 0,
-        });
+        return Some(Def::fun(tls_alloc_thread as *const () as u64));
     }
     // The `dlopen` family, for the same reason: nothing a `cdylib` links against defines
     // them, so the loader answers — and the loader is the object that can load one.
@@ -575,10 +589,7 @@ fn loader_defined(objects: &[Object], owner: usize, name: &[u8]) -> Option<Def> 
         (&b"__rtld_dlclose"[..], dlclose as *const ()),
     ] {
         if name == n {
-            return Some(Def {
-                addr: f as u64,
-                size: 0,
-            });
+            return Some(Def::fun(f as u64));
         }
     }
     let tls = objects.get(owner)?.tls?;
@@ -591,7 +602,7 @@ fn loader_defined(objects: &[Object], owner: usize, name: &[u8]) -> Option<Def> 
     } else {
         return None;
     };
-    Some(Def { addr, size: 0 })
+    Some(Def::fun(addr))
 }
 
 /// The image a relocation walk writes to: one loaded object's tables, read
@@ -1374,14 +1385,11 @@ core::arch::global_asm!(
 #[cfg(target_arch = "aarch64")]
 unsafe extern "C" {
     /// The `TLSDESC` resolver a descriptor this load wrote points at: the "static" one,
-    /// whose answer is its argument — the variable's offset from the thread pointer, which
-    /// the linker resolved into the relocation's addend because the variable is the one
-    /// object's own. The storage is the same block [`install_tls`] placed, so an access
-    /// through this and one through `__tls_get_addr` reach the same address.
-    ///
-    /// The dialect's other resolver — the one that looks a module up, for a symbol another
-    /// object defines — is not reachable: the port refuses a descriptor that names a symbol
-    /// before this can be called with one.
+    /// whose answer is its argument — the variable's offset from the thread pointer. The walk
+    /// writes that offset for both forms a descriptor takes: the linker's addend for a variable
+    /// the object defines itself, or the *defining* module's displacement plus the symbol's own
+    /// offset for one another object defines. The storage is the same block [`install_tls`]
+    /// placed, so an access through this and one through `__tls_get_addr` reach the same address.
     ///
     /// A descriptor says *where* a variable is but not *which module's* storage holds it,
     /// and the offset cannot be turned back into one — it is the module's distance plus the
