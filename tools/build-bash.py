@@ -42,8 +42,8 @@ from lld import find_lld, host_triple  # noqa: E402
 # release workflow read too: the commit the working build was validated against —
 # "Bash-5.3 patch 15" (`git describe`: bash-5.3-16-gb4608166). bash's git
 # repository ships its generated files (configure, y.tab.c, the builtins), so a
-# checkout needs no autotools; what it does not ship is a stable URL, hence the
-# commit rather than the tag.
+# checkout needs no autotools, and the pin is the commit rather than the tag
+# because upstream tags mark releases, not each patch.
 from bash_pin import BASH_COMMIT, BASH_DESCRIBE, BASH_GIT  # noqa: E402
 
 # The source is one clone for every target — it is the same tree — while the
@@ -196,12 +196,13 @@ def fetch_source(force: bool) -> None:
     """
     git = ["git", "-c", "core.autocrlf=false", "-c", "core.eol=lf"]
     commit = os.environ.get("MINIXRS_BASH_COMMIT", BASH_COMMIT)
+    url = os.environ.get("MINIXRS_BASH_GIT", BASH_GIT)
     if force and SRC.is_dir():
         shutil.rmtree(SRC)
     if not (SRC / ".git").is_dir():
         SRC.parent.mkdir(parents=True, exist_ok=True)
-        if run([*git, "clone", os.environ.get("MINIXRS_BASH_GIT", BASH_GIT), str(SRC)]) != 0:
-            die(f"cloning {BASH_GIT} failed")
+        if run([*git, "clone", url, str(SRC)]) != 0:
+            die(f"cloning {url} failed")
     elif not have_commit(git, commit):
         note("the pinned commit is not in the local clone; fetching")
         run([*git, "-C", str(SRC), "fetch", "origin"])

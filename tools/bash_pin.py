@@ -4,8 +4,10 @@
 The pin is the commit the working build was validated against — "Bash-5.3 patch
 15" (`git describe`: `bash-5.3-16-gb4608166`). bash's git repository ships its
 generated files (configure, y.tab.c, the builtins), so a checkout needs no
-autotools; what it does not ship is a stable URL, hence the commit rather than the
-tag.
+autotools, and the pin is the commit rather than the tag because upstream tags mark
+releases, not each patch. The clone comes from [`BASH_GIT`] — a mirror in this
+project's own GitHub org, refreshed by `just mirror-bash` when the pin moves —
+because savannah is slow and times out.
 
 Both the build (`tools/build-bash.py`) and the fetch (`tools/fetch-bash.py`) read
 the pin from here, and `.github/workflows/bash-release.yml` derives its release tag
@@ -27,7 +29,12 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 
 from pin import rust_gitlink  # noqa: E402
 
-BASH_GIT = "https://git.savannah.gnu.org/git/bash.git"
+# The build clones the mirror, not upstream: savannah is slow and times out, and no
+# CI run should depend on it. `BASH_GIT` is the credential-free read URL, `BASH_PUSH`
+# the write one, and `just mirror-bash` refreshes the mirror from [`BASH_UPSTREAM`].
+BASH_UPSTREAM = "https://git.savannah.gnu.org/git/bash.git"
+BASH_GIT = "https://github.com/sdgoij/bash.git"
+BASH_PUSH = "git@github.com:sdgoij/bash.git"
 BASH_COMMIT = "b460816602167718f78a6233164e8875f49b75b2"
 BASH_DESCRIBE = "Bash-5.3 patch 15"
 
