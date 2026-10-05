@@ -880,8 +880,10 @@ continues.
 
 - QEMU must be built with **`virglrenderer`**, and the guest launched with a GL
   device: `-device virtio-gpu-gl-pci` (PCI) or `virtio-gpu-gl-device` (mmio).
-  Today every recipe uses plain `virtio-gpu-device` on riscv64/aarch64 and
-  `bochs-display` on x86 — so **no existing recipe enables virgl**.
+  Most recipes use plain `virtio-gpu-device` on riscv64/aarch64 and
+  `bochs-display` on x86; the two virgl gates (`just test-gpu3d-x86`,
+  `just test-drmgl-x86`) are the ones that name `-device virtio-gpu-gl-pci`, and
+  they run only on a dev host whose QEMU was built with virglrenderer.
 - **A GL device needs a GL display backend, so a virgl gate cannot use
   `-nographic`.** `-nographic` means `-display none`, and realizing a GL device
   against it fails with *"The display backend does not have OpenGL support
@@ -909,11 +911,13 @@ continues.
   why 3b-4's `create_blob` serves the guest kind and answers `ENOSYS` for the host
   ones, and why D2's readback is the only present path there rather than the first of
   two.
-- A GL-capable host is required. Headless CI has none, so the options are
-  `-display egl-headless` with host Mesa on llvmpipe (`LIBGL_ALWAYS_SOFTWARE=1`)
-  — slow but real — or keeping the virgl gate out of CI and CI-testing only 3a's
-  negotiation path plus the llvmpipe branch. **Decide this before 3c**, because
-  it decides whether virgl is a CI gate or a manual one.
+- A GL-capable host is required, and headless CI has none. **Decided: virgl stays
+  a dev-host gate, not a CI one.** CI builds QEMU without virglrenderer and the
+  device check in `install-qemu` exempts the GL devices, so the virgl gates
+  (`just test-gpu3d-x86`, `just test-drmgl-x86`) do not run there; what CI does run
+  is the softpipe triangle (3c-2, `just test-gltriangle-<arch>`). `3c-3` revisits
+  this — if virgl becomes a CI gate, the exemption goes and CI grows the
+  `-display egl-headless` + host-llvmpipe (`LIBGL_ALWAYS_SOFTWARE=1`) path.
 - The project already requires QEMU 11+, which is new enough for blob resources
   and `CONTEXT_INIT`.
 

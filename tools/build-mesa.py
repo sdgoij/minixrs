@@ -442,6 +442,7 @@ def main(argv: list[str]) -> int:
         if shutil.which(tool) is None:
             die(f"the build needs {tool} on PATH")
 
+
     for arch in arches:
         fetch(MESA_GIT, MESA_TAG, MESA_COMMIT, MESA_SRC, force)
         fetch(DRM_GIT, DRM_TAG, DRM_COMMIT, DRM_SRC, force)

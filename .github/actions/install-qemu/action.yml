@@ -138,8 +138,17 @@ runs:
         devices=$("$qemu" -device help 2>&1)
         netdevs=$("$qemu" -machine "$QEMU_MACHINE" -netdev help 2>&1)
 
+        # The virgl gates (`just test-gpu3d-x86`, `just test-drmgl-x86`) are the one
+        # place a recipe names a device this build does not carry: a GL device needs a
+        # GL-capable host, which a CI runner is not, and this build deliberately has no
+        # virglrenderer (`WAYLAND.md` §6.10 D8 - the llvmpipe/softpipe branch is the
+        # runnable-everywhere one). Those two recipes are dev-host-only, so the GL
+        # devices are not required here. Drop the exception when virgl becomes a CI gate.
+        gl_devices="virtio-gpu-gl-pci virtio-gpu-gl-device"
+
         missing=""
         while read -r name; do
+          case " $gl_devices " in *" $name "*) continue ;; esac
           grep -qF "name \"$name\"" <<<"$devices" || missing="$missing -device $name"
         done < <(grep -o -- '-device [a-z0-9_-]*' <<<"$lines" | cut -d' ' -f2 | sort -u)
         while read -r type; do
