@@ -7,6 +7,13 @@
 
 #include <sys/time.h>
 
+/* glibc's <sys/select.h> pulls in `sigset_t` for its `pselect` declaration;
+ * readline's posixselect.h includes this header and then rlprivate.h declares
+ * `_rl_timeout_select(..., const sigset_t *)`, so the type has to be visible
+ * here too. This port has no `pselect`, but the type still comes from the
+ * header that owns it. */
+#include <signal.h>
+
 #ifdef __cplusplus
 extern "C" {
 #endif
