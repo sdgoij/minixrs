@@ -34,6 +34,13 @@ struct dirent *readdir(DIR *dirp);
 int closedir(DIR *dirp);
 void rewinddir(DIR *dirp);
 
+/* scandir/alphasort: the whole directory as a malloc'd array of entry copies
+ * (readdir's entry is reused, so a copy is required), filtered and sorted. */
+int scandir(const char *dirp, struct dirent ***namelist,
+            int (*filter)(const struct dirent *),
+            int (*compar)(const struct dirent **, const struct dirent **));
+int alphasort(const struct dirent **a, const struct dirent **b);
+
 #ifdef __cplusplus
 }
 #endif

@@ -605,6 +605,35 @@ test-cdyn-x86 boot-timeout="40": dynlib-x86
     FEED_SCENARIO=tools/smoke/cdyn.tsv sh tools/smoke/feed.sh target/test-cdyn-x86.log {{boot-timeout}} qemu-system-x86_64 -nographic -m 256M -no-reboot -vga none -device bochs-display,id=fb0 -kernel target/images/x86_64-pc-minix/minix-x86.elf -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0 -device virtio-tablet-pci,display=fb0
     @echo "cdyn: a program built by the recipe ran against the shipped libc.so (x86_64)"
 
+# gltriangle: build the surfaceless-EGL GLES2 triangle client and stage the Mesa
+# DSOs it runs against (§6.10 stage 3c-2).
+#
+# The boot gate exists (`tools/smoke/gltriangle.tsv`) but is blocked on the
+# port's root filesystem, not on Mesa: the client needs ~33 MiB of DSOs — two
+# copies of the 16.5 MiB `libgallium` (`libEGL`/`libGLESv2` name it in
+# DT_NEEDED, and EGL *also* dlopens it as `swrast_dri.so`), the only two names
+# the loader and Mesa will accept. A root image past the 16 MiB
+# `RAMDISK_IMAGE_SIZE` default stalls the boot before `wserver` reports ready —
+# embedded, or attached as the virtio-blk root, alike (verified both ways).
+# Raise that ceiling (MFS) and the boot below runs the scenario.
+#
+#   MINIXFS_EXTRA='<the seven /lib entries + /bin/gltriangle>' MINIXFS_BLOCKS=12288 just build-x86
+#   MINIXFS_EXTRA='...' MINIXFS_BLOCKS=12288 target/mkboot embed_initramfs
+#   just mkfs-x86
+#   FEED_SCENARIO=tools/smoke/gltriangle.tsv sh tools/smoke/feed.sh target/test-gltriangle-x86.log 180 \
+#     qemu-system-x86_64 -nographic -m 512M -no-reboot -vga none -device bochs-display,id=fb0 \
+#     -kernel target/trampoline.elf -device loader,file=target/kernel.bin,addr=0x200000 \
+#     -drive if=none,id=disk0,file=target/images/x86_64-pc-minix/disk.img,format=raw,cache=writethrough \
+#     -device virtio-blk-pci,disable-legacy=on,drive=disk0 -netdev user,id=net0 \
+#     -device virtio-net-pci,disable-legacy=on,netdev=net0 -device virtio-tablet-pci,display=fb0
+#
+# Needs `just build-mesa x86 --build` first.
+gltriangle-x86: dynlib-x86
+    python tools/build-mesa.py x86 --stage
+    @test -f target/mesa/x86/lib/libEGL.so.1 || (echo 'gltriangle: no Mesa DSOs — run `just build-mesa x86 --build` first' >&2; exit 1)
+    python tools/build-gltest.py x86
+    @echo "gltriangle: /bin/gltriangle built and the Mesa DSOs staged (boot gate blocked on the 16 MiB root-fs ceiling)"
+
 # UNIX-domain sockets: /bin/udstest round-trips a socketpair and a
 # bind/listen/connect/accept connection through the /dev/uds server — Phase 0 of
 # WAYLAND.md. build-x86 embeds the binary; the scenario types the command into
@@ -1075,6 +1104,13 @@ build-c-hello arch="x86":
 build-bash arch="x86":
     python tools/build-bash.py {{arch}}
 
+# Fetch and configure Mesa + libdrm for a target (§6.10 stage 3c-0): pinned sources
+# under `target/`, a meson cross file naming `tools/cc-dso-minix.py`, and
+# `meson setup` for the softpipe branch. Meson and ninja must be on the host's
+# PATH (a venv install is enough — see the script).
+build-mesa arch="x86" *args:
+    python tools/build-mesa.py {{arch}} {{args}}
+
 # The dynamic-linking artifacts an *image* carries: the loader (`/libexec/ld.so`,
 # `crates/ldso` linked with its own script, `tools/minix-ldso.ld`), the shared C library
 # (`/lib/libc.so`) and a C program linked against it (`/bin/dynclib`). All three are in
@@ -1122,9 +1158,9 @@ cdyn src arch="x86":
 #   - both libs need a distinct *_SHARED_OUTPUT_NAME: the never-built shared
 #     target collides with the static archive name on the Generic platform
 #     (ninja "multiple rules generate lib/libc++.a")
-#   - libc++ needs LIBCXX_ENABLE_THREADS=OFF (_LIBCPP_HAS_NO_THREADS);
-#     libc++abi keeps RTTI (private_typeinfo.cpp uses dynamic_cast), so it
-#     uses the plain toolchain, not the -fno-rtti LLVM one
+#   - libc++ builds with threads on now that the port's pthread has rwlock,
+#     barrier and condattr; libc++abi keeps RTTI (private_typeinfo.cpp uses
+#     dynamic_cast), so it uses the plain toolchain, not the -fno-rtti LLVM one
 #   - include order must be libc++ -> c-include -> libcxx-build config, or
 #     libc++'s <string.h> guard skips the C headers and ::size_t is missing
 #   - the IWYU mapping step needs Python3_EXECUTABLE; the standalone libcxx
@@ -1132,11 +1168,12 @@ cdyn src arch="x86":
 #     beside LLVM, whose python311._pth pins sys.path) cannot import libcxx's
 #     local modules, so tools/libcxx-iwyu.cmd stubs the step
 libcxx-x86:
+    python tools/libcxx-toolchain.py
     rm -rf target/cxx/libcxx-build
-    cmake -G Ninja -S rust/src/llvm-project/libcxx -B target/cxx/libcxx-build -DCMAKE_TOOLCHAIN_FILE={{ROOT}}/target/cxx/toolchain-x86_64.cmake -DCMAKE_BUILD_TYPE=Release -DLIBCXX_ENABLE_SHARED=OFF -DLIBCXX_ENABLE_STATIC=ON -DLIBCXX_ENABLE_EXCEPTIONS=OFF -DLIBCXX_ENABLE_RTTI=OFF -DLIBCXX_ENABLE_FILESYSTEM=OFF -DLIBCXX_ENABLE_LOCALIZATION=ON -DLIBCXX_ENABLE_MONOTONIC_CLOCK=ON -DLIBCXX_ENABLE_NEW_DELETE_DEFINITIONS=OFF -DLIBCXX_ENABLE_RANDOM_DEVICE=ON -DLIBCXX_ENABLE_ABI_LINKER_SCRIPT=OFF -DLIBCXX_ENABLE_THREADS=OFF -DLIBCXX_ABI_VERSION=1 -DLIBCXX_ABI_NAMESPACE=__1 -DLIBCXX_CXX_ABI=libcxxabi -DLIBCXX_AVAILABILITY_MINIMUM_HEADER_VERSION=2 -DLIBCXX_SHARED_OUTPUT_NAME=cxx-shared -DLIBCXX_INCLUDE_TESTS=OFF "-DLIBCXX_ADDITIONAL_COMPILE_FLAGS=-I{{ROOT}}/rust/src/llvm-project/libcxxabi/include;-D_POSIX_TIMERS=200809L" "-DPython3_EXECUTABLE={{ROOT}}/tools/libcxx-iwyu.cmd"
+    cmake -G Ninja -S rust/src/llvm-project/libcxx -B target/cxx/libcxx-build -DCMAKE_TOOLCHAIN_FILE={{ROOT}}/target/cxx/toolchain-x86_64.cmake -DCMAKE_BUILD_TYPE=Release -DLIBCXX_ENABLE_SHARED=OFF -DLIBCXX_ENABLE_STATIC=ON -DLIBCXX_ENABLE_EXCEPTIONS=OFF -DLIBCXX_ENABLE_RTTI=OFF -DLIBCXX_ENABLE_FILESYSTEM=OFF -DLIBCXX_ENABLE_LOCALIZATION=OFF -DLIBCXX_ENABLE_MONOTONIC_CLOCK=ON -DLIBCXX_ENABLE_NEW_DELETE_DEFINITIONS=OFF -DLIBCXX_ENABLE_RANDOM_DEVICE=ON -DLIBCXX_ENABLE_ABI_LINKER_SCRIPT=OFF -DLIBCXX_ENABLE_THREADS=ON -DLIBCXX_HAS_PTHREAD_API=ON -DLIBCXX_ABI_VERSION=1 -DLIBCXX_ABI_NAMESPACE=__1 -DLIBCXX_CXX_ABI=system-libcxxabi -DLIBCXX_CXX_ABI_INCLUDE_PATHS={{ROOT}}/rust/src/llvm-project/libcxxabi/include -DLIBCXX_AVAILABILITY_MINIMUM_HEADER_VERSION=2 -DLIBCXX_SHARED_OUTPUT_NAME=cxx-shared -DLIBCXX_INCLUDE_TESTS=OFF "-DLIBCXX_ADDITIONAL_COMPILE_FLAGS=-I{{ROOT}}/rust/src/llvm-project/libcxxabi/include;-D_POSIX_TIMERS=200809L" "-DPython3_EXECUTABLE={{ROOT}}/tools/libcxx-iwyu.cmd"
     ninja -C target/cxx/libcxx-build
     rm -rf target/cxx/libcxxabi-build
-    cmake -G Ninja -S rust/src/llvm-project/libcxxabi -B target/cxx/libcxxabi-build -DCMAKE_TOOLCHAIN_FILE={{ROOT}}/target/cxx/toolchain-x86_64.cmake -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_FLAGS="-ffreestanding -fno-pic -mno-red-zone -fno-stack-protector -O2 -I{{ROOT}}/tools/c-include" -DCMAKE_CXX_FLAGS="-ffreestanding -fno-pic -mno-red-zone -fno-stack-protector -O2 -std=c++23 -nostdinc++ -I{{ROOT}}/rust/src/llvm-project/libcxx/include -I{{ROOT}}/tools/c-include -I{{ROOT}}/target/cxx/libcxx-build/include/c++/v1" -DLIBCXXABI_ENABLE_SHARED=OFF -DLIBCXXABI_ENABLE_STATIC=ON -DLIBCXXABI_BAREMETAL=ON -DLIBCXXABI_ENABLE_THREADS=OFF -DLIBCXXABI_ENABLE_EXCEPTIONS=OFF -DLIBCXXABI_ENABLE_NEW_DELETE_DEFINITIONS=ON -DLIBCXXABI_AVAILABILITY_MINIMUM_HEADER_VERSION=2 -DLIBCXXABI_INCLUDE_TESTS=OFF -DLIBCXXABI_USE_LLVM_UNWINDER=OFF -DLIBCXXABI_ENABLE_STATIC_UNWINDER=OFF -DLIBCXXABI_SHARED_OUTPUT_NAME=cxxabi-shared
+    cmake -G Ninja -S rust/src/llvm-project/libcxxabi -B target/cxx/libcxxabi-build -DCMAKE_TOOLCHAIN_FILE={{ROOT}}/target/cxx/toolchain-x86_64.cmake -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_FLAGS="-ffreestanding -fPIC -mno-red-zone -fno-stack-protector -O2 -I{{ROOT}}/tools/c-include" -DCMAKE_CXX_FLAGS="-ffreestanding -fPIC -mno-red-zone -fno-stack-protector -O2 -std=c++23 -nostdinc++ -I{{ROOT}}/rust/src/llvm-project/libcxx/include -I{{ROOT}}/tools/c-include -I{{ROOT}}/target/cxx/libcxx-build/include/c++/v1" -DLIBCXXABI_ENABLE_SHARED=OFF -DLIBCXXABI_ENABLE_STATIC=ON -DLIBCXXABI_BAREMETAL=ON -DLIBCXXABI_ENABLE_THREADS=OFF -DLIBCXXABI_ENABLE_EXCEPTIONS=OFF -DLIBCXXABI_ENABLE_NEW_DELETE_DEFINITIONS=ON -DLIBCXXABI_AVAILABILITY_MINIMUM_HEADER_VERSION=2 -DLIBCXXABI_INCLUDE_TESTS=OFF -DLIBCXXABI_USE_LLVM_UNWINDER=OFF -DLIBCXXABI_ENABLE_STATIC_UNWINDER=OFF -DLIBCXXABI_SHARED_OUTPUT_NAME=cxxabi-shared
     ninja -C target/cxx/libcxxabi-build
     rm -rf target/cxx/merge-tmp
     mkdir -p target/cxx/merge-tmp

@@ -28,11 +28,16 @@ struct tm {
 #define CLOCK_REALTIME 0
 #define CLOCK_MONOTONIC 1
 
+#define TIMER_ABSTIME 1
+
 #ifdef __cplusplus
 extern "C" {
 #endif
 
 int clock_gettime(clockid_t clk_id, struct timespec *tp);
+int clock_nanosleep(clockid_t clk_id, int flags,
+                    const struct timespec *req, struct timespec *rem);
+int nanosleep(const struct timespec *req, struct timespec *rem);
 time_t time(time_t *tloc);
 time_t mktime(struct tm *tm);
 struct tm *localtime(const time_t *timep);

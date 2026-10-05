@@ -12,9 +12,9 @@
 //! first-fit allocator; concurrent allocation from several threads needs the
 //! Stage-A allocator work (see THREADS.md "Related work").
 
-use core::ffi::{c_int, c_void};
+use core::ffi::{c_char, c_int, c_long, c_uint, c_void};
 use core::mem::size_of;
-use core::sync::atomic::{AtomicU32, Ordering};
+use core::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 
 use super::set_errno;
 
@@ -216,44 +216,639 @@ pub unsafe extern "C" fn pthread_kill(thread: usize, sig: c_int) -> c_int {
     }
 }
 
-// ---- mutexes over the futex syscalls ----
+// ---- mutex attributes and typed mutexes ----
+
+const EBUSY: i32 = 16;
+const EAGAIN: i32 = 11;
+const ETIMEDOUT: i32 = 110;
+
+const MUTEX_NORMAL: i32 = 0;
+const MUTEX_RECURSIVE: i32 = 1;
+
+/// `pthread_mutex_t`, matching `tools/c-include/pthread.h`: the futex word at
+/// offset 0 (the lock), the kind, and — for a recursive mutex — the owning tid
+/// and the recursion depth.
+#[repr(C)]
+pub struct PthreadMutex {
+    state: u32,
+    kind: i32,
+    owner: i32,
+    count: i32,
+}
+
+#[repr(C)]
+pub struct PthreadMutexAttr {
+    kind: i32,
+}
+
+/// `struct timespec`, matching `tools/c-include/time.h` (`long`/`long`).
+#[repr(C)]
+pub struct Timespec {
+    tv_sec: i64,
+    tv_nsec: i64,
+}
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn pthread_mutex_init(m: *mut u32, _attr: *const c_void) -> c_int {
-    if m.is_null() {
+pub unsafe extern "C" fn pthread_mutexattr_init(attr: *mut PthreadMutexAttr) -> c_int {
+    if attr.is_null() {
         return fail(EINVAL);
     }
-    unsafe { core::ptr::write_volatile(m, 0) };
+    unsafe { (*attr).kind = MUTEX_NORMAL };
     0
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn pthread_mutex_destroy(_m: *mut u32) -> c_int {
+pub unsafe extern "C" fn pthread_mutexattr_destroy(_attr: *mut PthreadMutexAttr) -> c_int {
     0
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn pthread_mutex_lock(m: *mut u32) -> c_int {
+pub unsafe extern "C" fn pthread_mutexattr_settype(
+    attr: *mut PthreadMutexAttr,
+    kind: c_int,
+) -> c_int {
+    if attr.is_null() {
+        return fail(EINVAL);
+    }
+    unsafe { (*attr).kind = kind };
+    0
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn pthread_mutexattr_gettype(
+    attr: *const PthreadMutexAttr,
+    kind: *mut c_int,
+) -> c_int {
+    if attr.is_null() || kind.is_null() {
+        return fail(EINVAL);
+    }
+    unsafe { *kind = (*attr).kind };
+    0
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn pthread_mutex_init(m: *mut PthreadMutex, attr: *const c_void) -> c_int {
     if m.is_null() {
         return fail(EINVAL);
     }
-    let state = m as *mut AtomicU32;
+    let kind = if attr.is_null() {
+        MUTEX_NORMAL
+    } else {
+        unsafe { (*(attr as *const PthreadMutexAttr)).kind }
+    };
+    unsafe {
+        (*m).state = 0;
+        (*m).kind = kind;
+        (*m).owner = 0;
+        (*m).count = 0;
+    }
+    0
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn pthread_mutex_destroy(_m: *mut PthreadMutex) -> c_int {
+    0
+}
+
+/// Acquire `m`, honouring a recursive mutex: a thread that already owns it
+/// deepens the count instead of deadlocking on its own lock.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn pthread_mutex_lock(m: *mut PthreadMutex) -> c_int {
+    if m.is_null() {
+        return fail(EINVAL);
+    }
+    let me = minix_rt::thread_self();
+    if unsafe { (*m).kind } == MUTEX_RECURSIVE
+        && unsafe { (*m).state } != 0
+        && unsafe { (*m).owner } == me
+    {
+        unsafe { (*m).count += 1 };
+        return 0;
+    }
+    let state = unsafe { core::ptr::addr_of_mut!((*m).state) } as *mut AtomicU32;
     while unsafe { (*state).swap(1, Ordering::Acquire) } != 0 {
-        // SAFETY: `m` points to a readable `u32` for the mutex's lifetime.
-        unsafe { minix_rt::futex_wait(m, 1) };
+        // SAFETY: the mutex's futex word lives as long as the mutex.
+        unsafe { minix_rt::futex_wait(core::ptr::addr_of!((*m).state), 1) };
+    }
+    unsafe {
+        (*m).owner = me;
+        (*m).count = 1;
     }
     0
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn pthread_mutex_unlock(m: *mut u32) -> c_int {
+pub unsafe extern "C" fn pthread_mutex_trylock(m: *mut PthreadMutex) -> c_int {
     if m.is_null() {
         return fail(EINVAL);
     }
-    let state = m as *mut AtomicU32;
-    unsafe { (*state).store(0, Ordering::Release) };
-    minix_rt::futex_wake(m, 1);
+    let me = minix_rt::thread_self();
+    if unsafe { (*m).kind } == MUTEX_RECURSIVE
+        && unsafe { (*m).state } != 0
+        && unsafe { (*m).owner } == me
+    {
+        unsafe { (*m).count += 1 };
+        return 0;
+    }
+    let state = unsafe { core::ptr::addr_of_mut!((*m).state) } as *mut AtomicU32;
+    if unsafe { (*state).swap(1, Ordering::Acquire) } == 0 {
+        unsafe {
+            (*m).owner = me;
+            (*m).count = 1;
+        }
+        0
+    } else {
+        fail(EBUSY)
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn pthread_mutex_timedlock(
+    m: *mut PthreadMutex,
+    abstime: *const Timespec,
+) -> c_int {
+    if m.is_null() {
+        return fail(EINVAL);
+    }
+    // No futex timeout exists yet, so a timed lock polls to its deadline rather
+    // than being woken exactly at it.
+    loop {
+        if unsafe { pthread_mutex_trylock(m) } == 0 {
+            return 0;
+        }
+        if !abstime.is_null() && now_micros() >= abstime_micros(abstime) {
+            return fail(ETIMEDOUT);
+        }
+        sleep_micros(2_000);
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn pthread_mutex_unlock(m: *mut PthreadMutex) -> c_int {
+    if m.is_null() {
+        return fail(EINVAL);
+    }
+    if unsafe { (*m).kind } == MUTEX_RECURSIVE {
+        unsafe { (*m).count -= 1 };
+        if unsafe { (*m).count } > 0 {
+            return 0;
+        }
+    }
+    unsafe {
+        (*m).owner = 0;
+        (*m).count = 0;
+        (*(core::ptr::addr_of_mut!((*m).state) as *mut AtomicU32)).store(0, Ordering::Release);
+    }
+    minix_rt::futex_wake(unsafe { core::ptr::addr_of!((*m).state) }, 1);
     0
+}
+
+// ---- condition variables over the same futex ----
+
+/// `pthread_cond_t`: a sequence counter. A waiter records the count, unlocks,
+/// and futex-waits for it to change; a signal bumps it and wakes, so a wake that
+/// races the wait is caught by the waiter's `futex_wait` comparing the value.
+#[repr(C)]
+pub struct PthreadCond {
+    seq: u32,
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn pthread_cond_init(c: *mut PthreadCond, _attr: *const c_void) -> c_int {
+    if c.is_null() {
+        return fail(EINVAL);
+    }
+    unsafe { (*c).seq = 0 };
+    0
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn pthread_cond_destroy(_c: *mut PthreadCond) -> c_int {
+    0
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn pthread_cond_wait(c: *mut PthreadCond, m: *mut PthreadMutex) -> c_int {
+    if c.is_null() || m.is_null() {
+        return fail(EINVAL);
+    }
+    let seq = unsafe { core::ptr::addr_of!((*c).seq) };
+    let seen = unsafe { (*(seq as *mut AtomicU32)).load(Ordering::SeqCst) };
+    unsafe { pthread_mutex_unlock(m) };
+    unsafe { minix_rt::futex_wait(seq, seen) };
+    unsafe { pthread_mutex_lock(m) };
+    0
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn pthread_cond_timedwait(
+    c: *mut PthreadCond,
+    m: *mut PthreadMutex,
+    abstime: *const Timespec,
+) -> c_int {
+    if c.is_null() || m.is_null() {
+        return fail(EINVAL);
+    }
+    let seq = unsafe { core::ptr::addr_of_mut!((*c).seq) };
+    let seen = unsafe { (*(seq as *mut AtomicU32)).load(Ordering::SeqCst) };
+    unsafe { pthread_mutex_unlock(m) };
+    // No futex timeout exists yet, so a timed wait polls the sequence.
+    let r = loop {
+        if unsafe { (*(seq as *mut AtomicU32)).load(Ordering::SeqCst) } != seen {
+            break 0;
+        }
+        if !abstime.is_null() && now_micros() >= abstime_micros(abstime) {
+            break fail(ETIMEDOUT);
+        }
+        sleep_micros(2_000);
+    };
+    unsafe { pthread_mutex_lock(m) };
+    r
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn pthread_cond_signal(c: *mut PthreadCond) -> c_int {
+    if c.is_null() {
+        return fail(EINVAL);
+    }
+    let seq = unsafe { core::ptr::addr_of_mut!((*c).seq) };
+    unsafe { (*(seq as *mut AtomicU32)).fetch_add(1, Ordering::SeqCst) };
+    minix_rt::futex_wake(seq as *const u32, 1);
+    0
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn pthread_cond_broadcast(c: *mut PthreadCond) -> c_int {
+    if c.is_null() {
+        return fail(EINVAL);
+    }
+    let seq = unsafe { core::ptr::addr_of_mut!((*c).seq) };
+    unsafe { (*(seq as *mut AtomicU32)).fetch_add(1, Ordering::SeqCst) };
+    minix_rt::futex_wake(seq as *const u32, u32::MAX);
+    0
+}
+
+/// `pthread_condattr_t`: only the clock id is stored, matching
+/// `tools/c-include/pthread.h`. The clock choice is advisory here — the timed
+/// wait compares against the monotonic clock regardless.
+#[repr(C)]
+pub struct PthreadCondAttr {
+    clock: c_int,
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn pthread_condattr_init(attr: *mut PthreadCondAttr) -> c_int {
+    if attr.is_null() {
+        return fail(EINVAL);
+    }
+    unsafe { (*attr).clock = 0 };
+    0
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn pthread_condattr_destroy(_attr: *mut PthreadCondAttr) -> c_int {
+    0
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn pthread_condattr_setclock(
+    attr: *mut PthreadCondAttr,
+    clock_id: c_long,
+) -> c_int {
+    if attr.is_null() {
+        return fail(EINVAL);
+    }
+    unsafe { (*attr).clock = clock_id as c_int };
+    0
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn pthread_condattr_getclock(
+    attr: *const PthreadCondAttr,
+    clock_id: *mut c_long,
+) -> c_int {
+    if attr.is_null() || clock_id.is_null() {
+        return fail(EINVAL);
+    }
+    unsafe { *clock_id = (*attr).clock as c_long };
+    0
+}
+
+/// `pthread_barrier_t`, matching `tools/c-include/pthread.h`: the arrival count,
+/// the number that have arrived, and a generation that trip-counting waiters
+/// watch to know when to leave.
+#[repr(C)]
+pub struct PthreadBarrier {
+    mutex: PthreadMutex,
+    cond: PthreadCond,
+    count: c_uint,
+    waiting: c_uint,
+    generation: c_uint,
+}
+
+/// `PTHREAD_BARRIER_SERIAL_THREAD`: which single waiter the barrier releases
+/// first.
+const PTHREAD_BARRIER_SERIAL_THREAD: c_int = -1;
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn pthread_barrier_init(
+    barrier: *mut PthreadBarrier,
+    _attr: *const c_void,
+    count: c_uint,
+) -> c_int {
+    if barrier.is_null() || count == 0 {
+        return fail(EINVAL);
+    }
+    unsafe {
+        pthread_mutex_init(&mut (*barrier).mutex, core::ptr::null());
+        pthread_cond_init(&mut (*barrier).cond, core::ptr::null());
+        (*barrier).count = count;
+        (*barrier).waiting = 0;
+        (*barrier).generation = 0;
+    }
+    0
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn pthread_barrier_destroy(barrier: *mut PthreadBarrier) -> c_int {
+    if barrier.is_null() {
+        return fail(EINVAL);
+    }
+    unsafe {
+        pthread_mutex_destroy(&mut (*barrier).mutex);
+        pthread_cond_destroy(&mut (*barrier).cond);
+    }
+    0
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn pthread_barrier_wait(barrier: *mut PthreadBarrier) -> c_int {
+    if barrier.is_null() {
+        return fail(EINVAL);
+    }
+    unsafe { pthread_mutex_lock(&mut (*barrier).mutex) };
+    let generation = unsafe { (*barrier).generation };
+    unsafe { (*barrier).waiting += 1 };
+    if unsafe { (*barrier).waiting } == unsafe { (*barrier).count } {
+        unsafe {
+            (*barrier).waiting = 0;
+            (*barrier).generation = generation.wrapping_add(1);
+        }
+        unsafe { pthread_cond_broadcast(&mut (*barrier).cond) };
+        unsafe { pthread_mutex_unlock(&mut (*barrier).mutex) };
+        PTHREAD_BARRIER_SERIAL_THREAD
+    } else {
+        while unsafe { (*barrier).generation } == generation {
+            unsafe { pthread_cond_wait(&mut (*barrier).cond, &mut (*barrier).mutex) };
+        }
+        unsafe { pthread_mutex_unlock(&mut (*barrier).mutex) };
+        0
+    }
+}
+
+/// `pthread_rwlock_t`, matching `tools/c-include/pthread.h`: one mutex and
+/// condition guard the reader count and the writer flag.
+#[repr(C)]
+pub struct PthreadRwlock {
+    mutex: PthreadMutex,
+    cond: PthreadCond,
+    readers: c_int,
+    writer: c_int,
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn pthread_rwlock_init(
+    rwlock: *mut PthreadRwlock,
+    _attr: *const c_void,
+) -> c_int {
+    if rwlock.is_null() {
+        return fail(EINVAL);
+    }
+    unsafe {
+        pthread_mutex_init(&mut (*rwlock).mutex, core::ptr::null());
+        pthread_cond_init(&mut (*rwlock).cond, core::ptr::null());
+        (*rwlock).readers = 0;
+        (*rwlock).writer = 0;
+    }
+    0
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn pthread_rwlock_destroy(rwlock: *mut PthreadRwlock) -> c_int {
+    if rwlock.is_null() {
+        return fail(EINVAL);
+    }
+    unsafe {
+        pthread_mutex_destroy(&mut (*rwlock).mutex);
+        pthread_cond_destroy(&mut (*rwlock).cond);
+    }
+    0
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn pthread_rwlock_rdlock(rwlock: *mut PthreadRwlock) -> c_int {
+    if rwlock.is_null() {
+        return fail(EINVAL);
+    }
+    unsafe { pthread_mutex_lock(&mut (*rwlock).mutex) };
+    while unsafe { (*rwlock).writer } != 0 {
+        unsafe { pthread_cond_wait(&mut (*rwlock).cond, &mut (*rwlock).mutex) };
+    }
+    unsafe { (*rwlock).readers += 1 };
+    unsafe { pthread_mutex_unlock(&mut (*rwlock).mutex) };
+    0
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn pthread_rwlock_tryrdlock(rwlock: *mut PthreadRwlock) -> c_int {
+    if rwlock.is_null() {
+        return fail(EINVAL);
+    }
+    unsafe { pthread_mutex_lock(&mut (*rwlock).mutex) };
+    if unsafe { (*rwlock).writer } != 0 {
+        unsafe { pthread_mutex_unlock(&mut (*rwlock).mutex) };
+        return fail(EBUSY);
+    }
+    unsafe {
+        (*rwlock).readers += 1;
+        pthread_mutex_unlock(&mut (*rwlock).mutex);
+    }
+    0
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn pthread_rwlock_wrlock(rwlock: *mut PthreadRwlock) -> c_int {
+    if rwlock.is_null() {
+        return fail(EINVAL);
+    }
+    unsafe { pthread_mutex_lock(&mut (*rwlock).mutex) };
+    while unsafe { (*rwlock).writer } != 0 || unsafe { (*rwlock).readers } != 0 {
+        unsafe { pthread_cond_wait(&mut (*rwlock).cond, &mut (*rwlock).mutex) };
+    }
+    unsafe { (*rwlock).writer = 1 };
+    unsafe { pthread_mutex_unlock(&mut (*rwlock).mutex) };
+    0
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn pthread_rwlock_trywrlock(rwlock: *mut PthreadRwlock) -> c_int {
+    if rwlock.is_null() {
+        return fail(EINVAL);
+    }
+    unsafe { pthread_mutex_lock(&mut (*rwlock).mutex) };
+    if unsafe { (*rwlock).writer } != 0 || unsafe { (*rwlock).readers } != 0 {
+        unsafe { pthread_mutex_unlock(&mut (*rwlock).mutex) };
+        return fail(EBUSY);
+    }
+    unsafe {
+        (*rwlock).writer = 1;
+        pthread_mutex_unlock(&mut (*rwlock).mutex);
+    }
+    0
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn pthread_rwlock_unlock(rwlock: *mut PthreadRwlock) -> c_int {
+    if rwlock.is_null() {
+        return fail(EINVAL);
+    }
+    unsafe {
+        pthread_mutex_lock(&mut (*rwlock).mutex);
+        if (*rwlock).writer != 0 {
+            (*rwlock).writer = 0;
+        } else if (*rwlock).readers > 0 {
+            (*rwlock).readers -= 1;
+        }
+        pthread_cond_broadcast(&mut (*rwlock).cond);
+        pthread_mutex_unlock(&mut (*rwlock).mutex);
+    }
+    0
+}
+
+/// POSIX `sched_yield()`: hand the CPU to another runnable thread. The rest of
+/// the `sched.h` interface (priorities, policies, `sched_setscheduler`) is not
+/// supported.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sched_yield() -> c_int {
+    minix_rt::thread_yield();
+    0
+}
+
+/// Advisory thread naming. PM has no way to name a thread, so the request is
+/// accepted and dropped; Mesa ignores the result.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn pthread_setname_np(_thread: usize, _name: *const c_char) -> c_int {
+    0
+}
+
+// ---- once ----
+
+const ONCE_DONE: u32 = 2;
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn pthread_once(once: *mut u32, init: unsafe extern "C" fn()) -> c_int {
+    if once.is_null() {
+        return fail(EINVAL);
+    }
+    let p = once as *mut AtomicU32;
+    if unsafe { (*p).load(Ordering::Acquire) } == ONCE_DONE {
+        return 0;
+    }
+    if unsafe { (*p).compare_exchange(0, 1, Ordering::AcqRel, Ordering::Acquire) }.is_ok() {
+        unsafe { init() };
+        unsafe { (*p).store(ONCE_DONE, Ordering::Release) };
+        minix_rt::futex_wake(once as *const u32, u32::MAX);
+    } else {
+        loop {
+            let v = unsafe { (*p).load(Ordering::Acquire) };
+            if v == ONCE_DONE {
+                break;
+            }
+            unsafe { minix_rt::futex_wait(once as *const u32, v) };
+        }
+    }
+    0
+}
+
+// ---- thread-specific data ----
+
+/// The most keys a process may hold. Mesa's `tss_t` use is a handful; this is
+/// generous without making each thread's value block large.
+const MAX_KEYS: usize = 128;
+
+/// Destructors, indexed by key, plus a per-thread array of values — which is
+/// what makes `getspecific` per-thread without a lock.
+static KEY_DTORS: [AtomicUsize; MAX_KEYS] = [const { AtomicUsize::new(0) }; MAX_KEYS];
+static NEXT_KEY: AtomicU32 = AtomicU32::new(0);
+#[thread_local]
+static KEY_VALUES: [core::cell::Cell<*mut c_void>; MAX_KEYS] =
+    [const { core::cell::Cell::new(core::ptr::null_mut()) }; MAX_KEYS];
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn pthread_key_create(key: *mut u32, dtor: usize) -> c_int {
+    if key.is_null() {
+        return fail(EINVAL);
+    }
+    let id = NEXT_KEY.fetch_add(1, Ordering::Relaxed);
+    if id as usize >= MAX_KEYS {
+        return fail(EAGAIN);
+    }
+    KEY_DTORS[id as usize].store(dtor, Ordering::Release);
+    unsafe { *key = id };
+    0
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn pthread_key_delete(key: u32) -> c_int {
+    if key as usize >= MAX_KEYS {
+        return fail(EINVAL);
+    }
+    KEY_DTORS[key as usize].store(0, Ordering::Release);
+    0
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn pthread_setspecific(key: u32, value: *const c_void) -> c_int {
+    if key as usize >= MAX_KEYS {
+        return fail(EINVAL);
+    }
+    KEY_VALUES[key as usize].set(value as *mut c_void);
+    0
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn pthread_getspecific(key: u32) -> *mut c_void {
+    if key as usize >= MAX_KEYS {
+        return core::ptr::null_mut();
+    }
+    KEY_VALUES[key as usize].get()
+}
+
+/// `minix_std`'s monotonic clock in microseconds since boot (0 if unavailable).
+fn now_micros() -> u128 {
+    match minix_std::time::clock_gettime(1) {
+        Ok(t) => (t.tv_sec.max(0) as u128) * 1_000_000 + (t.tv_nsec.max(0) as u128) / 1000,
+        Err(_) => 0,
+    }
+}
+
+fn abstime_micros(ts: *const Timespec) -> u128 {
+    let sec = unsafe { (*ts).tv_sec }.max(0) as u128;
+    let nsec = unsafe { (*ts).tv_nsec }.max(0) as u128;
+    sec * 1_000_000 + nsec / 1000
+}
+
+/// Sleep, or spin on a host build (which never runs the timed paths).
+fn sleep_micros(us: u32) {
+    #[cfg(target_os = "minix")]
+    unsafe {
+        crate::c_sys::usleep(us);
+    }
+    #[cfg(not(target_os = "minix"))]
+    {
+        let _ = us;
+        core::hint::spin_loop();
+    }
 }
 
 /// Record `errno` and return -1 (POSIX error convention).

@@ -42,6 +42,7 @@ int symlink(const char *target, const char *linkpath);
 ssize_t readlink(const char *path, char *buf, size_t bufsiz);
 int ftruncate(int fd, off_t length);
 int access(const char *path, int mode);
+int chown(const char *path, uid_t owner, gid_t group);
 int fchown(int fd, uid_t owner, gid_t group);
 int usleep(unsigned int usec);
 
@@ -78,6 +79,8 @@ extern char **environ;
 #define _SC_PAGESIZE 30
 #define _SC_PAGE_SIZE 30
 #define _SC_GETPW_R_SIZE_MAX 69
+#define _SC_PHYS_PAGES 85
+#define _SC_AVPHYS_PAGES 86
 
 #define _POSIX_ARG_MAX 4096
 #define _POSIX_OPEN_MAX 32
@@ -85,6 +88,7 @@ extern char **environ;
 
 long sysconf(int name);
 int getpagesize(void);
+void sync(void);
 uid_t getuid(void);
 
 /* Process credentials. bash calls all of these unconditionally. */

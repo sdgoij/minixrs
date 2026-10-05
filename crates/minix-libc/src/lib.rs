@@ -19,6 +19,9 @@
 #[cfg(target_os = "minix")]
 mod pthread;
 
+#[cfg(target_os = "minix")]
+mod c_math;
+
 // The C-library helper modules (stdio/time/wchar/string/stdlib/setjmp)
 // that the old `tools/c-libc.c` used to provide. Exported symbols are
 // `#[cfg(target_os = "minix")]`-gated inside each module; the pure
@@ -994,6 +997,18 @@ pub unsafe extern "C" fn sigprocmask(how: c_int, set: *const SigSet, oldset: *mu
         Ok(()) => 0,
         Err(e) => fail(e.0),
     }
+}
+
+/// POSIX `pthread_sigmask()`: the thread-aware spelling of `sigprocmask`. Masks
+/// are per process here, so it is the same call.
+#[cfg(target_os = "minix")]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn pthread_sigmask(
+    how: c_int,
+    set: *const SigSet,
+    oldset: *mut SigSet,
+) -> c_int {
+    unsafe { sigprocmask(how, set, oldset) }
 }
 
 /// POSIX `sigsuspend()`: atomically install `mask` and wait for a signal.

@@ -1,10 +1,12 @@
 # Wayland on minixrs — design proposal and gap analysis
 
-Status: **draft; no Wayland code landed yet.** The loader support it depends
-on now has (dynamic linking, `dlopen`, multi-module TLS, an 18-object budget —
-§6.9). This document proposes how to get a Wayland compositor — and eventually
-a desktop — running on this port, and records what the reference tree has that
-we do not, so the deviations are deliberate rather than accidental.
+Status: **Phases 0–2 landed, and Phase 3 through stage 3b.** The loader support it
+depends on has landed (dynamic linking, `dlopen`, multi-module TLS, an 18-object
+budget — §6.9). §7 carries the per-phase state; what remains is Phase 2's
+multi-output, stage 3c (Mesa + `libdrm` as DSOs) and 3d, and Phases 4–5. This
+document proposes how to get a Wayland compositor — and eventually a desktop —
+running on this port, and records what the reference tree has that we do not, so
+the deviations are deliberate rather than accidental.
 
 North star: `cosmic-comp` (System76 COSMIC, built on **smithay**) on screen, at
 which point a Wayland session is a distribution-grade port rather than a demo.
@@ -796,13 +798,79 @@ Each stage has a gate that can be run without the next stage existing.
 
 | Stage | Deliverable | Gate |
 |---|---|---|
-| **3a** | `virtio-gpu` 3D transport, no Mesa: negotiate VIRGL/blob, `GET_CAPSET_INFO`/`GET_CAPSET`, `CTX_CREATE`, `RESOURCE_CREATE_3D`, a trivial `SUBMIT_3D`, read back with `TRANSFER_FROM_HOST_3D` | In QEMU with a GL device (`-device virtio-gpu-gl-pci` under `-display egl-headless`): the capset id/version is printed, a 3D resource round-trips known bytes, and the same binary on a device without `VIRTIO_GPU_F_VIRGL` reports "no 3D" instead of hanging |
-| **3b** | The `virtgpu` DRM node: `/dev/dri/renderD128`, GEM, `GETPARAM`/`CONTEXT_INIT`/`RESOURCE_CREATE(_BLOB)`/`EXECBUFFER`/`MAP_BLOB`/`WAIT`, `mmap` of a blob | A **hand-written C program** (not Mesa) does ctx-create → create blob → map → exec → wait → read the result. This is the stage that isolates "our DRM ABI" from "Mesa's bugs". |
+| **3a** | **Landed** (`just test-gpu3d-x86`, `just test-gpu3d-nogl-x86`). `virtio-gpu` 3D transport, no Mesa: negotiate VIRGL/blob, `GET_CAPSET_INFO`/`GET_CAPSET`, `CTX_CREATE`, `RESOURCE_CREATE_3D`, a trivial `SUBMIT_3D`, read back with `TRANSFER_FROM_HOST_3D` | In QEMU with a GL device (`-device virtio-gpu-gl-pci` under `-display egl-headless`): the capset id/version is printed, a 3D resource round-trips known bytes, and the same binary on a device without `VIRTIO_GPU_F_VIRGL` reports "no 3D" instead of hanging |
+| **3b** | **Landed** (`just test-drmmap-x86`, `just test-drmgl-x86`). The `virtgpu` DRM node (`crates/drivers/src/video/drm.rs`): `/dev/dri/renderD128`, GEM, `GETPARAM`/`CONTEXT_INIT`/`RESOURCE_CREATE(_BLOB)`/`EXECBUFFER`/`MAP_BLOB`/`WAIT`, `mmap` of a blob | A **hand-written C program** (not Mesa) does ctx-create → create blob → map → exec → wait → read the result. This is the stage that isolates "our DRM ABI" from "Mesa's bugs". |
 | **3c** | `libdrm` + Mesa (`virgl`) as DSOs; EGL surfaceless; a triangle into an FBO; readback; present via `/dev/fb` | A triangle on screen in QEMU, and the **same program** run under llvmpipe (`LIBGL_ALWAYS_SOFTWARE`) as a cross-check — if llvmpipe works and virgl does not, the bug is ours, not Mesa's |
 | **3d** | dmabuf/GBM or a zero-readback present path; the renderer wired into the output backend and the in-house compositor | The compositor composes a GL surface; the frame reaches the display without a full CPU readback |
 
 **3a and 3b are the two that must be done carefully.** 3c is mostly a porting
 exercise; 3d is where the design can still change.
+
+#### 3c's own stages
+
+3c is a port of Mesa and `libdrm`, not a driver, and it is the phase's long pole
+(§8). It is subdivided so each piece has a gate that runs without the next, and
+the order is chosen so the *first* runnable GL branch is the one that asks the
+least of the kernel:
+
+| Stage | Deliverable | Gate |
+|---|---|---|
+| **3c-0** | The build plumbing: Mesa and `libdrm` pinned and fetched under `target/` (the way `tools/build-bash.py` pins bash, `target/bash-src`), and a `tools/build-mesa.py` that drives their build against the minix C toolchain — including the `cc` that produces `*-minix-elf` shared objects. | `just build-mesa x86` reaches configure and either completes it or fails at a *named* missing libc symbol, with the log written where the next stage reads it |
+| **3c-1** | **The software rasteriser first — `softpipe`, not llvmpipe.** Mesa builds llvmpipe only with LLVM (`-Dllvm=enabled`), and an LLVM port is a much larger project than Mesa; `softpipe` is the same software family with no JIT (and so no `mprotect`). `surfaceless_probe_device_sw` opens no DRM node and loads it under `LIBGL_ALWAYS_SOFTWARE=1`, so this runs before the `/sys` question is settled. Build the `softpipe` gallium driver, `libEGL`/`libGLESv2` and `libglapi` as DSOs, surfaceless-only (`-Dplatforms=`, `-Dgallium-drivers=softpipe`). | In a guest with `LIBGL_ALWAYS_SOFTWARE=1`: `eglGetDisplay(EGL_DEFAULT_DISPLAY)` + `eglInitialize` + `eglQueryString` return a real EGL, and the `libgallium_dri.so` `PT_TLS` block measures ≤ 2048 bytes (`readelf -l`), which is what the loader's surplus TLS slot allows |
+| **3c-2** | The triangle over llvmpipe: a client makes an FBO, draws a GLES2 triangle, `glReadPixels`, writes `/dev/fb`, `FBIOFLUSH`. | The triangle is on screen in QEMU (read back from `/dev/fb`), with no DRM node opened |
+| **3c-3** | **virgl**: `libdrm` (D6 — a dependency, not a reimplementation), Mesa's `virgl` gallium driver, and the DRM device question — `/dev/dri/renderD128` plus either a minimal `/sys` `device/subsystem` node in `devman` or the recorded `drmParseSubsystemType` patch. | The same triangle runs through virgl (`-device virtio-gpu-gl-pci`), differing from 3c-2 only in which gallium driver Mesa loads |
+
+softpipe is first deliberately: §6.10's measurement is that the software branch
+reaches a triangle with no DRM device at all, so the first on-screen GL frame is
+the one that needs nothing from the render node, and virgl (which does) is second.
+The cross-check in the 3c row still holds — the *same* 3c-2 client run under virgl
+once 3c-3 lands.
+
+**A prerequisite the phase did not name: Mesa is C++.** Its `meson.build` opens
+`project('mesa', ['c', 'cpp'], …)` and calls `meson.get_compiler('cpp')`, so a
+cross build needs a **target** C++ compiler — a minix `clang++` with the libc++
+headers, and, for anything using the standard library, exceptions or RTTI, the
+port's own libc++ runtime (`just libcxx-x86`). Neither is reachable today: the
+libc++ headers live under `rust/src/llvm-project`, which is not checked out, and
+`just libcxx-x86` itself stops on a missing `target/cxx/toolchain-x86_64.cmake`.
+So `tools/cc-dso-minix.py` grows a `cpp` mode (or a sibling `c++` wrapper does)
+before Mesa can configure past its first line — and that, not a libc symbol, is
+what 3c-0's gate reports first.
+
+**Two more findings from the first configure.** (1) **libdrm is a *build*
+dependency, not only 3c-3's runtime one.** Mesa refuses to build EGL without the
+DRI path (`Feature egl cannot be disabled: EGL requires DRI, Haiku, Windows or
+Android`), and DRI looks up `libdrm` — so D6 is 3c-0/3c-1 work. A host `system`
+*outside* Mesa's `system_has_kms_drm` list skips the lookup but then EGL is
+refused; naming `linux` requires it and it is satisfied through pkg-config. (2) A
+minix C target defines neither `__linux__` nor `__unix__` (only `__ELF__`), so
+libdrm's `drm.h` takes its "one of the BSDs" branch and wants `sys/ioccom.h`,
+and `xf86drm.c` wants `libgen.h` (which `tools/c-include` lacks). Either the C
+toolchain defines `__linux__`/`__unix__` for minix — the port's libc is
+Linux/POSIX-shaped, which is why bash and the coreutils port — or libdrm/Mesa are
+patched, a deviation to record either way. (3) **The grind is real and starts in
+libdrm.** With `sys/ioccom.h`, `libgen.h` and the `major`/`minor`/`IOC_*`
+additions in `tools/c-include` in place, libdrm compiles until it needs libc
+functions the port has not got — `asprintf` (its `vasprintf` exists),
+`open_memstream` and a path-`chown` — which is §8's "one function at a time".
+libdrm also *self-reports* the `/sys` gap at compile time: it emits
+`#warning "Missing implementation of drmParseSubsystemType"` (and the bus/dev
+variants), which is D6's patch-or-`/sys` decision made visible.
+
+**Landed so far (3c-0/3c-1).** `tools/build-mesa.py` builds and installs libdrm
+and configures Mesa against it; `asprintf`, `open_memstream` and a path `chown`
+are in `minix-libc` (with `minix_std::fs::chown` — VFS already had `do_chown`),
+and `tools/c-include` gained `sys/ioccom.h`, `libgen.h`, the `major`/`minor`
+macros and the C99 classification macros in `math.h`. With those, **libdrm builds
+and installs**, Mesa's `meson setup` completes, and `ninja` compiles Mesa's
+subprojects (zlib, expat) and its own sources. The **thread layer is in** too:
+`pthread.h` gained condition variables, `pthread_once`, thread-specific keys,
+mutex attributes and a recursive mutex (over the existing futexes), so
+`src/c11/threads_posix.c` compiles. The next gaps the build names are
+`nanosleep`/`sched_yield`, `pthread_condattr_*`, the `<math.h>` float functions
+Mesa's `src/util` uses (`powf`, `fabsf`, `lrintf`, `fmax`, `fmin`, `roundf`) and
+an endianness define Mesa's `u_endian.h` wants from its build. That is where 3c-1
+continues.
 
 #### Host and QEMU requirements
 
@@ -1228,7 +1296,7 @@ alone gives it a window but hands it keycodes it cannot turn into text.
 | **0** | AF_UNIX server + `socketpair` + `sendmsg`/`recvmsg` + `SCM_RIGHTS`/`SO_PEERCRED`; native `poll`/`epoll`/`eventfd`/`timerfd`; `memfd_create` + `ftruncate` + anonymous shared frames; `mprotect`; `select` timeouts. **Landed:** sockets + fd passing (`test-uds-x86`), memfd (`test-memfd-x86`), `mprotect`, `select`/native `poll` with real deadlines (`test-select-x86`), `eventfd` (`test-eventfd-x86`), `timerfd` (`test-timerfd-x86`), `epoll` (`test-epoll-x86`). **Open:** none. | Two processes connect over the socket and **pass an fd**; a third `epoll_wait`s on it. Host + QEMU test |
 | **1** | In-house Wayland server, scoped in **§6.11**. **Landed:** 1a — the wire/interface crate and the registry + `sync` handshake over `/dev/uds` (`test-wayland-x86`); 1b — the `wl_shm` present path: `/sbin/wlserver` (boot proc 20) maps `/dev/fb`, `/bin/wlclient` draws into a memfd pool and commits a surface, and the frame is read back from `/dev/fb` (`test-wlshm-x86`); 1c — input: `wl_seat` keyboard/pointer, focus and `enter`, and a key routed from the device to a client (`test-wlkey-x86`), over an input-server ring that keeps a cursor per consumer and a terminal readiness path that reports instead of pushing (`KNOWN_ISSUES` 36, `test-pty-x86`). **Open:** none. | A `wl_shm` client renders through the server to `/dev/fb`, driven by a QEMU smoke scenario (same shape as `tools/smoke/`); a **ported stock** client later, on the same protocol |
 | **2** | `xdg_shell`, decorations, `layer_shell`, popups, damage tracking, cursor, keymaps, multi-output — scoped in **§6.12**. **Landed:** 2a — the seat's keymap, compiled into `wlserver` and served over an fd (`test-wlkey-x86`); 2b — `xdg_shell`: `xdg_wm_base`/`xdg_surface`/`xdg_toplevel`, `configure`/`ack_configure`, `ping`/`pong`, and a toplevel presented at the configured size (`test-wlx-x86`); 2c — several clients at once and per-surface focus, with input routed to the focused connection (`test-wlfocus-x86`); 2d — damage tracking, so only the damaged rectangle is recomposited, and the pointer's cursor image (`test-wlxd-x86`); 2e — popups, `zwlr_layer_shell_v1` and client-side decorations (`test-wlxe-x86`). **Open:** multi-output. | A real toolkit client runs a window with chrome and input |
-| **3** | GL rendering, scoped in **§6.10** — virgl over `virtio-gpu` first: 3D transport, a `virtgpu` render node, Mesa + `libdrm` as DSOs; llvmpipe kept as the fallback | The compositor renders GL content |
+| **3** | GL rendering, scoped in **§6.10** — virgl over `virtio-gpu` first: 3D transport, a `virtgpu` render node, Mesa + `libdrm` as DSOs; llvmpipe kept as the fallback. **Landed:** 3a — the 3D transport and virgl negotiation (`test-gpu3d-x86`, `test-gpu3d-nogl-x86`); 3b — the `/dev/dri/renderD128` node: GEM, contexts, blobs, transfers, submits, `WAIT` and `mmap` (`test-drmmap-x86`, `test-drmgl-x86`). **Open:** 3c (Mesa + `libdrm` as DSOs, EGL surfaceless, triangle + readback) and 3d (dmabuf/zero-readback present). | The compositor renders GL content |
 | **4** | smithay port; `cosmic-comp` against our backends; `cosmic-session` + D-Bus | `cosmic-comp` on screen; a `libcosmic` app connects |
 | **5** | Portals, fonts, the `libcosmic` suite | A usable session |
 

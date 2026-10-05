@@ -46,6 +46,7 @@ pub const VFS_RENAME: u32 = VFS_BASE + 17;
 pub const VFS_FCHDIR: u32 = VFS_BASE + 31;
 pub const VFS_ACCESS: u32 = VFS_BASE + 15;
 pub const VFS_CHMOD: u32 = VFS_BASE + 11;
+pub const VFS_CHOWN: u32 = VFS_BASE + 12;
 pub const VFS_UMASK: u32 = VFS_BASE + 27;
 pub const VFS_RMDIR: u32 = VFS_BASE + 18;
 pub const VFS_SYMLINK: u32 = VFS_BASE + 19;
@@ -920,6 +921,27 @@ pub fn symlink(target: &[u8], linkpath: &[u8]) -> Result<(), MinixErr> {
         msg_set_u32(&mut msg, OFF_SYMLINK_TARGET_LEN, target.len() as u32);
         msg_set_u64(&mut msg, OFF_SYMLINK_LINKPATH, linkpath.as_ptr() as u64);
         msg_set_u32(&mut msg, OFF_SYMLINK_LINKPATH_LEN, linkpath.len() as u32);
+        let _ = vfs_call(&mut msg)?;
+        Ok(())
+    }
+}
+
+/// Change a file's owner and group (VFS_CHOWN — path at 8/len at 16, owner at 24, group
+/// at 32). The server truncates both ids to 16 bits, as the reference's `chown(2)` does.
+pub fn chown(path: &[u8], owner: u32, group: u32) -> Result<(), MinixErr> {
+    #[cfg(not(target_os = "minix"))]
+    {
+        let _ = (path, owner, group, VFS_PROC_NR);
+        Err(MinixErr::ENOSYS)
+    }
+    #[cfg(target_os = "minix")]
+    unsafe {
+        let mut msg = [0u8; 64];
+        msg_set_i32(&mut msg, OFF_CALL, VFS_CHOWN as i32);
+        msg_set_u64(&mut msg, 8, path.as_ptr() as u64);
+        msg_set_u32(&mut msg, 16, path.len() as u32);
+        msg_set_u32(&mut msg, 24, owner);
+        msg_set_u32(&mut msg, 32, group);
         let _ = vfs_call(&mut msg)?;
         Ok(())
     }

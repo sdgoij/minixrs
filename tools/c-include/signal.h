@@ -42,6 +42,8 @@ typedef void (*sighandler_t)(int);
 #define SIGWINCH 28
 #define SIGSYS 31
 
+#define NSIG 32
+
 #define SIG_BLOCK 0
 #define SIG_UNBLOCK 1
 #define SIG_SETMASK 2
@@ -84,6 +86,9 @@ struct sigaction {
 sighandler_t signal(int signum, sighandler_t handler);
 int sigaction(int signum, const struct sigaction *act, struct sigaction *oldact);
 int sigprocmask(int how, const sigset_t *set, sigset_t *oldset);
+/* POSIX's thread-aware name for sigprocmask; this port masks per process, so
+ * the two are the same call. */
+int pthread_sigmask(int how, const sigset_t *set, sigset_t *oldset);
 int raise(int sig);
 int kill(pid_t pid, int sig);
 char *strsignal(int sig);

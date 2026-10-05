@@ -66,6 +66,92 @@ pub unsafe extern "C" fn strtok(str_: *mut c_char, delim: *const c_char) -> *mut
     start
 }
 
+/// POSIX `strtok_r()`: `strtok` with the resume position in a caller-owned
+/// `saveptr` instead of a static.
+#[cfg(target_os = "minix")]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn strtok_r(
+    str_: *mut c_char,
+    delim: *const c_char,
+    saveptr: *mut *mut c_char,
+) -> *mut c_char {
+    if saveptr.is_null() {
+        return core::ptr::null_mut();
+    }
+    let mut p = if str_.is_null() {
+        unsafe { *saveptr }
+    } else {
+        str_
+    };
+    if p.is_null() {
+        return core::ptr::null_mut();
+    }
+    while unsafe { *p } != 0 && !unsafe { strchr(delim, *p as c_int) }.is_null() {
+        p = unsafe { p.add(1) };
+    }
+    if unsafe { *p } == 0 {
+        unsafe { *saveptr = core::ptr::null_mut() };
+        return core::ptr::null_mut();
+    }
+    let start = p;
+    while unsafe { *p } != 0 && unsafe { strchr(delim, *p as c_int) }.is_null() {
+        p = unsafe { p.add(1) };
+    }
+    if unsafe { *p } != 0 {
+        unsafe { *p = 0 };
+        p = unsafe { p.add(1) };
+    }
+    unsafe { *saveptr = p };
+    start
+}
+
+/// POSIX `strndup()`: at most `n` bytes, always NUL-terminated.
+#[cfg(target_os = "minix")]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn strndup(s: *const c_char, n: usize) -> *mut c_char {
+    if s.is_null() {
+        return core::ptr::null_mut();
+    }
+    let mut len = 0usize;
+    while len < n && unsafe { *s.add(len) } != 0 {
+        len += 1;
+    }
+    let out = unsafe { crate::malloc(len + 1) } as *mut c_char;
+    if out.is_null() {
+        return core::ptr::null_mut();
+    }
+    unsafe {
+        core::ptr::copy_nonoverlapping(s as *const u8, out as *mut u8, len);
+        *out.add(len) = 0;
+    }
+    out
+}
+
+/// `strerror_r()` (the GNU variant): the message for `errnum`, copied into
+/// `buf`, with `buf` returned. libc++'s `system_error.cpp`, under its thread
+/// path, dispatches on whichever return type this resolves to.
+#[cfg(target_os = "minix")]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn strerror_r(errnum: c_int, buf: *mut c_char, buflen: usize) -> *mut c_char {
+    if buf.is_null() || buflen == 0 {
+        return core::ptr::null_mut();
+    }
+    let msg = unsafe { strerror(errnum) };
+    if msg.is_null() {
+        return core::ptr::null_mut();
+    }
+    let mut n = 0usize;
+    while unsafe { *msg.add(n) } != 0 {
+        n += 1;
+    }
+    let copy = if n < buflen - 1 { n } else { buflen - 1 };
+    unsafe {
+        core::ptr::copy_nonoverlapping(msg as *const u8, buf as *mut u8, copy);
+        *buf.add(copy) = 0;
+    }
+    buf
+}
+
 /// POSIX `strcoll()`: collation in the C locale is byte order, which is what
 /// the port's `_l` form already does.
 #[cfg(target_os = "minix")]

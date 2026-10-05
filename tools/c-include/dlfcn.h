@@ -34,7 +34,7 @@ typedef struct {
     void *dli_saddr;
 } Dl_info;
 
-int dladdr(void *addr, Dl_info *info);
+int dladdr(const void *addr, Dl_info *info);
 
 #ifdef __cplusplus
 }

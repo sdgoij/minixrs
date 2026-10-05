@@ -152,14 +152,14 @@ fn assemble(
             // error. MSYS converts POSIX-style env values on the way to a
             // native tool, which is how one arrives here — refuse it while the
             // value's provenance is still known, and name the way out.
-            if !["/bin/", "/sbin/", "/etc/"]
+            if !["/bin/", "/sbin/", "/etc/", "/lib/", "/libexec/"]
                 .iter()
                 .any(|dir| dest.starts_with(dir))
             {
                 panic!(
-                    "MINIXFS_EXTRA: {dest:?} is not a /bin/, /sbin/ or /etc/ path. A \
-                     POSIX-style value is converted on the way to a native tool, and a \
-                     converted dest lands the file in the root filesystem. Set \
+                    "MINIXFS_EXTRA: {dest:?} is not a /bin/, /sbin/, /etc/, /lib/ or \
+                     /libexec/ path. A POSIX-style value is converted on the way to a native \
+                     tool, and a converted dest lands the file in the root filesystem. Set \
                      MSYS2_ENV_CONV_EXCL=MINIXFS_EXTRA (the Justfile's build recipes do)."
                 );
             }

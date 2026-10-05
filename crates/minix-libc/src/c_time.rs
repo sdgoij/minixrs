@@ -45,6 +45,14 @@ pub struct TimeVal {
     pub tv_usec: TimeT,
 }
 
+/// C `struct timespec` (`tools/c-include/time.h`, `long`/`long`).
+#[cfg(target_os = "minix")]
+#[repr(C)]
+pub struct TimeSpec {
+    pub tv_sec: TimeT,
+    pub tv_nsec: TimeT,
+}
+
 /// C `clock_t` — `long`, as `tools/c-include/time.h` declares it.
 pub type ClockT = core::ffi::c_long;
 
@@ -311,6 +319,66 @@ pub unsafe extern "C" fn gettimeofday(tv: *mut TimeVal, tz: *mut c_void) -> c_in
             0
         }
         Err(_) => -1,
+    }
+}
+
+/// POSIX `nanosleep()`: sleep for the requested interval.
+///
+/// The port has no `nanosleep` syscall — `usleep` busy-waits on the monotonic
+/// clock and nothing interrupts the wait — so this always sleeps the whole
+/// interval and never writes `rem` (which is meaningful only on `EINTR`).
+#[cfg(target_os = "minix")]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nanosleep(req: *const TimeSpec, rem: *mut TimeSpec) -> c_int {
+    let _ = rem;
+    if req.is_null() {
+        return crate::fail(22); // EINVAL
+    }
+    let secs = unsafe { (*req).tv_sec }.max(0) as u128;
+    let nsec = unsafe { (*req).tv_nsec }.clamp(0, 999_999_999) as u128;
+    sleep_micros(secs * 1_000_000 + nsec / 1000);
+    0
+}
+
+/// POSIX `clock_nanosleep()`.
+///
+/// With `TIMER_ABSTIME` the deadline is turned into an interval against the named
+/// clock first; otherwise it is already an interval. Nothing interrupts the wait,
+/// so the return is always 0 and `rem` is never written.
+#[cfg(target_os = "minix")]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn clock_nanosleep(
+    clock_id: c_int,
+    flags: c_int,
+    req: *const TimeSpec,
+    rem: *mut TimeSpec,
+) -> c_int {
+    const TIMER_ABSTIME: c_int = 1;
+    let _ = rem;
+    if req.is_null() {
+        return 22; // EINVAL; unlike nanosleep, the error number is returned
+    }
+    let mut ns = unsafe { (*req).tv_sec }.max(0) as u128 * 1_000_000_000
+        + unsafe { (*req).tv_nsec }.clamp(0, 999_999_999) as u128;
+    if flags & TIMER_ABSTIME != 0 {
+        if let Ok(now) = minix_std::time::clock_gettime(clock_id) {
+            let now_ns = now.tv_sec.max(0) as u128 * 1_000_000_000
+                + now.tv_nsec.clamp(0, 999_999_999) as u128;
+            ns = ns.saturating_sub(now_ns);
+        }
+    }
+    sleep_micros(ns / 1000);
+    0
+}
+
+/// Busy-wait `us` microseconds in `usleep`-sized chunks: there is no sleep
+/// syscall, and `usleep` spins on the monotonic clock.
+#[cfg(target_os = "minix")]
+fn sleep_micros(mut us: u128) {
+    while us > 0 {
+        let chunk = if us > 1_000_000 { 1_000_000 } else { us } as u32;
+        unsafe { crate::c_sys::usleep(chunk) };
+        us -= chunk as u128;
     }
 }
 

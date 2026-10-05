@@ -36,7 +36,10 @@
 #define PRIXPTR "lX"
 
 #define PRIdMAX "ld"
+#define PRIiMAX "li"
+#define PRIoMAX "lo"
 #define PRIuMAX "lu"
 #define PRIxMAX "lx"
+#define PRIXMAX "lX"
 
 #endif

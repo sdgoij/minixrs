@@ -20,9 +20,12 @@ void *calloc(size_t nmemb, size_t size);
 void *realloc(void *ptr, size_t size);
 void *aligned_alloc(size_t alignment, size_t size);
 
-void exit(int status);
-void _Exit(int status);
-void abort(void);
+/* C's alloca, over clang's builtin — there is no `libc` entry point for it. */
+#define alloca(size) __builtin_alloca(size)
+
+void exit(int status) __attribute__((noreturn));
+void _Exit(int status) __attribute__((noreturn));
+void abort(void) __attribute__((noreturn));
 int atexit(void (*func)(void));
 int abs(int x);
 long labs(long x);
@@ -57,9 +60,12 @@ void qsort(void *base, size_t nmemb, size_t size,
 void *bsearch(const void *key, const void *base, size_t nmemb, size_t size,
               int (*compar)(const void *, const void *));
 char *getenv(const char *name);
+int setenv(const char *name, const char *value, int overwrite);
+int unsetenv(const char *name);
 int system(const char *command);
 char *realpath(const char *path, char *resolved);
-char *mktemp(char *template);
+char *mktemp(char *tmpl);
+int mkstemp(char *tmpl);
 
 /* div/ldiv/lldiv — C standard integer division results. */
 typedef struct { int quot, rem; } div_t;

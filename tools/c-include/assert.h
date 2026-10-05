@@ -2,6 +2,14 @@
 #ifndef _ASSERT_H
 #define _ASSERT_H
 
+/* C11 `static_assert`, over the `_Static_assert` keyword. C++11 has it as a
+ * keyword, so this must not shadow that. */
+#ifndef __cplusplus
+#ifndef static_assert
+#define static_assert _Static_assert
+#endif
+#endif
+
 #ifdef NDEBUG
 #define assert(expr) ((void)0)
 #else

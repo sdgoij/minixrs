@@ -191,6 +191,106 @@ pub unsafe extern "C" fn rewinddir(dirp: *mut DIR) {
     d.off = 0;
 }
 
+/// POSIX `scandir()`: the whole directory as a malloc'd array of `struct
+/// dirent *`, each a copy (readdir reuses its buffer), filtered and sorted.
+#[cfg(target_os = "minix")]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn scandir(
+    dirpath: *const c_char,
+    namelist: *mut *mut *mut Dirent,
+    filter: Option<unsafe extern "C" fn(*const Dirent) -> c_int>,
+    compar: Option<unsafe extern "C" fn(*const *const Dirent, *const *const Dirent) -> c_int>,
+) -> c_int {
+    if dirpath.is_null() || namelist.is_null() {
+        return crate::fail(EINVAL);
+    }
+    let dir = unsafe { opendir(dirpath) };
+    if dir.is_null() {
+        return -1;
+    }
+    let mut entries: *mut *mut Dirent = core::ptr::null_mut();
+    let mut count = 0usize;
+    let mut cap = 0usize;
+    loop {
+        let de = unsafe { readdir(dir) };
+        if de.is_null() {
+            break;
+        }
+        if let Some(f) = filter {
+            if unsafe { f(de) } == 0 {
+                continue;
+            }
+        }
+        if count == cap {
+            let newcap = if cap == 0 { 16 } else { cap * 2 };
+            let bytes = newcap * core::mem::size_of::<*mut Dirent>();
+            let new = unsafe { crate::realloc(entries as *mut c_void, bytes) } as *mut *mut Dirent;
+            if new.is_null() {
+                unsafe { free_dirent_array(entries, count) };
+                let _ = unsafe { closedir(dir) };
+                return -1;
+            }
+            entries = new;
+            cap = newcap;
+        }
+        let copy = unsafe { crate::malloc(core::mem::size_of::<Dirent>()) } as *mut Dirent;
+        if copy.is_null() {
+            unsafe { free_dirent_array(entries, count) };
+            let _ = unsafe { closedir(dir) };
+            return -1;
+        }
+        unsafe {
+            core::ptr::copy_nonoverlapping(
+                de as *const u8,
+                copy as *mut u8,
+                core::mem::size_of::<Dirent>(),
+            );
+            *entries.add(count) = copy;
+        }
+        count += 1;
+    }
+    let _ = unsafe { closedir(dir) };
+
+    if let Some(cmp) = compar {
+        let mut i = 1usize;
+        while i < count {
+            let key = unsafe { *entries.add(i) };
+            let mut j = i;
+            while j > 0 {
+                let prev = unsafe { *entries.add(j - 1) };
+                let a = core::ptr::addr_of!(prev).cast::<*const Dirent>();
+                let b = core::ptr::addr_of!(key).cast::<*const Dirent>();
+                if unsafe { cmp(a, b) } <= 0 {
+                    break;
+                }
+                unsafe { *entries.add(j) = prev };
+                j -= 1;
+            }
+            unsafe { *entries.add(j) = key };
+            i += 1;
+        }
+    }
+
+    unsafe { *namelist = entries };
+    count as c_int
+}
+
+/// Free a `scandir` result on the error path.
+#[cfg(target_os = "minix")]
+unsafe fn free_dirent_array(entries: *mut *mut Dirent, count: usize) {
+    for i in 0..count {
+        unsafe { crate::free(*entries.add(i) as *mut c_void) };
+    }
+    unsafe { crate::free(entries as *mut c_void) };
+}
+
+/// POSIX `alphasort()`: compare two directory entries by name.
+#[cfg(target_os = "minix")]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn alphasort(a: *const *const Dirent, b: *const *const Dirent) -> c_int {
+    unsafe { crate::c_string::strcmp((**a).d_name.as_ptr(), (**b).d_name.as_ptr()) }
+}
+
 // ---- sys/socket.h ----
 
 // The socket family (socket/bind/connect/listen/accept/shutdown/send/
@@ -269,12 +369,36 @@ pub unsafe extern "C" fn getpagesize() -> c_int {
     4096
 }
 
+/// POSIX `sync()`: flush filesystem caches. The VFS writes through to disk, so
+/// there is nothing buffered to push.
+#[cfg(target_os = "minix")]
+#[unsafe(no_mangle)]
+pub extern "C" fn sync() {}
+
+/// BSD `flock()`: advisory whole-file locking. The VFS has no file locks, so the
+/// lock is granted unconditionally; the caller is Mesa's on-disk cache DB, which
+/// the Mesa build compiles out with `-Dshader-cache=disabled`.
+#[cfg(target_os = "minix")]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn flock(_fd: c_int, _operation: c_int) -> c_int {
+    0
+}
+
 const SC_ARG_MAX: c_int = 0;
 const SC_PAGE_SIZE: c_int = 30;
 const SC_OPEN_MAX: c_int = 4;
 const SC_CLK_TCK: c_int = 2;
 const SC_GETPW_R_SIZE_MAX: c_int = 69;
+const SC_PHYS_PAGES: c_int = 85;
+const SC_AVPHYS_PAGES: c_int = 86;
 const OPEN_MAX: c_int = 32;
+
+/// The physical-memory answers: PM reports no RAM figure, so `_SC_PHYS_PAGES`
+/// and `_SC_AVPHYS_PAGES` name the QEMU default of 256 MiB in 4 KiB pages rather
+/// than fail. Callers (Mesa's `os_get_total_physical_memory`) treat a
+/// non-positive answer as "unknown", which would be worse than a figure that is
+/// merely conservative.
+const PHYS_PAGES: c_long = 65_536;
 
 /// The clock tick rate `_SC_CLK_TCK` reports and `times()` counts in. One
 /// number, because the two have to agree.
@@ -290,6 +414,7 @@ pub unsafe extern "C" fn sysconf(name: c_int) -> c_long {
         SC_OPEN_MAX => OPEN_MAX as c_long,
         SC_CLK_TCK => CLK_TCK as c_long,
         SC_GETPW_R_SIZE_MAX => 16_384,
+        SC_PHYS_PAGES | SC_AVPHYS_PAGES => PHYS_PAGES,
         _ => {
             crate::set_errno(EINVAL);
             -1
@@ -892,6 +1017,108 @@ pub unsafe extern "C" fn readlink(path: *const c_char, buf: *mut c_char, bufsiz:
     match minix_std::fs::readlink(path_bytes, out) {
         Ok(n) => n as isize,
         Err(e) => crate::fail(e.0) as isize,
+    }
+}
+
+// ---- libgen.h: basename/dirname ----
+
+/// POSIX `basename()`: the last component of a path, found in place, so `path`
+/// itself may be modified (and shorter). Empty and all-slash inputs give `"."`
+/// and `"/"` respectively.
+#[cfg(target_os = "minix")]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn basename(path: *mut c_char) -> *mut c_char {
+    static DOT: [u8; 2] = [b'.', 0];
+    static ROOT: [u8; 2] = [b'/', 0];
+    if path.is_null() {
+        return DOT.as_ptr() as *mut c_char;
+    }
+    let s = path as *mut u8;
+    if unsafe { *s } == 0 {
+        return DOT.as_ptr() as *mut c_char;
+    }
+    let mut n = 0usize;
+    while unsafe { *s.add(n) } != 0 {
+        n += 1;
+    }
+    let all_slash = (0..n).all(|k| unsafe { *s.add(k) } == b'/');
+    if all_slash {
+        return ROOT.as_ptr() as *mut c_char;
+    }
+    let mut i = n - 1;
+    while i > 0 && unsafe { *s.add(i) } == b'/' {
+        unsafe { *s.add(i) = 0 };
+        i -= 1;
+    }
+    while i > 0 && unsafe { *s.add(i - 1) } != b'/' {
+        i -= 1;
+    }
+    unsafe { s.add(i) as *mut c_char }
+}
+
+/// POSIX `dirname()`: everything before the last component, found in place, so
+/// `path` itself may be modified. A path with no `/` gives `"."`; a root path
+/// gives `"/"`.
+#[cfg(target_os = "minix")]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn dirname(path: *mut c_char) -> *mut c_char {
+    static DOT: [u8; 2] = [b'.', 0];
+    static ROOT: [u8; 2] = [b'/', 0];
+    if path.is_null() {
+        return DOT.as_ptr() as *mut c_char;
+    }
+    let s = path as *mut u8;
+    if unsafe { *s } == 0 {
+        return DOT.as_ptr() as *mut c_char;
+    }
+    let leading = unsafe { *s } == b'/';
+    let mut n = 0usize;
+    while unsafe { *s.add(n) } != 0 {
+        n += 1;
+    }
+    let all_slash = (0..n).all(|k| unsafe { *s.add(k) } == b'/');
+    if all_slash {
+        return ROOT.as_ptr() as *mut c_char;
+    }
+    let mut i = 0usize;
+    while unsafe { *s.add(i) } == b'/' {
+        i += 1;
+    }
+    while unsafe { *s.add(i) } != 0 {
+        i += 1;
+    }
+    while i > 0 && unsafe { *s.add(i - 1) } == b'/' {
+        unsafe { *s.add(i - 1) = 0 };
+        i -= 1;
+    }
+    while i > 0 && unsafe { *s.add(i - 1) } != b'/' {
+        i -= 1;
+    }
+    while i > 0 && unsafe { *s.add(i - 1) } == b'/' {
+        unsafe { *s.add(i - 1) = 0 };
+        i -= 1;
+    }
+    if i == 0 {
+        return if leading {
+            ROOT.as_ptr() as *mut c_char
+        } else {
+            DOT.as_ptr() as *mut c_char
+        };
+    }
+    s as *mut c_char
+}
+
+/// C `chown(2)`: change a path's owner and group (VFS_CHOWN).
+#[cfg(target_os = "minix")]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn chown(path: *const c_char, owner: c_uint, group: c_uint) -> c_int {
+    if path.is_null() {
+        return crate::fail(EINVAL);
+    }
+    let path_bytes = unsafe { core::ffi::CStr::from_ptr(path) }.to_bytes();
+    match minix_std::fs::chown(path_bytes, owner, group) {
+        Ok(()) => 0,
+        Err(e) => crate::fail(e.0),
     }
 }
 

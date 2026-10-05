@@ -1,0 +1,10 @@
+/* A placeholder C++ <thread> for the minix build.
+ *
+ * The port has no C++ standard library yet (libc++ is not built), but Mesa's
+ * `src/util/u_qsort.cpp` includes <thread> for the `thread_local` keyword, which
+ * is a language feature and needs nothing from the header. Until libc++ is
+ * ported this keeps that translation unit compiling without pretending to offer
+ * `std::thread`; anything that actually uses it must wait for that port. */
+#ifndef _MINIX_CPP_THREAD_PLACEHOLDER
+#define _MINIX_CPP_THREAD_PLACEHOLDER
+#endif

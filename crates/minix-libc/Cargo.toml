@@ -14,6 +14,9 @@ minix-std = { path = "../minix-std" }
 # rt off: syscall wrappers only (sbrk/brk for the C heap); no `_start`/
 # panic handler/allocator — those belong to the standalone userland runtime.
 minix-rt = { path = "../minix-rt", default-features = false }
+# Pure-Rust no_std math (a port of musl's libm). The C ABI wrappers in
+# `c_math.rs` are what `softpipe` and Mesa's `src/util` link against.
+libm = "0.2.16"
 
 [lints]
 workspace = true

@@ -44,6 +44,9 @@ pub struct FILE {
     // what a stream-based `scanf` needs to over-read and give back the tail.
     pushback: [u8; 8],
     pushback_len: usize,
+    // Non-null only for an `open_memstream` stream: the growable buffer and the
+    // two out-parameters the caller passed. `fd` is -1 for such a stream.
+    mem: *mut MemStream,
 }
 
 static mut _STDIN: FILE = FILE {
@@ -52,6 +55,7 @@ static mut _STDIN: FILE = FILE {
     owns_fd: 0,
     pushback: [0; 8],
     pushback_len: 0,
+    mem: core::ptr::null_mut(),
 };
 static mut _STDOUT: FILE = FILE {
     fd: 1,
@@ -59,6 +63,7 @@ static mut _STDOUT: FILE = FILE {
     owns_fd: 0,
     pushback: [0; 8],
     pushback_len: 0,
+    mem: core::ptr::null_mut(),
 };
 static mut _STDERR: FILE = FILE {
     fd: 2,
@@ -66,6 +71,7 @@ static mut _STDERR: FILE = FILE {
     owns_fd: 0,
     pushback: [0; 8],
     pushback_len: 0,
+    mem: core::ptr::null_mut(),
 };
 
 #[cfg(target_os = "minix")]
@@ -422,15 +428,25 @@ pub unsafe extern "C" fn vfprintf(
     mut ap: VaList<'_>,
 ) -> c_int {
     // A null stream has no fd to honour; C leaves that undefined, so fall
-    // back to stdout rather than dereferencing it.
+    // back to stdout rather than dereferencing it. A memory stream has no fd at
+    // all, and its bytes go to the buffer.
     let fd = if stream.is_null() {
         1
     } else {
         unsafe { (*stream).fd }
     };
+    let mem = if stream.is_null() {
+        core::ptr::null_mut()
+    } else {
+        unsafe { (*stream).mem }
+    };
     let mut emit = |c: u8| {
         let b = c;
-        let _ = unsafe { crate::write(fd, &b as *const u8 as *const c_void, 1) };
+        if mem.is_null() {
+            let _ = unsafe { crate::write(fd, &b as *const u8 as *const c_void, 1) };
+        } else {
+            let _ = unsafe { mem_write(mem, &b as *const u8, 1) };
+        }
     };
     unsafe { vformat(fmt, &mut ap, &mut emit) }
 }
@@ -439,6 +455,34 @@ pub unsafe extern "C" fn vfprintf(
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn fprintf(stream: *mut FILE, fmt: *const c_char, args: ...) -> c_int {
     unsafe { vfprintf(stream, fmt, args) }
+}
+
+/// POSIX `setvbuf()`. Streams here write through to their descriptor with no
+/// user buffer, so the request is accepted and `_IONBF` is already the case.
+#[cfg(target_os = "minix")]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn setvbuf(
+    _stream: *mut FILE,
+    _buf: *mut c_char,
+    _mode: c_int,
+    _size: usize,
+) -> c_int {
+    0
+}
+
+/// POSIX `openlog()`: the identity and facility for later `syslog` calls. There
+/// is no syslog service, so the settings are dropped; `syslog` writes to stderr.
+#[cfg(target_os = "minix")]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn openlog(_ident: *const c_char, _option: c_int, _facility: c_int) {}
+
+/// POSIX `syslog()`: Mesa's `log.c` routes to it under `DETECT_OS_POSIX`. There
+/// is no syslog service, so the message goes to stderr (the priorities and the
+/// call site are what vary; the destination is not).
+#[cfg(target_os = "minix")]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn syslog(_priority: c_int, fmt: *const c_char, args: ...) {
+    unsafe { vfprintf(stderr, fmt, args) };
 }
 
 #[cfg(target_os = "minix")]
@@ -471,7 +515,15 @@ pub unsafe extern "C" fn fwrite(
         // POSIX: a zero-byte element write "succeeds" with all members.
         return nmemb;
     }
-    let fd = unsafe { (*stream).fd };
+    let st = unsafe { &*stream };
+    if !st.mem.is_null() {
+        return if unsafe { mem_write(st.mem, ptr as *const u8, total) } {
+            nmemb
+        } else {
+            0
+        };
+    }
+    let fd = st.fd;
     if unsafe { crate::write(fd, ptr, total) } == total as isize {
         nmemb
     } else {
@@ -1178,6 +1230,13 @@ pub unsafe extern "C" fn fputc(c: c_int, stream: *mut FILE) -> c_int {
     }
     let st = unsafe { &mut *stream };
     let b = c as u8;
+    if !st.mem.is_null() {
+        if unsafe { mem_write(st.mem, &b as *const u8, 1) } {
+            return b as c_int;
+        }
+        st.flags |= F_ERR;
+        return -1;
+    }
     if unsafe { crate::write(st.fd, &b as *const u8 as *const c_void, 1) } == 1 {
         b as c_int
     } else {
@@ -1268,7 +1327,12 @@ pub unsafe extern "C" fn ungetc(c: c_int, stream: *mut FILE) -> c_int {
 #[cfg(target_os = "minix")]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn fflush(stream: *mut FILE) -> c_int {
-    let _ = stream;
+    if !stream.is_null() {
+        let st = unsafe { &*stream };
+        if !st.mem.is_null() {
+            unsafe { mem_finalize(st.mem) };
+        }
+    }
     0
 }
 
@@ -1288,6 +1352,14 @@ pub unsafe extern "C" fn fclose(stream: *mut FILE) -> c_int {
         return -1;
     }
     let st = unsafe { &mut *stream };
+    if !st.mem.is_null() {
+        unsafe {
+            mem_finalize(st.mem);
+            free(st.mem as *mut c_void);
+            free(stream as *mut c_void);
+        }
+        return 0;
+    }
     // Only fopen/fdopen streams own their fd and their own storage; the three
     // stdio statics are neither closed nor freed.
     let owned = st.owns_fd != 0;
@@ -1349,6 +1421,7 @@ unsafe fn mode_flags(mode: *const c_char) -> Option<(c_int, c_int)> {
 unsafe extern "C" {
     fn malloc(size: usize) -> *mut c_void;
     fn free(ptr: *mut c_void);
+    fn realloc(ptr: *mut c_void, size: usize) -> *mut c_void;
 }
 
 /// Wrap an fd in a heap `FILE`, or null when out of memory.
@@ -1365,9 +1438,116 @@ unsafe fn stream_for_fd(fd: c_int, stdio_flags: c_int, owns: c_int) -> *mut FILE
             owns_fd: owns,
             pushback: [0; 8],
             pushback_len: 0,
+            mem: core::ptr::null_mut(),
         }
     };
     f
+}
+
+/// State for an `open_memstream` stream: a growable buffer and the two
+/// out-parameters POSIX has the caller pass for the final buffer and length.
+/// Compiled on every target because `FILE` holds one; only the minix target's
+/// `open_memstream` constructs it.
+#[allow(dead_code)]
+struct MemStream {
+    buf: *mut u8,
+    len: usize,
+    cap: usize,
+    ptr: *mut *mut c_char,
+    sizeloc: *mut usize,
+}
+
+/// Append `n` bytes to a memory stream, growing the buffer (and keeping it NUL
+/// terminated) as needed. False on allocation failure, which the caller turns
+/// into the stream's error flag.
+#[cfg(target_os = "minix")]
+unsafe fn mem_write(ms: *mut MemStream, bytes: *const u8, n: usize) -> bool {
+    let ms = unsafe { &mut *ms };
+    if ms.len + n + 1 > ms.cap {
+        let mut cap = ms.cap.max(64);
+        while ms.len + n + 1 > cap {
+            cap = cap.saturating_mul(2);
+        }
+        let grown = unsafe { realloc(ms.buf as *mut c_void, cap) } as *mut u8;
+        if grown.is_null() {
+            return false;
+        }
+        ms.buf = grown;
+        ms.cap = cap;
+    }
+    unsafe { core::ptr::copy_nonoverlapping(bytes, ms.buf.add(ms.len), n) };
+    ms.len += n;
+    unsafe { *ms.buf.add(ms.len) = 0 };
+    true
+}
+
+/// Publish a memory stream's buffer and length to the caller's out-parameters,
+/// which POSIX has `fflush`/`fclose` do.
+#[cfg(target_os = "minix")]
+unsafe fn mem_finalize(ms: *mut MemStream) {
+    let ms = unsafe { &mut *ms };
+    unsafe {
+        *ms.buf.add(ms.len) = 0;
+        *ms.ptr = ms.buf as *mut c_char;
+        *ms.sizeloc = ms.len;
+    }
+}
+
+/// POSIX `open_memstream()`: a write-only `FILE` that accumulates into a heap
+/// buffer. POSIX leaves the buffer to the caller to `free` after `fclose`, so it
+/// is deliberately not freed here.
+#[cfg(target_os = "minix")]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn open_memstream(ptr: *mut *mut c_char, sizeloc: *mut usize) -> *mut FILE {
+    if ptr.is_null() || sizeloc.is_null() {
+        return core::ptr::null_mut();
+    }
+    let ms = unsafe { malloc(core::mem::size_of::<MemStream>()) } as *mut MemStream;
+    if ms.is_null() {
+        return core::ptr::null_mut();
+    }
+    let buf = unsafe { malloc(64) } as *mut u8;
+    if buf.is_null() {
+        unsafe { free(ms as *mut c_void) };
+        return core::ptr::null_mut();
+    }
+    let f = unsafe { malloc(core::mem::size_of::<FILE>()) } as *mut FILE;
+    if f.is_null() {
+        unsafe {
+            free(buf as *mut c_void);
+            free(ms as *mut c_void);
+        }
+        return core::ptr::null_mut();
+    }
+    unsafe {
+        *buf = 0;
+        *ms = MemStream {
+            buf,
+            len: 0,
+            cap: 64,
+            ptr,
+            sizeloc,
+        };
+        *ptr = buf as *mut c_char;
+        *sizeloc = 0;
+        *f = FILE {
+            fd: -1,
+            flags: F_WRITE,
+            owns_fd: 0,
+            pushback: [0; 8],
+            pushback_len: 0,
+            mem: ms,
+        };
+    }
+    f
+}
+
+/// C99 `asprintf()`: format into a freshly allocated string the caller frees. A
+/// variadic front end for `vasprintf`, exactly as `printf` is for `vprintf`.
+#[cfg(target_os = "minix")]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn asprintf(strp: *mut *mut c_char, fmt: *const c_char, args: ...) -> c_int {
+    unsafe { crate::c_locale::vasprintf(strp, fmt, args) }
 }
 
 /// POSIX `fopen()`: open `path` and wrap it. The stream owns the fd, so

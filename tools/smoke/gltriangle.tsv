@@ -1,0 +1,16 @@
+# The `just test-gltriangle-x86` scenario: /bin/gltriangle draws a GLES2 triangle
+# through surfaceless EGL on Mesa's `softpipe` and checks the readback —
+# WAYLAND.md §6.10 stage 3c-2.
+#
+#   FEED_SCENARIO=tools/smoke/gltriangle.tsv sh tools/smoke/feed.sh <log> <seconds> <qemu command…>
+#
+# The client, the Mesa DSOs and their dependencies are injected into the disk
+# image by the recipe; the program sets LIBGL_ALWAYS_SOFTWARE / EGL_PLATFORM /
+# LIBGL_DRIVERS_PATH itself, so the line it must print is the whole gate: EGL had
+# to initialise, load the swrast driver, compile the GLSL, run softpipe and give
+# a red centroid and a black corner back.
+#
+# One step per line, as `tools/smoke/scenario.tsv` documents: the command, a tab,
+# and the whole line its output must produce.
+
+/bin/gltriangle	gltriangle: pass

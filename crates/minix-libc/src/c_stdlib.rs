@@ -483,6 +483,60 @@ pub unsafe extern "C" fn mktemp(template: *mut c_char) -> *mut c_char {
     template
 }
 
+/// POSIX `mkstemp`: `mktemp`'s name generation, but the file is created with
+/// `O_CREAT | O_EXCL` so the name is reserved atomically — the point of
+/// `mkstemp` over `mktemp`. A name already taken is `EEXIST` and retried;
+/// anything else is the caller's to see.
+#[cfg(target_os = "minix")]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mkstemp(template: *mut c_char) -> c_int {
+    const O_RDWR: c_int = 0o02;
+    const O_CREAT: c_int = 0o100;
+    const O_EXCL: c_int = 0o200;
+    const EINVAL: i32 = 22;
+    const EEXIST: i32 = 17;
+    if template.is_null() {
+        crate::set_errno(EINVAL);
+        return -1;
+    }
+    let len = unsafe { core::ffi::CStr::from_ptr(template) }
+        .to_bytes()
+        .len();
+    if len < 6 {
+        crate::set_errno(EINVAL);
+        return -1;
+    }
+    let tail = unsafe { core::slice::from_raw_parts(template.add(len - 6) as *const u8, 6) };
+    if tail != b"XXXXXX" {
+        crate::set_errno(EINVAL);
+        return -1;
+    }
+    let ticks = match minix_std::time::clock_gettime(minix_std::time::CLOCK_MONOTONIC) {
+        Ok(t) => t.tv_nsec as u32,
+        Err(_) => 0,
+    };
+    let pid = crate::getpid() as u32;
+    static mut SEQ: u32 = 0;
+    for _ in 0..100 {
+        let seq = unsafe {
+            SEQ = SEQ.wrapping_add(1);
+            SEQ
+        };
+        let suffix = temp_suffix(pid ^ ticks.rotate_left(7) ^ seq.wrapping_mul(0x9E37_79B9));
+        for (i, c) in suffix.iter().enumerate() {
+            unsafe { *template.add(len - 6 + i) = *c as c_char };
+        }
+        let fd = unsafe { crate::open(template, O_RDWR | O_CREAT | O_EXCL, 0o600) };
+        if fd >= 0 {
+            return fd;
+        }
+        if unsafe { *crate::__errno_location() } != EEXIST {
+            return -1;
+        }
+    }
+    -1
+}
+
 // glibc-compatible 31-bit LCG; POSIX leaves the sequence unspecified.
 static mut RAND_STATE: u32 = 1;
 
@@ -555,6 +609,133 @@ pub unsafe extern "C" fn getenv(name: *const c_char) -> *mut c_char {
     }
     let want = unsafe { core::ffi::CStr::from_ptr(name) }.to_bytes();
     getenv_in(unsafe { environ } as *const *const c_char, want)
+}
+
+/// POSIX `setenv()`: set `name` to `value`, replacing an existing entry (unless
+/// `overwrite` is 0) or growing the environment.
+///
+/// Growing allocates a new array the way POSIX allows `environ` to move; the
+/// old array is not freed (it may be the one `crt0` was handed, which we do not
+/// own). A replaced entry's old string is likewise left alone — the environment
+/// lives for the process, and a pointer a caller is holding stays valid.
+#[cfg(target_os = "minix")]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn setenv(
+    name: *const c_char,
+    value: *const c_char,
+    overwrite: c_int,
+) -> c_int {
+    if name.is_null() || value.is_null() {
+        crate::set_errno(22); // EINVAL
+        return -1;
+    }
+    let nameb = unsafe { core::ffi::CStr::from_ptr(name) }.to_bytes();
+    if nameb.is_empty() || nameb.contains(&b'=') {
+        crate::set_errno(22);
+        return -1;
+    }
+    let valb = unsafe { core::ffi::CStr::from_ptr(value) }.to_bytes();
+    let total = nameb.len() + 1 + valb.len() + 1;
+    let entry = unsafe { crate::malloc(total) } as *mut c_char;
+    if entry.is_null() {
+        crate::set_errno(12); // ENOMEM
+        return -1;
+    }
+    unsafe {
+        core::ptr::copy_nonoverlapping(nameb.as_ptr(), entry as *mut u8, nameb.len());
+        *entry.add(nameb.len()) = b'=' as c_char;
+        core::ptr::copy_nonoverlapping(
+            valb.as_ptr(),
+            entry.add(nameb.len() + 1) as *mut u8,
+            valb.len(),
+        );
+        *entry.add(total - 1) = 0;
+    }
+
+    let env = unsafe { environ };
+    let mut found: *mut *mut c_char = core::ptr::null_mut();
+    let mut n = 0usize;
+    if !env.is_null() {
+        loop {
+            let e = unsafe { *env.add(n) };
+            if e.is_null() {
+                break;
+            }
+            let bytes = unsafe { core::ffi::CStr::from_ptr(e) }.to_bytes();
+            if let Some(eq) = bytes.iter().position(|b| *b == b'=')
+                && &bytes[..eq] == nameb
+            {
+                found = unsafe { env.add(n) };
+            }
+            n += 1;
+        }
+    }
+
+    if !found.is_null() {
+        if overwrite == 0 {
+            unsafe { crate::free(entry as *mut c_void) };
+            return 0;
+        }
+        unsafe { *found = entry };
+        return 0;
+    }
+
+    let new =
+        unsafe { crate::malloc((n + 2) * core::mem::size_of::<*mut c_char>()) } as *mut *mut c_char;
+    if new.is_null() {
+        unsafe { crate::free(entry as *mut c_void) };
+        crate::set_errno(12);
+        return -1;
+    }
+    for i in 0..n {
+        unsafe { *new.add(i) = *env.add(i) };
+    }
+    unsafe {
+        *new.add(n) = entry;
+        *new.add(n + 1) = core::ptr::null_mut();
+        environ = new;
+    }
+    0
+}
+
+/// POSIX `unsetenv()`: drop `name` from the environment by compacting the array
+/// in place (removing entries never needs the array to move).
+#[cfg(target_os = "minix")]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn unsetenv(name: *const c_char) -> c_int {
+    if name.is_null() {
+        crate::set_errno(22);
+        return -1;
+    }
+    let nameb = unsafe { core::ffi::CStr::from_ptr(name) }.to_bytes();
+    if nameb.is_empty() || nameb.contains(&b'=') {
+        crate::set_errno(22);
+        return -1;
+    }
+    let env = unsafe { environ };
+    if env.is_null() {
+        return 0;
+    }
+    let mut i = 0usize;
+    let mut j = 0usize;
+    loop {
+        let e = unsafe { *env.add(i) };
+        if e.is_null() {
+            break;
+        }
+        let bytes = unsafe { core::ffi::CStr::from_ptr(e) }.to_bytes();
+        let matches = bytes
+            .iter()
+            .position(|b| *b == b'=')
+            .is_some_and(|eq| &bytes[..eq] == nameb);
+        if !matches {
+            unsafe { *env.add(j) = e };
+            j += 1;
+        }
+        i += 1;
+    }
+    unsafe { *env.add(j) = core::ptr::null_mut() };
+    0
 }
 
 #[cfg(target_os = "minix")]

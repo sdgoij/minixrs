@@ -30,6 +30,10 @@ typedef long fpos_t;
 #define EOF (-1)
 #define BUFSIZ 8192
 
+#define _IOFBF 0
+#define _IOLBF 1
+#define _IONBF 2
+
 #define SEEK_SET 0
 #define SEEK_CUR 1
 #define SEEK_END 2
@@ -54,6 +58,7 @@ int getchar(void);
 int fflush(FILE *stream);
 int fclose(FILE *stream);
 int fileno(FILE *stream);
+int setvbuf(FILE *stream, char *buf, int mode, size_t size);
 
 FILE *fopen(const char *path, const char *mode);
 FILE *fdopen(int fd, const char *mode);
@@ -76,6 +81,8 @@ int snprintf(char *str, size_t size, const char *fmt, ...);
 int vsprintf(char *str, const char *fmt, va_list ap);
 int vsnprintf(char *str, size_t size, const char *fmt, va_list ap);
 int vasprintf(char **strp, const char *fmt, va_list ap);
+int asprintf(char **strp, const char *fmt, ...);
+FILE *open_memstream(char **ptr, size_t *sizeloc);
 int scanf(const char *fmt, ...);
 int sscanf(const char *str, const char *fmt, ...);
 int fscanf(FILE *stream, const char *fmt, ...);
