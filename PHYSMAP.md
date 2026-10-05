@@ -1,7 +1,7 @@
 # PHYSMAP.md — a physmap the user window cannot shadow
 
-Status: **P1–P3d landed (2026-09-29); P4 landed for AArch64 and RISC-V (2026-10-01); x86's
-shrink and P5–P6 are design.** This scopes the fix for the class that
+Status: **P1–P6 landed, all three arches.** P1–P3d landed 2026-09-29; P4 (including x86's shrink
+and base move), P5 and P6 landed 2026-10-01. This scopes the fix for the class that
 `KNOWN_ISSUES.md` item 38's B exposed: the kernel dereferences *physical* addresses as pointers,
 and the virtual address it does that at is one a user window can also occupy.
 
@@ -213,10 +213,11 @@ not the host suite's.
 **What P1 deliberately left, and P2a took up.** P1 put the window in the *boot* tables only, and
 its boot test read it inside `on_kernel_tables` — enough to prove the mapping, not enough for the
 kernel to rely on it, because the kernel normally runs on a process's tables. P2a is where it
-became a property of every address space. Also still open is one assertion the plan first put in
-P1: "the kernel image is below the user base" **cannot be stated yet**, because on x86-64 and
-riscv64 it is not true — the image ends at ~33 MiB and ~2.05 GiB against user bases of 16 MiB,
-which is item 38 itself. It belongs with D3 in P4.
+became a property of every address space. The one assertion the plan first put in P1 — "the kernel
+image is below the user base" — could not be stated then, because on x86-64 and riscv64 it was not
+true (the image ended past the user base, which is item 38 itself). D3/P4 settled it: x86's base
+moved above the image, RISC-V adopted the low-1 GiB window, and P4's M1 check now asserts the
+stronger property directly — no present kernel mapping's VA intersects a user window.
 
 ## 6. What this is worth
 
@@ -231,8 +232,9 @@ which is item 38 itself. It belongs with D3 in P4.
 - **Phase 3's prerequisite.** dmabuf/GBM, the render node's mmap and the device window all want a
   frame that is *not* at its own physical address. The device window landed as P5; dmabuf/GBM and
   the render node's own mmap still want one.
-- **One more investigation unblocked.** The dynamic-exec hang of item 38 ends in "a fault that
-  should be taken is not"; the tables it must fault through are the same tables this work is about.
+- **One more investigation unblocked, and since closed.** The dynamic-exec hang of item 38 — "a
+  fault that should be taken is not" — was `fpu.rs` dereferencing a frame at its physical address;
+  `test-dynlink-x86` and `test-cdyn-x86` are green with the base moved (`KNOWN_ISSUES.md` item 38).
 
 ## 7. Risks and traps
 
@@ -268,7 +270,12 @@ which is item 38 itself. It belongs with D3 in P4.
   than in `load_and_prepare_all`: the riscv64/aarch64 test binaries run the in-kernel suite — which
   walks — before that, and the x86 test binary runs its own ahead of it too.
 
-## 8. Suggested `.rules` additions
+## 8. Where the guidance lives
+
+These traps are maintained as the `minix-physmap` skill (`.agents/skills/minix-physmap/`), not as
+`.rules` entries. `.rules` is for one-line traps a code change must avoid; this is a subsystem's
+worth of how to work, which belongs in a skill. The paragraphs below are the record the skill was
+written from.
 
 - A kernel read or write of a physical frame goes through `PHYS_TO_VIRT`; dereferencing the result
   of `pte_to_phys` directly is item 38's bug (`KNOWN_ISSUES.md`) -- `tools/check-physmap.py`
