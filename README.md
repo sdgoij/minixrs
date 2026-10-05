@@ -8,145 +8,23 @@ This project implements the full MINIX 3 stack in Rust — kernel, architecture-
 > instances in a tab. The real kernel, the real servers and the real userland, booting to a `#`
 > prompt with a disk, a display, a keyboard and a network. No install, no server.
 
-## Status
-
-Boots multi-process userspace in QEMU on x86_64, RISC-V64, and AArch64 with a serial shell.
-The same system runs in a browser tab on wasm32 — the [demo](https://sdgoij.github.io/minixrs/) is
-that build, and CI builds and boots the same artifacts on every push.
-VFS mounts the root filesystem, MFS reads and writes files, and the shell supports
-`>` redirection (create/truncate) for builtin commands **and external binaries**
-(exec'd commands write through VFS via a dup2'd fd, so `/bin/echo x > file` works).
-Alongside `>` the builtin shell handles `|` pipelines (up to eight stages), `&&`
-chaining and trailing `&` background jobs. It is deliberately kept small: GNU bash is
-the full shell (built by the fork's stage1 and injected as `/bin/bash`, see below), so
-the root shell does not need to grow into one.
-
-See `.agents/skills/` for domain-specific documentation and
-[PORTING_PLAN.md](PORTING_PLAN.md) for the task tracker.
-
-> **⚠️ Research project — not production-ready.**  
-> If you're looking for a production operating system, use Linux, a BSD, or [Redox](https://www.redox-os.org/) instead.
-
-## Recent work
-
-The last few days moved the project from "boots a shell" to "a real toolchain target":
-
-- **The whole system in a browser tab** — a **wasm32** target where each process is a WebAssembly instance and the host *is* the devices (console, clock, disk, display, keyboard, pointer, the network). The kernel, the servers and the userland are the ones the arches run: the shell forks, execs from the image, writes a file to the disk and reads it back, and `ping 10.0.2.2` reaches a peer over the host's link. [Try it](https://sdgoij.github.io/minixrs/).
-- **1:1 kernel threads** — every thread is a schedulable Proc slot: `thread_create`/`exit`/`join`/`yield`, wake-one IPC delivery, group sweep on exit/exec/fork, per-thread TLS. MINIX proper had no native threads; this port does.
-- **A working `std` port** — the forked rustc's std PAL for minix (`sys/pal/minix`) runs on the OS: `/bin/hello` is a std-linked binary that spawns threads with TLS and exits cleanly.
-- **Networking that works** — virtio-net plus DNS: `/bin/udp nos.nl` resolves hostnames from inside QEMU.
-- **Memory from 72M to 16G** — the same kernel boots in ~72 MiB of guest RAM and runs `/bin/hello` up to 16 GiB, on all three hardware arches (x86_64, RISC-V64, AArch64).
-- **A heap that actually grows** — userland heap growth routed through VM's brk (demand-mapped, freed on exit); the COW refcount bug that killed repeated `hello` runs is fixed.
-- **Honest memory reporting** — the boot banner prints detected vs usable RAM (a 4 GiB guest says `4095 MiB detected (4078 MiB usable)`, not the old "5120 MiB" artifact).
-- **uutils/coreutils runs on the OS** — the multicall binary (60 applets) boots, allocates and writes output a second tool reads back; it is embedded on x86_64 and riscv64, gated by `just test-coreutils-wedge`. The coreutils submodule tracks the port (see [coreutils](#coreutils) below).
-- **GNU bash runs** — built by the fork's stage1 (a POSIX host, see `C_BUILD.md`), injected as `/bin/bash` and booted: it prints its banner, runs `-c`, loops, arithmetic and redirects, and gets its own `$PWD`. Getting there filled the C surface it needed (`termios`/`ioctl`, `mknod`, `inet_*`, `scanf`, an environment that survives `exec`) plus two gaps it found in the shell and the libc: a shell that did not remove quotes, and a `getcwd` that returned `ENOSYS`.
-- **A `ls` that behaves like one** — sorted, and laid out in columns that fit the terminal (80 columns when the tty cannot say, which a serial console cannot), one name per line when the output is a file or a pipe. A wider directory listing is what found an MFS `getdents` bug: at end-of-directory it returned `OK` with a stale reply payload, so a reader asking until it got 0 was handed the same entries for ever.
-- **Dynamic linking** — a Rust loader (`crates/ldso`, installed as `/libexec/ld.so`) that VFS's exec enters as a program's `PT_INTERP`, and every image now carries it together with the port's C library as a shared object (`/lib/libc.so`) and a C program linked against it (`/bin/dynclib`). The loader maps each `DT_NEEDED` at a deterministic base, binds eagerly, follows the dependency graph transitively, applies every object's relocations and runs its initialisers in order, maps one file once (by inode, not by the name it was asked for), and gives a dynamically linked program thread-local storage. A program can also `dlopen` one at run time — which is what a driver lookup needs — and linking dynamically stays opt-in as MINIX's is: the default is still static, and a program of your own is `just cdyn`, which links against the `/lib/libc.so` every image already carries; see [below](#dynamic-linking).
-
-## coreutils
-
-`/bin/coreutils` is the port's real toolchain: one multicall binary built from the
-[`uutils/coreutils`](https://github.com/uutils/coreutils) fork in `coreutils/`, whose **60
-applets** are the subset named by the `feat_minix` feature set in `coreutils/Cargo.toml`. It is
-embedded in the image on **x86_64** and **riscv64**. **aarch64** builds it
-(`just coreutils-aarch64`, which needs the port's own `cc` for blake3's NEON path) but the image
-does not carry it yet, because an applet that allocates heavily — `coreutils seq 200` —
-intermittently writes nothing there (KNOWN_ISSUES aarch64 #9). wasm32 does not build it at all:
-the multicall links the std PAL, which the browser target does not.
-
-The applets run as `coreutils <name> [args]`; the multicall also dispatches on its own
-`argv[0]`, so a link named for an applet works too. The OS has no kernel entropy source, so
-`coreutils/src/bin/coreutils.rs` registers a weak SplitMix64 RNG for the applets that want one
-(`factor`, `seq`, `shuf`, `sort`) until it grows one. The link is stripped and `opt-level=z` to
-keep the ~6 MiB binary inside the default 16 MiB minixfs.
-
-`just test-coreutils-wedge` is the acceptance gate — the scenario in
-`tools/smoke/coreutils-wedge.tsv` has `coreutils seq 3` write three lines and the next tool read
-them back, the reproducer for the wedge that once left a child dead at its ELF entry
-(KNOWN_ISSUES item 12). It runs in QEMU on x86_64, and the same scenario has also been run green
-on riscv64.
-
-The excluded applets are the ones the port cannot run yet: `chmod` and `touch` need
-`std::os::unix` mode bits and `filetime`, `rm` pulls in `console` with no non-`unix` fallback,
-and `pwd` and `mktemp` need a working `std::env::current_dir` (KNOWN_ISSUES item 24). The OS
-ships its own `/bin/chmod`, `/bin/rm` and friends for those.
-
-## Dynamic linking
-
-Opt-in, and the default is unchanged: every program the boot path runs is static and non-PIE,
-exactly as in MINIX. What an image *carries* is the capability — the loader
-`/libexec/ld.so`, the port's C library as a shared object `/lib/libc.so`, and `/bin/dynclib`,
-a C program linked against it — so `just build` embeds all three in both images and the boot
-test checks for them.
-
-The loader is `crates/ldso`, entered by VFS's exec as a program's `PT_INTERP` interpreter. It
-maps every `DT_NEEDED` object at a base from a deterministic allocator (there is no ASLR, so a
-loader failure is reproducible), applies each object's `RELATIVE` fixups, resolves `GLOB_DAT`,
-`JUMP_SLOT` and `COPY` **eagerly** — an unresolved symbol fails the load rather than faulting
-on the first call — follows the dependency graph depth-first, runs the objects' initialisers
-in dependency order, and lays out every module of thread-local storage against the thread
-pointer, so a library that keeps `__thread` state — and a second one loaded later — each get
-their own storage. One
-file is one mapping however it is named: the check is the file (`st_dev`/`st_ino`), not the
-spelling, so a soname and a path to the same object do not become two copies. The crate is
-new rather than a port of `ld.elf_so`, but the rules are the reference's — `search.c`'s "a name
-containing a slash is a path", and `load.c`'s path-then-inode "already loaded".
-
-A program can also `dlopen` a shared object at run time and reach its symbols with `dlsym` —
-the loader answers the family for `libc.so`, so a C program links nothing extra for it — and
-`RTLD_LOCAL`/`RTLD_GLOBAL` scope a load, with `dlclose` accepted and nothing unloaded. What it
-does not do yet, each a deferral rather than a stub: unload an object, `LD_LIBRARY_PATH`,
-auxv (the loader uses a fixed 4 KiB page), and MINIX's soname/versioned-symlink scheme, so the
-search is literal — `/lib/`, `/usr/lib/`, or the name itself when it contains a `/`. Two
-*measured* limits bound what can be loaded: a program can carry **18** shared objects, and
-**8** of them can bring thread-local storage (`TLS_SLOTS`), the ones it starts with plus a
-surplus of 2 KiB slices for later ones — an object past either is refused with a message that
-names it. A dynamically linked program is bounded in address space rather than memory: an
-address space holds 64 regions, the two images plus the stack and the heap take 8, and an
-object costs one region per `PT_LOAD` — three, now that the `GNU_RELRO` segment nothing reads
-is not linked.
-
-Building anything dynamic goes through the fork's `-elf` (position-independent) targets, which
-`just bootstrap` builds. `tools/build-dynlibc.py` builds `libc.so` and `dynclib` with them
-(`just dynlib-<arch>`, which every image build runs). `just cdyn tools/myprog.c` links a
-program of your own the way that script links `dynclib` — `-Bdynamic`, `-l:libc.so`,
-`--allow-shlib-undefined` for the TLS symbols the loader supplies, and
-`--dynamic-linker=/libexec/ld.so` — writes `target/dync/<arch>/<stem>`, and prints the two
-commands that build an image with it and boot it (`MINIXFS_EXTRA`; on Windows the hint also
-names `MSYS2_ENV_CONV_EXCL`, without which MSYS rewrites the `/bin/...` value on the way to a
-native tool and the build refuses it). Every image already carries what the program needs, so
-nothing is added to the image but the program itself.
-
-- [DYNAMIC_LINKING.md](DYNAMIC_LINKING.md) — the design decisions, the phased plan (0–7), the
-  measurements and the traps; it builds on the file-backed exec path in
-  [FILEMMAP.md](FILEMMAP.md).
-- `just test-dynlink-x86` (also `riscv64`, `aarch64`) — boots an image and drives
-  `tools/smoke/dyn.tsv`: the loader's bases, relocations, transitive load, cross-object
-  resolution and initialiser order, before and after a `fork` and a re-`exec`, then the shipped
-  `/bin/dynclib`'s line — `errno` read through the loader's thread-local storage, `strerror`'s
-  buffer inside `libc.so`, and the program's own `.init_array` — and five `dlopen` steps: the two
-  scopes, `dlclose`, and the two failures the loader names itself.
-- `just test-cdyn-x86` — the gate on the recipe for a program of your own: it builds
-  `tools/cdyn-demo.c` with `just cdyn`, injects the result and boots `tools/smoke/cdyn.tsv`,
-  whose line is a string only `libc.so` holds.
-- `just probe-dso-share-x86` (also `riscv64`) — measures from the host's page tables that two
-  processes mapping one object share its read-only frames (13/13 on x86_64).
-- `cargo test -p ldso` — the host side: the ELF parse, every relocation rule, the base
-  allocator and the name resolution.
-
 ## Quick Start
 
 ### Prerequisites
 
 - Rust toolchain (MSRV: **1.96**, edition: **2024**) — the OS is built with
   the forked Rust compiler in the `rust/` submodule; `just bootstrap` builds
-  its stage1 compiler + the minix std sysroots (first run needs network)
+  its stage1 compiler + the minix std sysroots (first run needs network), and
+  `just fetch-stage1` installs a published stage1 instead
 - bash on PATH (git-bash on Windows) — the Justfile recipes are POSIX sh
 - QEMU 11 or newer (`qemu-system-x86_64`, `qemu-system-riscv64`,
   `qemu-system-aarch64`) — the test recipes refuse an older emulator, which hangs
   the aarch64 boot suite
 - Clang 22 (x86 trampoline, C smoke tests, the dynamic-linking artifacts on every arch, C++ runtime cross build)
-- CMake + Ninja (for the C++ runtime cross build — `just libcxx-x86`)
+- CMake + Ninja (for the C++ runtime cross build — `just libcxx <arch>`) and
+  Meson + Ninja (for the Mesa/libdrm cross build — `just build-mesa <arch>`);
+  building either is optional, since `just fetch-bash <arch>` and
+  `just fetch-mesa <arch>` install the released artifacts
 - [Just](https://just.systems/) (build runner)
 - **For the wasm32 target only:** a Rust **nightly** with the `rust-src` component — that target is a
   JSON spec built with `-Z build-std`, so it needs sources rather than a prebuilt sysroot —
@@ -206,6 +84,150 @@ ones are attached to releases: a `v*` tag for a release, `image-<sha>`
 (prereleases) for a per-commit build. The assets carry the version
 (`minix-x86-v0.1.0.elf`), every image in a release was booted by the build that
 published it, and the release notes carry the exact `qemu-system-*` command line.
+Beside it a release carries the **split** form: the kernel and initramfs as a
+boot image (`minix-<arch>-<ver>-boot.elf`) and the root filesystem as a virtio
+disk image (`minix-<arch>-<ver>-system.img`) — which is what holds the optional
+larger pieces, GNU bash and the GL stack.
+
+## Status
+
+Boots multi-process userspace in QEMU on x86_64, RISC-V64, and AArch64 with a serial shell.
+The same system runs in a browser tab on wasm32 — the [demo](https://sdgoij.github.io/minixrs/) is
+that build, and CI builds and boots the same artifacts on every push.
+VFS mounts the root filesystem, MFS reads and writes files, and the shell supports
+`>` redirection (create/truncate) for builtin commands **and external binaries**
+(exec'd commands write through VFS via a dup2'd fd, so `/bin/echo x > file` works).
+Alongside `>` the builtin shell handles `|` pipelines (up to eight stages), `&&`
+chaining and trailing `&` background jobs. It is deliberately kept small: GNU bash is
+the full shell (built by the fork's stage1 and injected as `/bin/bash`, see below), so
+the root shell does not need to grow into one.
+
+Images come in two forms: a self-contained ELF (kernel, initramfs and root filesystem
+embedded), and a split pair — a boot image plus a root filesystem on a virtio disk. The
+split is what carries the optional larger pieces: GNU bash, and the Mesa/libdrm GL stack,
+which draws a GLES2 triangle through surfaceless EGL on all three hardware arches
+(`just test-gltriangle-<arch>`; [WAYLAND.md](WAYLAND.md)).
+
+See `.agents/skills/` for domain-specific documentation and
+[PORTING_PLAN.md](PORTING_PLAN.md) for the task tracker.
+
+> **⚠️ Research project — not production-ready.**  
+> If you're looking for a production operating system, use Linux, a BSD, or [Redox](https://www.redox-os.org/) instead.
+
+## Recent work
+
+The project is now a real toolchain target. The most recent work:
+
+- **The C graphics stack runs** — libdrm and Mesa (its GLSL compiler included) build as minix **shared objects** against the port's C library and load under its own dynamic loader; a surfaceless-EGL client draws a GLES2 triangle on `softpipe`, reads it back and checks it, on all three hardware arches (`just test-gltriangle-<arch>`: EGL 1.5 / GLES 3.1). The loader grew to meet it — a general-dynamic thread-local's offset word, and a cross-object `TLSDESC` descriptor on aarch64 — and it is the forcing function the C++ toolchain and `dlopen` needed; see [WAYLAND.md](WAYLAND.md).
+- **Bash and Mesa as releases per pin** — GNU bash is built at a pinned upstream commit, and both it and the Mesa/libdrm DSOs are published as releases keyed on the pin *and* the toolchain, so `just fetch-bash <arch>` and `just fetch-mesa <arch>` install them in seconds and CI rebuilds only when a pin moves. The stage1 toolchain already worked this way (`just fetch-stage1`); `just build-bash`/`just build-mesa` stay the authoritative builds.
+- **A split image** — the boot image (kernel + initramfs) and the root filesystem are separate release artifacts, so the root can outgrow the 16 MiB embedded window and carry GNU bash and the ~36 MiB GL stack; the self-contained ELF is still built and booted too.
+- **Interactive bash** — readline works at the console: it sets the terminal raw and *polls* before it reads, which the tty server never woke because its `select` did not pump the kernel serial ring. `just test-interactive-bash-<arch>` types a line at `bash-5.3#` and checks it ran.
+- **A physical-memory map a user window cannot shadow** — kernel mappings of physical frames are asserted against the user address space at compile time, and a checker refuses to treat a physical address as a pointer (the bug that read a large server's own image instead of the frame); see [PHYSMAP.md](PHYSMAP.md).
+- **The whole system in a browser tab** — a **wasm32** target where each process is a WebAssembly instance and the host *is* the devices (console, clock, disk, display, keyboard, pointer, the network). The kernel, the servers and the userland are the ones the arches run: the shell forks, execs from the image, writes a file to the disk and reads it back, and `ping 10.0.2.2` reaches a peer over the host's link. [Try it](https://sdgoij.github.io/minixrs/).
+- **1:1 kernel threads** — every thread is a schedulable Proc slot: `thread_create`/`exit`/`join`/`yield`, wake-one IPC delivery, group sweep on exit/exec/fork, per-thread TLS. MINIX proper had no native threads; this port does.
+- **A working `std` port** — the forked rustc's std PAL for minix (`sys/pal/minix`) runs on the OS: `/bin/hello` is a std-linked binary that spawns threads with TLS and exits cleanly.
+- **Networking that works** — virtio-net plus DNS: `/bin/udp nos.nl` resolves hostnames from inside QEMU.
+- **Memory from 72M to 16G** — the same kernel boots in ~72 MiB of guest RAM and runs `/bin/hello` up to 16 GiB, on all three hardware arches (x86_64, RISC-V64, AArch64).
+- **A heap that actually grows** — userland heap growth routed through VM's brk (demand-mapped, freed on exit); the COW refcount bug that killed repeated `hello` runs is fixed.
+- **Honest memory reporting** — the boot banner prints detected vs usable RAM (a 4 GiB guest says `4095 MiB detected (4078 MiB usable)`, not the old "5120 MiB" artifact).
+- **uutils/coreutils runs on the OS** — the multicall binary (60 applets) boots, allocates and writes output a second tool reads back; it is embedded on x86_64 and riscv64, gated by `just test-coreutils-wedge`. The coreutils submodule tracks the port (see [coreutils](#coreutils) below).
+- **GNU bash runs** — built by the fork's stage1 (a POSIX host, see `C_BUILD.md`), injected as `/bin/bash` and booted: it prints its banner, runs `-c`, loops, arithmetic and redirects, and gets its own `$PWD`. Getting there filled the C surface it needed (`termios`/`ioctl`, `mknod`, `inet_*`, `scanf`, an environment that survives `exec`) plus two gaps it found in the shell and the libc: a shell that did not remove quotes, and a `getcwd` that returned `ENOSYS`.
+- **A `ls` that behaves like one** — sorted, and laid out in columns that fit the terminal (80 columns when the tty cannot say, which a serial console cannot), one name per line when the output is a file or a pipe. A wider directory listing is what found an MFS `getdents` bug: at end-of-directory it returned `OK` with a stale reply payload, so a reader asking until it got 0 was handed the same entries for ever.
+- **Dynamic linking** — a Rust loader (`crates/ldso`, installed as `/libexec/ld.so`) that VFS's exec enters as a program's `PT_INTERP`, and every image now carries it together with the port's C library as a shared object (`/lib/libc.so`) and a C program linked against it (`/bin/dynclib`). The loader maps each `DT_NEEDED` at a deterministic base, binds eagerly, follows the dependency graph transitively, applies every object's relocations and runs its initialisers in order, maps one file once (by inode, not by the name it was asked for), and gives a dynamically linked program thread-local storage. A program can also `dlopen` one at run time — which is what a driver lookup needs — and linking dynamically stays opt-in as MINIX's is: the default is still static, and a program of your own is `just cdyn`, which links against the `/lib/libc.so` every image already carries; see [below](#dynamic-linking).
+
+## coreutils
+
+`/bin/coreutils` is the port's real toolchain: one multicall binary built from the
+[`uutils/coreutils`](https://github.com/uutils/coreutils) fork in `coreutils/`, whose **60
+applets** are the subset named by the `feat_minix` feature set in `coreutils/Cargo.toml`. It is
+embedded in the image on **x86_64** and **riscv64**. **aarch64** builds it
+(`just coreutils-aarch64`, which needs the port's own `cc` for blake3's NEON path) but the image
+does not carry it yet, because an applet that allocates heavily — `coreutils seq 200` —
+intermittently writes nothing there (KNOWN_ISSUES aarch64 #9). wasm32 does not build it at all:
+the multicall links the std PAL, which the browser target does not.
+
+The applets run as `coreutils <name> [args]`; the multicall also dispatches on its own
+`argv[0]`, so a link named for an applet works too. The OS has no kernel entropy source, so
+`coreutils/src/bin/coreutils.rs` registers a weak SplitMix64 RNG for the applets that want one
+(`factor`, `seq`, `shuf`, `sort`) until it grows one. The link is stripped and `opt-level=z` to
+keep the ~6 MiB binary inside the default 16 MiB minixfs.
+
+`just test-coreutils-wedge` is the acceptance gate — the scenario in
+`tools/smoke/coreutils-wedge.tsv` has `coreutils seq 3` write three lines and the next tool read
+them back, the reproducer for the wedge that once left a child dead at its ELF entry
+(KNOWN_ISSUES item 12). It runs in QEMU on x86_64, and the same scenario has also been run green
+on riscv64.
+
+The excluded applets are the ones the port cannot run yet: `chmod` and `touch` need
+`std::os::unix` mode bits and `filetime`, `rm` pulls in `console` with no non-`unix` fallback,
+and `pwd` and `mktemp` need a working `std::env::current_dir` (KNOWN_ISSUES item 24). The OS
+ships its own `/bin/chmod`, `/bin/rm` and friends for those.
+
+## Dynamic linking
+
+Opt-in, and the default is unchanged: every program the boot path runs is static and non-PIE,
+exactly as in MINIX. What an image *carries* is the capability — the loader
+`/libexec/ld.so`, the port's C library as a shared object `/lib/libc.so`, and `/bin/dynclib`,
+a C program linked against it — so `just build` embeds all three in both images and the boot
+test checks for them.
+
+The loader is `crates/ldso`, entered by VFS's exec as a program's `PT_INTERP` interpreter. It
+maps every `DT_NEEDED` object at a base from a deterministic allocator (there is no ASLR, so a
+loader failure is reproducible), applies each object's `RELATIVE` fixups, resolves `GLOB_DAT`,
+`JUMP_SLOT` and `COPY` **eagerly** — an unresolved symbol fails the load rather than faulting
+on the first call — applies the thread-local relocations too (`DTPMOD`/`DTPREL`, and aarch64's
+`TLSDESC` descriptors, whose symbol is resolved to the *defining* object, since a module's
+storage and displacement are the loader's to choose), follows the dependency graph depth-first,
+runs the objects' initialisers
+in dependency order, and lays out every module of thread-local storage against the thread
+pointer, so a library that keeps `__thread` state — and a second one loaded later — each get
+their own storage. One
+file is one mapping however it is named: the check is the file (`st_dev`/`st_ino`), not the
+spelling, so a soname and a path to the same object do not become two copies. The crate is
+new rather than a port of `ld.elf_so`, but the rules are the reference's — `search.c`'s "a name
+containing a slash is a path", and `load.c`'s path-then-inode "already loaded".
+
+A program can also `dlopen` a shared object at run time and reach its symbols with `dlsym` —
+the loader answers the family for `libc.so`, so a C program links nothing extra for it — and
+`RTLD_LOCAL`/`RTLD_GLOBAL` scope a load, with `dlclose` accepted and nothing unloaded. What it
+does not do yet, each a deferral rather than a stub: unload an object, `LD_LIBRARY_PATH`,
+auxv (the loader uses a fixed 4 KiB page), and MINIX's soname/versioned-symlink scheme, so the
+search is literal — `/lib/`, `/usr/lib/`, or the name itself when it contains a `/`. Two
+*measured* limits bound what can be loaded: a program can carry **18** shared objects, and
+**8** of them can bring thread-local storage (`TLS_SLOTS`), the ones it starts with plus a
+surplus of 2 KiB slices for later ones — an object past either is refused with a message that
+names it. A dynamically linked program is bounded in address space rather than memory: an
+address space holds 64 regions, the two images plus the stack and the heap take 8, and an
+object costs one region per `PT_LOAD` — three, now that the `GNU_RELRO` segment nothing reads
+is not linked.
+
+Building anything dynamic goes through the fork's `-elf` (position-independent) targets, which
+`just bootstrap` builds. `tools/build-dynlibc.py` builds `libc.so` and `dynclib` with them
+(`just dynlib-<arch>`, which every image build runs). `just cdyn tools/myprog.c` links a
+program of your own the way that script links `dynclib` — `-Bdynamic`, `-l:libc.so`,
+`--allow-shlib-undefined` for the TLS symbols the loader supplies, and
+`--dynamic-linker=/libexec/ld.so` — writes `target/dync/<arch>/<stem>`, and prints the two
+commands that build an image with it and boot it (`MINIXFS_EXTRA`; on Windows the hint also
+names `MSYS2_ENV_CONV_EXCL`, without which MSYS rewrites the `/bin/...` value on the way to a
+native tool and the build refuses it). Every image already carries what the program needs, so
+nothing is added to the image but the program itself.
+
+- [DYNAMIC_LINKING.md](DYNAMIC_LINKING.md) — the design decisions, the phased plan (0–8), the
+  measurements and the traps; it builds on the file-backed exec path in
+  [FILEMMAP.md](FILEMMAP.md).
+- `just test-dynlink-x86` (also `riscv64`, `aarch64`) — boots an image and drives
+  `tools/smoke/dyn.tsv`: the loader's bases, relocations, transitive load, cross-object
+  resolution and initialiser order, before and after a `fork` and a re-`exec`, then the shipped
+  `/bin/dynclib`'s line — `errno` read through the loader's thread-local storage, `strerror`'s
+  buffer inside `libc.so`, and the program's own `.init_array` — and five `dlopen` steps: the two
+  scopes, `dlclose`, and the two failures the loader names itself.
+- `just test-cdyn-x86` — the gate on the recipe for a program of your own: it builds
+  `tools/cdyn-demo.c` with `just cdyn`, injects the result and boots `tools/smoke/cdyn.tsv`,
+  whose line is a string only `libc.so` holds.
+- `just probe-dso-share-x86` (also `riscv64`) — measures from the host's page tables that two
+  processes mapping one object share its read-only frames (13/13 on x86_64).
+- `cargo test -p ldso` — the host side: the ELF parse, every relocation rule, the base
+  allocator and the name resolution.
 
 ## Project Structure
 
@@ -306,6 +328,13 @@ See `.agents/skills/` for domain deep-dives:
   measures read-only frame sharing between two processes from the host's page tables, and
   `cargo test -p ldso` covers the loader's parsing, relocation rules and name resolution on
   the host. The boot test asserts that an image carries the loader and the two objects.
+- **The C graphics stack:** `just test-gltriangle-<arch>` cross-builds Mesa/libdrm as shared
+  objects (`just build-mesa <arch> --build`, or `just fetch-mesa <arch>` for the published
+  ones) and boots a surfaceless-EGL client that draws a GLES2 triangle on `softpipe` and
+  checks the readback. It is the end-to-end gate on the C++ toolchain and the loader.
+- **Interactive bash:** `just test-interactive-bash-<arch>` boots the split system image and
+  types a line at `bash-5.3#` — the one path that exercises readline's raw-mode setup and its
+  poll-then-read, which the `bash -c` steps cannot reach.
 - **wasm (the browser target):** `sh tools/wasm-browser/build.sh` builds and stages the artifacts
   first (it runs `tools/wasm-servers/build.sh`, then copies the three into the page's `build/`), then
   - `node tools/wasm-servers/boot.cjs` — the boot chain and every device, at quiescence (82 checks)
