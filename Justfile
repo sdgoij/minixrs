@@ -274,6 +274,26 @@ test-system-image-aarch64 boot-timeout="60": system-image-aarch64
     sh tools/smoke/feed.sh target/test-system-image-aarch64.log {{boot-timeout}} qemu-system-aarch64 -machine virt -cpu cortex-a57 -m 256M -nographic -no-reboot -global virtio-mmio.force-legacy=off -drive if=none,id=disk0,file=target/images/aarch64-unknown-minix/disk.img,format=raw,cache=writethrough -device virtio-blk-device,drive=disk0 -netdev user,id=net0 -device virtio-net-device,netdev=net0 -device virtio-gpu-device -device virtio-keyboard-device -kernel target/images/aarch64-unknown-minix/minix-aarch64-boot.elf
     @just _assert-qemu-log target/test-system-image-aarch64.log "wserver: ready"
 
+# Interactive bash: readline polls the console instead of blocking on a line read,
+# so this drives a *typed* line at `bash-5.3#` — the part the `bash -c` scenario in
+# `test-bash-<arch>` cannot see. It boots the split pair (the shipping artifact),
+# which carries bash when its `target/bash/<arch>/bash` exists; `build-bash` first
+# so the image the gate builds has it.
+test-interactive-bash arch="x86" boot-timeout="60": (build-bash arch)
+    @just test-interactive-bash-{{arch}} {{boot-timeout}}
+
+test-interactive-bash-x86 boot-timeout="40": system-image-x86
+    @just _assert-qemu-version qemu-system-x86_64
+    python tools/smoke/interactive_bash.py target/test-interactive-bash-x86.log {{boot-timeout}} -- qemu-system-x86_64 -nographic -m 256M -no-reboot -vga none -device bochs-display,id=fb0 -kernel target/images/x86_64-pc-minix/minix-x86-boot.elf -drive if=none,id=disk0,file=target/images/x86_64-pc-minix/disk.img,format=raw,cache=writethrough -device virtio-blk-pci,disable-legacy=on,drive=disk0 -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0 -device virtio-tablet-pci,display=fb0
+
+test-interactive-bash-riscv64 boot-timeout="60": system-image-riscv64
+    @just _assert-qemu-version qemu-system-riscv64
+    python tools/smoke/interactive_bash.py target/test-interactive-bash-riscv64.log {{boot-timeout}} -- qemu-system-riscv64 -machine virt -m 256M -nographic -global virtio-mmio.force-legacy=off -drive if=none,id=disk0,file=target/images/riscv64gc-unknown-minix/disk.img,format=raw,cache=writethrough -device virtio-blk-device,drive=disk0 -netdev user,id=net0 -device virtio-net-device,netdev=net0 -device virtio-gpu-device -device virtio-keyboard-device -kernel target/images/riscv64gc-unknown-minix/minix-riscv64-boot.elf
+
+test-interactive-bash-aarch64 boot-timeout="60": system-image-aarch64
+    @just _assert-qemu-version qemu-system-aarch64
+    python tools/smoke/interactive_bash.py target/test-interactive-bash-aarch64.log {{boot-timeout}} -- qemu-system-aarch64 -machine virt -cpu cortex-a57 -m 256M -nographic -no-reboot -global virtio-mmio.force-legacy=off -drive if=none,id=disk0,file=target/images/aarch64-unknown-minix/disk.img,format=raw,cache=writethrough -device virtio-blk-device,drive=disk0 -netdev user,id=net0 -device virtio-net-device,netdev=net0 -device virtio-gpu-device -device virtio-keyboard-device -kernel target/images/aarch64-unknown-minix/minix-aarch64-boot.elf
+
 build-riscv64: userland-riscv64 coreutils-riscv64 dynlib-riscv64
     RUSTC="{{stage1-rustc}}" cargo build -p kernel-boot --bin kernel-boot-riscv64 --target riscv64gc-unknown-minix --features embed_initramfs,embed_minixfs,riscv64 --release
 

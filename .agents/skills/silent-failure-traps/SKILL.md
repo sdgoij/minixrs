@@ -59,6 +59,26 @@ reasoned about; the fix recorded is what the code does now.
   retry into the window while the truncated command is still running (`tools/dso_share_probe.py`,
   `ARCHS["pace"]` and `wait_for_after`).
 
+## A prompt that ignores input can be the server, not the harness
+
+Every cause above is host-side. The same symptom — the guest reaches a prompt and then never acts on a
+typed byte — came from the guest's own tty server, and looked identical from the host.
+
+- **A `select` that does not pump its device can never report a byte that arrives in a kernel ring.**
+  The console's bytes sit in the kernel serial ring; `crates/servers/src/tty.rs`'s `do_read` pulled them
+  into the line buffer only inside its blocking loop, and `do_select` → `select_try` inspected only that
+  buffer. With no read pending nothing filled it, and nothing notified the server when the ring gained a
+  byte, so a poll on the console could never become ready. `bash --noediting` worked while plain `bash`
+  did not — readline sets the terminal raw and *polls* before it reads, so it spun in `select` for ever
+  and never issued a `read` (instrumented: `[sel][sel][sel]…`, no `[rd]`). The fix is a wake: pump the
+  ring non-blocking on the poll path too (`console_read` loops `read(0)` until `EAGAIN`; `do_select`
+  calls `(tp.tty_devread)(tp, 0)` for a console line), the counterpart of the pty master's `select_wake`.
+  A pty slave is unaffected because its input arrives by message, not from a ring the server must drain.
+- So a prompt that ignores input is *not* proof of a harness problem — read the tty server's own
+  read/select instrumentation before blaming the feeder. `just test-interactive-bash-<arch>`
+  (`tools/smoke/interactive_bash.py`) is the gate that catches it: it types at `bash-5.3#`, which no
+  `bash -c` scenario reaches.
+
 ## The kernel's message boundary
 
 - **A delivered message's source endpoint is the message, not a return register.** `mini_send`,
@@ -125,6 +145,7 @@ working shell).
 |------|-------|
 | Host-side driver that gets all of the above right | `tools/smoke/feed.sh`, `tools/smoke/scenario.tsv` |
 | Host-side driver whose input pace is arch-specific, and which reads guest memory over QMP | `tools/dso_share_probe.py` |
+| Host-side driver that reaches an interactive bash (readline's poll path) | `tools/smoke/interactive_bash.py` |
 | The same scenario inside the wasm engine | `tools/wasm-browser/run.js` |
 | A delivery's endpoint | `crates/kernel/src/ipc.rs` (`mini_receive`'s async branch, `try_one`) |
 | The diag channel's two halves | `crates/minix-rt/src/lib.rs` (`diag_message`), `crates/kernel/src/system.rs` (`do_diagctl_handler`) |

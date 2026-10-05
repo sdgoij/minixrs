@@ -2239,11 +2239,17 @@ are arch-specific, `[env]` is tooling/platform, not kernel.
   right one; otherwise the link fails `E0460: found possibly newer version of
   crate core`).
 
-  Still not covered: an **interactive** bash. The driver types into the minix
-  shell and waits for its `#` prompt, which bash's `bash-5.3#` replaces, so every
-  step is a fresh `bash -c`; readline and the terminal setup (`tcsetattr` into
-  raw mode) are as untested as before. (`tools/build-bash.py`,
-  `tools/cc-minix.py`, `Justfile`, `tools/smoke/bash.tsv`, `C_BUILD.md`)
+  **An interactive bash is covered too (2026-10-05).** The `bash -c` scenario
+  cannot reach readline: it types into the minix shell and waits for its `#`
+  prompt, which bash's `bash-5.3#` replaces. `just test-interactive-bash-<arch>`
+  boots the split system image and drives a typed line at `bash-5.3#` through
+  `tools/smoke/interactive_bash.py`, exercising readline's raw-mode setup and its
+  poll-then-read path. That path *was* broken: the console's bytes sat in the
+  kernel serial ring until a blocking `read`, so `do_select` never saw a typed byte
+  and readline spun for ever; the tty server now pumps the ring on its poll path
+  (`crates/servers/src/tty.rs`, `silent-failure-traps`). All three arches pass.
+  (`tools/build-bash.py`, `tools/cc-minix.py`, `Justfile`,
+  `tools/smoke/interactive_bash.py`, `crates/servers/src/tty.rs`, `C_BUILD.md`)
 - **~~`signal.h` and `minix-libc` disagree on `sigprocmask`~~ — FIXED
   (2026-09-24).** `minix-std`'s signature is now
   `sigprocmask(how, set_ptr, old_ptr)` (PM's `m2l1`/`m2l2`, both caller

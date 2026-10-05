@@ -1635,10 +1635,32 @@ pub fn tty_init(system_hz_val: u32) {
 
 /// Console devread hook — non-blocking input drain.
 ///
-/// v1 no-op: input flows through `do_read`, which pulls from the kernel's
-/// serial ring via the tty's own `read(0)`. Wired (rather than `tty_devnop`)
-/// so the console line is active for `line2tty`/CDEV requests.
-fn console_read(_tp: &mut Tty, _try_only: i32) -> i32 {
+/// Pull the kernel serial ring (`read(0)`, non-blocking: `EAGAIN` means empty)
+/// through the line discipline and into this line's input buffer.
+///
+/// `do_read` blocks on this same ring, but a `select`/`poll` on the console only
+/// looks at this line's buffer — so without this pump a selector never observes a
+/// typed byte and `readline`'s poll spins forever. This is the console's "input
+/// arrived" hook, the counterpart of the pty master's `select_wake`. Wired (rather
+/// than `tty_devnop`) so the console line is active for `line2tty`/CDEV requests.
+fn console_read(tp: &mut Tty, _try_only: i32) -> i32 {
+    #[cfg(target_os = "minix")]
+    {
+        loop {
+            let mut byte = [0u8; 1];
+            let r = minix_rt::read(0, &mut byte);
+            if r <= 0 {
+                // EAGAIN (ring empty) or an error: nothing more to pull.
+                break;
+            }
+            in_process(tp, &byte);
+        }
+        in_transfer(tp);
+    }
+    #[cfg(not(target_os = "minix"))]
+    {
+        let _ = tp;
+    }
     0
 }
 
@@ -2427,6 +2449,13 @@ pub fn do_select(minor: DevMinor, mut ops: u32, endpt: Endpoint) -> i32 {
         Some(tp) => tp,
         None => return ENXIO,
     };
+
+    // The console's bytes sit in the kernel serial ring until something pumps
+    // them; pump here too so a poll observes a typed byte. (A pty slave's input
+    // arrives by message instead, and its `pty_slave_read` is a no-op.)
+    if isconsole(tp) {
+        (tp.tty_devread)(tp, 0);
+    }
 
     let watch = ops & CDEV_NOTIFY;
     ops &= CDEV_OP_RD | CDEV_OP_WR | CDEV_OP_ERR;

@@ -509,6 +509,14 @@ jobs:
           path: target/bash/${{ matrix.arch }}/bash
           if-no-files-found: error
 
+      # The scenario above reaches only `bash -c`. This boots the split system image
+      # with the bash artifact injected and types a line at `bash-5.3#`, the one path
+      # that exercises readline's raw-mode setup and its poll-then-read. The
+      # arch-specific recipe (not `test-interactive-bash`) so the C build above is not
+      # repeated just to reach it.
+      - name: Interactive bash
+        run: just test-interactive-bash-${{ matrix.arch }} 120
+
   # The images and the release live in `.github/workflows/image-release.yml`, which
   # this calls: the release logic keeps one home, and `needs` is what makes the
   # release downstream of the tests and the suites rather than something that could

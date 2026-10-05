@@ -239,11 +239,15 @@ publishes, so a released image carries a shell for scripts (a plain `just image`
 stays bash-free). The job is in the release's `needs`, so a C surface that builds
 bash but breaks it blocks a release.
 
-**What that still does not cover:** an *interactive* bash. The driver types into
-the minix shell and waits for its `#` prompt, which bash's `bash-5.3#` replaces,
-so every step is a fresh `bash -c`. Its profile files, its terminal setup
-(`tcsetattr` into raw mode) and readline are therefore still only as exercised as
-typing at it by hand once — the one part of bash a scenario cannot reach yet.
+**Interactive bash now has its own gate.** The `bash -c` scenario cannot reach it
+— it types into the minix shell and waits for its `#` prompt, which bash's
+`bash-5.3#` replaces — so `just test-interactive-bash-<arch>` boots the split
+system image and drives a typed line at `bash-5.3#`
+(`tools/smoke/interactive_bash.py`), which exercises readline's terminal setup
+(`tcsetattr` into raw mode) and its poll-then-read path. That path was broken and
+is now fixed: the console's bytes stayed in the kernel serial ring until a
+blocking `read`, so a poll on the console never became ready
+(`crates/servers/src/tty.rs`; `silent-failure-traps`).
 
 ## A three-arch C surface
 
