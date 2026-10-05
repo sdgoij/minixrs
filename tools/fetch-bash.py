@@ -1,30 +1,30 @@
 #!/usr/bin/env python3
-"""Install the prebuilt Mesa + libdrm shared objects for the pinned version.
+"""Install the prebuilt GNU bash for the pinned commit.
 
-`just build-mesa <arch> --build` compiles Mesa, libdrm and the C++ runtime from
-source — tens of minutes and a meson host per arch. This downloads the same seven
-DSOs, and the handful of headers the surfaceless client compiles against, from a
+`just build-bash <arch>` clones bash (a full clone — the pin is a commit), rebuilds
+`minix-libc` with this host's stage1, configures 209 objects and links them: minutes
+per arch, and a 289 MiB clone the first time. This downloads the same binary from a
 release published in this repository instead (see
-`.github/workflows/mesa-release.yml`), tagged by the Mesa and libdrm commits
-`tools/mesa_pin.py` pins together with the `rust` gitlink, so they match both the
-sources and the toolchain they were built with.
+`.github/workflows/bash-release.yml`), tagged by the commit `tools/bash_pin.py`
+pins together with the `rust` gitlink, so the binary matches both the sources and
+the toolchain it was built with.
 
-`just build-mesa` stays authoritative: it is what you run when the port's C
-toolchain or `tools/cc-dso-minix.py` changes, or to bump the pin. This is the
-cache for everyone else — CI's `gltriangle` job fetches instead of building.
+`just build-bash` stays authoritative: it is what you run when the port's C headers
+or libc change, or to bump the pin. This is the cache for everyone else — CI's
+`bash` job fetches instead of building.
 
-An existing set of DSOs is never replaced unless you ask for it with `--force`,
-and a marker records which release it came from (a built set has no marker, so it
-is reported as coming from nowhere).
+An existing bash is never replaced unless you ask for it with `--force`, and a
+marker records which release it came from (a built one has no marker, so it is
+reported as coming from nowhere).
 
 Two environment overrides exist for testing and for consuming a release from
 elsewhere:
 
-  MINIXRS_MESA_BASE   base URL holding `<asset>` and `SHA256SUMS`
+  MINIXRS_BASH_BASE   base URL holding `<asset>` and `SHA256SUMS`
                       (default: this repository's release for the pinned tag)
-  MINIXRS_MESA_DEST   install directory (default: `target/mesa/<arch>`)
+  MINIXRS_BASH_DEST   install directory (default: `target/bash/<arch>`)
 
-Usage: python tools/fetch-mesa.py [x86|riscv64|aarch64] [--force]
+Usage: python tools/fetch-bash.py [x86|riscv64|aarch64] [--force]
 """
 
 from __future__ import annotations
@@ -41,24 +41,21 @@ import urllib.request
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "tools"))
 
-import mesa_pin  # noqa: E402
+import bash_pin  # noqa: E402
 import pin  # noqa: E402
 from ccarch import Arch, resolve_argv  # noqa: E402
 
 RELEASE_REPO = "sdgoij/minixrs"
-# The header whose presence means "a usable set is installed", alongside the DSO
-# the loader looks up first (`gltriangle` links it and includes this).
-SONAME = "libEGL.so.1"
-HEADER = "include/EGL/egl.h"
+BINARY = "bash"
 MARKER = ".minixrs-fetched"
 
 
 def dest_dir(arch: Arch) -> pathlib.Path:
-    return ROOT / "target" / "mesa" / arch.name
+    return ROOT / "target" / "bash" / arch.name
 
 
 def recorded_tag(dest: pathlib.Path) -> str:
-    """The release a fetched set came from, or "" if it did not come from here."""
+    """The release a fetched bash came from, or "" if it did not come from here."""
     marker = dest / MARKER
     if not marker.is_file() or not marker.read_text(encoding="utf-8").strip():
         return ""
@@ -67,17 +64,17 @@ def recorded_tag(dest: pathlib.Path) -> str:
 
 def download(url: str, dest: pathlib.Path) -> None:
     # GitHub answers release-asset requests without a User-Agent with 403.
-    req = urllib.request.Request(url, headers={"User-Agent": "minixrs-fetch-mesa"})
+    req = urllib.request.Request(url, headers={"User-Agent": "minixrs-fetch-bash"})
     try:
         with urllib.request.urlopen(req) as resp, open(dest, "wb") as f:
             shutil.copyfileobj(resp, f)
     except urllib.error.HTTPError as e:
         if e.code == 404:
             sys.exit(
-                f"error: no prebuilt Mesa DSOs at {url}\n"
-                "       Nothing has been published for this pin yet.\n"
-                "       Run `just build-mesa <arch> --build` to build from source, or publish a\n"
-                "       release with the `mesa release` workflow."
+                f"error: no prebuilt bash at {url}\n"
+                "       Nothing has been published for this commit yet.\n"
+                "       Run `just build-bash <arch>` to build from source, or publish a\n"
+                "       release with the `bash release` workflow."
             )
         sys.exit(f"error: downloading {url} failed: {e}")
     except urllib.error.URLError as e:
@@ -129,30 +126,29 @@ def main(argv: list[str]) -> int:
         sys.exit(f"error: unknown argument {rest[0]!r}\n"
                  f"       usage: {argv[0]} [x86|riscv64|aarch64] [--force]")
 
-    tag = mesa_pin.tag(pin.rust_gitlink())
-    dest = pathlib.Path(os.environ.get("MINIXRS_MESA_DEST") or dest_dir(arch))
-    lib = dest / "lib"
+    tag = bash_pin.tag(pin.rust_gitlink())
+    dest = pathlib.Path(os.environ.get("MINIXRS_BASH_DEST") or dest_dir(arch))
 
-    if (lib / SONAME).is_file() and not force:
+    if (dest / BINARY).is_file() and not force:
         recorded = recorded_tag(dest)
         if recorded == tag:
-            print(f"Mesa DSOs for {tag} are already installed at {lib}")
+            print(f"bash for {tag} is already installed at {dest / BINARY}")
         elif recorded:
-            print(f"the DSOs at {lib} were fetched for {recorded}, not {tag}")
-            print("re-run with --force to replace them, or `just build-mesa` to build from source")
+            print(f"the bash at {dest / BINARY} was fetched for {recorded}, not {tag}")
+            print("re-run with --force to replace it, or `just build-bash` to build from source")
         else:
-            print(f"DSOs already exist at {lib} and did not come from here")
+            print(f"a bash already exists at {dest / BINARY} and did not come from here")
             print("(a source build leaves no marker, so it cannot be identified)")
-            print("re-run with --force to replace them with the published set")
+            print("re-run with --force to replace it with the published one")
         return 0
 
     asset_name = f"{tag}-{arch.name}.tar.xz"
-    base = os.environ.get("MINIXRS_MESA_BASE") or (
+    base = os.environ.get("MINIXRS_BASH_BASE") or (
         f"https://github.com/{RELEASE_REPO}/releases/download/{tag}"
     )
     base = base.rstrip("/")
 
-    tmp = ROOT / "target" / "mesa-download"
+    tmp = ROOT / "target" / "bash-download"
     shutil.rmtree(tmp, ignore_errors=True)
     tmp.mkdir(parents=True)
     asset = tmp / asset_name
@@ -163,22 +159,19 @@ def main(argv: list[str]) -> int:
     download(f"{base}/SHA256SUMS", sums)
     verify(asset, sums)
 
-    # Replace rather than merge: a set built for another pin may not contain
-    # everything this one does, and leftovers would be staged into the image.
-    shutil.rmtree(lib, ignore_errors=True)
+    # Replace the binary, but leave the build tree: a source build's configure.log
+    # and objects are not this script's to delete, and the artifact is one file.
+    (dest / BINARY).unlink(missing_ok=True)
     print(f"extracting into {dest}")
     extract(asset, dest)
     shutil.rmtree(tmp, ignore_errors=True)
 
-    if not (lib / SONAME).is_file():
-        sys.exit(f"error: {asset_name} did not contain lib/{SONAME}")
-    if not (dest / HEADER).is_file():
-        sys.exit(f"error: {asset_name} did not contain {HEADER}")
+    if not (dest / BINARY).is_file():
+        sys.exit(f"error: {asset_name} did not contain {BINARY}")
 
-    dest.mkdir(parents=True, exist_ok=True)
     (dest / MARKER).write_text(f"{tag}  {base}/{asset_name}\n", encoding="utf-8")
-    count = len(list(lib.glob("*.so*")))
-    print(f"installed Mesa DSOs for {tag} ({arch.name}) at {lib} ({count} objects)")
+    size = (dest / BINARY).stat().st_size
+    print(f"installed bash for {tag} ({arch.name}) at {dest / BINARY} ({size / 1e6:.1f} MB)")
     return 0
 
 

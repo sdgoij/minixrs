@@ -33,6 +33,11 @@
 # build runs only when the pin has no release yet (a pin bump, a new
 # `cc-dso-minix.py` feature, or a manual `mesa release` run).
 #
+# The `bash` job follows the same shape for the shell, from the `bash-<pin>`
+# release `bash-release.yml` publishes for the commit `tools/bash_pin.py` pins
+# (`bash-pin`/`bash-release`): the 289 MiB clone and the C build happen only when
+# the pin has no release yet.
+#
 # The image jobs depend on the suites for the same reason. Both suites also run
 # locally (`just test-boot-<arch>`, `just test-qemu-<arch>`, on Windows too); they
 # gate on the guest's serial log via `just _assert-qemu-log`.
@@ -444,31 +449,80 @@ jobs:
       - name: The shipped image, driven through the smoke scenario
         run: just image ${{ matrix.arch }} 120
 
-  # The port's largest C consumer, built for every arch and booted. bash is fetched at
-  # the pinned upstream commit, configured against `tools/c-include`, linked against
-  # minix-libc (`tools/build-bash.py`), and then driven through `tools/smoke/bash.tsv` in
-  # the guest. This is the only job that builds a third-party C project, so it is where a
-  # missing header, a missing libc export or a link flag that stopped being forwarded shows
-  # up: the C smoke binaries (/bin/helloc, /bin/ctest) exercise the same surface, but
-  # nowhere near this much of it.
+  # Decides whether the pinned bash commit needs a release before anything consumes
+  # one. Read-only; `bash-release` below does the publishing.
+  bash-pin:
+    name: bash pin
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    outputs:
+      pin: ${{ steps.check.outputs.pin }}
+      needed: ${{ steps.check.outputs.needed }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: false
+
+      - name: Decide whether a bash release has to be built
+        id: check
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          pin="$(python3 tools/bash_pin.py)"
+          echo "pin=${pin}" >> "$GITHUB_OUTPUT"
+
+          published=false
+          if gh release view "${pin}" > /dev/null 2>&1; then
+            published=true
+          fi
+          needed=true
+          [ "${published}" = true ] && needed=false
+          echo "needed=${needed}" >> "$GITHUB_OUTPUT"
+
+          {
+            echo "### bash \`${pin}\`"
+            echo
+            echo "- release published: **${published}**"
+            echo "- build needed: **${needed}**"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # One build of the pinned bash per arch, and only when the pin has no release yet.
+  # Calls the workflow the operator can also run by hand, so the build and its
+  # publishing rules keep one home.
+  bash-release:
+    name: bash release
+    needs: bash-pin
+    if: >-
+      needs.bash-pin.outputs.needed == 'true' &&
+      (github.event_name == 'workflow_dispatch' || github.ref == 'refs/heads/main' || github.ref_type == 'tag')
+    permissions:
+      contents: write
+    uses: ./.github/workflows/bash-release.yml
+    secrets: inherit
+
+  # The port's largest C consumer, gated for every arch. The shell itself is built
+  # once per pin (`bash-release`) and fetched here; what this job builds is the minix
+  # image around it, then it drives `tools/smoke/bash.tsv` and the interactive-bash
+  # scenario in the guest. It is the job that would show a missing header, libc export
+  # or link flag in the C surface - the C smoke binaries (/bin/helloc, /bin/ctest)
+  # cover a fraction of it.
   #
-  # Each arch's shell is published as the `bash-<arch>` artifact, and the release workflow
-  # downloads it and injects it into the image it publishes, so a released image carries
-  # `/bin/bash`. bash is deliberately *not* a `BOOT_BINS` entry: a plain image build must
-  # not depend on bash having been built, so a local `just image` stays bash-free and the
-  # coupling lives here, in the release path.
+  # Each arch's shell is re-published as the `bash-<arch>` artifact, and the release
+  # workflow downloads it and injects it into the image it publishes, so a released
+  # image carries `/bin/bash`. bash is deliberately *not* a `BOOT_BINS` entry: a plain
+  # image build must not depend on bash having been built.
   bash:
     name: bash (${{ matrix.arch }})
     runs-on: ubuntu-24.04
-    timeout-minutes: 60
-    # The same wait the arch jobs take: when the pin has changed, `stage1` builds and
-    # publishes the toolchain release that `fetch-stage1` consumes, and a *skipped*
-    # `stage1` (nothing to build) must not read as a failure.
-    needs: [rust-pin, stage1]
+    timeout-minutes: 45
+    needs: [rust-pin, stage1, bash-pin, bash-release]
     if: >-
       !cancelled() &&
       needs.rust-pin.result == 'success' &&
-      (needs.stage1.result == 'success' || needs.stage1.result == 'skipped')
+      (needs.stage1.result == 'success' || needs.stage1.result == 'skipped') &&
+      needs.bash-pin.result == 'success' &&
+      (needs.bash-release.result == 'success' || needs.bash-release.result == 'skipped')
     strategy:
       fail-fast: false
       matrix:
@@ -500,16 +554,20 @@ jobs:
       - name: Install the prebuilt stage1
         run: just fetch-stage1 ${{ matrix.arch }}
 
-      # Fetches bash (a full clone the first time — the pin is a commit, so a
-      # shallow one is not enough), rebuilds minix-libc with this host's stage1,
-      # configures, links, and boots the result through the bash scenario. 120 s of
-      # boot budget, as `image` above: a runner emulates the guest.
-      - name: Build bash and boot it
-        run: just test-bash ${{ matrix.arch }} 120
+      # The pinned shell, from the `bash-<pin>` release. Building it here is a 289 MiB
+      # clone plus 209 objects; fetching is seconds.
+      - name: Install the prebuilt bash
+        run: just fetch-bash ${{ matrix.arch }}
 
-      # `just test-bash` just wrote target/bash/<arch>/bash; hand it to the release
-      # workflow. `if-no-files-found: error` because a rename on either side should fail
-      # loudly rather than let a release image ship without the shell it was promised.
+      # Drives `tools/smoke/bash.tsv` in the guest: the banner, `-c`, arithmetic, a
+      # loop, a redirect, an external command and `$PWD`. 120 s of boot budget, as
+      # `image` above: a runner emulates the guest.
+      - name: Boot bash through the scenario
+        run: just test-bash-${{ matrix.arch }} 120
+
+      # `target/bash/<arch>/bash` is in hand; hand it to the release workflow.
+      # `if-no-files-found: error` because a rename on either side should fail loudly
+      # rather than let a release image ship without the shell it was promised.
       - uses: actions/upload-artifact@v7
         with:
           name: bash-${{ matrix.arch }}
@@ -517,10 +575,8 @@ jobs:
           if-no-files-found: error
 
       # The scenario above reaches only `bash -c`. This boots the split system image
-      # with the bash artifact injected and types a line at `bash-5.3#`, the one path
-      # that exercises readline's raw-mode setup and its poll-then-read. The
-      # arch-specific recipe (not `test-interactive-bash`) so the C build above is not
-      # repeated just to reach it.
+      # with the shell in place and types a line at `bash-5.3#`, the one path that
+      # exercises readline's raw-mode setup and its poll-then-read.
       - name: Interactive bash
         run: just test-interactive-bash-${{ matrix.arch }} 120
 

@@ -3,8 +3,9 @@
 # local work can install them in seconds instead of building Mesa from source.
 #
 # This is the `toolchain-release.yml` pattern applied to the GL stack. The pin is
-# `tools/mesa_pin.py`: the Mesa and libdrm commits, whose pair the release tag is
-# derived from, so an artifact can only match the sources in the tree. Manual or
+# `tools/mesa_pin.py`: the Mesa and libdrm commits and the `rust` gitlink, from
+# which the release tag is derived, so an artifact matches both the sources and
+# the toolchain in the tree. Manual or
 # automatic: `workflow_dispatch` rebuilds on demand (after a pin bump or a
 # `tools/cc-dso-minix.py` change), and `ci.yml` calls it - through `workflow_call`
 # - when the pinned tag has no release yet, before anything consumes one.
@@ -164,6 +165,10 @@ jobs:
         run: |
           set -euo pipefail
           tag='${{ steps.pin.outputs.tag }}'
+          mesa_tag="$(python3 -c 'import sys;sys.path.insert(0,"tools");import mesa_pin as p;print(p.MESA_TAG)')"
+          mesa_commit="$(python3 -c 'import sys;sys.path.insert(0,"tools");import mesa_pin as p;print(p.MESA_COMMIT)')"
+          drm_tag="$(python3 -c 'import sys;sys.path.insert(0,"tools");import mesa_pin as p;print(p.DRM_TAG)')"
+          drm_commit="$(python3 -c 'import sys;sys.path.insert(0,"tools");import mesa_pin as p;print(p.DRM_COMMIT)')"
           shopt -s nullglob
           assets=(mesa-*.tar.xz)
           test "${#assets[@]}" -eq 3 || {
@@ -171,10 +176,10 @@ jobs:
           sha256sum "${assets[@]}" > SHA256SUMS
           notes="$(printf '%s\n' \
             "Prebuilt Mesa + libdrm shared objects for the pins in \`tools/mesa_pin.py\`" \
-            "(the release tag is derived from the two commits):" \
+            "(the release tag is the two commits plus the toolchain pin):" \
             "" \
-            "- Mesa \`${MESA_TAG}\` (\`${MESA_COMMIT}\`)" \
-            "- libdrm \`${DRM_TAG}\` (\`${DRM_COMMIT}\`)" \
+            "- Mesa \`${mesa_tag}\` (\`${mesa_commit}\`)" \
+            "- libdrm \`${drm_tag}\` (\`${drm_commit}\`)" \
             "- arches: x86_64, riscv64, aarch64 (one asset each, seven DSOs under \`lib/\`)" \
             "" \
             "Install one arch with \`just fetch-mesa <arch>\`, which derives this tag and" \

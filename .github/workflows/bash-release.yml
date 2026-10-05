@@ -1,0 +1,151 @@
+# Builds GNU bash at the pinned upstream commit for every arch and publishes it as
+# a release in this repository, so CI and local work can install the shell in
+# seconds instead of cloning 289 MiB and building 209 objects.
+#
+# This is the `toolchain-release.yml` pattern applied to bash. The pin is
+# `tools/bash_pin.py`: the upstream commit and the `rust` gitlink, from which the
+# release tag is derived, so an artifact matches both the sources and the toolchain
+# in the tree. Manual or automatic:
+# `workflow_dispatch` rebuilds on demand (after a pin bump, or a change to
+# `tools/c-include` / `crates/minix-libc` that needs a fresh binary), and `ci.yml`
+# calls it - through `workflow_call` - when the pinned tag has no release yet,
+# before anything consumes one.
+#
+# The asset is per-arch (`bash-<pin>-<arch>.tar.xz`, the one binary), because bash
+# is target code. `tools/fetch-bash.py` derives the tag from the same pin,
+# downloads one arch's asset, and verifies `SHA256SUMS`.
+#
+# The release lives here rather than on a fork, because the built-in
+# `GITHUB_TOKEN` can only write its own repository - no personal access tokens,
+# and consuming the asset needs no credentials (this repository is public).
+
+name: bash release
+
+on:
+  workflow_dispatch:
+  # Called by `ci.yml`; the caller has to grant `contents: write` for the publish
+  # step, since a called workflow cannot widen its own permissions.
+  workflow_call:
+
+concurrency:
+  group: bash-release
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: bash (${{ matrix.arch }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [x86, riscv64, aarch64]
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: false
+          token: ${{ secrets.SUBMODULE_TOKEN || github.token }}
+
+      - uses: ./.github/actions/install-clang
+
+      - name: Rewrite submodule SSH URLs to HTTPS
+        run: |
+          git config --global url."https://github.com/".insteadOf "git@github.com:"
+
+      # `rust` supplies the stage1 `just fetch-stage1` installs and the minix
+      # target the C build links against. Shallow, like the other checkouts.
+      - name: Check out the submodules shallowly
+        run: git submodule update --init --depth 1 rust
+
+      - uses: extractions/setup-just@v4
+
+      # The recipes call `python` by that name.
+      - name: Make python resolve
+        run: sudo ln -sf /usr/bin/python3 /usr/local/bin/python
+
+      - name: Install the prebuilt stage1
+        run: just fetch-stage1 ${{ matrix.arch }}
+
+      - name: Build bash
+        run: just build-bash ${{ matrix.arch }}
+
+      - name: Package
+        id: package
+        run: |
+          set -euo pipefail
+          pin="$(python3 tools/bash_pin.py)"
+          asset="${pin}-${{ matrix.arch }}.tar.xz"
+          binary="target/bash/${{ matrix.arch }}/bash"
+          test -f "${binary}" || { echo "!! no built bash at ${binary}"; exit 1; }
+          tar -cJf "${asset}" -C "target/bash/${{ matrix.arch }}" bash
+          ls -lh "${asset}"
+          echo "asset=${asset}" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: bash-asset-${{ matrix.arch }}
+          path: ${{ steps.package.outputs.asset }}
+          if-no-files-found: error
+
+  # One release, so one job: a matrix job cannot create it without racing the
+  # others. All three arch assets are in hand by the time this runs (`needs`).
+  publish:
+    name: publish
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: false
+
+      - name: Resolve the pin
+        id: pin
+        run: echo "tag=$(python3 tools/bash_pin.py)" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: bash-asset-*
+          merge-multiple: true
+
+      - name: Publish the release
+        env:
+          # `github.token`, not `secrets.GITHUB_TOKEN`: a called workflow is always
+          # handed the caller's token (see toolchain-release.yml).
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag='${{ steps.pin.outputs.tag }}'
+          describe="$(python3 -c 'import sys;sys.path.insert(0,"tools");import bash_pin as p;print(p.BASH_DESCRIBE)')"
+          commit="$(python3 -c 'import sys;sys.path.insert(0,"tools");import bash_pin as p;print(p.BASH_COMMIT)')"
+          shopt -s nullglob
+          assets=(bash-*.tar.xz)
+          test "${#assets[@]}" -eq 3 || {
+            echo "!! expected 3 arch assets, found ${#assets[@]}"; ls -l; exit 1; }
+          sha256sum "${assets[@]}" > SHA256SUMS
+          notes="$(printf '%s\n' \
+            "GNU bash for the commit pinned in \`tools/bash_pin.py\`:" \
+            "" \
+            "- bash \`${describe}\` (\`${commit}\`)" \
+            "- arches: x86_64, riscv64, aarch64 (one asset each)" \
+            "" \
+            "Install one arch with \`just fetch-bash <arch>\`, which derives this tag and" \
+            "verifies \`SHA256SUMS\`. \`just build-bash <arch>\` remains the authoritative" \
+            "path when the pin or the C surface changes.")"
+          # Prereleases, like the stage1 and `image-<sha>` builds: an artifact for a
+          # pin, not a milestone. `edit` repairs a re-run as well as `create`.
+          if gh release view "${tag}" > /dev/null 2>&1; then
+            gh release upload "${tag}" --clobber "${assets[@]}" SHA256SUMS
+            gh release edit "${tag}" --prerelease --notes "${notes}"
+          else
+            gh release create "${tag}" \
+              --prerelease \
+              --title "${tag}" \
+              --notes "${notes}" \
+              "${assets[@]}" SHA256SUMS
+          fi
+          echo "published ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/releases/tag/${tag}"

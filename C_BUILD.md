@@ -239,6 +239,16 @@ publishes, so a released image carries a shell for scripts (a plain `just image`
 stays bash-free). The job is in the release's `needs`, so a C surface that builds
 bash but breaks it blocks a release.
 
+**The shell is built once per pin and fetched after.** `tools/bash_pin.py` names
+the pinned commit and the release tag is derived from it, the stage1 pattern:
+`.github/workflows/bash-release.yml` publishes `bash-<pin>` with one asset per
+arch, and `just fetch-bash <arch>` installs one checksum-verified. CI's `bash` job
+fetches instead of building, so the 289 MiB clone and the 209-object build happen
+only when the pin has no release yet (`bash-pin`/`bash-release`). `just build-bash`
+stays authoritative — it is what a `tools/c-include` or `crates/minix-libc` change
+needs — and the fetched shell is still validated against the current image by the
+scenario, so a stale artifact fails loudly rather than silently.
+
 **Interactive bash now has its own gate.** The `bash -c` scenario cannot reach it
 — it types into the minix shell and waits for its `#` prompt, which bash's
 `bash-5.3#` replaces — so `just test-interactive-bash-<arch>` boots the split

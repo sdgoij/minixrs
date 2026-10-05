@@ -38,14 +38,13 @@ sys.path.insert(0, str(TOOLS))
 from ccarch import ALL, Arch, resolve_argv  # noqa: E402
 from lld import find_lld, host_triple  # noqa: E402
 
-# Pinned: the commit the working build was validated against — "Bash-5.3 patch
-# 15" (`git describe`: bash-5.3-16-gb4608166). bash's git repository ships its
-# generated files (configure, y.tab.c, the builtins), so a checkout needs no
-# autotools; what it does not ship is a stable URL, hence the commit rather than
-# the tag.
-BASH_GIT = "https://git.savannah.gnu.org/git/bash.git"
-BASH_COMMIT = "b460816602167718f78a6233164e8875f49b75b2"
-BASH_DESCRIBE = "Bash-5.3 patch 15"
+# Pinned in `tools/bash_pin.py`, which the fetch (`tools/fetch-bash.py`) and the
+# release workflow read too: the commit the working build was validated against —
+# "Bash-5.3 patch 15" (`git describe`: bash-5.3-16-gb4608166). bash's git
+# repository ships its generated files (configure, y.tab.c, the builtins), so a
+# checkout needs no autotools; what it does not ship is a stable URL, hence the
+# commit rather than the tag.
+from bash_pin import BASH_COMMIT, BASH_DESCRIBE, BASH_GIT  # noqa: E402
 
 # The source is one clone for every target — it is the same tree — while the
 # build tree, the artifact and the logs are per arch: two arches sharing a

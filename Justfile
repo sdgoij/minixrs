@@ -1222,6 +1222,13 @@ build-c-hello arch="x86":
 build-bash arch="x86":
     python tools/build-bash.py {{arch}}
 
+# Install the prebuilt bash for the pinned commit (`tools/bash_pin.py`) instead of
+# building it: the release `.github/workflows/bash-release.yml` publishes, tagged
+# by that commit. `just build-bash` stays authoritative (a C header or libc change
+# needs it); this is the cache CI and dev machines use.
+fetch-bash arch="x86" *args:
+    python tools/fetch-bash.py {{arch}} {{args}}
+
 # Fetch and configure Mesa + libdrm for a target (§6.10 stage 3c-0): pinned sources
 # under `target/`, a meson cross file naming `tools/cc-dso-minix.py`, and
 # `meson setup` for the softpipe branch. Meson and ninja must be on the host's
