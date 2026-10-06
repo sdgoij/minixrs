@@ -75,9 +75,12 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Install meson, ninja and cmake
+      # Mesa's `meson.build` gates on the host python having `packaging` (it falls
+      # back to `distutils`, which Python 3.12 removed) and `mako`; without them
+      # `meson setup` aborts before compiling anything. Both go in with meson here.
+      - name: Install meson, ninja, cmake and Mesa's Python deps
         run: |
-          pip install meson ninja
+          pip install meson ninja packaging mako
           sudo apt-get install -y --no-install-recommends cmake pkg-config
 
       - name: Rewrite submodule SSH URLs to HTTPS
