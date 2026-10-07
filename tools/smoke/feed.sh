@@ -100,6 +100,26 @@ wait_for_after() {
     return 1
 }
 
+# `wait_for_after`, but for a literal the caller must not have read as a regex.
+#
+# `type_step` checks the guest echoed the *whole* command, and a command is not a pattern:
+# bash.tsv's third step is `/bin/bash -c 'x=$((6*7)); echo MATH=$x'`, whose `$`, `(` and `)` are
+# metacharacters, so an ERE built from it matches no echo at all and the step is rejected however
+# many times it arrives. `-F` is the fix, and it keeps the property the end-of-line anchor stood
+# in for: a truncated echo is a *prefix* of the command, so it cannot contain the whole of it.
+wait_for_after_fixed() {
+    pattern=$1
+    from=$2
+    while [ "$waited" -lt "$budget" ]; do
+        if tail -c +$((from + 1)) "$log" 2>/dev/null | grep -qF -- "$pattern"; then
+            return 0
+        fi
+        sleep "$poll"
+        waited=$((waited + 1))
+    done
+    return 1
+}
+
 # Type `$1` a byte at a time, and do not accept it until the guest has echoed the whole of it.
 #
 # Two details this turns on, both measured:
@@ -125,7 +145,7 @@ type_step() {
             sleep "$pace"
         done
         printf '\n'
-        if wait_for_after "${1}[[:space:]]*$" "$anchor"; then
+        if wait_for_after_fixed "$1" "$anchor"; then
             return 0
         fi
         # Something shorter ran. Let the shell come back before the next attempt, or that attempt

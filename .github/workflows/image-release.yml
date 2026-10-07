@@ -62,6 +62,25 @@ name: boot images (called by minixrs)
 
 on:
   workflow_call:
+    inputs:
+      host_tests:
+        type: string
+        required: true
+      arch_tests:
+        type: string
+        required: true
+      wasm_tests:
+        type: string
+        required: true
+      wasm_wire_tests:
+        type: string
+        required: true
+      bash:
+        type: string
+        required: true
+      gltriangle:
+        type: string
+        required: true
 
 concurrency:
   group: image-release
@@ -71,8 +90,48 @@ permissions:
   contents: read
 
 jobs:
+  # The caller's gate results are checked here rather than by `needs` in `ci.yml`,
+  # because `needs` *skips* this whole workflow when a gate is red, and a skipped job is
+  # not revived by "re-run failed jobs": the retry goes green while `release` stays
+  # skipped, so the run reports `success` and publishes nothing. Failing here instead
+  # makes a red gate re-runnable.
+  gate:
+    name: gates
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    env:
+      # `GATE_*`, not the bare names: `bash` exports a `BASH` variable, which would
+      # override an injected `BASH:` and hide a red bash gate.
+      GATE_HOST_TESTS: ${{ inputs.host_tests }}
+      GATE_ARCH_TESTS: ${{ inputs.arch_tests }}
+      GATE_WASM_TESTS: ${{ inputs.wasm_tests }}
+      GATE_WASM_WIRE_TESTS: ${{ inputs.wasm_wire_tests }}
+      GATE_BASH: ${{ inputs.bash }}
+      GATE_GLTRIANGLE: ${{ inputs.gltriangle }}
+    steps:
+      - name: Every gate in the calling run passed
+        run: |
+          set -euo pipefail
+          failed=0
+          while IFS=: read -r name result; do
+            if [ "$result" != success ]; then
+              echo "!! the $name gate is '$result', not 'success' - not publishing" >&2
+              failed=1
+            fi
+          done <<EOF
+          host-tests:$GATE_HOST_TESTS
+          arch-tests:$GATE_ARCH_TESTS
+          wasm-tests:$GATE_WASM_TESTS
+          wasm-wire-tests:$GATE_WASM_WIRE_TESTS
+          bash:$GATE_BASH
+          gltriangle:$GATE_GLTRIANGLE
+          EOF
+          [ "$failed" = 0 ] || exit 1
+          echo "every gate passed"
+
   image:
     name: image (${{ matrix.arch }})
+    needs: gate
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     strategy:

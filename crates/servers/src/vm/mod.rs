@@ -1006,12 +1006,14 @@ fn handle_pagefault_for(ep: i32, addr: u64, error_code: u32) {
     // non-executable file regions (rodata/data) so VFS's kernel-mode copies
     // of the image (vircopy of user buffers) hit present pages.
     if region.flags & region::VR_FILE != 0 {
-        let fault = if vmp.prefault_exec {
+        let prefault = vmp.prefault_exec;
+        let fault = if prefault {
             vmp.prefault_exec = false;
             Fault::for_prefault(ep, cr3, vmp, addr)
         } else {
             Fault::for_page(ep, cr3, addr)
         };
+        crate::vm::vfs_request::probe(b"file", ep, 0, 0, 0, addr, i32::from(prefault));
         // The fault is resolved by whichever page lands last, and not here: the pages VFS has to
         // fill arrive later, and waiting for them in this handler is what finding 58 is about.
         advance_fault(fault);
@@ -1219,6 +1221,7 @@ pub(crate) fn advance_fault(fault: Fault) {
         }
     }
     if fault.resolve {
+        crate::vm::vfs_request::probe(b"clr", fault.ep, 0, 0, 0, fault.fault_page, 0);
         unsafe {
             mem::sys_vmctl(fault.ep, VMCTL_CLEAR_PAGEFAULT, 0);
         }
@@ -1282,6 +1285,7 @@ fn start_file_page(va: u64, fault: &Fault) -> PageOutcome {
         // blocked like the thread whose fill it is — the completion clears the whole group, which
         // is what releases both.
         if crate::vm::vfs_request::page_pending(ep, page_addr) {
+            crate::vm::vfs_request::probe(b"pend", ep, 0, 0, 0, page_addr, 0);
             return PageOutcome::Pending;
         }
         return PageOutcome::Done;
@@ -1359,6 +1363,7 @@ fn start_file_page(va: u64, fault: &Fault) -> PageOutcome {
     // joiner. A read-only page and a MAP_SHARED one both become the object's shared frame, which is
     // exactly what a joiner wants.
     if cacheable && file_off < file_size && crate::vm::vfs_request::park_page(state) {
+        crate::vm::vfs_request::probe(b"park", ep, dev, ino, file_off, page_addr, 0);
         return PageOutcome::Pending;
     }
 
@@ -1415,7 +1420,10 @@ fn start_file_page(va: u64, fault: &Fault) -> PageOutcome {
             page_size as u32,
             job,
         ) {
-            Ok(()) => return PageOutcome::Pending,
+            Ok(()) => {
+                crate::vm::vfs_request::probe(b"fdio", ep, dev, ino, file_off, page_addr, 0);
+                return PageOutcome::Pending;
+            }
             Err(_) => {
                 let _ = crate::vm::vm_unmap_page_in(cr3, page_addr);
                 crate::vm::vm_free_pages(pa, 1);
@@ -1526,6 +1534,15 @@ pub fn finish_file_page(state: PageState, reply: &[u8; 64]) {
     // However that turned out, faults parked on this fill have to move on: with the frame if the
     // page reached the cache, or by taking their own path if it did not.
     crate::vm::vfs_request::release_parked(state.dev, state.ino, state.file_off, landed);
+    crate::vm::vfs_request::probe(
+        b"fin",
+        state.fault.ep,
+        state.dev,
+        state.ino,
+        state.file_off,
+        state.page_addr,
+        result,
+    );
 
     if landed {
         advance_fault(state.fault);

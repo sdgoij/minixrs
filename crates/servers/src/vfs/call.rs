@@ -2972,6 +2972,8 @@ pub fn do_vm_call() -> i32 {
     let fault_va = r_u64(&glob.fs_m_in, VMCALL_FAULTVA_OFF);
     let length = r_u32(&glob.fs_m_in, VMCALL_LENGTH_OFF);
 
+    crate::vm::vfs_request::probe(b"vmcall", ep, req as u32, req_id, offset as u64, 0, 0);
+
     let result = match req {
         VMVFSREQ_FDLOOKUP => {
             // Look up `req_fd` in the referenced process's fd table. For a
@@ -3133,6 +3135,7 @@ pub fn vm_call_reply_device(out: &mut [u8; 64], dev: u32, phys: u64, len: u64) {
 /// handled su's exec'd-image page fault). The result code travels in
 /// VMV_RESULT; the fixed m_type (written at byte 4) is VM_VFS_REPLY.
 fn vm_call_reply(ep: i32, result: i32, req_id: u32) -> i32 {
+    crate::vm::vfs_request::probe(b"vmrep", ep, result as u32, req_id, 0, 0, 0);
     unsafe {
         let glob_mut = &mut *vfs_global();
         glob_mut.fs_m_out[VMV_ENDPOINT_OFF..][..4].copy_from_slice(&ep.to_le_bytes());

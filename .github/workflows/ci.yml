@@ -719,9 +719,24 @@ jobs:
   release:
     name: release
     needs: [host-tests, arch-tests, wasm-tests, wasm-wire-tests, bash, gltriangle]
-    if: github.event_name == 'workflow_dispatch' || github.ref == 'refs/heads/main' || github.ref_type == 'tag'
+    # `always()`, not the implicit `success()`. With `success()`, one red gate (a flake)
+    # *skips* this job, and a skipped job is not revived by "re-run failed jobs": the
+    # retry goes green while `release` stays skipped, so the run reports `success` and
+    # nothing is published. Running regardless and checking the gate results inside the
+    # called workflow makes a red gate a *failure* here instead, which a re-run does
+    # revive.
+    if: >-
+      always() &&
+      (github.event_name == 'workflow_dispatch' || github.ref == 'refs/heads/main' || github.ref_type == 'tag')
     # The called workflow writes a release, so the caller has to allow that much.
     permissions:
       contents: write
     uses: ./.github/workflows/image-release.yml
+    with:
+      host_tests: ${{ needs.host-tests.result }}
+      arch_tests: ${{ needs.arch-tests.result }}
+      wasm_tests: ${{ needs.wasm-tests.result }}
+      wasm_wire_tests: ${{ needs.wasm-wire-tests.result }}
+      bash: ${{ needs.bash.result }}
+      gltriangle: ${{ needs.gltriangle.result }}
     secrets: inherit

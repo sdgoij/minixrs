@@ -12,7 +12,14 @@ pub const SUPER_MAGIC_V3: u16 = 0x4D5A;
 pub const BLOCK_SIZE: usize = 4096;
 pub const ZONE_SIZE: usize = 4096;
 const LOG_ZONE_SIZE: i16 = 0;
-pub const INODES: u32 = 128;
+/// Inodes in every image this writer builds. The fixed layout takes ~33 (the directory
+/// set, `BOOT_FILES`, the `DEVICES` nodes, the `/link` symlink and the `/lib`//`/libexec`
+/// pair), so the release payload — coreutils, bash and the seven Mesa DSOs — needs 131
+/// of them. At 128 the overflow set bits past the end of the bitmap silently and only
+/// showed up in the guest, as `err=28` on the smoke scenario's `> smoke.txt`. 256 keeps
+/// headroom for this payload and the next. `MINIXFS_BLOCKS` cannot help here: the table
+/// is sized in inodes, not zones, which is why doubling the image changed nothing.
+pub const INODES: u32 = 256;
 pub const NAMESIZE: usize = 60;
 
 /// Default root-image size in blocks (16 MiB): the uutils coreutils
@@ -622,12 +629,69 @@ pub fn build_minixfs(files: &[(&'static str, Vec<u8>)]) -> Vec<u8> {
     // image does. Created last, so every inode the layout tests pin keeps its number.
     fs.add_symlink(root_zone, "link", b"/sys/devices/virtio-gpu");
 
+    // `alloc_inode` only fails once the *bitmap block* (32768 bits) fills, so a payload that
+    // outgrows `INODES` is written with the overflow bits set and fails in the guest as
+    // `err=28` on the first `> file`, with nothing in the build saying why. Refuse such an
+    // image and name the resource that ran out.
+    let free_inodes = fs.inodes.saturating_sub(fs.next_inode - 1);
+    let free_zones = fs.total_blocks.saturating_sub(fs.next_zone);
+    assert!(
+        free_inodes > 0 && free_zones > 0,
+        "minixfs: no room left for the guest to create a file - {free_inodes} free inodes, \
+         {free_zones} free zones. Raise INODES for the inode table, or MINIXFS_BLOCKS for the zones."
+    );
+
     fs.finalise()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `n` tiny files under `/bin` — the shape a payload takes as far as inode accounting
+    /// goes, where the parent directory and the count are what set it.
+    fn named_files(n: usize) -> Vec<(&'static str, Vec<u8>)> {
+        (0..n)
+            .map(|i| {
+                let dest: &'static str = Box::leak(format!("/bin/f{i:03}").into_boxed_str());
+                (dest, vec![b'x'])
+            })
+            .collect()
+    }
+
+    fn used_inodes(image: &[u8]) -> u32 {
+        let imap_blocks =
+            i16::from_le_bytes(image[1024 + 8..1024 + 10].try_into().unwrap()) as usize;
+        image[2 * BLOCK_SIZE..(2 + imap_blocks) * BLOCK_SIZE]
+            .iter()
+            .map(|b| b.count_ones())
+            .sum()
+    }
+
+    /// The release payload must leave an inode free, because the boot smoke creates a file
+    /// (`> smoke.txt`): a full table turns that into `err=28`. Red at `INODES = 128` (131 in
+    /// use), green at 256.
+    #[test]
+    fn a_release_payload_leaves_an_inode_for_the_guest_to_create_a_file() {
+        let files = named_files(98);
+        let image = build_minixfs(&files);
+        let ninodes = u32::from_le_bytes(image[1024..1028].try_into().unwrap());
+        let used = used_inodes(&image);
+        assert!(
+            ninodes > used,
+            "no free inode: {ninodes} in the table, {used} in use - the guest's first create \
+             would fail with ENOSPC"
+        );
+    }
+
+    /// A payload larger than the table is refused at build time rather than written with
+    /// overflow bits set beyond the bitmap.
+    #[test]
+    #[should_panic(expected = "no room left for the guest to create a file")]
+    fn a_payload_bigger_than_the_inode_table_is_refused() {
+        let files = named_files(INODES as usize + 8);
+        let _ = build_minixfs(&files);
+    }
 
     #[test]
     fn superblock_magic_and_size() {
