@@ -1,4 +1,4 @@
-//! `/bin/drmmap` — a render node's memory object, mapped into a client (`WAYLAND.md` §6.10,
+//! `/bin/drmmap` — a render node's memory object, mapped into a client (`.notes/wayland.md` §6.10,
 //! stage 3b-3).
 //!
 //! What this is here to prove is *aliasing*, and that is not something one mapping can say:

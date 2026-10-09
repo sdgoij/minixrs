@@ -332,7 +332,7 @@ unsafe fn msg_set_i64(msg: &mut [u8; 64], off: usize, val: i64) {
 /// Format a string into the static buffer (stub — no formatting).
 ///
 /// Real implementation would use a proper formatter.
-/// See PORTING_PLAN.md Phase 12.6 follow-up.
+/// See .notes/porting_plan.md Phase 12.6 follow-up.
 unsafe fn buf_append_str(s: &str) {
     let _ = s;
 }

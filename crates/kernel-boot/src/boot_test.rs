@@ -15,7 +15,7 @@ use arch_common::com::{
 /// `--defsym=BASE_ADDRESS` (`rust/compiler/rustc_target/src/spec/base/minix.rs`),
 /// which is also the `PROVIDE`d default in `tools/minix-user.ld`. It is per-arch
 /// and x86's is 64 MiB because its kernel image occupies 2..34 MiB — the user
-/// window is a band above the image (`PHYSMAP.md` P4).
+/// window is a band above the image (`.notes/physmap.md` P4).
 #[cfg(target_arch = "x86_64")]
 const USER_IMAGE_BASE: u64 = 0x0400_0000;
 #[cfg(not(target_arch = "x86_64"))]
@@ -128,7 +128,7 @@ pub unsafe fn run_boot_tests() {
     // M: Every boot process has a walkable page table
     failures += test_boot_procs_page_tables();
 
-    // M1: The user window and the kernel's VAs overlap in neither direction (`PHYSMAP.md` P4).
+    // M1: The user window and the kernel's VAs overlap in neither direction (`.notes/physmap.md` P4).
     // All three arches hold it now: AArch64's and RISC-V's windows are the low 1 GiB, and x86's is
     // a band above its shrunk identity map.
     #[cfg(any(target_arch = "aarch64", target_arch = "riscv64", target_arch = "x86_64"))]
@@ -522,7 +522,7 @@ fn test_vm_check_range() -> u32 {
                 // Read from the kernel image, which every process's table maps at its link
                 // address — the point is that the kernel is still reachable after the switch.
                 // This used to read `saved` (the CR3) as a pointer, which only worked while
-                // the identity map covered a frame's physical address (`PHYSMAP.md` P4).
+                // the identity map covered a frame's physical address (`.notes/physmap.md` P4).
                 let _k = core::ptr::read_volatile(kernel::hal::kern_vaddr() as *const u8);
                 kernel::hal::write_cr3(saved);
             }
@@ -580,7 +580,7 @@ fn test_allocator() -> u32 {
 /// allocations would land inside the running stack and the loader's own writes
 /// would clobber its frame — which is exactly what a kernel image grown by a few
 /// KiB did to this arch, silently, as an endless loop in `load_and_prepare_proc`
-/// (`PORTING_PLAN.md` finding 19).
+/// (`.notes/porting_plan.md` finding 19).
 ///
 /// Two notes on what this can and cannot stage. It checks the allocator's *base*,
 /// not a fresh allocation: by the time this suite runs the boot loader has taken
@@ -825,7 +825,7 @@ unsafe fn test_physmap() -> u32 {
 }
 
 /// Every boot process's address space must reach the physmap: the kernel reaches page tables
-/// through it and runs on whichever of these tables is current (`PHYSMAP.md` D2/D4).
+/// through it and runs on whichever of these tables is current (`.notes/physmap.md` D2/D4).
 ///
 /// The walk is the part that can fail cleanly, so it runs first for every process; the read from
 /// the process's own CR3 is the actual proof, and it runs only once all the walks have passed, so
@@ -866,7 +866,7 @@ unsafe fn test_physmap_everywhere() -> u32 {
         // The proof: one frame, written through the kernel's physmap and read back through every
         // boot process's tables, has to be the same memory. The write cannot be the identity view of
         // `pa` any more — a frame's physical address is not a VA the kernel may use once the
-        // per-process identity map stops at the low window (`PHYSMAP.md` P4), and this runs on the
+        // per-process identity map stops at the low window (`.notes/physmap.md` P4), and this runs on the
         // calling process's tables.
         const PATTERN: u64 = 0x5048_5953_4D41_5001;
         core::ptr::write_volatile(va as *mut u64, PATTERN);
@@ -1398,7 +1398,7 @@ fn test_boot_procs_page_tables() -> u32 {
     }
 }
 
-/// The user window and the kernel's VAs overlap in neither direction (`PHYSMAP.md` P4).
+/// The user window and the kernel's VAs overlap in neither direction (`.notes/physmap.md` P4).
 ///
 /// A kernel mapping over the user window is what `KNOWN_ISSUES.md` item 38 measured: ring 0 reaches
 /// a frame at a VA the process also owns, so a frame the allocator hands out inside that window *is*
@@ -1575,7 +1575,7 @@ fn test_map_page_walk_roundtrip() -> u32 {
         };
         // Through the physmap: `root` is a frame, and a frame's physical address is not a VA
         // the kernel may use — the per-process identity map stops at the low window now
-        // (`PHYSMAP.md` P4), and this test runs on the calling process's tables.
+        // (`.notes/physmap.md` P4), and this test runs on the calling process's tables.
         core::ptr::write_bytes(kernel::pagetable::frame_ptr(root), 0, 4096);
 
         // 2. Allocate a page to map.

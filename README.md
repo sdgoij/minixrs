@@ -106,10 +106,10 @@ Images come in two forms: a self-contained ELF (kernel, initramfs and root files
 embedded), and a split pair — a boot image plus a root filesystem on a virtio disk. The
 split is what carries the optional larger pieces: GNU bash, and the Mesa/libdrm GL stack,
 which draws a GLES2 triangle through surfaceless EGL on all three hardware arches
-(`just test-gltriangle-<arch>`; [WAYLAND.md](WAYLAND.md)).
+(`just test-gltriangle-<arch>`; [.notes/wayland.md](.notes/wayland.md)).
 
 See `.agents/skills/` for domain-specific documentation and
-[PORTING_PLAN.md](PORTING_PLAN.md) for the task tracker.
+[.notes/porting_plan.md](.notes/porting_plan.md) for the task tracker.
 
 > **⚠️ Research project — not production-ready.**  
 > If you're looking for a production operating system, use Linux, a BSD, or [Redox](https://www.redox-os.org/) instead.
@@ -118,11 +118,11 @@ See `.agents/skills/` for domain-specific documentation and
 
 The project is now a real toolchain target. The most recent work:
 
-- **The C graphics stack runs** — libdrm and Mesa (its GLSL compiler included) build as minix **shared objects** against the port's C library and load under its own dynamic loader; a surfaceless-EGL client draws a GLES2 triangle on `softpipe`, reads it back and checks it, on all three hardware arches (`just test-gltriangle-<arch>`: EGL 1.5 / GLES 3.1). The loader grew to meet it — a general-dynamic thread-local's offset word, and a cross-object `TLSDESC` descriptor on aarch64 — and it is the forcing function the C++ toolchain and `dlopen` needed; see [WAYLAND.md](WAYLAND.md).
+- **The C graphics stack runs** — libdrm and Mesa (its GLSL compiler included) build as minix **shared objects** against the port's C library and load under its own dynamic loader; a surfaceless-EGL client draws a GLES2 triangle on `softpipe`, reads it back and checks it, on all three hardware arches (`just test-gltriangle-<arch>`: EGL 1.5 / GLES 3.1). The loader grew to meet it — a general-dynamic thread-local's offset word, and a cross-object `TLSDESC` descriptor on aarch64 — and it is the forcing function the C++ toolchain and `dlopen` needed; see [.notes/wayland.md](.notes/wayland.md).
 - **Bash and Mesa as releases per pin** — GNU bash is built at a pinned upstream commit, and both it and the Mesa/libdrm DSOs are published as releases keyed on the pin *and* the toolchain, so `just fetch-bash <arch>` and `just fetch-mesa <arch>` install them in seconds and CI rebuilds only when a pin moves. The stage1 toolchain already worked this way (`just fetch-stage1`); `just build-bash`/`just build-mesa` stay the authoritative builds.
 - **A split image** — the boot image (kernel + initramfs) and the root filesystem are separate release artifacts, so the root can outgrow the 16 MiB embedded window and carry GNU bash and the ~36 MiB GL stack; the self-contained ELF is still built and booted too.
 - **Interactive bash** — readline works at the console: it sets the terminal raw and *polls* before it reads, which the tty server never woke because its `select` did not pump the kernel serial ring. `just test-interactive-bash-<arch>` types a line at `bash-5.3#` and checks it ran.
-- **A physical-memory map a user window cannot shadow** — kernel mappings of physical frames are asserted against the user address space at compile time, and a checker refuses to treat a physical address as a pointer (the bug that read a large server's own image instead of the frame); see [PHYSMAP.md](PHYSMAP.md).
+- **A physical-memory map a user window cannot shadow** — kernel mappings of physical frames are asserted against the user address space at compile time, and a checker refuses to treat a physical address as a pointer (the bug that read a large server's own image instead of the frame); see [.notes/physmap.md](.notes/physmap.md).
 - **The whole system in a browser tab** — a **wasm32** target where each process is a WebAssembly instance and the host *is* the devices (console, clock, disk, display, keyboard, pointer, the network). The kernel, the servers and the userland are the ones the arches run: the shell forks, execs from the image, writes a file to the disk and reads it back, and `ping 10.0.2.2` reaches a peer over the host's link. [Try it](https://sdgoij.github.io/minixrs/).
 - **1:1 kernel threads** — every thread is a schedulable Proc slot: `thread_create`/`exit`/`join`/`yield`, wake-one IPC delivery, group sweep on exit/exec/fork, per-thread TLS. MINIX proper had no native threads; this port does.
 - **A working `std` port** — the forked rustc's std PAL for minix (`sys/pal/minix`) runs on the OS: `/bin/hello` is a std-linked binary that spawns threads with TLS and exits cleanly.
@@ -131,7 +131,7 @@ The project is now a real toolchain target. The most recent work:
 - **A heap that actually grows** — userland heap growth routed through VM's brk (demand-mapped, freed on exit); the COW refcount bug that killed repeated `hello` runs is fixed.
 - **Honest memory reporting** — the boot banner prints detected vs usable RAM (a 4 GiB guest says `4095 MiB detected (4078 MiB usable)`, not the old "5120 MiB" artifact).
 - **uutils/coreutils runs on the OS** — the multicall binary (60 applets) boots, allocates and writes output a second tool reads back; it is embedded on x86_64 and riscv64, gated by `just test-coreutils-wedge`. The coreutils submodule tracks the port (see [coreutils](#coreutils) below).
-- **GNU bash runs** — built by the fork's stage1 (a POSIX host, see `C_BUILD.md`), injected as `/bin/bash` and booted: it prints its banner, runs `-c`, loops, arithmetic and redirects, and gets its own `$PWD`. Getting there filled the C surface it needed (`termios`/`ioctl`, `mknod`, `inet_*`, `scanf`, an environment that survives `exec`) plus two gaps it found in the shell and the libc: a shell that did not remove quotes, and a `getcwd` that returned `ENOSYS`.
+- **GNU bash runs** — built by the fork's stage1 (a POSIX host, see `.notes/c_build.md`), injected as `/bin/bash` and booted: it prints its banner, runs `-c`, loops, arithmetic and redirects, and gets its own `$PWD`. Getting there filled the C surface it needed (`termios`/`ioctl`, `mknod`, `inet_*`, `scanf`, an environment that survives `exec`) plus two gaps it found in the shell and the libc: a shell that did not remove quotes, and a `getcwd` that returned `ENOSYS`.
 - **A `ls` that behaves like one** — sorted, and laid out in columns that fit the terminal (80 columns when the tty cannot say, which a serial console cannot), one name per line when the output is a file or a pipe. A wider directory listing is what found an MFS `getdents` bug: at end-of-directory it returned `OK` with a stale reply payload, so a reader asking until it got 0 was handed the same entries for ever.
 - **Dynamic linking** — a Rust loader (`crates/ldso`, installed as `/libexec/ld.so`) that VFS's exec enters as a program's `PT_INTERP`, and every image now carries it together with the port's C library as a shared object (`/lib/libc.so`) and a C program linked against it (`/bin/dynclib`). The loader maps each `DT_NEEDED` at a deterministic base, binds eagerly, follows the dependency graph transitively, applies every object's relocations and runs its initialisers in order, maps one file once (by inode, not by the name it was asked for), and gives a dynamically linked program thread-local storage. A program can also `dlopen` one at run time — which is what a driver lookup needs — and linking dynamically stays opt-in as MINIX's is: the default is still static, and a program of your own is `just cdyn`, which links against the `/lib/libc.so` every image already carries; see [below](#dynamic-linking).
 
@@ -212,9 +212,9 @@ names `MSYS2_ENV_CONV_EXCL`, without which MSYS rewrites the `/bin/...` value on
 native tool and the build refuses it). Every image already carries what the program needs, so
 nothing is added to the image but the program itself.
 
-- [DYNAMIC_LINKING.md](DYNAMIC_LINKING.md) — the design decisions, the phased plan (0–8), the
+- [.notes/dynamic_linking.md](.notes/dynamic_linking.md) — the design decisions, the phased plan (0–8), the
   measurements and the traps; it builds on the file-backed exec path in
-  [FILEMMAP.md](FILEMMAP.md).
+  [.notes/filemmap.md](.notes/filemmap.md).
 - `just test-dynlink-x86` (also `riscv64`, `aarch64`) — boots an image and drives
   `tools/smoke/dyn.tsv`: the loader's bases, relocations, transitive load, cross-object
   resolution and initialiser order, before and after a `fork` and a re-`exec`, then the shipped
@@ -282,7 +282,7 @@ On wasm32 the mapping is unusual enough to be worth stating: a *process* is a We
 and an address space is its linear memory, so the "architecture" is the host. Every hardware
 boundary the other three arches implement in assembly or device registers — context switching,
 interrupts, paging, port I/O, PCI — becomes a host import or a dispatch decision, which is what
-`ARCH_WASM32.md` is about. The kernel, the servers and the system calls above that boundary are the
+`.notes/arch_wasm32.md` is about. The kernel, the servers and the system calls above that boundary are the
 same code on all four.
 
 See `.agents/skills/` for domain deep-dives:

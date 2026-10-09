@@ -139,7 +139,7 @@ pub unsafe fn verify_grant(
                 // C compares `cp_who_to` against `ANY`, which this port does not
                 // have: `mini_receive` normalizes the wire sentinel
                 // `0x0000ffff` into `NONE`, so `GRANTEE_ANY` carries that value
-                // with the meaning the grant needs. `PORTING_PLAN.md` finding 18
+                // with the meaning the grant needs. `.notes/porting_plan.md` finding 18
                 // records the divergence from C, where `ANY` and `NONE` are
                 // distinct.
                 let indirect = g.cp_u.cp_indirect;

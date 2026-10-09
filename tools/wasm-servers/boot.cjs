@@ -1051,7 +1051,7 @@ note(
 // The linker places a module's static image and `arch_wasm32::hal` fixes the
 // user-VA windows independently, so a change that grows the image can push it
 // into a window an allocator owns, where a static is overwritten at run time
-// (`ARCH_WASM32.md` §5.4). `asyncify_scratch_ptr()` is the linker's `__heap_base`,
+// (`.notes/arch_wasm32.md` §5.4). `asyncify_scratch_ptr()` is the linker's `__heap_base`,
 // the end of the whole static image; if it reaches the first window, the two have
 // met and the boot is not trustworthy even when it looks green.
 check(
@@ -1380,7 +1380,7 @@ check(
 // The probe is gone, and this is what says so. `mount_root` prefers the `virtio_blk`
 // driver and asks it whether it has a device; with that instance absent the probe
 // blocked on a peer that would never answer, MFS sat inside it and the RAM disk was
-// never asked for a block (`PORTING_PLAN.md` finding 25). A `SEND` in the RAM disk's
+// never asked for a block (`.notes/porting_plan.md` finding 25). A `SEND` in the RAM disk's
 // trace can only happen after it received a BDEV request and answered, so this pins
 // the whole chain in one fact: VFS mounted, MFS read, the RAM disk served.
 check(

@@ -1,6 +1,6 @@
 //! The kernel's HAL surface, implemented with host primitives.
 //!
-//! Grouped the way `ARCH_WASM32.md` §8 groups the x86_64 port, so the two can be
+//! Grouped the way `.notes/arch_wasm32.md` §8 groups the x86_64 port, so the two can be
 //! read side by side. Where a function is inert, the doc comment says why rather
 //! than leaving it to the reader.
 //!
@@ -659,7 +659,7 @@ pub const KERNBASE: u64 = 0xFFFF_8000_0000_0000;
 pub const MAX_USER_ADDRESS: u64 = 0x0000_8000_0000_0000;
 
 /// The simulator has one address space and no MMU, so a "physical" address is already a valid
-/// pointer and there is no window to distinguish. `PHYSMAP.md`'s physmap exists to separate the
+/// pointer and there is no window to distinguish. `.notes/physmap.md`'s physmap exists to separate the
 /// two; here the identity is the correct answer rather than a missing feature. Host tests that
 /// fabricate page tables build them at host addresses and pass them through [`virt_to_phys`],
 /// which is why the identity keeps those fixtures working under either HAL.

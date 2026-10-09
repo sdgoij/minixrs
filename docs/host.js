@@ -33,7 +33,7 @@
 // The second is not hypothetical. The shell's `read_line` retries `read(0)` in user mode when
 // there is nothing to read, and on this port the tty's own `do_read` does the same, so an idle
 // console is a *spin*: it never blocks and never returns to the host's loop. That is
-// `PORTING_PLAN.md` finding 32, still open. `pump()` therefore ends a slice after `maxSyscalls`,
+// `.notes/porting_plan.md` finding 32, still open. `pump()` therefore ends a slice after `maxSyscalls`,
 // unwinding the instance through Asyncify exactly as a blocked syscall does, and the front end
 // decides when to resume it. `sliceWasSpinOnly()` answers whether the slice did nothing but retry
 // the console read, which is the observable form of "the guest is waiting for you" and what lets
@@ -130,7 +130,7 @@ export const SYSTEM_SPECS = [
 /// An error *return* is something the guest decides what to do with, and a guest in a retry loop
 /// may simply retry, so a budget that only returns an errno can be ignored. Throwing unwinds out
 /// of the guest's dispatch to the loop that owns it, which can then stop and say who was
-/// spinning. That is `PORTING_PLAN.md` finding 12.
+/// spinning. That is `.notes/porting_plan.md` finding 12.
 class BudgetExhausted extends Error {}
 
 const utf8Encoder = new TextEncoder();
@@ -791,7 +791,7 @@ export function createHost({
         // All six argument registers are named and forwarded, not only the two the
         // message-passing syscalls use: the kernel's dispatcher hands `args` straight to the
         // handler, and a syscall whose count arrives as a literal zero is a transfer that reports
-        // success and moves nothing (`PORTING_PLAN.md` finding 29).
+        // success and moves nothing (`.notes/porting_plan.md` finding 29).
         minix_syscall: (nrRaw, a0, a1, a2, a3, a4, a5) => {
           const nr = Number(nrRaw);
           const dst = Number(a0);
@@ -874,7 +874,7 @@ export function createHost({
           // otherwise spend the rest of the slice spinning on the CPU that process is waiting for.
           // That is what a pointer drag over the desktop did — eight rounds of the input/desktop
           // handshake, one per slice, each slice filled with the tty's console-read retry
-          // (`PORTING_PLAN.md` finding 62).
+          // (`.notes/porting_plan.md` finding 62).
           //
           // Unconditional rather than gated on "is somebody else runnable": a yield means the
           // caller is done with the CPU, and asking the scheduler first would put the decision in

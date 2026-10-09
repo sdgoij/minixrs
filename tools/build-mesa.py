@@ -217,11 +217,11 @@ def wsl_path(path: pathlib.Path) -> str:
 
 def run_in_wsl(argv: list[str]) -> int:
     """Re-enter this script in WSL: the build needs a POSIX host (see
-    `tools/build-bash.py` and `C_BUILD.md`)."""
+    `tools/build-bash.py` and `.notes/c_build.md`)."""
     wsl = shutil.which("wsl")
     if wsl is None:
         die("this host is Windows and has no `wsl` to build in; Mesa's build needs a "
-            "POSIX host (see C_BUILD.md)")
+            "POSIX host (see .notes/c_build.md)")
     distro = os.environ.get("MINIX_WSL_DISTRO", "FedoraLinux-44")
     inner = (f"cd {shlex.quote(wsl_path(ROOT))} && "
              f"python3 tools/build-mesa.py {shlex.join(argv)}").strip()

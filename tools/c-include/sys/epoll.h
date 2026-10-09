@@ -31,7 +31,7 @@ struct epoll_event {
 #define EPOLLHUP 0x010
 #define EPOLLNVAL 0x020
 #define EPOLLRDHUP 0x2000
-/* Accepted, but served level-triggered (see minixrs WAYLAND.md). */
+/* Accepted, but served level-triggered (see minixrs .notes/wayland.md). */
 #define EPOLLET (1u << 31)
 #define EPOLLONESHOT (1u << 30)
 

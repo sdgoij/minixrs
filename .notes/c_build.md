@@ -1,4 +1,4 @@
-# C_BUILD.md — building third-party C for minix, and the one host it needs
+# c_build.md — building third-party C for minix, and the one host it needs
 
 ## What holds today: any host builds minix
 

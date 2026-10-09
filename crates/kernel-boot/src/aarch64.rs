@@ -516,7 +516,7 @@ pub unsafe extern "C" fn kmain(arg_dtb: u64) -> ! {
                 core::sync::atomic::Ordering::Relaxed,
             );
             // Before the next line of output: the MMU is on, so everything from here that reaches a
-            // frame or a device register needs the window (`PHYSMAP.md` P4).
+            // frame or a device register needs the window (`.notes/physmap.md` P4).
             kernel_boot::boot_init::install_physmap_in_boot_tables();
         }
         serial_write("  MMU enabled\r\n");
@@ -556,7 +556,7 @@ pub unsafe extern "C" fn kmain(arg_dtb: u64) -> ! {
                 core::sync::atomic::Ordering::Relaxed,
             );
             // Before the next line of output: the MMU is on, so everything from here that reaches a
-            // frame or a device register needs the window (`PHYSMAP.md` P4).
+            // frame or a device register needs the window (`.notes/physmap.md` P4).
             kernel_boot::boot_init::install_physmap_in_boot_tables();
         }
         serial_write("  MMU enabled\r\n");
@@ -728,7 +728,7 @@ unsafe fn enable_mmu() {
     //
     // PUD[0] (0..1 GiB) is deliberately left unmapped. That range *is* the AArch64 user window
     // (`MAX_USER_ADDRESS` is the RAM base), so a kernel identity block over it is exactly the
-    // overlap `PHYSMAP.md` P4 removes. It was needed only because `kernel-boot`'s own
+    // overlap `.notes/physmap.md` P4 removes. It was needed only because `kernel-boot`'s own
     // `serial_write`/`serial_putc` wrote the PL011 at its physical address (0x0900_0000 /
     // 0x0900_0018) on every print, so the first message after the MMU came on took a translation
     // fault at 0x0900_0018 once the block went — a `-d int` trace names it (ESR 0x96000005). Those
@@ -773,7 +773,7 @@ unsafe fn enable_mmu() {
 #[cfg(not(feature = "integration-tests"))]
 unsafe fn enable_gic() {
     // Through the physmap. The GIC is below the RAM base, and the low 1 GiB is not identity-mapped
-    // in the boot tables any more — that range *is* the AArch64 user window (`PHYSMAP.md` P4). This
+    // in the boot tables any more — that range *is* the AArch64 user window (`.notes/physmap.md` P4). This
     // runs after `install_physmap_in_boot_tables`, so the window is there.
     let gicd_base = kernel::hal::phys_to_virt(0x0800_0000) as *mut u32;
     let gicc_base = kernel::hal::phys_to_virt(0x0801_0000) as *mut u32;

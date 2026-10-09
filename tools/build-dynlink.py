@@ -22,7 +22,7 @@ file rather than about the spelling.
 `libdyn3` is the third: named by the executable only, depending on nothing, so
 that what the program's three objects exhaust is the *address space* rather than
 the symbol tables — the region budget a dynamically linked program has
-(`tools/libdyn3.c`, `DYNAMIC_LINKING.md` §7 Phase 2).
+(`tools/libdyn3.c`, `.notes/dynamic_linking.md` §7 Phase 2).
 
 The `dlopen` pair is what Phase 6 adds: `libdlopen.so` and `libtls1.so` are named by
 *nothing* at link time, and `dynopen` asks the loader for them at run time — one loads

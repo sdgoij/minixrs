@@ -1109,7 +1109,7 @@ pub unsafe fn exec_elf_for_target(
         // Allocate physical pages for the stack and write the exec frame into them through the
         // physmap. This used to switch to `boot_cr3` and write at the physical address, reaching the
         // frames through the boot identity map; the physmap is in this process's own tables too, and
-        // it is the map that survives the identity shrink (`PHYSMAP.md` D3/P4).
+        // it is the map that survives the identity shrink (`.notes/physmap.md` D3/P4).
         // Writing at the user-stack VA instead would land beyond RAM below 256 MiB on x86
         // (0x0FE00000), 2.3 GiB on RISC-V and 252 MiB on AArch64, so the frame is built at the
         // allocated frames and the RSP plus the argv/envp string pointers are converted to the user VA.
@@ -1250,7 +1250,7 @@ const EXEC_ARGV_MAX: usize = 64;
 const EXEC_ARGV_BLOB_MAX: usize = 512;
 
 /// Install a new image into `rp` by asking the host to instantiate a module — exec on this port
-/// (§7.2 of `ARCH_WASM32.md`).
+/// (§7.2 of `.notes/arch_wasm32.md`).
 ///
 /// There is no address space to build and no entry point to program: the image *is* the bytes the
 /// caller read off the disk, the host owns instantiating them, and the instance the process was

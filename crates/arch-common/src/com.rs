@@ -242,7 +242,7 @@ pub const RAMDISK_IMAGE_VA: u64 = 0x100000000;
 /// linear memory holds the process and nothing else, so there is no high half to
 /// put a device window in. It has to be clear of the process's own VA range *and*
 /// of the module's static image, which the linker grows upward from 1 MiB
-/// (`ARCH_WASM32.md` §5.4) — hence 48 MiB, above the stack top (46 MiB) and with
+/// (`.notes/arch_wasm32.md` §5.4) — hence 48 MiB, above the stack top (46 MiB) and with
 /// room under it for the image to grow. Only the RAM disk server reads here, which
 /// is what makes one flat 16 MiB image safe.
 #[cfg(target_arch = "wasm32")]

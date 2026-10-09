@@ -78,7 +78,7 @@ pub fn serial_write(s: &str) {
     {
         // Through the arch's byte writer, which reaches the PL011 at its physical address while the
         // MMU is off and through the physmap once it is on. Writing 0x0900_0000 here directly only
-        // works while the identity map covers it, and that is the map `PHYSMAP.md` P4 shrinks — so
+        // works while the identity map covers it, and that is the map `.notes/physmap.md` P4 shrinks — so
         // every boot message after the MMU comes on depended on a block the shrink removes.
         for &b in s.as_bytes() {
             arch_aarch64::hal::serial_write_byte(b);

@@ -204,7 +204,7 @@ pub const MAX_BO_HANDLES: usize = 32;
 pub const VIRTGPU_WAIT_NOWAIT: u32 = 1;
 
 /// `VIRTGPU_EXECBUF_FENCE_FD_IN` / `_OUT` — the submit carries an input fence to wait on, or asks
-/// for an output fence fd. This node has no fence objects (`WAYLAND.md` §6.10 D4), so a request
+/// for an output fence fd. This node has no fence objects (`.notes/wayland.md` §6.10 D4), so a request
 /// that sets either is refused rather than run without the synchronisation it asked for.
 pub const VIRTGPU_EXECBUF_FENCE_FD_IN: u32 = 0x01;
 /// See [`VIRTGPU_EXECBUF_FENCE_FD_IN`].

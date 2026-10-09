@@ -7,7 +7,7 @@
 # instance's — `--stack-first` puts the 1 MiB stack at the bottom, and the port's user-VA
 # windows start at 32 MiB (`arch_wasm32::hal`), above the static image, which the linker
 # grows upward from 1 MiB and which `boot.cjs` checks still ends below the first window
-# (`ARCH_WASM32.md` §5.4). That region is also why the module's argv area is a reserved
+# (`.notes/arch_wasm32.md` §5.4). That region is also why the module's argv area is a reserved
 # static rather than an address picked by hand.
 #
 # `wasm32-minix` is one of the fork's own targets

@@ -26,7 +26,7 @@ pub fn serial_write_byte(byte: u8) {
 /// Read a byte from the 16550 UART (blocking).
 ///
 /// The register address comes from [`crate::uart::uart_base`], which is raw before paging is on and
-/// through the physmap after, so this works at either point (`PHYSMAP.md` P4).
+/// through the physmap after, so this works at either point (`.notes/physmap.md` P4).
 pub fn serial_read_byte() -> u8 {
     let base = crate::uart::uart_base() as *const u8;
     unsafe {
@@ -642,7 +642,7 @@ pub const fn kern_vaddr() -> u64 {
 
 /// User stack base virtual address, just below the RAM start so the stack gets
 /// maximum space below it while staying inside the low 1 GiB — the user window
-/// the kernel's identity map does not cover (`PHYSMAP.md` P4).
+/// the kernel's identity map does not cover (`.notes/physmap.md` P4).
 pub const fn user_stack_base() -> u64 {
     0x3FC0_0000u64
 }
@@ -715,7 +715,7 @@ pub const MAP_NX: u64 = 0; // RISC-V: NX is absence of X bit
 /// heap, mmap and stack — to the low 1 GiB. The kernel's identity map starts at
 /// the RAM base (`0x8000_0000`), so a ceiling below it is what makes a fault at a
 /// kernel-range VA fatal instead of something the user-fault gate tries to
-/// resolve (`PHYSMAP.md` P4). The highest thing that must fit is the loader at
+/// resolve (`.notes/physmap.md` P4). The highest thing that must fit is the loader at
 /// `0x0400_0000`, and the stack sits just below the ceiling at `0x3FC0_0000`.
 ///
 /// The previous value was SV39's own user limit (`0x40_0000_0000`); that is the
@@ -723,7 +723,7 @@ pub const MAP_NX: u64 = 0; // RISC-V: NX is absence of X bit
 pub const MAX_USER_ADDRESS: u64 = 0x4000_0000;
 
 /// Base of the kernel's physmap: the window through which a *physical*
-/// address is reached as a pointer (`PHYSMAP.md`).
+/// address is reached as a pointer (`.notes/physmap.md`).
 ///
 /// This kernel runs on the calling process's page tables, so any virtual
 /// address it uses for physical memory is one a user window could also be
@@ -799,7 +799,7 @@ const _: () = assert!(
 );
 
 // The user layout is confined to the low 1 GiB and the kernel's identity map starts above it — the
-// whole point of the shrink (`PHYSMAP.md` P4). These are compile-time pins, and they are checked by
+// whole point of the shrink (`.notes/physmap.md` P4). These are compile-time pins, and they are checked by
 // `cargo check --target riscv64gc-unknown-minix` (part of `just check`): this module is riscv-only,
 // so a host `cargo test` never compiles it and a `#[test]` here would never run.
 const _: () = assert!(
@@ -1275,7 +1275,7 @@ pub unsafe fn tlb_flush() {
 /// must check the serial log for result markers.
 ///
 /// The address is raw before paging is on and through the physmap after, like
-/// every other device below the RAM base (`PHYSMAP.md` P4).
+/// every other device below the RAM base (`.notes/physmap.md` P4).
 pub fn qemu_exit(code: u32) -> ! {
     unsafe {
         let val = if code == 0 { 0x5555u32 } else { 0x3333u32 };
@@ -1528,14 +1528,14 @@ pub unsafe fn exec_create_root(boot_cr3: u64) -> u64 {
         // Copy the identity map's RAM window (1..32 GiB, one 1 GiB block per L2
         // entry); the entries are supervisor-only, matching the boot table.
         // Entry 0 (0..1 GiB) is the user window and is deliberately not mapped
-        // by the kernel (`PHYSMAP.md` P4).
+        // by the kernel (`.notes/physmap.md` P4).
         for i in 1usize..32 {
             let e = core::ptr::read(boot_root.add(i));
             core::ptr::write((phys_to_virt(new_root) as *mut u64).add(i), e);
         }
         // The physmap sits above the identity map, in entries 256..288, which the copy above
         // does not reach, so it goes in explicitly: every address space the kernel runs on must
-        // have it (`PHYSMAP.md` D2).
+        // have it (`.notes/physmap.md` D2).
         if !install_physmap(new_root, arch_common::PhysAccess::Physmap) {
             return 0;
         }

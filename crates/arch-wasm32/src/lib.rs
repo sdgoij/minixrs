@@ -6,7 +6,7 @@
 //!
 //! The parts of the HAL with no host boundary at all are re-exported from
 //! `arch-sim` rather than duplicated a fourth time: paging stubs, the frame
-//! layout, the VA layout, and the page arena. `ARCH_WASM32.md` §2 frames the two
+//! layout, the VA layout, and the page arena. `.notes/arch_wasm32.md` §2 frames the two
 //! as the same HAL, and §3 explains why the boundary is where the authority sits.
 //!
 //! # Imports
@@ -40,7 +40,7 @@ unsafe extern "C" {
     /// This is the port's page table. Two processes' address spaces are two
     /// linear memories here, and the host owns both, so a cross-process copy is
     /// not something the kernel can perform any more than a CR3 switch is
-    /// something the host could (§5.1 of `ARCH_WASM32.md`).
+    /// something the host could (§5.1 of `.notes/arch_wasm32.md`).
     fn host_copy_between(
         src_proc: i32,
         src_addr: u32,
@@ -50,11 +50,11 @@ unsafe extern "C" {
     ) -> i32;
     /// Instantiate the module at `request_addr` as the process in `slot`.
     ///
-    /// This is exec on this port (§7.2 of `ARCH_WASM32.md`): a program *is* a wasm module,
+    /// This is exec on this port (§7.2 of `.notes/arch_wasm32.md`): a program *is* a wasm module,
     /// so "install the new image" is instantiation, and only the host can instantiate. The
     /// kernel's half is to say which process, which bytes and with what arguments — one
     /// structure rather than a row of arguments, because this boundary has already paid for a
-    /// dropped parameter (`PORTING_PLAN.md` finding 29: a console write that transferred
+    /// dropped parameter (`.notes/porting_plan.md` finding 29: a console write that transferred
     /// `count = 0` bytes and reported success), and a layout with named fields is one thing both
     /// sides can read. See [`ExecModuleRequest`].
     ///

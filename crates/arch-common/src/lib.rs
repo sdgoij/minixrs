@@ -24,7 +24,7 @@ pub fn init() {}
 ///
 /// The kernel normally reaches a table or a frame through the physmap. A builder that derefs the
 /// physical address instead is leaning on the identity map — a VA a user window can occupy
-/// (`KNOWN_ISSUES.md` item 38, `PHYSMAP.md` D4). The one unavoidable case is installing the window
+/// (`KNOWN_ISSUES.md` item 38, `.notes/physmap.md` D4). The one unavoidable case is installing the window
 /// into the boot tables: before that call returns there is no window to reach anything through, so
 /// the root itself is written at its physical address.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -2,7 +2,7 @@
 """Read the input server's EV_HEAD/EV_TAIL/CONSUMER_EP from guest RAM.
 
 The input server loads at a physical address the boot log prints (VA base
-0x4000000 since `PHYSMAP.md` P4), so a symbol's phys address = PHYS_BASE +
+0x4000000 since `.notes/physmap.md` P4), so a symbol's phys address = PHYS_BASE +
 (VA - VA_BASE). Read the queue indices before
 and after injecting mouse moves to see whether the wserver ever drains.
 """

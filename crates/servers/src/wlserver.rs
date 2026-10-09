@@ -7,14 +7,14 @@
 //! display. It arbitrates a single focus between them, so input goes to the surface
 //! that last mapped a window (2c). It also serves
 //! the seat's keymap — [`KEYMAP_XKB`] into a `memfd`, handed to a client's keyboard
-//! by `SCM_RIGHTS` (`WAYLAND.md` §6.12).
+//! by `SCM_RIGHTS` (`.notes/wayland.md` §6.12).
 //!
 //! It maps the framebuffer directly and sends `FBIOFLUSH` **to the fb server**,
 //! not through VFS, the way `wserver` does — VFS is single-worker and the shell's
 //! blocking console read holds it, so a device ioctl through VFS would wait for a
-//! keystroke (`WAYLAND.md` §6.11).
+//! keystroke (`.notes/wayland.md` §6.11).
 
-/// The US/evdev XKB keymap `wl_keyboard.keymap` serves (`WAYLAND.md` §6.12).
+/// The US/evdev XKB keymap `wl_keyboard.keymap` serves (`.notes/wayland.md` §6.12).
 ///
 /// Compiled in rather than read from a boot data file: a boot process's read of a
 /// regular file goes through VFS to MFS, and by the time `wlserver` runs the shell
@@ -795,7 +795,7 @@ mod tests {
         assert_eq!(
             KEYMAP_XKB.len(),
             64756,
-            "regenerate with the `xkbcli` command in WAYLAND.md §6.12"
+            "regenerate with the `xkbcli` command in .notes/wayland.md §6.12"
         );
     }
 }

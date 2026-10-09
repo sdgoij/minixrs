@@ -6,7 +6,7 @@
 # default puts its 1 MiB stack at the bottom of that. The port's user-VA windows
 # start at 32 MiB (`arch_wasm32::hal`), above the module's static image, which the
 # linker grows upward from 1 MiB and which `boot.cjs` checks still ends below the
-# first window (`ARCH_WASM32.md` §5.4); 48 MiB covers the stack top, and the RAM
+# first window (`.notes/arch_wasm32.md` §5.4); 48 MiB covers the stack top, and the RAM
 # disk instance grows further for the image at `RAMDISK_IMAGE_VA` (48 MiB).
 #
 # `wasm32-minix` is one of the fork's own targets

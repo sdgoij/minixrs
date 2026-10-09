@@ -21,10 +21,10 @@ use core::sync::atomic::{AtomicI32, Ordering};
 /// server's text rendering).
 pub mod fbfont;
 
-/// The `wl_shm` client gate — `/bin/wlclient` (`WAYLAND.md` Phase 1b).
+/// The `wl_shm` client gate — `/bin/wlclient` (`.notes/wayland.md` Phase 1b).
 pub mod wlclient;
 
-/// The DRM render node's client — `/bin/drminfo` (`WAYLAND.md` §6.10, stage 3b).
+/// The DRM render node's client — `/bin/drminfo` (`.notes/wayland.md` §6.10, stage 3b).
 pub mod drminfo;
 
 /// The DRM render node's memory objects, mapped by a client — `/bin/drmmap` (§6.10, 3b-3).
@@ -3011,7 +3011,7 @@ pub fn epoll_test(_args: &[&str]) -> i32 {
     0
 }
 
-/// Wayland Phase 1a smoke test (`WAYLAND.md` §6.11): the protocol handshake over
+/// Wayland Phase 1a smoke test (`.notes/wayland.md` §6.11): the protocol handshake over
 /// a real `/dev/uds` socket. A forked child serves one client — the parent —
 /// which enumerates the registry and syncs, and prints PASS only if every global
 /// and the callback arrived.

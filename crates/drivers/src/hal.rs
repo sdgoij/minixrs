@@ -23,7 +23,7 @@ pub use arch_aarch64::hal::{
 };
 
 // Devices in the wasm port come from the host, so every port-I/O and PCI entry
-// point here is inert — the disposition `ARCH_WASM32.md` §8 already prescribes.
+// point here is inert — the disposition `.notes/arch_wasm32.md` §8 already prescribes.
 // The names exist so driver code compiles unchanged; a driver that actually
 // needs its device reaches it through a host import instead, which is what M4
 // (block), M5 (display, input) and M6 (network) each added below.

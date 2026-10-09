@@ -34,7 +34,7 @@
 #                  `/lib/libdyn2.so` and `/lib/./libdyn2.so` — and all three are one
 #                  file, so the check is about the file and not the spelling. A second
 #                  mapping would run the initialiser twice, and a loader without the
-#                  check fails the load instead (`DYNAMIC_LINKING.md` §7 Phase 2). The
+#                  check fails the load instead (`.notes/dynamic_linking.md` §7 Phase 2). The
 #                  field is a number so that every string on the line still comes from
 #                  an object.
 #
@@ -90,7 +90,7 @@
 #
 # `missing` asserts the loader's *own* message, because "it failed" is worth little.
 #
-# `tls` is the multi-module case (`DYNAMIC_LINKING.md` Phase 8): the object carries a `PT_TLS`
+# `tls` is the multi-module case (`.notes/dynamic_linking.md` Phase 8): the object carries a `PT_TLS`
 # and gets a module of its own, in a slot the layout reserved before any thread existed. The
 # three fields are what makes that an assertion rather than a hope. `init` is read back before
 # anything writes it, so it can only be the object's init image (7, not 0, and not a

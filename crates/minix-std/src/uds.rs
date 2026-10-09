@@ -11,7 +11,7 @@
 //!
 //! Sockets are non-blocking: `connect` completes at once (queuing the connection
 //! on the listener) and `accept` answers `EAGAIN` when nothing is queued, so a
-//! caller retries rather than waits (`WAYLAND.md` §6.1). `accept` returning
+//! caller retries rather than waits (`.notes/wayland.md` §6.1). `accept` returning
 //! `EAGAIN` is not an error to give up on — poll and retry.
 
 use crate::fs::{O_RDWR, close, ioctl, open, read, write};
@@ -165,7 +165,7 @@ pub fn recv_fds(fd: i32, fds: &mut [i32]) -> Result<usize, MinixErr> {
 ///
 /// Returns the descriptor count and the credentials of whatever process last
 /// sent on this socket — the same pair `SO_PEERCRED` reports — or `None` when
-/// the sender recorded none (see `WAYLAND.md` §6.2). Room for the credentials
+/// the sender recorded none (see `.notes/wayland.md` §6.2). Room for the credentials
 /// is offered on top of `fds.len()` descriptors, so a caller wanting both must
 /// leave space for the descriptors it expects.
 pub fn recv_fds_cred(fd: i32, fds: &mut [i32]) -> Result<(usize, Option<(u32, u32)>), MinixErr> {

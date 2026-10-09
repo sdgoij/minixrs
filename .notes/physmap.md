@@ -1,4 +1,4 @@
-# PHYSMAP.md — a physmap the user window cannot shadow
+# physmap.md — a physmap the user window cannot shadow
 
 Status: **P1–P6 landed, all three arches.** P1–P3d landed 2026-09-29; P4 (including x86's shrink
 and base move), P5 and P6 landed 2026-10-01. This scopes the fix for the class that
@@ -7,7 +7,7 @@ and the virtual address it does that at is one a user window can also occupy.
 
 It is not a new feature. It is the invariant the port has been relying on without stating it, plus
 the one mapping that makes the invariant hold by construction. It is also a prerequisite for
-Phase 3 (`WAYLAND.md` §6.10): `do_map_phys` maps a device BAR at its *physical* address today,
+Phase 3 (`.notes/wayland.md` §6.10): `do_map_phys` maps a device BAR at its *physical* address today,
 which is the same hazard wearing a driver's hat.
 
 ---
@@ -280,7 +280,7 @@ written from.
 - A kernel read or write of a physical frame goes through `PHYS_TO_VIRT`; dereferencing the result
   of `pte_to_phys` directly is item 38's bug (`KNOWN_ISSUES.md`) -- `tools/check-physmap.py`
   enforces it in `just check` for `crates/kernel/src` and `crates/arch-*/src`, and an
-  exception marks itself with `physmap-ok: <reason>` at the site (`PHYSMAP.md` P6) — it reads whatever the *running*
+  exception marks itself with `physmap-ok: <reason>` at the site (`.notes/physmap.md` P6) — it reads whatever the *running*
   process has mapped at that address, which for a large server is its own image.
 - A kernel-only mapping's virtual address must be outside every user window. The per-arch
   `PHYS_TO_VIRT` base is asserted against `MAX_USER_ADDRESS` at compile time; do not add a kernel

@@ -3952,7 +3952,7 @@ pub unsafe fn do_exec_initramfs_handler(_caller: *mut Proc, msg: &mut [u8; MESSA
 
         // Allocate physical pages for the stack and build the frame in them through the physmap.
         // This used to build the frame at the user-stack VA, reached through the identity map, and
-        // copy it into the allocated frames — leaning on the map `PHYSMAP.md` P4 shrinks and writing
+        // copy it into the allocated frames — leaning on the map `.notes/physmap.md` P4 shrinks and writing
         // to the low physical page that happened to sit at that address.
         let stack_pages = ((stack_end - stack_start) / 4096) as usize;
         let phys_stack_base = match crate::hal::alloc_phys_contig(stack_pages) {
@@ -5426,7 +5426,7 @@ pub unsafe fn do_vm_paging_handler(_caller: *mut Proc, msg: &mut [u8; MESSAGE_SI
             VM_PAGING_COPY => {
                 // Copy count pages from src_pa to dst_pa. Both are frames, so both
                 // go through the physmap: a frame's physical address is not a
-                // virtual address the kernel may dereference (`PHYSMAP.md` P4).
+                // virtual address the kernel may dereference (`.notes/physmap.md` P4).
                 let src_pa = msg_read_u64(msg, VM_PAGING_PA_OFF);
                 let dst_pa = msg_read_u64(msg, VM_PAGING_CR3_OFF);
                 let count = msg_read_i32(msg, VM_PAGING_COUNT_OFF);
@@ -6298,7 +6298,7 @@ mod tests {
         // [call number@0, source@4] before the handler runs, so every *request*
         // field has to be at 8 or later. C's structs are union-relative and start
         // at 0, which is how these seven read the call number for as long as they
-        // did (PORTING_PLAN finding 14). Pinned numerically rather than through the
+        // did (.notes/porting_plan.md finding 14). Pinned numerically rather than through the
         // constants they guard, so a regression to a union offset fails here.
         assert_eq!(ABORT_HOW_OFF, 8);
         assert_eq!(STATECTL_REQUEST_OFF, 8);

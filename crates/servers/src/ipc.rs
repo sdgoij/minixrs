@@ -624,7 +624,7 @@ const fn enosys() -> i32 {
 /// Stub: register VM exit watch for a process.
 ///
 /// Real implementation would call vm_watch_exit() on the VM server.
-/// See PORTING_PLAN.md Phase 12.5 follow-up.
+/// See .notes/porting_plan.md Phase 12.5 follow-up.
 unsafe fn vm_watch_exit_stub(_who: i32) -> Result<(), i32> {
     Ok(())
 }
@@ -633,7 +633,7 @@ unsafe fn vm_watch_exit_stub(_who: i32) -> Result<(), i32> {
 ///
 /// Real implementation would call vm_query_exit() on the VM server.
 /// Returns None to signal no more exited processes.
-/// See PORTING_PLAN.md Phase 12.5 follow-up.
+/// See .notes/porting_plan.md Phase 12.5 follow-up.
 unsafe fn vm_query_exit_stub() -> Option<i32> {
     None
 }
@@ -1355,7 +1355,7 @@ pub unsafe fn do_shmctl(msg: &mut [u8; MESSAGE_SIZE]) -> i32 {
 ///
 /// Real implementation walks the SHM list, calls vm_getrefcount for each,
 /// and unmaps/destroys segments that have 0 attachments and SHM_DEST set.
-/// See PORTING_PLAN.md Phase 12.5 follow-up.
+/// See .notes/porting_plan.md Phase 12.5 follow-up.
 unsafe fn update_refcount_and_destroy_stub() {
     let nr = SHM_LIST_NR.load(Ordering::Relaxed) as usize;
     if nr == 0 {

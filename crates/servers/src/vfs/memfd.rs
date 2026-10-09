@@ -27,7 +27,7 @@
 //! * `ftruncate` sets the vnode's size. Growth needs no blocks: a page appears
 //!   when it is first written or faulted.
 //!
-//! See `WAYLAND.md` §6.4 for the design and §5 row 18 for the deviation.
+//! See `.notes/wayland.md` §6.4 for the design and §5 row 18 for the deviation.
 
 use minix_std::fs::Stat;
 

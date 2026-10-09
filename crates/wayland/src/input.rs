@@ -6,7 +6,7 @@
 //! a loop.
 //!
 //! Phase 1 sends `wl_keyboard.key` as an evdev keycode with **no keymap event**
-//! (`WAYLAND.md` §6.6): the in-house client interprets it with the US table here,
+//! (`.notes/wayland.md` §6.6): the in-house client interprets it with the US table here,
 //! and a real XKB keymap — which needs `xkbcommon` — is a later port item.
 
 /// `wl_keyboard.key` / `wl_pointer.button` state: released.

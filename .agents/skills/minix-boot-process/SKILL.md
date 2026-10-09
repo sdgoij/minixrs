@@ -126,7 +126,7 @@ the shared objects its `DT_NEEDED` names and only then jumps to the program's en
 process started" is therefore answered by the binary's `PT_INTERP`, not its filename — a
 boot-chain reader looking at a dynamic `/bin/...` will see `ld.so` run first. No *boot*
 process is dynamically linked and the default build stays static, so the boot chain itself is
-unchanged (`DYNAMIC_LINKING.md`).
+unchanged (`.notes/dynamic_linking.md`).
 
 ## Key Files
 

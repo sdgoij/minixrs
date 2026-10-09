@@ -19,7 +19,7 @@ first where it is not x86_64 (the default, so an existing `CC` keeps working):
     CC="python3 <repo>/tools/cc-minix.py riscv64"
 
 `tools/build-bash.py` does that. The build host has to be POSIX (the rlib, the
-stage1 and clang must be the same host's): see `C_BUILD.md`.
+stage1 and clang must be the same host's): see `.notes/c_build.md`.
 """
 
 from __future__ import annotations

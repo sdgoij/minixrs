@@ -1285,9 +1285,9 @@ pub const EPOLLERR: u32 = 0x008;
 pub const EPOLLHUP: u32 = 0x010;
 pub const EPOLLNVAL: u32 = 0x020;
 pub const EPOLLRDHUP: u32 = 0x2000;
-/// Edge-triggered — accepted but served level-triggered (see `WAYLAND.md` §5).
+/// Edge-triggered — accepted but served level-triggered (see `.notes/wayland.md` §5).
 pub const EPOLLET: u32 = 1 << 31;
-/// One-shot — accepted but served level-triggered (see `WAYLAND.md` §5).
+/// One-shot — accepted but served level-triggered (see `.notes/wayland.md` §5).
 pub const EPOLLONESHOT: u32 = 1 << 30;
 
 /// `struct epoll_event` (Linux kernel ABI: packed, so 12 bytes): the ready
@@ -1476,7 +1476,7 @@ pub fn truncate(fd: i32, length: i64) -> Result<(), MinixErr> {
 /// to the size wanted, then mapped `MAP_SHARED` with [`crate::vmem::mmap`]; every
 /// mapping of it, in any process it has been passed to, is backed by the same
 /// frames. `MFD_CLOEXEC` is bit 0 of `flags`; the name is ignored (nothing names
-/// an anonymous object). See `WAYLAND.md` §6.4.
+/// an anonymous object). See `.notes/wayland.md` §6.4.
 pub fn memfd_create(flags: i32) -> Result<i32, MinixErr> {
     #[cfg(not(target_os = "minix"))]
     {

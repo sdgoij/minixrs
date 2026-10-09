@@ -8,7 +8,7 @@ description: Traps at the kernel-to-server boundary of the MINIX/Rust port — i
 Two families of bug with one shape: a server **inferred** something the kernel already knew, and the
 inference was right until the *second* case. Both are silent — no crash, no errno, no log line — and
 both were found by giving the port a second process to get wrong (findings 39, 42, 43, 44, 45 and 46
-in `PORTING_PLAN.md`).
+in `.notes/porting_plan.md`).
 
 When you write code that could ask the kernel one question and get the truth, ask. This skill is
 about the places where that is not obvious.

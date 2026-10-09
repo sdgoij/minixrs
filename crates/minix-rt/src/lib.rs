@@ -156,7 +156,7 @@ pub unsafe extern "C" fn minix_sigreturn_trampoline() -> ! {
 ///
 /// The native ports read it off the stack in a naked function, because a
 /// hardware signal frame *is* a stack frame. wasm32 has neither, so §6.3 of
-/// `ARCH_WASM32.md` moves delivery to the process's own syscall shim: the shim
+/// `.notes/arch_wasm32.md` moves delivery to the process's own syscall shim: the shim
 /// records the frame here before invoking a handler, and the trampoline below
 /// hands it back to PM.
 #[cfg(target_arch = "wasm32")]
@@ -1803,7 +1803,7 @@ pub const HEAP_BASE: usize = if cfg!(any(target_arch = "aarch64", target_arch = 
 } else if cfg!(target_arch = "wasm32") {
     // Must match `arch_wasm32::hal::user_heap_base()`: the kernel's brk window is
     // derived from that, and a mismatch would make every brk request ENOMEM. It
-    // sits above the module's static image (`ARCH_WASM32.md` §5.4), which the
+    // sits above the module's static image (`.notes/arch_wasm32.md` §5.4), which the
     // linker places and which grows with the code.
     0x0200_0000
 } else {

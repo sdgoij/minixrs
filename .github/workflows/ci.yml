@@ -46,7 +46,7 @@
 # port's wasm front ends are its strongest surface - `run.js` types at a shell,
 # execs off the image, forks, and re-reads a disk - and nothing ran them: they were
 # manual because `build.sh` needs a nightly and Binaryen, which is a runner setup
-# rather than a code problem (`TEST_GATES.md` cause (i), `ARCH_WASM32.md` §13). What
+# rather than a code problem (`.notes/test_gates.md` cause (i), `.notes/arch_wasm32.md` §13). What
 # they caught on the way to being wired in is the argument for wiring them: an
 # arena overlapping the kernel's own statics (finding 61) and a yield that could not
 # switch processes (finding 62), the second of which reached a reader as `stopped:

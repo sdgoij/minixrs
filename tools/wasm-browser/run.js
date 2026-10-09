@@ -201,7 +201,7 @@ check(
 // A typed `ping`, at a shell that is already at its prompt: the shell forks and execs `/bin/ping`
 // off the image, the program opens `/dev/ip`, VFS routes major 14 to the net server, and that server
 // ARP-resolves 10.0.2.2, frames the packet and hands it to `virtio_net` over DL — which on this arch
-// reaches the host through four imports (`ARCH_WASM32.md` §9, M6). What answers is `net.js`'s
+// reaches the host through four imports (`.notes/arch_wasm32.md` §9, M6). What answers is `net.js`'s
 // gateway, the same object the page runs.
 //
 // The id in the reply is the forked client's own pid, so the check reading it is what says the

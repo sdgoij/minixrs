@@ -18,7 +18,7 @@
 # Why paced, and why it waits for the prompt: input written to the console before the shell is reading
 # it is *dropped*, not buffered. Measured on the shipped x86 image — `printf '/bin/echo alive\n' |
 # qemu …` printed nothing, and the same bytes after a delay printed the command, its output and the
-# next prompt. That was Step 2's open question in TEST_GATES.md, and this is the answer it recorded:
+# next prompt. That was Step 2's open question in .notes/test_gates.md, and this is the answer it recorded:
 # the feeder types after the prompt, in order, one step at a time.
 #
 # Fails on the step that did not answer, naming it: a scenario that stops should say which of its
@@ -203,7 +203,7 @@ drive() {
         fi
         if [ -n "$expect" ]; then
             # The whole line, not a substring: the guest echoes what it is sent, and for the first step
-            # that echoed text contains the expectation too (TEST_GATES.md cause (h)).
+            # that echoed text contains the expectation too (.notes/test_gates.md cause (h)).
             if ! wait_for_after "^${expect}[[:space:]]*$" "$at"; then
                 write_status "step $steps" "did not answer: sent '$send', expected the line '$expect'"
                 return 1

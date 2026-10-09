@@ -1,5 +1,5 @@
 # The `just test-drmgl-x86` scenario: the render node's client on the device the host *did*
-# enable GL on (`WAYLAND.md` §6.10, stages 3b-4 and on).
+# enable GL on (`.notes/wayland.md` §6.10, stages 3b-4 and on).
 #
 # This is the first gate that types into a guest whose display backend is GL, and that is what
 # `FEED_PACE` in `feed.sh` is for. Every other scenario sends each step as one write, which is

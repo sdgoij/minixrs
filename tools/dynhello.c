@@ -16,7 +16,7 @@
  * in `libdyn.so` — one mapping of that file means one constructor call. It is what
  * makes "one file, one mapping" an assertion rather than a construction: a loader that
  * mapped the file once per `DT_NEEDED` spelling would run the initialiser more than
- * once. (The phase notes in `DYNAMIC_LINKING.md` quote the gate line as it was then;
+ * once. (The phase notes in `.notes/dynamic_linking.md` quote the gate line as it was then;
  * `count=` and the fifth field are later.)
  *
  * The fifth, `dynlink-3-ok`, comes from `libdyn3.so`: a third object named by nothing

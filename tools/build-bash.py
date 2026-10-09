@@ -9,7 +9,7 @@ Usage: python tools/build-bash.py [all|x86|riscv64|aarch64|<triple>] [--force]
 bash is the port's largest C consumer and its broadest test of the C surface:
 209 objects, its own configure, and everything from termios to globbing. It is
 also the reason several of the C headers and libc entry points exist at all
-(`C_BUILD.md` records which). This script is the build that keeps them honest:
+(`.notes/c_build.md` records which). This script is the build that keeps them honest:
 it fetches bash at a pinned commit, builds minix-libc with the *same* stage1 the
 link uses, configures bash against the port's headers, links it, and leaves the
 result at `target/bash/<arch>/bash`.
@@ -80,7 +80,7 @@ def build_marker(arch: Arch) -> pathlib.Path:
 
 
 # Two configure knobs a *static* libc makes necessary, both of which upstream
-# never sees because a shared libc interposes instead (C_BUILD.md has the link
+# never sees because a shared libc interposes instead (.notes/c_build.md has the link
 # errors each one fixes):
 #   --without-bash-malloc  bash's lib/malloc and the libc's malloc are otherwise
 #                          both in the link, and lld refuses the duplicate.
@@ -162,7 +162,7 @@ def run_in_wsl(argv: list[str]) -> int:
     wsl = shutil.which("wsl")
     if wsl is None:
         die("this host is Windows and has no `wsl` to build in; bash's build needs a "
-            "POSIX host (see C_BUILD.md)")
+            "POSIX host (see .notes/c_build.md)")
     distro = os.environ.get("MINIX_WSL_DISTRO", "FedoraLinux-44")
     inner = (f"cd {shlex.quote(wsl_path(ROOT))} && "
              f"python3 tools/build-bash.py {shlex.join(argv)}").strip()
@@ -192,7 +192,7 @@ def fetch_source(force: bool) -> None:
     is reproducible from a clean checkout, and checked out on a POSIX host so
     that the line endings are the ones git stores: a Windows checkout with
     `core.autocrlf=true` writes `configure` with CRLF, and `/bin/sh^M` is not a
-    shell (C_BUILD.md, trap 1).
+    shell (.notes/c_build.md, trap 1).
     """
     git = ["git", "-c", "core.autocrlf=false", "-c", "core.eol=lf"]
     commit = os.environ.get("MINIXRS_BASH_COMMIT", BASH_COMMIT)
@@ -300,7 +300,7 @@ def make(arch: Arch, jobs: int) -> None:
     """Link bash. The relink is forced: make compares the shell against its
     objects, and the rlib is a prerequisite of none of them, so a libc change
     alone leaves every object newer and make reports success without relinking
-    (C_BUILD.md, trap 2)."""
+    (.notes/c_build.md, trap 2)."""
     build = build_dir(arch)
     previous = build / "bash"
     if previous.exists():

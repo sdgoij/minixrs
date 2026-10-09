@@ -6,7 +6,7 @@
 # One step per line: the command, a tab, and the line its output must produce. An empty expectation
 # means the step has nothing to say and the next prompt is the whole of its evidence — a write.
 #
-# Two rules, both of them cause (h) in TEST_GATES.md:
+# Two rules, both of them cause (h) in .notes/test_gates.md:
 #
 #   * The expectation is matched against a *whole line*. The guest echoes what it is sent, so
 #     `# /bin/echo smoke-ok` would satisfy a substring search for `smoke-ok` on a shell that

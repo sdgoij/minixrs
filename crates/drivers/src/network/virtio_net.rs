@@ -555,7 +555,7 @@ fn submit_tx(st: &mut VirtioNetState, len: usize) -> Result<(), DriverError> {
 /// Nothing to add and nothing to wait for: a link carries the frame, and no link has a use for a
 /// `virtio_net_hdr` — that header is the *device's* word for what the guest knows about the frame,
 /// which is why the offload features are negotiated at all rather than assumed. What the link does
-/// with the frame is the link's business (`ARCH_WASM32.md` §9: an in-page gateway, or a relay at the
+/// with the frame is the link's business (`.notes/arch_wasm32.md` §9: an in-page gateway, or a relay at the
 /// other end of a WebSocket), and the answer is whether it took it — which for a link is the end of
 /// the transmit, where for a queue it is the beginning.
 #[cfg(target_arch = "wasm32")]

@@ -223,7 +223,7 @@ boot-image-x86: userland-x86 coreutils-x86 dynlib-x86
 
 # The system image: the full root filesystem on a raw disk for virtio-blk. coreutils
 # is part of it, and so is anything a caller injects (`MINIXFS_EXTRA`, merged ahead of
-# the caller's own value; the Mesa DSOs are the ~36 MiB case, `WAYLAND.md` §6.10 stage
+# the caller's own value; the Mesa DSOs are the ~36 MiB case, `.notes/wayland.md` §6.10 stage
 # 3c-2). GNU bash is included when its artifact is present — `just build-bash <arch>`
 # locally, or the release's downloaded `bash-<arch>` — and its heavy C build is never
 # forced onto the `run-<arch>` path. The image builder reads `MINIXFS_EXTRA` /
@@ -754,7 +754,7 @@ test-gltriangle-aarch64 boot-timeout="180": gltriangle-aarch64 boot-image-aarch6
 
 # UNIX-domain sockets: /bin/udstest round-trips a socketpair and a
 # bind/listen/connect/accept connection through the /dev/uds server — Phase 0 of
-# WAYLAND.md. build-x86 embeds the binary; the scenario types the command into
+# .notes/wayland.md. build-x86 embeds the binary; the scenario types the command into
 # the shell and wants the whole line back.
 test-uds-x86 boot-timeout="40": build-x86
     mkdir -p target/images/x86_64-pc-minix
@@ -783,7 +783,7 @@ test-pty-x86 boot-timeout="40": build-x86
     @echo "pty: a poll on a pty master is woken by the slave's write (x86_64)"
 
 # Readiness primitives: /bin/seltest drives select(2) and poll(2) over pipes and
-# checks a real timeout on each — Phase 0 of WAYLAND.md. build-x86 embeds the
+# checks a real timeout on each — Phase 0 of .notes/wayland.md. build-x86 embeds the
 # binary; the scenario types the command into the shell and wants the whole line back.
 test-select-x86 boot-timeout="40": build-x86
     mkdir -p target/images/x86_64-pc-minix
@@ -793,7 +793,7 @@ test-select-x86 boot-timeout="40": build-x86
     @echo "select/poll: pipe readiness and real timeouts (x86_64)"
 
 # eventfd: /bin/eventfdtest exercises the counter semantics and a cross-process
-# wake of a blocked poll — Phase 0 of WAYLAND.md. build-x86 embeds the binary.
+# wake of a blocked poll — Phase 0 of .notes/wayland.md. build-x86 embeds the binary.
 test-eventfd-x86 boot-timeout="40": build-x86
     mkdir -p target/images/x86_64-pc-minix
     cp target/trampoline.elf target/images/x86_64-pc-minix/minix-x86.elf
@@ -802,7 +802,7 @@ test-eventfd-x86 boot-timeout="40": build-x86
     @echo "eventfd: counter semantics and a cross-process wake (x86_64)"
 
 # timerfd: /bin/timerfdtest drives one-shot, periodic and absolute timers (and a
-# disarm) through blocking polls — Phase 0 of WAYLAND.md.
+# disarm) through blocking polls — Phase 0 of .notes/wayland.md.
 test-timerfd-x86 boot-timeout="40": build-x86
     mkdir -p target/images/x86_64-pc-minix
     cp target/trampoline.elf target/images/x86_64-pc-minix/minix-x86.elf
@@ -812,7 +812,7 @@ test-timerfd-x86 boot-timeout="40": build-x86
 
 # epoll: /bin/epolltest drives a persistent interest set — add/modify/remove,
 # level-triggered readiness over an eventfd and a pipe, and a blocked
-# `epoll_wait` woken by a child process — Phase 0 of WAYLAND.md.
+# `epoll_wait` woken by a child process — Phase 0 of .notes/wayland.md.
 test-epoll-x86 boot-timeout="40": build-x86
     mkdir -p target/images/x86_64-pc-minix
     cp target/trampoline.elf target/images/x86_64-pc-minix/minix-x86.elf
@@ -821,7 +821,7 @@ test-epoll-x86 boot-timeout="40": build-x86
     @echo "epoll: persistent interest set, level-triggered readiness, cross-process wake (x86_64)"
 
 # wayland: /bin/waylandtest drives the Phase 1a protocol handshake (registry and
-# wl_display.sync) between a forked client and server over /dev/uds — WAYLAND.md
+# wl_display.sync) between a forked client and server over /dev/uds — .notes/wayland.md
 # §6.11. build-x86 embeds the binary.
 test-wayland-x86 boot-timeout="40": build-x86
     mkdir -p target/images/x86_64-pc-minix
@@ -832,7 +832,7 @@ test-wayland-x86 boot-timeout="40": build-x86
 
 # wlshm: /bin/wlclient drives the Phase 1b wl_shm present path — it draws into a
 # memfd pool, passes the fd to /sbin/wlserver (boot proc 20), commits a surface,
-# and reads the composited frame back from /dev/fb — WAYLAND.md §6.11. build-x86
+# and reads the composited frame back from /dev/fb — .notes/wayland.md §6.11. build-x86
 # embeds both binaries.
 test-wlshm-x86 boot-timeout="40": build-x86
     mkdir -p target/images/x86_64-pc-minix
@@ -843,8 +843,8 @@ test-wlshm-x86 boot-timeout="40": build-x86
 
 # wlkey: tools/wlkey_probe.py drives the Phase 1c input path and the Phase 2a
 # keymap — /bin/wlkey binds wl_seat's keyboard, resolves the `keymap` event's fd
-# and checks its bytes (WAYLAND.md §6.12), commits a surface, and a key injected
-# with QMP reaches it as `wl_keyboard.key` — WAYLAND.md §6.11. A host probe rather
+# and checks its bytes (.notes/wayland.md §6.12), commits a surface, and a key injected
+# with QMP reaches it as `wl_keyboard.key` — .notes/wayland.md §6.11. A host probe rather
 # than a tsv scenario: the key has to be a real device event, and the serial console
 # the tsv gates type into is not one.
 test-wlkey-x86: build-x86
@@ -857,7 +857,7 @@ test-wlkey-x86: build-x86
 
 # wlx: /bin/wlx drives the Phase 2b xdg_shell path — it maps an xdg_toplevel, the
 # server sends `configure`, the client acks it and commits a frame of the configured
-# size, and the frame reaches /dev/fb — WAYLAND.md §6.12.
+# size, and the frame reaches /dev/fb — .notes/wayland.md §6.12.
 test-wlx-x86 boot-timeout="40": build-x86
     mkdir -p target/images/x86_64-pc-minix
     cp target/trampoline.elf target/images/x86_64-pc-minix/minix-x86.elf
@@ -868,7 +868,7 @@ test-wlx-x86 boot-timeout="40": build-x86
 
 # wlfocus: tools/wlfocus_probe.py drives the Phase 2c focus path — /bin/wlx2 opens
 # two connections, maps a window on each, and a QMP key must reach the focused one as
-# the focus moves between them — WAYLAND.md §6.12. A host probe, like wlkey's: a key
+# the focus moves between them — .notes/wayland.md §6.12. A host probe, like wlkey's: a key
 # has to be a real device event, which the serial console is not.
 test-wlfocus-x86: build-x86
     mkdir -p target/images/x86_64-pc-minix
@@ -880,7 +880,7 @@ test-wlfocus-x86: build-x86
 
 # wlxd: /bin/wlxd drives the Phase 2d damage and cursor path — it damages a small
 # rectangle and checks the rest of the frame survives, then gives the pointer an
-# image and finds it on /dev/fb — WAYLAND.md §6.12.
+# image and finds it on /dev/fb — .notes/wayland.md §6.12.
 test-wlxd-x86 boot-timeout="40": build-x86
     mkdir -p target/images/x86_64-pc-minix
     cp target/trampoline.elf target/images/x86_64-pc-minix/minix-x86.elf
@@ -892,7 +892,7 @@ test-wlxd-x86 boot-timeout="40": build-x86
 # wlxe: /bin/wlxe drives the Phase 2e panel, popup and decoration path — it maps an
 # opaque window, then a zwlr_layer_shell_v1 panel and an xdg_popup over it, requires
 # the decoration manager to answer client-side, and checks both are composited where
-# they asked and no wider — WAYLAND.md §6.12.
+# they asked and no wider — .notes/wayland.md §6.12.
 test-wlxe-x86 boot-timeout="40": build-x86
     mkdir -p target/images/x86_64-pc-minix
     cp target/trampoline.elf target/images/x86_64-pc-minix/minix-x86.elf
@@ -900,7 +900,7 @@ test-wlxe-x86 boot-timeout="40": build-x86
     FEED_SCENARIO=tools/smoke/wlxe.tsv sh tools/smoke/feed.sh target/test-wlxe-x86.log {{boot-timeout}} qemu-system-x86_64 -nographic -m 256M -no-reboot -vga none -device bochs-display,id=fb0 -kernel target/images/x86_64-pc-minix/minix-x86.elf -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0 -device virtio-tablet-pci,display=fb0
     @echo "wlxe: layer-shell panel, xdg_popup and client-side decoration (x86_64)"
 # Measure whether two processes that map one object through the loader share its
-# physical frames — Phase 5 of DYNAMIC_LINKING.md. `tools/dso_share_probe.py` boots
+# physical frames — Phase 5 of .notes/dynamic_linking.md. `tools/dso_share_probe.py` boots
 # the dynamic image, runs `/bin/dynclib hold | /bin/dynclib hold` (two lives of the
 # same dynamic image, `libc.so` mapped by the loader in each), then walks both
 # processes' page tables from outside the guest and compares the frames behind the
@@ -1215,7 +1215,7 @@ build-c-hello arch="x86":
 # POSIX (the stage1, the rlib and clang all have to be the same host's), so on
 # Windows the script re-enters WSL by itself — `MINIX_WSL_DISTRO` picks the
 # distribution. Artifact: `target/bash/<arch>/bash`; `just test-bash <arch>`
-# boots it. `C_BUILD.md` has the why of each flag and each trap this build costs.
+# boots it. `.notes/c_build.md` has the why of each flag and each trap this build costs.
 #
 # Run this *after* the toolchain: `bootstrap` and `fetch-stage1` start with
 # `cargo clean`, which takes `target/bash-src` and the build tree with it.
@@ -1259,7 +1259,7 @@ fetch-mesa arch="x86" *args:
 # image depends on this one, and an image has dynamic linking whether or not its gate was
 # ever run. The loader is what a `PT_INTERP` binary needs to be exec'd at all; nothing in
 # the boot path carries one, so an image with these three boots exactly as before
-# (`DYNAMIC_LINKING.md` D2).
+# (`.notes/dynamic_linking.md` D2).
 #
 # The loader lands in the release dir from cargo, and `tools/build-dynlibc.py` puts the
 # other two there, the way `tools/build-c-hello.py` does for helloc/ctest.
@@ -1337,7 +1337,7 @@ test-linux:
 # Clippy runs with `--all-targets` so the lint set matches CI's `host-tests`
 # job, which lints tests, examples and bins as well as the libraries.
 #
-# The physmap rule is the same kind of gate (`PHYSMAP.md` P6): a physical address is a
+# The physmap rule is the same kind of gate (`.notes/physmap.md` P6): a physical address is a
 # number, not a pointer, and check-physmap.py rejects one cast to a pointer unless the line
 # converts it (`phys_to_virt`/`frame_ptr`/`table_ptr`) or says `physmap-ok: <reason>`.
 check:

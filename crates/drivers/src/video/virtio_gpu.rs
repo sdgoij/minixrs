@@ -1369,7 +1369,7 @@ impl drm::RenderNode for DrmNode {
             // nothing to share across devices. The first is not a missing feature on this side but
             // a missing *window*: it is a PCI shared-memory capability the device grows only under
             // `hostmem=`, which no recipe of ours sets, and which virtio-mmio cannot carry at all
-            // (`WAYLAND.md` §6.10's host requirements).
+            // (`.notes/wayland.md` §6.10's host requirements).
             drm::VIRTGPU_PARAM_HOST_VISIBLE | drm::VIRTGPU_PARAM_CROSS_DEVICE => Ok(0),
             drm::VIRTGPU_PARAM_CONTEXT_INIT => Ok(self.has_context_init as i32),
             drm::VIRTGPU_PARAM_SUPPORTED_CAPSET_IDS => Ok(self.capset_mask() as i32),
@@ -1658,7 +1658,7 @@ impl drm::RenderNode for DrmNode {
         // `SUBMIT_3D` after the renderer has run it — the boot probe reads an inline write's
         // effect back through the transfer that follows it — so there is no queued work to wait
         // for. `nowait` therefore changes nothing, and blocking would be a lie about work this
-        // node does not have (`WAYLAND.md` §6.10 D4: no fence objects yet).
+        // node does not have (`.notes/wayland.md` §6.10 D4: no fence objects yet).
         Ok(())
     }
 }

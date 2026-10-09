@@ -15,7 +15,7 @@
 //! `wake_*` (`wake_object`), or the shared deadline. Level-triggered by
 //! construction — each wait re-scans the whole set.
 //!
-//! Deviations from Linux, all recorded in `WAYLAND.md` §5: the instance holds at
+//! Deviations from Linux, all recorded in `.notes/wayland.md` §5: the instance holds at
 //! most [`MAX_INTERESTS`] registrations (the wait engine's per-entry bound);
 //! `EPOLLET`/`EPOLLONESHOT` are accepted in the mask but behave level-triggered;
 //! an interest whose fd the waiter has closed is dropped lazily at the next

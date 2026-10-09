@@ -12,7 +12,7 @@
 /// object otherwise carries and nothing here reads the header — so `8 + 3n <= 64` leaves
 /// **18** objects. That is the number a Wayland session wants (compositor, EGL/GLES,
 /// libdrm/gbm, xkbcommon, libinput), and it is what moved this from 32: 16 held exactly
-/// two objects and refused a third (`DYNAMIC_LINKING.md` §7 Phase 2), and 32 held six.
+/// two objects and refused a third (`.notes/dynamic_linking.md` §7 Phase 2), and 32 held six.
 ///
 /// Raising it is cheap because [`VirRegion`] carries no per-page state (see there), but it
 /// is not free: the table is `Option<VirRegion>` — 72 bytes, measured — per process
@@ -99,7 +99,7 @@ pub const VR_CACHE: u32 = 0x100;
 /// MAP_SHARED file region: pages are shared cache frames mapped
 /// read-write (no COW), so two processes mapping the same file region
 /// see each other's writes. The documented exception to the
-/// per-process-private-page model (FILEMMAP §6).
+/// per-process-private-page model (.notes/filemmap.md §6).
 pub const VR_SHARED: u32 = 0x200;
 
 impl VirRegion {

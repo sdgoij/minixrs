@@ -1,4 +1,4 @@
-//! `/bin/drmexec` — an object's contents through the transfer and submit ABI (`WAYLAND.md` §6.10,
+//! `/bin/drmexec` — an object's contents through the transfer and submit ABI (`.notes/wayland.md` §6.10,
 //! stage 3b-4).
 //!
 //! This is the boot probe's round trip, done through the DRM ABI instead of the driver's own

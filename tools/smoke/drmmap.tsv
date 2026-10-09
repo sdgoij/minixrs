@@ -1,5 +1,5 @@
 # The `just test-drmmap-x86` scenario: the render node's memory objects, created and mapped
-# by a client (`WAYLAND.md` §6.10, stage 3b-3). One step, because the proof is one program's
+# by a client (`.notes/wayland.md` §6.10, stage 3b-3). One step, because the proof is one program's
 # whole session — create, map, write through one mapping and read through another, then close
 # — and no single call of it says anything on its own.
 #

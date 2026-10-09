@@ -57,7 +57,7 @@ static FB_BUF: FbBufCell = FbBufCell::new();
 /// Scratch space for ioctl arg structs and inline write data.
 static mut FB_SCRATCH: [u8; 128] = [0; 128];
 
-/// The backing the render node's memory objects come from (`WAYLAND.md` §6.10, stage 3b-3).
+/// The backing the render node's memory objects come from (`.notes/wayland.md` §6.10, stage 3b-3).
 ///
 /// A DRM object's memory is guest memory this server owns: a client's `mmap` of one maps
 /// these very frames (the same K3 path `/dev/fb` uses), so each object needs one
@@ -97,7 +97,7 @@ impl GemArenaCell {
 #[cfg(target_arch = "x86_64")]
 static GEM_ARENA: GemArenaCell = GemArenaCell::new();
 
-/// The minor the DRM render node answers on (`WAYLAND.md` §6.10, stage 3b).
+/// The minor the DRM render node answers on (`.notes/wayland.md` §6.10, stage 3b).
 ///
 /// VFS routes a `CDEV_*` request by *major* and sends only the *minor*, so the two
 /// interfaces this server answers on are told apart by their minors alone: `/dev/fb` is
@@ -107,7 +107,7 @@ static GEM_ARENA: GemArenaCell = GemArenaCell::new();
 /// and nothing else has to move with it.
 const DRM_MINOR_BASE: u32 = 128;
 
-/// The render node's device, held from the boot probe (`WAYLAND.md` §6.10, stage 3b).
+/// The render node's device, held from the boot probe (`.notes/wayland.md` §6.10, stage 3b).
 ///
 /// `None` is a machine with no `virtio-gpu` device at all, and then the node refuses to
 /// open rather than answering for a device that is not there. A device the host gave no
@@ -136,7 +136,7 @@ fn devio_hook(request: u32, port: u16, value: u32) -> u32 {
 /// Physical-memory mapping hook: map `phys..phys+len` into this process
 /// via `VM_MAP_PHYS` and return the window address VM chose for it. The
 /// address is a `VR_DIRECT` region in this process's mmap area, not the
-/// physical address (`PHYSMAP.md` D5), so it is read as a full 64-bit value.
+/// physical address (`.notes/physmap.md` D5), so it is read as a full 64-bit value.
 ///
 /// # Safety
 ///
@@ -647,7 +647,7 @@ unsafe fn handle_cdev_request(
 /// The write is a *datagram*: one message, one unit, moved by `SYS_VIRCOPY` from the caller's own
 /// memory instead of in 8-byte inline chunks. That is the only shape a frame can take on this port,
 /// and it is why the compositor can be a device client at all here: `/dev/fb` cannot be `mmap`ed
-/// (there are no page tables to map a physical range through, `ARCH_WASM32.md` §9.2), so on the
+/// (there are no page tables to map a physical range through, `.notes/arch_wasm32.md` §9.2), so on the
 /// arches that `mmap` it the frame is a direct memory write and here it is one copy.
 ///
 /// The destination and its bound come from the *driver* (`device`), not from a constant here: the
@@ -784,7 +784,7 @@ fn safecopy_to(_grantee: i32, _grant: u32, _data: &[u8]) -> i32 {
 }
 
 /// Answer a `/dev/dri/renderD128` request: the DRM render node's `CDEV_*` surface
-/// (`WAYLAND.md` §6.10, stage 3b).
+/// (`.notes/wayland.md` §6.10, stage 3b).
 ///
 /// `read` and `write` are refusals, and deliberately so: a DRM render node is an `ioctl`
 /// interface, with no data stream and no event queue yet. `mmap` is answered only for a
@@ -833,7 +833,7 @@ unsafe fn handle_drm_request(
             #[cfg(target_arch = "wasm32")]
             {
                 // No page tables to map a physical range through, and no render node
-                // either: the device is the host's canvas (`ARCH_WASM32.md` §9.2).
+                // either: the device is the host's canvas (`.notes/arch_wasm32.md` §9.2).
                 -95 // EOPNOTSUPP
             }
             #[cfg(not(target_arch = "wasm32"))]

@@ -3,7 +3,7 @@
 //
 // A browser has no raw sockets, so the guest's NIC cannot reach a real network the way it does under
 // QEMU. What it *can* reach is a link: something that holds the guest's frames and answers them.
-// `ARCH_WASM32.md` §9 names two, and the guest above this boundary cannot tell them apart —
+// `.notes/arch_wasm32.md` §9 names two, and the guest above this boundary cannot tell them apart —
 // `virtio_net`'s wasm transport calls four imports, the DL protocol is untouched, and which link is
 // behind those imports is the front end's choice:
 //

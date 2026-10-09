@@ -7,7 +7,7 @@
 //! VFS thread; this port's VFS is single-threaded and blocks in
 //! `request::fs_sendrec`, so the call could never be answered. VFS therefore
 //! owns the whole transfer — the layering Linux uses, where the transport
-//! carries a rendezvous and the kernel owns the descriptors. See `WAYLAND.md`
+//! carries a rendezvous and the kernel owns the descriptors. See `.notes/wayland.md`
 //! §5.
 //!
 //! The rendezvous is the *receiving* socket's clone device, which is what the

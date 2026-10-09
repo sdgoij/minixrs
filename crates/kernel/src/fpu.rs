@@ -14,7 +14,7 @@
 //! `p_seg.fpu_state` holds a **physmap** address (`hal::phys_to_virt` of the frame), not the frame's
 //! physical address. It used to be the physical address, dereferenced through the identity map: that
 //! is sound only while no user window covers the frame's address, and it is `KNOWN_ISSUES.md` item
-//! 38's shape. Moving x86's userland above the kernel image (`PHYSMAP.md` P4) put the shared-object
+//! 38's shape. Moving x86's userland above the kernel image (`.notes/physmap.md` P4) put the shared-object
 //! region inside RAM's physical range, so a frame allocated there was also a VA the running process
 //! had mapped — the first dynamically-linked program on the new layout took a kernel-mode write
 //! fault on a not-present user page and looped on it (`-d int`: `v=0e e=0002 cpl=0`, repeating).

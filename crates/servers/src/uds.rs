@@ -1,11 +1,11 @@
-//! UNIX-domain socket server (`/dev/uds`, major 18) — `WAYLAND.md` Phase 0.
+//! UNIX-domain socket server (`/dev/uds`, major 18) — `.notes/wayland.md` Phase 0.
 //!
 //! # Scope
 //!
 //! The device, the socket table, `socketpair(2)`, and the named-socket path:
 //! `bind`, `listen`, `connect`, `accept` and `getsockname`. fd passing
 //! (`sendmsg`/`recvmsg`/`SCM_RIGHTS`) and readiness (`select`/`poll`) are the
-//! increments after this one (`WAYLAND.md` §6.1–6.2).
+//! increments after this one (`.notes/wayland.md` §6.1–6.2).
 //!
 //! # Why I/O never blocks
 //!

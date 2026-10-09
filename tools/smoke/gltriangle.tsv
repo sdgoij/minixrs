@@ -1,6 +1,6 @@
 # The `just test-gltriangle-x86` scenario: /bin/gltriangle draws a GLES2 triangle
 # through surfaceless EGL on Mesa's `softpipe` and checks the readback —
-# WAYLAND.md §6.10 stage 3c-2.
+# .notes/wayland.md §6.10 stage 3c-2.
 #
 #   FEED_SCENARIO=tools/smoke/gltriangle.tsv sh tools/smoke/feed.sh <log> <seconds> <qemu command…>
 #

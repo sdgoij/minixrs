@@ -31,7 +31,7 @@ const LCR_WLEN_8: u32 = 3 << 5; // 8-bit word length
 ///
 /// Before the MMU is on there is no translation, so a register is where its physical address says;
 /// after that the kernel reaches it through the physmap, because the identity map is not something
-/// it may lean on (`PHYSMAP.md` P4). `boot_cr3` is the test: the boot path stores it as it enables
+/// it may lean on (`.notes/physmap.md` P4). `boot_cr3` is the test: the boot path stores it as it enables
 /// the MMU and installs the window immediately after.
 fn uart_reg(phys: usize) -> usize {
     if boot_cr3() == 0 {
@@ -1051,7 +1051,7 @@ pub use crate::fork::vm_paging_fork;
 /// stack and mmap install on demand. The GIC and the PL011 are *not* mapped
 /// here: the kernel reaches them through the physmap, and an identity block
 /// over 0..1 GiB would be a kernel mapping inside the user window
-/// (`PHYSMAP.md` P4, and what the boot test's user-window check reports).
+/// (`.notes/physmap.md` P4, and what the boot test's user-window check reports).
 ///
 /// # Safety
 ///
@@ -1183,7 +1183,7 @@ pub unsafe fn exec_create_root(boot_cr3: u64) -> u64 {
 
         // The physmap lives in PUD[32..64], and this PUD was built rather than copied from
         // boot, so it goes in explicitly: every address space the kernel runs on must have it
-        // (`PHYSMAP.md` D2).
+        // (`.notes/physmap.md` D2).
         if !install_physmap(new_pgd, arch_common::PhysAccess::Physmap) {
             return 0;
         }

@@ -1,7 +1,7 @@
 # Fork spike — can a suspended wasm process be cloned?
 
 Answers the one question that could invalidate the `arch-wasm32` design
-(`ARCH_WASM32.md`, §11 risk 1 and §12): **can `fork` be implemented for a
+(`.notes/arch_wasm32.md`, §11 risk 1 and §12): **can `fork` be implemented for a
 process suspended inside a syscall, given that wasm cannot copy a running
 stack?**
 
@@ -153,7 +153,7 @@ asserted in the harnesses.
 
 ### The mutable-global worry was unfounded
 
-`ARCH_WASM32.md` flagged that mutable wasm globals are not part of linear memory
+`.notes/arch_wasm32.md` flagged that mutable wasm globals are not part of linear memory
 and so are not cloned. For this case it does not bite:
 
 - Asyncify's own two globals are re-established by `asyncify_start_rewind(ptr)`.

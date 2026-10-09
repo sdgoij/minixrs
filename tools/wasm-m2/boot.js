@@ -812,7 +812,7 @@ note(
     'to appear correct. The grant pair is the one whose address did not come out ' +
     `of a message at all. SYS_VUMAP answered ${vumap.result} because its result ` +
     'is physical addresses and this port has none: the vector read is the whole ' +
-    'of what can be exercised, and `ARCH_WASM32.md` §5.3 argues that there is no ' +
+    'of what can be exercised, and `.notes/arch_wasm32.md` §5.3 argues that there is no ' +
     'physical-address model to build rather than one still to decide. ' +
     'SYS_SAFEMEMSET is the write half of the same grant, so the pair above and ' +
     'this one cover both directions of `verify_grant`.'

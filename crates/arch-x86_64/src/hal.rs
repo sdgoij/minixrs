@@ -925,7 +925,7 @@ pub const MAP_NX: u64 = 0x8000000000000000; // PG_NX
 /// standing check can walk: everything the port places lives below the 4 GiB mmap base,
 /// and a ceiling two orders of magnitude below where the identity map used to end is
 /// also what makes a fault at a kernel-range VA fatal instead of something the
-/// user-fault gate tries to resolve (`PHYSMAP.md` P4).
+/// user-fault gate tries to resolve (`.notes/physmap.md` P4).
 ///
 /// The port's user window is a *band* rather than `0..this`: the kernel image occupies
 /// 2..34 MiB with the trampoline below it, so the window starts at the user base
@@ -936,13 +936,13 @@ pub const MAX_USER_ADDRESS: u64 = 0x10_0000_0000;
 /// Top of the kernel's identity map: `[0, identity_map_top())` is mapped VA == PA in every
 /// address space, supervisor-only. It stops at the user base, so only the kernel image
 /// (2..34 MiB) and the low frames below the base are reachable without a translation; a frame
-/// above it goes through [`phys_to_virt`] (`PHYSMAP.md` P4).
+/// above it goes through [`phys_to_virt`] (`.notes/physmap.md` P4).
 pub const fn identity_map_top() -> u64 {
     0x0400_0000
 }
 
 /// Base of the kernel's physmap: the window through which a *physical*
-/// address is reached as a pointer (`PHYSMAP.md`).
+/// address is reached as a pointer (`.notes/physmap.md`).
 ///
 /// This kernel runs on the calling process's page tables, so any virtual
 /// address it uses for physical memory is one a user window could also be
@@ -1005,7 +1005,7 @@ const _: () = assert!(
 );
 
 // The user layout stays inside the window, and the window stays below the physmap.
-// Compile-time pins for `PHYSMAP.md` P4, alongside the ones above.
+// Compile-time pins for `.notes/physmap.md` P4, alongside the ones above.
 const _: () = assert!(0x0400_0000 < MAX_USER_ADDRESS, "the exec image base");
 const _: () = assert!(0x0800_0000 < MAX_USER_ADDRESS, "the loader base");
 const _: () = assert!(vm_scratch_base() < MAX_USER_ADDRESS, "VM's scratch base");
@@ -1806,7 +1806,7 @@ pub unsafe fn install_physmap(cr3: u64, access: arch_common::PhysAccess) -> bool
 ///
 /// The boot table and every frame allocated here are reached through the physmap, not at their
 /// physical addresses: exec runs with the window present, and the identity map is the map
-/// `PHYSMAP.md` P4 shrinks.
+/// `.notes/physmap.md` P4 shrinks.
 ///
 /// # Safety
 ///
@@ -1829,7 +1829,7 @@ pub unsafe fn exec_create_root(boot_cr3: u64) -> u64 {
         };
         core::ptr::write_bytes(phys_to_virt(pdpt_page) as *mut u8, 0, 4096);
         // The identity map is one 1 GiB window: `identity_map_top` is the user base, well
-        // inside PDPT[0], so exactly one PD is needed (`PHYSMAP.md` P4).
+        // inside PDPT[0], so exactly one PD is needed (`.notes/physmap.md` P4).
         let pd_page = match alloc_phys_page() {
             Some(p) => p,
             None => return 0,
@@ -1863,7 +1863,7 @@ pub unsafe fn exec_create_root(boot_cr3: u64) -> u64 {
         }
         // The physmap lives in that upper half, so the copy above brings it in; installing it
         // here as well keeps it a property of this constructor rather than of the copy's range
-        // (`PHYSMAP.md` D2).
+        // (`.notes/physmap.md` D2).
         if !install_physmap(pml4, arch_common::PhysAccess::Physmap) {
             return 0;
         }

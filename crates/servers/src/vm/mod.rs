@@ -1667,7 +1667,7 @@ fn do_remap(msg: &mut Message) -> i32 {
 ///
 /// The mapping is given a virtual address from the target's own region space, the way the
 /// reference's `do_map_phys` is (`map_page_region` allocates the region's `vaddr`), instead of
-/// echoing the physical address back as one (`PHYSMAP.md` D5). A device frame mapped at `VA == PA`
+/// echoing the physical address back as one (`.notes/physmap.md` D5). A device frame mapped at `VA == PA`
 /// lands wherever the device happens to live inside the process's address space and is not
 /// recorded as a region: a later `mmap` cannot see it, `munmap` cannot release it, and the
 /// teardown walks -- which skip `VR_DIRECT` regions so a device's frames are left to the device --
@@ -3883,7 +3883,7 @@ mod tests {
         assert_eq!(ENOSYS, -78);
         // `EINVAL` is -5 here, but -5 is `EIO` and C's `EINVAL` is 22. Left alone
         // deliberately: it has 96 call sites in this file and wants its own change.
-        // Recorded in `PORTING_PLAN.md` finding 20.
+        // Recorded in `.notes/porting_plan.md` finding 20.
         assert_eq!(EINVAL, -5);
         assert_eq!(SIGSEGV, 11);
         assert_eq!(SIGABRT, 6);

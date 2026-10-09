@@ -1,7 +1,7 @@
 # The `just test-readlink-x86` scenario: `readlink(2)` on the symlink the image ships.
 #
 # A symlink is the shape `/sys` is made of - the tree libdrm's device enumeration reads, a
-# prerequisite for the accelerated path (`WAYLAND.md` 6.10) - and reading one is the only
+# prerequisite for the accelerated path (`.notes/wayland.md` 6.10) - and reading one is the only
 # operation in this image that moves a *filesystem server's* bytes into a user process: the FS
 # copies the target out of the inode's first block through a grant VFS made for the caller's
 # own buffer. A mistake in any of the three shows up as a count with no bytes, or as bytes

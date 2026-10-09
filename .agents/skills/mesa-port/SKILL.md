@@ -6,7 +6,7 @@ description: Cross-building Mesa and libdrm for minix — the Wayland §6.10 pha
 # Mesa + libdrm for minix
 
 The GL stack is a port of Mesa 25.3.6 + libdrm 2.4.129 onto the port's C
-toolchain. `WAYLAND.md` §6.10 is the design; these are the recipes and the traps.
+toolchain. `.notes/wayland.md` §6.10 is the design; these are the recipes and the traps.
 
 ## The pieces
 

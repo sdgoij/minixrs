@@ -393,7 +393,7 @@ pub unsafe fn vm_memset(proc: i32, vaddr: u64, c: u8, count: usize) -> i32 {
         // The kernel's own space on an arch that has a physmap: `ph` is physical, and the physmap
         // is how the kernel writes a physical address. Dereferencing it directly assumes the
         // identity map answers for it, and a user window shadows the identity map wherever the two
-        // share an address (`KNOWN_ISSUES.md` item 38, `PHYSMAP.md` P3). An arch whose address
+        // share an address (`KNOWN_ISSUES.md` item 38, `.notes/physmap.md` P3). An arch whose address
         // spaces are separate memories has no such window and no physmap, so there the kernel's own
         // space still goes to the copy seam below.
         if crate::hal::CROSS_ADDRESS_SPACE_COPY.is_none()
@@ -485,7 +485,7 @@ pub unsafe fn vm_check_range(caller: *mut crate::proc::Proc, addr: u64, bytes: u
 /// Where the arch has no page tables to switch — so the two address spaces are
 /// genuinely separate memories — the copy is delegated to the HAL, because the
 /// only layer that can reach both is then outside the kernel (§5.1 of
-/// `ARCH_WASM32.md`). The caller cannot tell the difference, which is the point:
+/// `.notes/arch_wasm32.md`). The caller cannot tell the difference, which is the point:
 /// this is the single choke point for cross-address-space movement, so IPC
 /// payloads, `sys_vircopy` and the grant table all start working on such an arch
 /// at once.

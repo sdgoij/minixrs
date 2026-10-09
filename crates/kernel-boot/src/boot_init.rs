@@ -263,7 +263,7 @@ unsafe fn calc_elf_bounds(data: &[u8]) -> Result<LoadedElf, ElfError> {
 /// difference between each segment's vaddr and the ELF's base vaddr.
 ///
 /// Writes through the physmap: `phys_base` is a frame the boot path allocated, and the identity
-/// map this used to lean on is the one `PHYSMAP.md` P4 shrinks.
+/// map this used to lean on is the one `.notes/physmap.md` P4 shrinks.
 unsafe fn load_elf_at(data: &[u8], phys_base: u64, elf_base_vaddr: u64) -> Result<(), ElfError> {
     let ehdr = parse_elf_header(data)?;
 
@@ -343,7 +343,7 @@ pub struct BootProcessConfig {
 ///
 /// Call this as soon as paging is on and the physical allocator is ready, and **before anything
 /// walks a page table**: `pagetable`'s walk and map helpers reach every table through the window
-/// (`PHYSMAP.md` D4), so a boot path that walks before this faults. It also has to precede the
+/// (`.notes/physmap.md` D4), so a boot path that walks before this faults. It also has to precede the
 /// first per-process table, which `load_and_prepare_all` builds — the tables the boot servers keep
 /// running on must carry the window too.
 ///
@@ -400,7 +400,7 @@ pub unsafe fn load_and_prepare_all(cfg: &BootProcessConfig) -> *mut Proc {
     // The physmap is already in the boot tables: [`install_physmap_in_boot_tables`] ran in this
     // arch's entry before calling here. The constructors below either inherit it through the boot
     // root's upper half (x86-64, RISC-V) or install it explicitly into their private PUD (AArch64)
-    // (`PHYSMAP.md` D2/D4).
+    // (`.notes/physmap.md` D2/D4).
 
     let mut first_proc: *mut Proc = core::ptr::null_mut();
     for (i, &(_, proc_nr)) in boot_procs.iter().enumerate() {
@@ -971,7 +971,7 @@ pub unsafe fn boot_create_restricted_page_table(
         // PML4[0] → PDP, whose one window points at a deep copy of the boot PD that
         // holds the identity map. The copy stops at `identity_map_top` (the user base), so the
         // kernel reaches its own image and the low frames through the identity map and anything
-        // above the base through the physmap (`PHYSMAP.md` P4). map_page splits the 2 MiB huge
+        // above the base through the physmap (`.notes/physmap.md` P4). map_page splits the 2 MiB huge
         // pages for the user's code/stack/brk pages.
         //
         // Every entry is supervisor-only. The identity map exists so the kernel can reach
@@ -1086,7 +1086,7 @@ pub unsafe fn boot_create_restricted_page_table(
                 unsafe { core::ptr::write_volatile(table_ptr(private_pud).add(i), 0) };
             }
             // PUD[0] (0..1 GiB) stays unmapped: that range is the user window, and a kernel
-            // identity mapping over it is the overlap `PHYSMAP.md` P4 removes. The kernel reaches
+            // identity mapping over it is the overlap `.notes/physmap.md` P4 removes. The kernel reaches
             // the GIC and the UART through the physmap, which every table this constructor builds
             // carries (`install_physmap` below). A driver's virtio-mmio window is put back under
             // PUD[0] if it needs one. PUD[2..32] are copied from boot further down.
@@ -1096,7 +1096,7 @@ pub unsafe fn boot_create_restricted_page_table(
             // kernel's own window: its base holds the exception vector table
             // (AP=EL0_RW there causes a prefetch abort on kernel exception
             // entry, a QEMU Cortex-A57 quirk), and the rest must stay EL1-only
-            // for the other half of `PHYSMAP.md` P4's invariant — a
+            // for the other half of `.notes/physmap.md` P4's invariant — a
             // user-accessible mapping inside a kernel VA range. Userspace never
             // needed to reach physical memory through it: VM maps the frames it
             // touches (`crate::vm::vm_mappage`) and the drivers use
@@ -1157,7 +1157,7 @@ pub unsafe fn boot_create_restricted_page_table(
                 for i in 0..512usize {
                     let va = (i as u64) * 0x20_0000;
                     // Only the virtio-mmio window is mapped. The rest of 0..1 GiB is the user
-                    // window, and mapping it here — even EL1-only — is the overlap `PHYSMAP.md`
+                    // window, and mapping it here — even EL1-only — is the overlap `.notes/physmap.md`
                     // P4 removes; the driver needs the device, not the range.
                     let entry = if va >= VIRTIO_MMIO_BASE && va < VIRTIO_MMIO_BASE + 0x20_0000 {
                         va | PMD_BLOCK_USER
@@ -1255,7 +1255,7 @@ pub unsafe fn boot_create_restricted_page_table(
     // upper-half copy above already brought it in, but on AArch64 the private PUD was built
     // rather than copied, so this is the only thing that puts it there. Installing it
     // unconditionally keeps that a property of this constructor instead of a consequence of
-    // which entry range each arch happens to copy (`PHYSMAP.md` D2).
+    // which entry range each arch happens to copy (`.notes/physmap.md` D2).
     if !unsafe { kernel::hal::install_physmap(pages[0], arch_common::PhysAccess::Physmap) } {
         return None;
     }

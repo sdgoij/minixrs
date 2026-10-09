@@ -1,6 +1,6 @@
-# TEST_GATES.md — what "it boots" means, and why the boot tests should have failed
+# test_gates.md — what "it boots" means, and why the boot tests should have failed
 
-`PORTING_PLAN.md` finding 57 is the failure this is written after: all three hardware arches stopped
+`.notes/porting_plan.md` finding 57 is the failure this is written after: all three hardware arches stopped
 at `init: starting shell...`, and **every gate was green** — six QEMU suites, the host suite on two
 platforms, CI, and the wasm harnesses. Nothing reported an error, because nothing was wrong except
 that the system would never do anything again: the faulting process sat on `RTS_PAGEFAULT` and the

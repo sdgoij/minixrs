@@ -38,7 +38,7 @@ const LSR_THRE: u8 = 0x20; // Transmit Holding Register Empty
 ///
 /// Before paging is on there is no translation, so a register is where its physical address says;
 /// after that the kernel reaches it through the physmap, because the identity map is not something
-/// it may lean on (`PHYSMAP.md` P4). `boot_cr3` is the test: the boot path stores it as it turns
+/// it may lean on (`.notes/physmap.md` P4). `boot_cr3` is the test: the boot path stores it as it turns
 /// paging on and installs the window immediately after.
 ///
 /// `pub(crate)`: the HAL's byte-at-a-time console (`serial_read_byte`, `poll_console`) needs the

@@ -60,7 +60,7 @@ pub const BOOT_BINS: &[(&str, &str)] = &[
     // The loader is here for `/bin/dynclib`'s sake: a binary carrying `PT_INTERP` cannot
     // be exec'd without it. None of the three is in the boot path — VFS's `PT_INTERP`
     // branch is reached only by a binary that carries one, and every program the boot
-    // path runs is still static and non-PIE, which is D2 in `DYNAMIC_LINKING.md`.
+    // path runs is still static and non-PIE, which is D2 in `.notes/dynamic_linking.md`.
     ("/libexec/ld.so", "ldso"),
     ("/lib/libc.so", "libc.so"),
     ("/bin/dynclib", "dynclib"),
@@ -165,7 +165,7 @@ pub const BOOT_BINS: &[(&str, &str)] = &[
     // `/sbin/wserver` is the window server (K5): boot proc 18, the in-house
     // compositor on /dev/fb.
     ("/sbin/wserver", "wserver"),
-    // `/sbin/uds` is the UNIX-domain socket server (`WAYLAND.md` Phase 0):
+    // `/sbin/uds` is the UNIX-domain socket server (`.notes/wayland.md` Phase 0):
     // boot proc 19, the /dev/uds character driver.
     ("/sbin/uds", "uds"),
     ("/bin/kill", "kill"),
@@ -189,12 +189,12 @@ pub const BOOT_BINS: &[(&str, &str)] = &[
     ("/sbin/devman", "devman"),
     ("/sbin/fb", "fb"),
     ("/sbin/input", "input"),
-    // `/sbin/wlserver` is the Wayland server (WAYLAND.md Phase 1): boot proc 20,
+    // `/sbin/wlserver` is the Wayland server (.notes/wayland.md Phase 1): boot proc 20,
     // the in-house compositor that speaks the wire protocol over `/run/wayland-0`
     // and presents `wl_shm` buffers to `/dev/fb`.
     ("/sbin/wlserver", "wlserver"),
     // `/bin/drminfo` opens the DRM render node (`/dev/dri/renderD128`) and reports what it
-    // says it is (`WAYLAND.md` §6.10, stage 3b). It is also a second, independent
+    // says it is (`.notes/wayland.md` §6.10, stage 3b). It is also a second, independent
     // statement of the render node's ABI — see the module's own comment.
     ("/bin/drminfo", "drminfo"),
     // `/bin/drmmap` makes a render node memory object, maps it, and proves the mapping is
@@ -307,7 +307,7 @@ pub const DEVICES: &[(&str, u32, u32, u32)] = &[
     ("/dev/ptyp3", 0o020666, 9, 195),
     // Last, so no existing device is renumbered by its arrival.
     ("/dev/uds", 0o020600, 18, 0), // char device, major=18 (uds), minor=0
-    // The DRM render node (`WAYLAND.md` §6.10, stage 3b) — the first device in a
+    // The DRM render node (`.notes/wayland.md` §6.10, stage 3b) — the first device in a
     // *directory*, and last for the same reason. Render nodes take minor 128 and up by
     // DRM's convention, so a client looking for one finds this where it expects it.
     ("/dev/dri/renderD128", 0o020666, 25, 128), // char device, major=25 (drm), minor=128

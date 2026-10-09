@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Reject a physical address used as a pointer without the physmap conversion.
 
-`PHYSMAP.md` D4/P6. A frame's physical address is a number, not a virtual address the kernel may
+`.notes/physmap.md` D4/P6. A frame's physical address is a number, not a virtual address the kernel may
 dereference. `pte_to_phys`/`pte_frame` return one, a masked PTE *is* one, and so is any `*_phys` or
 `*_pa` binding the kernel keeps for one. The only sound way from one to a pointer is the
 conversion: the HAL's `phys_to_virt` / `PHYS_TO_VIRT`, or `kernel::pagetable`'s `frame_ptr` /
@@ -92,7 +92,7 @@ def main() -> int:
             " of a pointer function), say so on the line with `physmap-ok: <reason>`."
         )
         return 1
-    print("physmap: no physical address is used as a pointer (PHYSMAP.md P6)")
+    print("physmap: no physical address is used as a pointer (.notes/physmap.md P6)")
     return 0
 
 

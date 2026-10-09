@@ -98,7 +98,7 @@ Three consequences worth knowing before you use it:
   browser without the Web Locks API opens the disk unlocked.
 - **`exit` is what makes a session durable.** MFS keeps its dirty blocks in its own cache until
   something flushes them, so a tab closed at the prompt leaves the disk *unclean* — the next mount
-  reads it fine and refuses to write (`MFSFLAG_CLEAN`, `PORTING_PLAN.md` finding 48). Ending the
+  reads it fine and refuses to write (`MFSFLAG_CLEAN`, `.notes/porting_plan.md` finding 48). Ending the
   session — `exit`, or the control that sends it for you — runs the guest's shutdown, which syncs,
   unmounts and marks the disk clean.
 - **A write is durable a tick after it returns,** when the browser commits the transaction, rather
@@ -132,7 +132,7 @@ safe to close: until then, MFS's dirty blocks are still the shutdown's business.
 ## The display
 
 The canvas above the terminal is the *guest's* own display, not a decorator: the `fb` server boots
-into a backend whose surface is its own memory and whose mode is the canvas's (`ARCH_WASM32.md`
+into a backend whose surface is its own memory and whose mode is the canvas's (`.notes/arch_wasm32.md`
 §9.2, M5a). Two calls cross into the host — the mode, and one frame per flush — so what the canvas
 shows is what the guest's driver put in its framebuffer:
 
@@ -146,7 +146,7 @@ A frame that is not the mode's size is refused by `host.js` rather than shown: t
 disagreeing about the mode is a bug, and a partial picture looks like a drawing error.
 
 With a window system in the guest, what is on the canvas is the desktop the compositor composes
-(M5b, `ARCH_WASM32.md` §9.3): the console's 80x24 cells in a window of their own, drawn by
+(M5b, `.notes/arch_wasm32.md` §9.3): the console's 80x24 cells in a window of their own, drawn by
 `wserver` into a surface of its own memory and handed to `/dev/fb` as one datagram write per flush.
 The `fb` driver's own verification pattern — three bands, the same one the hardware arches are
 checked with — is what its surface holds before any client writes, and `tools/wasm-servers/boot.cjs`
@@ -207,7 +207,7 @@ this image's module. Each is a `WASM_MODULES` entry and a `match` arm away.
 
 The shell retries `read(0)` in user mode when there is nothing to read, and on this port the tty's
 own `do_read` does the same — an idle console is a *spin*, not a block
-(`PORTING_PLAN.md` finding 32). That has two consequences a browser makes unavoidable, and they
+(`.notes/porting_plan.md` finding 32). That has two consequences a browser makes unavoidable, and they
 are what `host.js`'s slice mechanism exists for:
 
 - The guest never hands control back on its own, so a page that let it run would freeze on the
@@ -219,7 +219,7 @@ are what `host.js`'s slice mechanism exists for:
   for you" looks like from outside — and the page parks on it: no slices at all until a keystroke,
   with a two-second safety valve in case the reading is ever wrong.
 
-Interrupting an idle guest also found a cross-arch bug (`PORTING_PLAN.md` finding 41): the
+Interrupting an idle guest also found a cross-arch bug (`.notes/porting_plan.md` finding 41): the
 `RTS_PREEMPTED` flag that `thread_yield` sets was never cleared, because the wasm platform layer
 was missing the step every hardware arch runs at syscall return. A process that yielded and then
 blocked in `RECEIVE` was woken but never re-linked, so the run queue drained and the console went

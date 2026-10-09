@@ -7,8 +7,8 @@ below about the port was read out of the tree at the time of writing; every clai
 MINIX 3.3.0 comes from `.refs/minix-3.3.0/` and is cited by file. Sections marked *as
 built* record where the implementation revised the draft.
 
-Related: [`FILEMMAP.md`](FILEMMAP.md) (the exec/mmap substrate this builds on),
-[`PORTING_PLAN.md`](PORTING_PLAN.md) (phase tracker), [`C_BUILD.md`](C_BUILD.md) (the
+Related: [`filemmap.md`](filemmap.md) (the exec/mmap substrate this builds on),
+[`porting_plan.md`](porting_plan.md) (phase tracker), [`c_build.md`](c_build.md) (the
 toolchain this has to extend), `.agents/skills/minix-kernel-boundary` and
 `silent-failure-traps`.
 
@@ -16,7 +16,7 @@ toolchain this has to extend), `.agents/skills/minix-kernel-boundary` and
 
 - The port is **all-static, `ET_EXEC`-only, non-PIE at `0x01000000`**, but it already
   has the two things a loader is built on: **file-backed demand-paged exec**
-  (`FILEMMAP.md`) and **userland `mmap` with `MAP_FIXED` and `MAP_SHARED`**
+  (`.notes/filemmap.md`) and **userland `mmap` with `MAP_FIXED` and `MAP_SHARED`**
   (`vm/mod.rs::do_mmap`, `finish_mmap_file`). So this is an *addition* to a working
   substrate, not a replacement of it.
 - **The payoff is nearly free — now measured, and the one hole closed.** VM's file page cache
@@ -34,7 +34,7 @@ toolchain this has to extend), `.agents/skills/minix-kernel-boundary` and
   **opt-in** dynamic build (default stays static, exactly as MINIX does), and a
   **classic non-PIE first** progression so each phase adds exactly one mechanism.
 - **wasm32 is out of scope** — exec there is host module instantiation and there are no
-  faults to fault on (`ARCH_WASM32.md`). This is a three-arch project.
+  faults to fault on (`.notes/arch_wasm32.md`). This is a three-arch project.
 - **The toolchain fork carries the PIC targets after all — and the static path is untouched.**
   Phases 0–3 first ran on a JSON target plus `-Z build-std`, which needed a nightly; the targets
   are now the fork's own `*-minix-elf` triples, built by the same stage1 compiler as the rest of
@@ -74,7 +74,7 @@ Concretely, "done" for v1 means:
   `_dl_runtime_resolve`, and is the right default for an OS with no ABI promises yet.
 - **ASLR** — the port has none today; the loader will use a deterministic base.
 - **`ldconfig` / `/etc/ld.so.cache`** — a fixed search path plus `LD_LIBRARY_PATH`.
-- **wasm32** — see §1 of `ARCH_WASM32.md`: no page faults, exec is instantiation.
+- **wasm32** — see §1 of `.notes/arch_wasm32.md`: no page faults, exec is instantiation.
 
 ## 2. Why this is opt-in, and what it buys
 
@@ -159,7 +159,7 @@ register contract** (it avoids needing a full auxv on the first cut, §6.2), and
 | `PT_INTERP` / `PT_DYNAMIC` | `kernel/src/elf.rs` | constants declared, **never read** |
 | Exec pipeline | `vfs/exec.rs` → `VM_EXEC_NEWMEM` → `vfs/mmap.rs::vfs_memmap` (`VM_VFS_MMAP`) → `SYS_EXEC_LOAD` | works, one image, one `vmfd` kept in **VFS's** fproc at `VM_PROC_NR` (never installed in the target) |
 | Demand paging of segments | `vm/mod.rs::do_vfs_mmap`, `start_file_page`/`finish_page` | works; per-`PT_LOAD` lazy `VR_FILE` region, FDIO on fault (a `vm/cache.rs` hit first) |
-| File page cache (sharing) | `vm/cache.rs` (`cache_find`/`cache_insert`/`clear_bydev`, LRU, 4096 pages); used by `vm/mod.rs::start_file_page`/`finish_page` | **implemented** — shares read-only and `MAP_SHARED`-writable file pages across processes; `VM_MAPCACHEPAGE`/`VM_SETCACHEPAGE`/`VM_CLEARCACHE` handlers are implemented too (the `FILEMMAP.md §3/§6` "stubs" rows are stale) |
+| File page cache (sharing) | `vm/cache.rs` (`cache_find`/`cache_insert`/`clear_bydev`, LRU, 4096 pages); used by `vm/mod.rs::start_file_page`/`finish_page` | **implemented** — shares read-only and `MAP_SHARED`-writable file pages across processes; `VM_MAPCACHEPAGE`/`VM_SETCACHEPAGE`/`VM_CLEARCACHE` handlers are implemented too (the `.notes/filemmap.md §3/§6` "stubs" rows are stale) |
 | Userland `mmap` | `minix-std/src/vmem.rs` → `vm/mod.rs::do_mmap` | works; **`MAP_FIXED` honoured** (`do_mmap`, `finish_mmap_file`, `do_vfs_mmap`), `MAP_SHARED` sets `VR_SHARED` |
 | Identity-PTE clearing | `vm/mod.rs::finish_mmap_file` (`vm_clear_range`) and `do_vfs_mmap` | **already clears identity PTEs over a mapped range** — so a userland `mmap(MAP_FIXED)` at `0x01000000` will fault in correctly |
 | Region flags | `vm/region.rs` | `VR_FILE`, `VR_EXEC`, `VR_WRITE`, **`VR_SHARED`** (documented as the exception to the private-page model) |
@@ -186,7 +186,7 @@ Each decision gives the options, the recommendation, and the cost of being wrong
 ### D1 — Scope: the three hardware arches; wasm32 excluded
 
 wasm has no page faults and `exec` is a host `instantiate`, so there is nothing for an
-`ld.so` to do (`vfs/exec.rs` wasm arm, `ARCH_WASM32.md`). Gate the whole feature on
+`ld.so` to do (`vfs/exec.rs` wasm arm, `.notes/arch_wasm32.md`). Gate the whole feature on
 `not(target_arch = "wasm32")`, exactly as the existing ELF arm is gated.
 
 ### D2 — Default stays static; dynamic is opt-in
@@ -240,7 +240,7 @@ would have needed `AT_PHDR` to describe itself.
 MINIX reserves 10 MB below the stack and lets `ld.so` relocate itself. For the port the
 cheaper first step is a **non-PIE loader at a fixed high base** (below the user mmap
 base: 4 GiB on x86, `0x30000000` on aarch64 and riscv — see the heap comment in
-`minix-rt/src/lib.rs`; riscv moved from the 4 GiB base with `PHYSMAP.md` P4). That removes the chicken-and-egg of the relocator needing
+`minix-rt/src/lib.rs`; riscv moved from the 4 GiB base with `.notes/physmap.md` P4). That removes the chicken-and-egg of the relocator needing
 relocation. Cost: a fixed reservation (MINIX reserves 10 MB too, for the same reason),
 and the loader is not itself relocatable until a later phase. Revisit if the loader ever
 needs to be shared or ASLR arrives.
@@ -267,7 +267,7 @@ load-time error instead of a first-call trap.
    place gets a private copy of every page and no sharing. `VR_SHARED` is a different
    thing (fork/COW semantics for `MAP_SHARED` pages, `vm/cow.rs`) — it is not the
    sharing mechanism. Phase 5 is measurement plus this mapping discipline, not new VM
-   code. (The `FILEMMAP.md §3/§6` "block cache is a stub" claims predate the cache and
+   code. (The `.notes/filemmap.md §3/§6` "block cache is a stub" claims predate the cache and
    should be corrected there.)
 
 ### D8 — TLS: single-module static TLS, placed by the loader
@@ -930,7 +930,7 @@ asserted on the loader's own message. `just test-dynlink-<arch>`.
 
 Per-arch reloc sets (Appendix A) and the `exec_init_regs` register choice (§6.2). Prefer
 landing each phase on x86_64 first, then porting, matching how the exec work went
-(`FILEMMAP.md §5` needed three arch-specific fixes after the x86 version was green).
+(`.notes/filemmap.md §5` needed three arch-specific fixes after the x86 version was green).
 
 As built — riscv64 first, then aarch64, in that order:
 
@@ -1045,7 +1045,7 @@ them.
 ## 8. Risks and traps
 
 - **The toolchain fork is the schedule risk**, not the loader (§6.5, Phase 3/4).
-- **Attribution / lazy exec pages.** `FILEMMAP.md §6` records the kernel-mode fault
+- **Attribution / lazy exec pages.** `.notes/filemmap.md §6` records the kernel-mode fault
   *attribution* gap (a kernel copy faulting a lazy page is attributed to the copier).
   The loader reads its own mapped DSO pages and relocates into them; keep every loader
   access a **user-mode** access, or the gap becomes a SIGSEGV that looks like a loader
@@ -1078,9 +1078,9 @@ them.
   loader diagnostic that cannot tell them apart sends the reader to the wrong file. Checked by
   putting `MAX_REGIONS` back to 16: the message is the one that names the address space.
 - **RISC-V X bit / AArch64 address range.** Executable regions must reach `VR_EXEC` so
-  RISC-V text pages get the X PTE (`FILEMMAP.md §5` Bug 4); `MAX_USER_ADDRESS` on
+  RISC-V text pages get the X PTE (`.notes/filemmap.md §5` Bug 4); `MAX_USER_ADDRESS` on
   aarch64 covers the whole TTBR0 range, so a bad loader base can become an eret-retry
-  loop (`FILEMMAP.md §6`).
+  loop (`.notes/filemmap.md §6`).
 - **A page two `PT_LOAD`s share needs their *union*, and the obvious fix is the wrong one.**
   Phase 7 found `.text`'s last page — the one holding the `.plt` — losing `PTE_X`, because
   `do_vfs_mmap` trims the earlier region out of a page the later segment claims and the
@@ -1221,7 +1221,7 @@ Dynamic tags needed: `DT_NEEDED`, `DT_STRTAB`/`DT_STRSZ`/`DT_SYMTAB`/`DT_SYMENT`
 ## Appendix B — bookkeeping
 
 - `README.md` "Project Structure": add `crates/ldso` (**done**).
-- `PORTING_PLAN.md`: a "Dynamic linking" phase entry pointing at this file (**done**, as a
+- `.notes/porting_plan.md`: a "Dynamic linking" phase entry pointing at this file (**done**, as a
   status entry rather than a phase: the work is a track of its own and Phase 4 was dropped).
 - `Justfile`: `dynlink-x86` / `test-dynlink-x86` (**done**); `dynlink-riscv64` /
   `dynlink-aarch64` and their `test-` recipes (**done**, Phase 7, on the same

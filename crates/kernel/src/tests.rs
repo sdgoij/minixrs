@@ -1359,7 +1359,7 @@ fn test_pt_map_unmap(ctx: &mut TestCtx) {
 
         // Write to the allocated frame through the physmap: the fresh root is not the active
         // page table, so the write cannot go through `va`, and a frame's own address is only
-        // reachable as a pointer after the conversion (`PHYSMAP.md` D4).
+        // reachable as a pointer after the conversion (`.notes/physmap.md` D4).
         let frame = crate::pagetable::frame_ptr(phys) as *mut u32;
         core::ptr::write_volatile(frame, 0xCAFEBABE);
         let val = core::ptr::read_volatile(frame);

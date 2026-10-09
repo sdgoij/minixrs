@@ -16,7 +16,7 @@
 //!     it. The compositor is a device client here exactly as it is on the other arches, where the
 //!     `mmap` is what makes the frame a direct memory write instead of a copy.
 //!   * **There is no keyboard yet.** Input arrives from a driver blocked in `RECEIVE` that nothing
-//!     can wake on this port (`ARCH_WASM32.md` §11, M5c), so the input consumer registration is
+//!     can wake on this port (`.notes/arch_wasm32.md` §11, M5c), so the input consumer registration is
 //!     skipped and the receive loop serves window requests only.
 //!
 //! The desktop is painted twice over: a *whole* repaint when the windows themselves change (create,

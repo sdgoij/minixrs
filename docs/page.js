@@ -9,7 +9,7 @@
 // Two things are worth knowing before reading it:
 //
 //   * The guest's console read does not block on this port. The shell retries `read(0)` in user
-//     mode and the tty does the same, so an idle console is a *spin* (`PORTING_PLAN.md` finding
+//     mode and the tty does the same, so an idle console is a *spin* (`.notes/porting_plan.md` finding
 //     32). That is why the loop cannot simply "run the guest and wait for a keystroke": it has to
 //     stop the guest, and `sliceWasSpinOnly()` is how it knows the guest has nothing to do but
 //     wait. Without that the tab would sit at 100% of a core while the user reads the screen.
@@ -276,7 +276,7 @@ showView('terminal');
 
 // ---------------------------------------------------------------------- the controls
 //
-// Both exist because of what the disk cannot promise by itself (`PORTING_PLAN.md` finding 54).
+// Both exist because of what the disk cannot promise by itself (`.notes/porting_plan.md` finding 54).
 // A session only ends cleanly if something asks it to — MFS holds its dirty blocks until a
 // shutdown syncs them, so a tab closed at the prompt leaves the filesystem unclean and the next
 // boot mounts it read-only — and a store the page refuses is otherwise a page with no way back,

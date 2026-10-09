@@ -129,8 +129,8 @@ capability: `/libexec/ld.so`, `/lib/libc.so` (the port's C library as a shared o
 and the boot test checks for them — while every program the boot path runs is still static.
 The design, the phases (0–7, complete; 4 dropped) and the
 measured result that a shared object's read-only pages are one frame set across processes
-live in [`DYNAMIC_LINKING.md`](DYNAMIC_LINKING.md), which builds on the file-backed exec
-substrate in [`FILEMMAP.md`](FILEMMAP.md).
+live in [`dynamic_linking.md`](dynamic_linking.md), which builds on the file-backed exec
+substrate in [`filemmap.md`](filemmap.md).
 
 ## Phase 0: Project Structure & Build System
 
@@ -3801,7 +3801,7 @@ MMIO transport (no PCI).
   - `Framebuffer` driver struct with open/close/read/write/ioctl
   - Real implementation depends on arch-specific VESA/PCI MMIO backend (see 12.22)
   - `CanvasArch` (M5a, wasm): a third backend whose surface is the *server's* buffer and whose mode
-    is the host's — `ARCH_WASM32.md` §9.2. `fb`'s server is shared with the bus arches; what differs
+    is the host's — `.notes/arch_wasm32.md` §9.2. `fb`'s server is shared with the bus arches; what differs
     is the backend, `CDEV_MAP` (refused where there are no page tables), and the port-I/O hooks,
     which do not exist there.
 
@@ -6173,7 +6173,7 @@ zeroes rather than as an error.
 
 #### wasm32 port — findings (added)
 
-Building the system for `wasm32` (see `ARCH_WASM32.md`) put a second,
+Building the system for `wasm32` (see `.notes/arch_wasm32.md`) put a second,
 independent axis of portability pressure on the same code, and it found things
 the three shipping arches cannot: they are all 64-bit and all have a page table.
 
@@ -6226,7 +6226,7 @@ being selected. Compiling cleanly therefore proved much less than it looked like
 The fix is a target with `os = "minix"`: `tools/wasm-target/wasm32-minix.json`,
 built with `-Z json-target-spec -Z build-std=core,alloc` (values taken from
 `rustc --print target-spec-json` for `wasm32-unknown-unknown`, with `os` changed).
-`ARCH_WASM32.md` §10 predicted this as an in-tree spec in `rust/`; the JSON form
+`.notes/arch_wasm32.md` §10 predicted this as an in-tree spec in `rust/`; the JSON form
 needs no fork and no bootstrap, which is why it is the one used for now.
 
 **6. `USER_STACK_TOP`'s duplication is now four-way, and the wasm32 arm is a
@@ -6282,7 +6282,7 @@ because their init only touches their own statics. A boot sequence that is only
 the missing part.
 
 **10. Places that write user memory directly, and what they do on wasm.** The
-cross-address-space copy seam (`ARCH_WASM32.md` §5.1) is routed through the HAL
+cross-address-space copy seam (`.notes/arch_wasm32.md` §5.1) is routed through the HAL
 at every site that takes a user pointer. On an arch whose two address spaces are
 separate memories, a direct write is not merely ineffective — a guest address such
 as `0x100050` is just past the kernel's 1 MiB stack, so it lands *in the kernel's
@@ -6375,7 +6375,7 @@ argument that was derived from these comments and turned out to be wrong, which
 is the argument for running the copy and reading the byte count instead.
 
 **12. A runaway guest cannot be preempted, so the host needs its own limit.**
-`ARCH_WASM32.md` §6.4 says a process that loops without a syscall is unstoppable,
+`.notes/arch_wasm32.md` §6.4 says a process that loops without a syscall is unstoppable,
 and PM's first appearance on this port was a spin in its `SYS_GETKSIG` loop —
 caused by finding 10's sibling, the reply that never arrived. The harness's first
 version recorded every syscall and so exhausted Node's heap instead of
@@ -6484,7 +6484,7 @@ offsets does not remove it:
   that — the copy from the caller's slot, at the vector's address, of the vector's
   own byte count — rather than dressing the errno up as a pass. That there is no
   physical-address model to *build*, rather than one still to be decided, is argued
-  in `ARCH_WASM32.md` §5.3: the three shipping arches identity-map the kernel, so
+  in `.notes/arch_wasm32.md` §5.3: the three shipping arches identity-map the kernel, so
   "physical" and "kernel virtual" are the same number there, and the port's drivers
   already bounce through a driver-local buffer rather than programming a device from
   another process's addresses.
@@ -6625,7 +6625,7 @@ families cannot drift apart again.
 
 **The same sweep missed `ENOSYS`, which `errno.h` puts at 78 and the port put at
 five different wrong values.** Found while deciding what `umap`/`vumap` should
-answer on a target with no page tables (`ARCH_WASM32.md` §5.3): `kernel/src/ipc.rs`
+answer on a target with no page tables (`.notes/arch_wasm32.md` §5.3): `kernel/src/ipc.rs`
 had `-72`, `servers/src/vm/mod.rs` `-72`, `minix-std` and `servers/{pm,tty}.rs`
 `-71`, `minix-libc` `71`, and `libminixfs::errors`/`vtreefs` `-38`. That last pair is
 Linux's `ENOSYS` (38) rather than a wrong digit, and 38 is `ENOTSOCK` in C's
@@ -7329,7 +7329,7 @@ It needs a fix in `exit_proc` and a test that a child outliving its parent ends 
 whose pid is 1, rather than with VFS.
 
 **47. What a loop of commands costs, measured.** Not a bug, and it is here because the number was
-open: §12 risk 1 of `ARCH_WASM32.md` ends with "a real figure needs a realistic workload", and
+open: §12 risk 1 of `.notes/arch_wasm32.md` ends with "a real figure needs a realistic workload", and
 after 42 the page can run one. `node tools/wasm-browser/run.js` now types five external commands
 in a row and reports what each cost, which puts numbers on the design's central tradeoff — a fork
 here duplicates the *process*, not a stack.
@@ -7591,7 +7591,7 @@ So the invariant the port ran on was *no allocation inside VFS's VM-request hand
 FDLOOKUP and FDCLOSE arms of `do_vm_call`). Nothing enforced it, and it was held by inspection until
 2026-09, when the class was removed rather than policed: VM's VFS requests are asynchronous now
 (`crates/servers/src/vm/vfs_request.rs`), so VM never blocks on VFS and no request of VFS's can be
-delivered into a reply slot — see `TEST_GATES.md` Step 6 for the shape and finding 64 for how a
+delivered into a reply slot — see `.notes/test_gates.md` Step 6 for the shape and finding 64 for how a
 stray message in that slot used to be read as an answer. C does not have the problem for the same
 reason: the `vm_vfs_*` requests are asynchronous with callbacks through `do_vfs_reply`. The port had
 replaced that with a synchronous sendrec (`vfs_request_sync`, gone) and left `do_vfs_reply` a stub
@@ -7640,7 +7640,7 @@ the M5c check exists in both.
 wrote over the privilege table.** `arch-sim`'s frame arena starts at `ARENA_BASE` = 0x100000, and its
 comment calls that value "arbitrary non-zero" — true where a returned page is only stored or
 compared, and false on this port, where the kernel *dereferences* what `kernel::hal` hands it.
-wasm32 has no physical/virtual identity to keep (`ARCH_WASM32.md` §5.3), so the arena's addresses can
+wasm32 has no physical/virtual identity to keep (`.notes/arch_wasm32.md` §5.3), so the arena's addresses can
 only be the instance's own linear memory, and a fixed number above the image is not memory at all.
 With the base re-exported from `arch-sim`, `alloc_phys_contig` handed back the module's own bytes:
 the privilege table lives at 0x100e40, four kilobytes into the arena's first page, so the first exec
@@ -7816,7 +7816,7 @@ integration suite cannot reach this path: `try_deliver_senda` reads the sender's
 `virtual_copy`, and the suite's test processes have no page table to read it from.
 
 **66. An async delivery put the sender's endpoint in a register the syscall epilogue then wrote
-over, so VFS read every reply as coming from PM.** Step 6 of `TEST_GATES.md` moved VM's requests to
+over, so VFS read every reply as coming from PM.** Step 6 of `.notes/test_gates.md` moved VM's requests to
 VFS off the blocking path, and VFS takes the sender of each message from `RECEIVE`'s return value
 (`get_work`). `mini_receive`'s async branch delivered the message through `try_async`, which stamps
 the sender's endpoint into the receiver's return register exactly as `mini_send` does — and then

@@ -133,7 +133,7 @@ pub extern "C" fn minix_server_vfs() -> i32 {
 /// never asked for a block. Spawned, it answers `EIO` because `virtio_blk_open` finds no
 /// device, which is true, and `bdev_driver_root` takes the ramdisk fallback it already
 /// has. Faithful rather than a stub: a driver that is present and reports nothing
-/// attached. `PORTING_PLAN.md` finding 25.
+/// attached. `.notes/porting_plan.md` finding 25.
 #[unsafe(no_mangle)]
 pub extern "C" fn minix_server_virtio_blk() -> i32 {
     servers::virtio_blk::virtio_blk_server_main();
@@ -194,7 +194,7 @@ pub extern "C" fn minix_server_tty() -> i32 {
 /// VFS's init mounts it *after* the root filesystem — `mount_devman`, whose own comment
 /// says it "blocks until devman starts, like mount_root/MFS". Without this instance VFS
 /// stops there on an absent peer, which is the same shape as the `virtio_blk` probe
-/// above (`PORTING_PLAN.md` finding 25), so it is answered the same way: by being there.
+/// above (`.notes/porting_plan.md` finding 25), so it is answered the same way: by being there.
 #[unsafe(no_mangle)]
 pub extern "C" fn minix_server_devman() -> i32 {
     servers::devman::devman_server_main();
@@ -205,7 +205,7 @@ pub extern "C" fn minix_server_devman() -> i32 {
 ///
 /// On wasm its backend is the host's canvas rather than a device on a bus, so the surface is
 /// this instance's own memory, the mode comes from the host, and a flush hands the pixels over
-/// - see `drivers::video::fb::CanvasArch` and `ARCH_WASM32.md` §11 (M5a). A host with no display
+/// - see `drivers::video::fb::CanvasArch` and `.notes/arch_wasm32.md` §11 (M5a). A host with no display
 /// leaves it a driver that found no device, which is why it still reaches its main loop either
 /// way: the boot's device map already names this slot, so a client's `CDEV_OPEN` has to be
 /// answered by something.
@@ -217,7 +217,7 @@ pub extern "C" fn minix_server_fb() -> i32 {
 
 /// The input server: `/dev/kbd` (major 20) — the keyboard and the pointer as events.
 ///
-/// On wasm its third backend is the host's own records (M5c, `ARCH_WASM32.md` §11), which is why the
+/// On wasm its third backend is the host's own records (M5c, `.notes/arch_wasm32.md` §11), which is why the
 /// instance has to exist at all: nothing on this port reads an 8042 or probes for a virtio-input, and
 /// the desktop has no other way to be told that the reader moved the mouse. It boots after `fb` and
 /// before `wserver` because that is the kernel's own `BOOT_IMAGE` order, and the order is load-bearing
@@ -244,7 +244,7 @@ pub extern "C" fn minix_input_events_queued() -> i32 {
 /// On wasm it composes the desktop into a surface of its own — there is no device memory to map and
 /// no page tables to map one through — and hands each frame to `/dev/fb` as a single datagram write,
 /// which the fb driver copies into the surface it owns and presents when the compositor flushes
-/// (M5b, `ARCH_WASM32.md` §11). It boots before `tty` on purpose: the console's window is created at
+/// (M5b, `.notes/arch_wasm32.md` §11). It boots before `tty` on purpose: the console's window is created at
 /// tty's init, and a console with no window server behind it has nowhere to put its cells.
 #[unsafe(no_mangle)]
 pub extern "C" fn minix_server_wserver() -> i32 {

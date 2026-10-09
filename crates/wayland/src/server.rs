@@ -7,11 +7,11 @@
 //! the protocol host-testable, and it is the piece a real `/sbin/wlserver`
 //! shares with the smoke test.
 //!
-//! Phase 1 scope (`WAYLAND.md` §6.11): the core handshake (`wl_display.sync`,
+//! Phase 1 scope (`.notes/wayland.md` §6.11): the core handshake (`wl_display.sync`,
 //! `wl_registry`), the factories a client binds (`wl_compositor`, `wl_shm`,
 //! `wl_output`, `wl_seat`), and object creation for surfaces and regions.
 //! `wl_shm` pools/buffers and input events are 1b/1c; the keymap event is 2a
-//! (`WAYLAND.md` §6.12), whose bytes the caller supplies — nothing here touches
+//! (`.notes/wayland.md` §6.12), whose bytes the caller supplies — nothing here touches
 //! an fd.
 
 use crate::protocol;

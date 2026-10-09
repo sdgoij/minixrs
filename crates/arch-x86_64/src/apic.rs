@@ -95,7 +95,7 @@ unsafe fn apic_read(offset: u32) -> u32 {
     unsafe {
         // The base is a physical address, and the registers are reached through the physmap rather
         // than through the identity address the kernel also happens to have — the one P4 shrinks
-        // away (`PHYSMAP.md` P3c).
+        // away (`.notes/physmap.md` P3c).
         let addr = crate::hal::phys_to_virt(APIC_BASE.load(Ordering::Relaxed) + offset as u64)
             as *const u32;
         ptr::read_volatile(addr)

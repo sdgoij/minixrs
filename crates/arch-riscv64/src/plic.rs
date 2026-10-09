@@ -33,7 +33,7 @@ pub const UART_IRQ: u32 = 10;
 ///
 /// Before paging is on there is no translation, so a register is where its physical address says;
 /// after that the kernel reaches it through the physmap, because the identity map no longer covers
-/// the low 1 GiB the device sits in (`PHYSMAP.md` P4). `boot_cr3` is the test: the boot path stores
+/// the low 1 GiB the device sits in (`.notes/physmap.md` P4). `boot_cr3` is the test: the boot path stores
 /// it as it turns paging on and installs the window immediately after.
 fn plic_base() -> u64 {
     if crate::hal::boot_cr3() == 0 {

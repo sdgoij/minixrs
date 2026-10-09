@@ -5,7 +5,7 @@ MFS `fs_stat`/`fs_statvfs`), the server-stub cleanup (VM
 `clear_pagefault`/`do_vfs_reply`, clock server incl. CLOCK_SETTIME, tty
 chardriver primitives), and the tooling fixes (automated per-exec
 region/page-count probe, riscv64/aarch64 kernel-binary collision, MSYS
-env mangling). Supersedes the older "open questions" lists in FILEMMAP §6
+env mangling). Supersedes the older "open questions" lists in .notes/filemmap.md §6
 where they overlap; FILEMMAP keeps the detailed write-up.
 
 Legend: `[all]` affects all arches, `[x86]` / `[riscv]` / `[aarch64]`
@@ -19,13 +19,13 @@ are arch-specific, `[env]` is tooling/platform, not kernel.
    `do_setcache` / `do_clearcache` are no-ops; every page fault allocates a
    private page and reads go straight to VFS/MFS each time. No eviction/LRU
    until the real cache lands. Correctness is fine; this is pure perf.
-   (FILEMMAP §6)
+   (.notes/filemmap.md §6)
 2. **MFS read-path I/O amplification ~3–6×** — large sequential reads issue
    ~3–6× more virtio-blk I/Os than the file's block count (cat ≈2.8×,
    mmapfd ≈5.6×, 33 MiB `/bin/bign` pre-fault ≈5.8×). Two candidate fixes
    (make PREFETCH read; move `ONE_SHOT` off the `FULL_DATA_BLOCK` value)
    were tried and reverted. Open: profile MFS's cache/read-ahead against
-   the virtio request stream. (FILEMMAP §7)
+   the virtio request stream. (.notes/filemmap.md §7)
 3. **`mmap(fd)` MAP_SHARED semantics** — implemented (MAP_SHARED sets
    `VR_SHARED`, the pages are file-cache frames shared between processes) and
    exercised by `mmapfd shared`, which forks and checks that the child's write is
@@ -34,7 +34,7 @@ are arch-specific, `[env]` is tooling/platform, not kernel.
    `handle_cow_fault` re-enables writability in place instead of copying. What
    is still unbuilt is the *reverse* case — a shared *anonymous* mapping, or a
    file mapping whose cache page is evicted underneath it (item 1's stub cache).
-   (FILEMMAP §6)
+   (.notes/filemmap.md §6)
 4. **~~VFS `do_fstat` never copies the `Stat` back~~ — FIXED.** The stat
    path now works end-to-end: VFS `do_stat`/`do_fstat`/`do_lstat` pass the
    caller's buffer + `size_of::<Stat>()` to `req_stat` (was `null_mut`, 0);
@@ -131,7 +131,7 @@ are arch-specific, `[env]` is tooling/platform, not kernel.
      VM does not wait on VFS any more (`vm/vfs_request.rs`, asynchronous with
      `AMF_NOREPLY`, so a waiting server cannot absorb the request either), so
      the handler may allocate and the class is gone rather than policed —
-     PORTING_PLAN.md finding 58.
+     .notes/porting_plan.md finding 58.
      Still true, and unrelated to that: `vm_remap`, `vm_getphys` and
      `vm_unmap` in `servers/src/ipc.rs` are *callers* of VM, so a server
      blocking on VM in those paths is the ordinary shape, not a cycle.
@@ -149,7 +149,7 @@ are arch-specific, `[env]` is tooling/platform, not kernel.
    `/bin/forkthread` (fork-from-worker, child inherits the worker's tid)
    on x86.
 10. **Userland `mmap(fd)` has no real consumer** — `mmapfd` is a test
-    binary; exec remains the production user. (FILEMMAP §6)
+    binary; exec remains the production user. (.notes/filemmap.md §6)
 11. **`EDONTREPLY` and its neighbours disagreed with C in three places — FIXED
     (2026-09).** `sys/sys/errno.h` has `ENOTREADY -201`, `EDEADSRCDST -202`,
     `EDONTREPLY -203`, `ELOCKED -208`, but `arch-common::ipc` had
@@ -162,7 +162,7 @@ are arch-specific, `[env]` is tooling/platform, not kernel.
     kernel's values — but ported C compares them *by value*
     (`sef_cb_lu_prepare` returning `ENOTREADY` and its caller checking it is the
     standard live-update shape). All four definitions now carry C's values, with
-    `test_minix_ipc_error_codes_match_c` pinning them. (`PORTING_PLAN.md`
+    `test_minix_ipc_error_codes_match_c` pinning them. (`.notes/porting_plan.md`
     finding 20)
 
 12. **A process VM decides to kill was not killed (2026-09-21, FIXED — the multicall wedge).**
@@ -995,7 +995,7 @@ are arch-specific, `[env]` is tooling/platform, not kernel.
     `win_base + ((va - user_low) % win_size)`, so the whole low GB aliased free RAM. The branches it
     called "unmapped" (below `user_low`, and `win_size == 0`) wrote `0 | PMD_BLOCK` -- a *valid*
     EL0-RW block at physical 0, not an invalid entry. riscv64 and x86 were unaffected (`read=err`):
-    riscv64's `exec_create_root` does not copy the window's entry at all (`PHYSMAP.md` P4) and x86's
+    riscv64's `exec_create_root` does not copy the window's entry at all (`.notes/physmap.md` P4) and x86's
     identity map stops at the user base.
 
     *Fixed (2026-10-02).* The table now maps only the virtio-mmio window (identity, EL0_RW) and
@@ -1198,7 +1198,7 @@ are arch-specific, `[env]` is tooling/platform, not kernel.
     not the snapshot `fork(2)` promises, in the direction nobody tested (`/bin/forktest` only
     checked that the *child's* write did not reach the parent).
 
-    *Found through bash (see `C_BUILD.md`).* A command that forks — `cat /etc/passwd`, and any
+    *Found through bash (see `.notes/c_build.md`).* A command that forks — `cat /etc/passwd`, and any
     other external command — killed the child with a ring-3 `#GP` at `list_length`
     (`G0000 0000000001084590 001B …`). The fault-time register file, read with a gdbstub
     breakpoint on `exception_gpf_entry` (`target/tmp/bash-gpf-probe.py`), gave
@@ -1264,7 +1264,7 @@ are arch-specific, `[env]` is tooling/platform, not kernel.
     socket is your peer" in its ioctl reply, and `NWIOGUDSPEERCRED` is served from the peer's
     recorded owner endpoint. `do_copyfd` stays implemented (`VFS_COPYFD`, root-only) for a
     caller that genuinely has a thread to be answered on, but nothing in the tree uses it yet.
-    See `WAYLAND.md` §5 row 5 and §6.2.
+    See `.notes/wayland.md` §5 row 5 and §6.2.
 
     **VND is still open.** `vnd_copyfd`/`vnd_fstat` (`crates/drivers/src/storage/vnd.rs`) return
     `Err(DriverError::Unsupported)`, so `VNDIOCSET` cannot open a backing file. Either give VFS
@@ -1346,7 +1346,7 @@ are arch-specific, `[env]` is tooling/platform, not kernel.
     (`crates/servers/src/vfs/epoll.rs`) is net-new — MINIX emulates `poll` over `select` and
     has no `epoll`. An instance holds a persistent interest set, and `epoll_wait` re-scans
     the whole set through the shared readiness engine (`vfs::select`), so readiness is
-    level-triggered by construction. Deliberate limits, all in `WAYLAND.md` §5 row 23:
+    level-triggered by construction. Deliberate limits, all in `.notes/wayland.md` §5 row 23:
     `EPOLLET` and `EPOLLONESHOT` are accepted in the event mask but not honoured; an instance
     holds at most `MAX_INTERESTS` (64) registrations (the wait entry's `MAX_WATCH`),
     answering `ENOSPC` beyond that; and an interest whose fd the waiter has closed is dropped
@@ -1534,9 +1534,9 @@ are arch-specific, `[env]` is tooling/platform, not kernel.
     marker at the top of `ldso::rtld::run` never printed, so the loader executed nothing. It was
     not the copy: the same hang reproduced with `ipc.rs` at `HEAD`. Reverting the layout makes both
     gates green again, so the hang is the base move's doing and is **hidden, not fixed** —
-    `PHYSMAP.md`'s P2 and P4 change the same tables, and both stages should carry "re-check
+    `.notes/physmap.md`'s P2 and P4 change the same tables, and both stages should carry "re-check
     dynlink" as a gate. The layout itself now belongs to that plan: moving the user window is one
-    decision, made once, with the physmap present, rather than twice (see `PHYSMAP.md` D1–D4).
+    decision, made once, with the physmap present, rather than twice (see `.notes/physmap.md` D1–D4).
 
     **What the attempt exposed is worth keeping, and part of it landed.** The same shadowing works
     in the other direction: this kernel dereferences *physical* addresses as pointers in several
@@ -1567,7 +1567,7 @@ are arch-specific, `[env]` is tooling/platform, not kernel.
     256 MiB — so a table page handed out in `0x0FE00000` (254 MiB, inside *every* process's 1 MiB
     stack window) would poison every walk in the system, silently. `pte_is_valid_phys`
     (`phys < 0x8_0000_0000`) bounds the address but says nothing about whether a user mapping
-    shadows it. There are two honest shapes, and `PHYSMAP.md` works the choice through: stop
+    shadows it. There are two honest shapes, and `.notes/physmap.md` works the choice through: stop
     dereferencing physical addresses (walk-free user copies, and each page table reached through the
     CR3 that owns it), or give the kernel a physmap at a virtual address no user window covers. The
     reference does the second and a scratch-window version of the first — its kernel is linked at
@@ -1581,7 +1581,7 @@ are arch-specific, `[env]` is tooling/platform, not kernel.
     invisible, so a loader that *did* start and fail would look exactly like the silence above. That
     is `silent-failure-traps` material independently of this item.
 
-    *`PHYSMAP.md` now has its first stage landed (2026-09-29).* Each arch has a physmap — x86-64
+    *`.notes/physmap.md` now has its first stage landed (2026-09-29).* Each arch has a physmap — x86-64
     `0xFFFF_8000_0000_0000`, riscv64 `0xFFFF_FFC0_0000_0000`, aarch64 `0x8_0000_0000` (low,
     because `EPD1` disables TTBR1 there) — with `phys_to_virt`/`virt_to_phys` as the only
     conversion, compile-time assertions that the base is above every user address, and
@@ -1590,7 +1590,7 @@ are arch-specific, `[env]` is tooling/platform, not kernel.
     the reverse, on all three arches. What it is not yet is *used*: the derefs are P2, and the
     per-process install is P4.
 
-    *And it is used now: `PHYSMAP.md` P4 landed on all three arches (2026-10-01, x86 last).* Every
+    *And it is used now: `.notes/physmap.md` P4 landed on all three arches (2026-10-01, x86 last).* Every
     per-process table's identity map is the kernel image plus the low frames and stops at the user
     base (x86's `0x200000..~0x20D3000` under a `identity_map_top()` of 64 MiB; AArch64's and
     RISC-V's start above their low-1 GiB windows instead), every page-table frame and every kernel
@@ -1703,7 +1703,7 @@ are arch-specific, `[env]` is tooling/platform, not kernel.
     `msg.m_payload.m1.m1i1 = pa as i32`, so a physical address above 4 GiB comes back wrong, and
     above 2 GiB it is sign-extended -- the same trap the neighbouring `do_map_phys` guards
     against by reading its field as `u32`. The right reply for an address is the convention
-    `do_mmap` already uses and `do_map_phys` was moved onto under `PHYSMAP.md` P5: a `u64` at
+    `do_mmap` already uses and `do_map_phys` was moved onto under `.notes/physmap.md` P5: a `u64` at
     message bytes 8..16.
 
     It is latent rather than live -- nothing calls `vm_getphys` except its own stub arm, and the
@@ -1978,7 +1978,7 @@ are arch-specific, `[env]` is tooling/platform, not kernel.
    against `__stack_top` rather than sampling a fresh allocation (a sample passes
    in both layouts, because by then the loader has moved the free cursor). Any
    change that grows the aarch64 image is a candidate to re-arm a latent overlap
-   of this shape — see `PORTING_PLAN.md` finding 19.
+   of this shape — see `.notes/porting_plan.md` finding 19.
 8. **`trapframe_to_mcontext` returned a zeroed context — FIXED (2026-09).**
    The pair was `Mcontext::default()` and an empty function, so
    `SYS_GETMCONTEXT` would have reported an all-zero register file rather than
@@ -2114,7 +2114,7 @@ are arch-specific, `[env]` is tooling/platform, not kernel.
 - **The bare-metal suite carried an arch assumption that only a bare-metal run
   can see.** `syscall_brk` in `crates/kernel/src/tests.rs` asserted x86_64's
   heap base as a literal (`0x3FE00000`, which was x86_64's alone — aarch64 is at
-  `0x2000_0000`, and riscv64 moved there with `PHYSMAP.md` P4), so `just test-qemu-aarch64` failed at
+  `0x2000_0000`, and riscv64 moved there with `.notes/physmap.md` P4), so `just test-qemu-aarch64` failed at
   `FAIL syscall_brk` while `cargo test -p kernel` stayed green. It stayed green
   because `tests.rs` is behind `kernel`'s `qemu-tests` feature and the host suite
   does not enable it: these tests are compiled by a feature the host build never
@@ -2168,7 +2168,7 @@ are arch-specific, `[env]` is tooling/platform, not kernel.
   (bash writes `#define clock_t long` otherwise, which collides with the host's
   typedef in the build tools); and `locale_utf8locale` needed `wcwidth`, without
   which `HANDLE_MULTIBYTE` is off while bash's globbing still uses an identifier
-  only the multibyte branch declares. `C_BUILD.md` has the write-up.
+  only the multibyte branch declares. `.notes/c_build.md` has the write-up.
   (`tools/ccflags.py`, `tools/build-c-hello.py`)
 - **~~What the hermetic compile then exposed: the port's own missing headers~~
   — FIXED (2026-09-24).** With the host out of the picture the bash build's
@@ -2176,7 +2176,7 @@ are arch-specific, `[env]` is tooling/platform, not kernel.
   tty surface behind it (`tcgetattr`/`tcsetattr`/`tcgetpgrp`/`cfmakeraw`, …),
   `sys/ioctl.h`, `sys/param.h`, `utime.h`, `netinet/in.h`/`arpa/inet.h`,
   `mktemp`, `mknod`/`mkfifo`, `times`, `bsearch`, `wcwidth`/`mbstowcs`, and
-  `_POSIX_VERSION` in `unistd.h`. `C_BUILD.md`'s "the missing terminal
+  `_POSIX_VERSION` in `unistd.h`. `.notes/c_build.md`'s "the missing terminal
   interface" list is the inventory, and bash configuring, compiling and linking
   at all is the check on it (`just build-bash`).
   (`tools/c-include`, `crates/minix-libc`)
@@ -2249,7 +2249,7 @@ are arch-specific, `[env]` is tooling/platform, not kernel.
   and readline spun for ever; the tty server now pumps the ring on its poll path
   (`crates/servers/src/tty.rs`, `silent-failure-traps`). All three arches pass.
   (`tools/build-bash.py`, `tools/cc-minix.py`, `Justfile`,
-  `tools/smoke/interactive_bash.py`, `crates/servers/src/tty.rs`, `C_BUILD.md`)
+  `tools/smoke/interactive_bash.py`, `crates/servers/src/tty.rs`, `.notes/c_build.md`)
 - **~~`signal.h` and `minix-libc` disagree on `sigprocmask`~~ — FIXED
   (2026-09-24).** `minix-std`'s signature is now
   `sigprocmask(how, set_ptr, old_ptr)` (PM's `m2l1`/`m2l2`, both caller

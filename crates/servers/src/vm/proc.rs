@@ -297,7 +297,7 @@ pub unsafe fn pt_new(ep: Endpoint) -> i32 {
         // address: VM is a user process with no user-visible physical window.
         // The direct pointer writes this replaces only worked while a
         // user-visible identity map covered the frames — x86's, which
-        // `PHYSMAP.md` P4 shrinks, and never RISC-V's or AArch64's, whose
+        // `.notes/physmap.md` P4 shrinks, and never RISC-V's or AArch64's, whose
         // identity leaves are supervisor-only. `pt_free_internal`,
         // `free_address_space` and `cow_setup_fork` map tables the same way.
         const VM_MAP_FLAGS: u64 = kernel::pagetable::MAP_WRITE | kernel::pagetable::MAP_USER;

@@ -9,8 +9,8 @@ description: Guidelines for translating MINIX 3.3.0 C code to Rust — struct la
 
 Every function you write must do something meaningful. If a feature needs infrastructure that does not exist:
 1. **Implement the missing infrastructure first** — it becomes the prerequisite task.
-2. **If you cannot implement it in this session**, add a new task to PORTING_PLAN.md describing the
-   missing functionality, then use `todo!("<explanation; see PORTING_PLAN.md TASK>")`.
+2. **If you cannot implement it in this session**, add a new task to .notes/porting_plan.md describing the
+   missing functionality, then use `todo!("<explanation; see .notes/porting_plan.md TASK>")`.
 
 ### Good `todo!()`
 ```rust
@@ -25,7 +25,7 @@ fn f() {}                         // empty body, silent no-op
 ```
 
 **Stub Deferral Rule:** Every `todo!()` or `stub_handler!` MUST create a concrete task in
-PORTING_PLAN.md under the Phase where the missing dependencies become available.
+.notes/porting_plan.md under the Phase where the missing dependencies become available.
 Do NOT leave "deferred to later phase" without a traceable task.
 
 # C to Rust Translation for MINIX

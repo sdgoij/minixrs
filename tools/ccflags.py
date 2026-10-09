@@ -10,7 +10,7 @@ paths no real system has. A missing header should be an error, not a guess.
 
 Two call sites share this list — `tools/build-c-hello.py` and the scratch
 `target/tmp/cc-minix` the bash build uses — so it lives here rather than in
-both. `C_BUILD.md` has the write-up.
+both. `.notes/c_build.md` has the write-up.
 """
 
 from __future__ import annotations

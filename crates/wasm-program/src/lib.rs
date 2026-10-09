@@ -1,6 +1,6 @@
 //! One userland program, as its own wasm module.
 //!
-//! This is the shape `exec` instantiates (`ARCH_WASM32.md` §7.2): the module *is* the
+//! This is the shape `exec` instantiates (`.notes/arch_wasm32.md` §7.2): the module *is* the
 //! program, and the export at the bottom of this file is what the host calls in place of
 //! `_start`. It is a separate crate from `wasm-servers` because the two are arranged
 //! opposite ways round. A server is one module with an entry per server — all ten run the
@@ -131,7 +131,7 @@ fn blob_is_sane(base: u32, argc: u32) -> bool {
     true
 }
 
-/// The smallest program that needs `fork` (`ARCH_WASM32.md` §11, M7b step 5a).
+/// The smallest program that needs `fork` (`.notes/arch_wasm32.md` §11, M7b step 5a).
 ///
 /// It forks once, and the two instances say which one they are: the child prints the pid it was
 /// given and the 0 `fork` returned to it, the parent prints the pid `fork` returned and then

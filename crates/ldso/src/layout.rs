@@ -13,7 +13,7 @@ use crate::elf::{Elf, PT_LOAD};
 /// main program, the loader, the stack and the heap.
 ///
 /// Per-arch because the main program's base is: x86's userland starts at 64 MiB
-/// (above the kernel image — `PHYSMAP.md` P4), so its objects start at 80 MiB and
+/// (above the kernel image — `.notes/physmap.md` P4), so its objects start at 80 MiB and
 /// its loader at 128 MiB; riscv and aarch64 keep the 16 MiB base, so theirs start
 /// at 32 MiB with the loader at 64 MiB. Each value mirrors the arch's
 /// `--defsym=BASE_ADDRESS` / `--defsym=LOADER_BASE` in the target spec.

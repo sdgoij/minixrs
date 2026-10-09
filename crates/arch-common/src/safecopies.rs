@@ -104,7 +104,7 @@ pub const GRANT_INVALID: CpGrantId = -1;
 /// against it in `verify_grant`. This port has no separate `ANY`: `mini_receive`
 /// normalizes the wire sentinel `0x0000ffff` into the kernel's `NONE` (31743),
 /// so that is the value the kernel's grantee check compares against, and
-/// `PORTING_PLAN.md` finding 18 records the divergence from C. This constant is
+/// `.notes/porting_plan.md` finding 18 records the divergence from C. This constant is
 /// here rather than in either side so that the kernel's check and a granter
 /// filling in an entry cannot drift apart.
 pub const GRANTEE_ANY: i32 = 31743;

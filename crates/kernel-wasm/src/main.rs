@@ -6,7 +6,7 @@
 //! this layer owns the entry points and the panic handler, and the kernel below
 //! it is unchanged.
 //!
-//! M2 adds the dispatch protocol (§4.1 of `ARCH_WASM32.md`): the host drives a
+//! M2 adds the dispatch protocol (§4.1 of `.notes/arch_wasm32.md`): the host drives a
 //! loop, and this layer answers three questions — who should run next, what did
 //! a syscall do, and is that process now blocked. The kernel keeps its own
 //! process table and run queues; the host never decides any of it.
@@ -88,7 +88,7 @@ fn proc_at(slot: i32) -> *mut Proc {
 /// arches. The division is the port's usual one — the host declares *that* something happened, the
 /// guest decides what it means — and it is deliberately not input-specific: the same export is what a
 /// timer tick or a network event would arrive through, so the next device needs no seam of its own
-/// (`ARCH_WASM32.md` §13).
+/// (`.notes/arch_wasm32.md` §13).
 ///
 /// Called between dispatch slices, never during one, so the kernel is in a consistent state and no
 /// instance is executing.
@@ -102,7 +102,7 @@ pub extern "C" fn minix_kernel_irq(irq: i32) {
     unsafe { kernel::interrupt::irq_handle(irq) };
 }
 
-/// Whether the kernel's frame arena overlaps the privilege table (`PORTING_PLAN.md` finding 61).
+/// Whether the kernel's frame arena overlaps the privilege table (`.notes/porting_plan.md` finding 61).
 ///
 /// The arena is where an exec frame lands, and the table is the kernel's own static, so "the arena
 /// covers memory it must not" is a question about two addresses in one module — answerable here
@@ -127,7 +127,7 @@ pub extern "C" fn minix_arena_overlaps_privs() -> i32 {
 ///
 /// For the checks, and for one property they can otherwise only infer: the privilege table is the
 /// most sensitive thing the kernel's frame arena sits next to (`arch_wasm32`'s static arena,
-/// `ARCH_WASM32.md` §5.3), so "an exec did not disturb the process table" is readable as "every
+/// `.notes/arch_wasm32.md` §5.3), so "an exec did not disturb the process table" is readable as "every
 /// mask is what it was". A mask that changed is a frame written outside the arena.
 #[unsafe(no_mangle)]
 pub extern "C" fn minix_proc_trap_mask(slot: i32) -> i32 {
@@ -214,7 +214,7 @@ pub extern "C" fn minix_proc_spawn_user(slot: i32, endpoint: i32) -> i32 {
 /// Name a slot in the kernel's image table: the loader's statement that a process will exist
 /// there.
 ///
-/// The host is this port's loader (§7 of `ARCH_WASM32.md`), so the set of processes that exist
+/// The host is this port's loader (§7 of `.notes/arch_wasm32.md`), so the set of processes that exist
 /// is not `BOOT_IMAGE`'s alone. A program the host runs outside the boot image is still a
 /// process the kernel has, and this table is how the servers come to know it: PM registers every
 /// entry it names, and an entry is what keeps PM from handing that slot to a forked child.
@@ -341,7 +341,7 @@ pub extern "C" fn minix_syscall(
         // and aarch64 equivalents): a process that comes out of a syscall with `RTS_PREEMPTED`
         // has the flag cleared, and is put back on the tail of its queue when nothing else is
         // set. On wasm nothing did, and the flag is set by `RTS_thread_yield` — the tty's
-        // "console has nothing for me" retry, i.e. `PORTING_PLAN.md` finding 32 — so it stuck.
+        // "console has nothing for me" retry, i.e. `.notes/porting_plan.md` finding 32 — so it stuck.
         //
         // A sticky flag is not cosmetic: every wake-up path in `ipc.rs` re-enqueues a receiver
         // only when `p_rts_flags == 0` (`mini_send` and the three async delivery arms), and

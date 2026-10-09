@@ -27,7 +27,7 @@ pub fn init() {
 ///
 /// On a hardware arch "physical" and "kernel virtual" are the same number, and the arena is a range
 /// of RAM above the kernel image. On this port there is no such range and no identity to keep
-/// (`ARCH_WASM32.md` §5.3): the only memory the kernel can dereference is its own module's, so the
+/// (`.notes/arch_wasm32.md` §5.3): the only memory the kernel can dereference is its own module's, so the
 /// arena has to *be* part of it, at an address private to the instance. `arch-sim`'s base is
 /// documented as "arbitrary non-zero", which is true where nothing dereferences a returned page and
 /// false here — the kernel writes what it was handed through the pointer, and with the default base
@@ -161,7 +161,7 @@ const EINVAL: i32 = -22;
 /// machine with an empty slot has.
 ///
 /// The MAC is the *link's*, not the host's business: what a link is addressed as is a property of
-/// the wire it is pretending to be, and the two links this port has (`ARCH_WASM32.md` §9) are an
+/// the wire it is pretending to be, and the two links this port has (`.notes/arch_wasm32.md` §9) are an
 /// in-page gateway and a WebSocket relay — neither of which has a reason to disagree about it.
 pub fn net_mac() -> Option<[u8; 6]> {
     // SAFETY: the import has no preconditions; the host answers 0 for "no link".
@@ -271,7 +271,7 @@ pub use crate::ExecModuleRequest;
 
 /// Ask the host to instantiate the module named by `request` as the process in `slot`.
 ///
-/// Exec on this port (§7.2 of `ARCH_WASM32.md`): a program is a wasm module and only the host
+/// Exec on this port (§7.2 of `.notes/arch_wasm32.md`): a program is a wasm module and only the host
 /// can instantiate one, so the kernel's half is to say which process, which bytes and with what
 /// arguments. Called from the wasm arm of `do_exec_load_handler`, which is where the image would
 /// otherwise be installed.
@@ -399,7 +399,7 @@ pub fn qemu_exit(code: u32) -> ! {
 //
 // The windows start at 32 MiB, not at a few, because the *linker* — not this
 // crate — places the module's static image, and on the servers module that image
-// is ~15.8 MiB and grows with the code (`ARCH_WASM32.md` §5.4). A window at 2 MiB
+// is ~15.8 MiB and grows with the code (`.notes/arch_wasm32.md` §5.4). A window at 2 MiB
 // would sit inside the image, and the bump heap an allocator carves from it would
 // overwrite whatever static the linker put there. Starting the first window at
 // 32 MiB leaves ~16 MiB of headroom, and `tools/wasm-servers/boot.cjs` asserts the

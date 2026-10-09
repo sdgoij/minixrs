@@ -271,7 +271,7 @@ wasm offsets by subtracting a base and bounds-checking. Consequences:
   must fit in 32 bits. wasm64 would lift this; it is a stretch goal (§11).
 - **`brk`/`mmap` become `memory.grow`.** No demand paging is possible: wasm
   memory can only grow, never be mapped at a chosen address or faulted in.
-- **No COW, no file-backed lazy mmap.** `FILEMMAP.md` documents that exec is
+- **No COW, no file-backed lazy mmap.** `.notes/filemmap.md` documents that exec is
   already file-backed lazy mmap. That mechanism is replaced, not ported: exec
   becomes module instantiation (§7.2).
 - **There is no physical address space** — see §5.3. The kernel's frame arena
@@ -321,7 +321,7 @@ The other is the return value — a `RECEIVE` that blocks is answered later, and
 sender's endpoint reaches the guest through the frame `mini_send` writes, which is
 where the shipping arches read it on the way back to userland. Without it a resumed
 call returned the value cached at *block* time, so DS replied to endpoint 0 instead
-of to its client (`PORTING_PLAN.md` finding 15). `kernel-wasm` now records a blocked
+of to its client (`.notes/porting_plan.md` finding 15). `kernel-wasm` now records a blocked
 call's result and answers `minix_proc_retval`, and the host reads that slot on
 rewind rather than replaying what it saw.
 Measured cost of the whole thing: **two FFI crossings per message**
@@ -335,7 +335,7 @@ closed.** Each site is gated rather than rewritten: where
 shipping arches are byte-for-byte unchanged and only wasm takes the new path.
 Every conversion that takes a user pointer reduces to one of two operations —
 `vm::virtual_copy` when two address spaces meet, and `vm::read_from_proc` /
-`vm::write_to_proc` when a kernel buffer is on one side — and `PORTING_PLAN.md`
+`vm::write_to_proc` when a kernel buffer is on one side — and `.notes/porting_plan.md`
 finding 10 carries the per-site table, including the two entries that turned out
 to be already converted when the list was finally read through.
 
@@ -357,7 +357,7 @@ routed through `vm::virtual_copy`, `EXEC_SETUP`'s name read and `vm::vm_memset`
 by the M2 harness, and `do_vumap`'s vector transfers were converted with the
 harness asserting the input-vector read itself — the call cannot *complete*,
 because its result is physical addresses and this port has none, but that is
-`PORTING_PLAN.md` finding 14 rather than a seam gap. `ps_str` turned out to need
+`.notes/porting_plan.md` finding 14 rather than a seam gap. `ps_str` turned out to need
 nothing: it is passed to `arch_proc_init` as a value, and no implementation
 dereferences it.
 
@@ -368,7 +368,7 @@ memory, addressed out of a priv structure rather than out of a message. Every
 grep above was a message grep, so none could have matched; reading C's
 `do_safecopy.c` is what turned it up. It now goes through `vm::read_from_proc`,
 and the M2 harness pins it with a real `SYS_SETGRANT`/`SYS_SAFECOPYFROM` pair
-across two instances (`PORTING_PLAN.md` finding 16). *Finding 17* is the bug that
+across two instances (`.notes/porting_plan.md` finding 16). *Finding 17* is the bug that
 test uncovered underneath it: `proc_init` never marked the dynamic privilege
 slots free, so the allocator `SYS_SETGRANT` needs could never return one.
 
@@ -452,7 +452,7 @@ kernel dereferences it, so the base has to name real bytes of *this* module.
 address to `init_phys_alloc` (`crates/arch-wasm32/src/hal.rs`). Taking `arch-sim`'s
 base instead points the arena at the module's own statics: in the layout where this first showed,
 the privilege table sat at `0x100e40`, four kilobytes into the first page, so the first exec frame
-landed on a `Priv` entry and the desktop's `s_trap_mask` came back 0 (`PORTING_PLAN.md` finding 61).
+landed on a `Priv` entry and the desktop's `s_trap_mask` came back 0 (`.notes/porting_plan.md` finding 61).
 The invariant above is what made the difference invisible for as long as it was — nothing crossed an
 instance boundary either way.
 
@@ -738,7 +738,7 @@ The Node implementation is a file (`tools/wasm-browser/file-store.js`, driven by
 page's is IndexedDB behind the same four calls (`tools/wasm-browser/store.js`). The page's cannot
 answer the way the file does — IndexedDB is asynchronous and `host_block_read`/`host_block_write`
 are not — so it holds the disk in memory for the session and writes changed pages back as records,
-which is a weaker promise than the reference's durable-on-return `block_write` (`PORTING_PLAN.md`
+which is a weaker promise than the reference's durable-on-return `block_write` (`.notes/porting_plan.md`
 finding 54).
 
 Holding it is a tab's, not a page's: the page takes a Web Lock named after the database for as long
@@ -974,7 +974,7 @@ x86_64-pc-minix` is clean too, and every change above is behaviour-neutral there
   userland depend on `minix-rt`/`minix-std`, not on `std`.
   **This is load-bearing, not cosmetic** — without `os: "minix"` the build
   compiles the `#[cfg(not(target_os = "minix"))]` host stubs instead of the real
-  servers (97 of them return `ENOSYS`). See `PORTING_PLAN.md` finding 5.
+  servers (97 of them return `ENOSYS`). See `.notes/porting_plan.md` finding 5.
 - a wasm arm in `rust/library/std/src/sys/pal/minix/`
 - a `#[cfg(target_arch = "wasm32")]` arm for `syscall0..syscallN` in
   `crates/minix-rt/src/lib.rs`, calling `extern "C" fn host_syscall(...)`.
@@ -1073,7 +1073,7 @@ release build only *happens* to be safe because the wrapped negative index casts
 to a very large `usize`. A validator whose job is rejecting bad input thus panics
 or relies on an accident. Recorded as a `NOTE` rather than fixed — reachability
 depends on whether callers clamp, which needs an audit. Written up in
-`PORTING_PLAN.md`.
+`.notes/porting_plan.md`.
 
 **2. IPC payloads cannot be verified on the host, and their copy error is
 discarded.** `mini_send` copies the message via `copy_from_user`, whose result the
@@ -1081,7 +1081,7 @@ kernel drops (`let _ = ...`). With no address translation the copy fails, so the
 receiver's buffer stays zeroed and nothing reports a problem. The rendezvous
 *bookkeeping* is fully testable here — source endpoint recorded in `p_delivermsg`,
 flags cleared, run queues consistent — but payload integrity still needs a real
-arch. Also written up in `PORTING_PLAN.md`.
+arch. Also written up in `.notes/porting_plan.md`.
 
 Deliberately **not** exercised: anything needing real address translation. Exec,
 `system.rs`'s root address-space setup, and grants treat HAL values as real
@@ -1164,7 +1164,7 @@ kernel to copy its buffer into another instance's; the second then reads *its ow
 memory, so nothing the host or the sender did locally can satisfy it. Two things
 made it worth the wiring: it proved `SYS_VIRCOPY` end to end, and in doing so it
 found a seam site that reading had missed three times — see §5.1 and
-`PORTING_PLAN.md` finding 13.
+`.notes/porting_plan.md` finding 13.
 
 The harness has since grown around that seam, because each new site got its test
 rather than its patch: `SYS_MEMSET`, `SYS_EXEC` and `SYS_VUMAP` were converted and
@@ -1174,7 +1174,7 @@ the copy is made out of it in another, followed by the `SYS_SAFEMEMSET` that
 writes the pattern back the other way, its flags written into the granter's own
 table. The pair is the check DS's label seeding depends on, and it is the one site
 whose address came out of a priv structure rather than a message (§5.1,
-`PORTING_PLAN.md` findings 16–17); the memset is what makes `verify_grant`'s write
+`.notes/porting_plan.md` findings 16–17); the memset is what makes `verify_grant`'s write
 arm exercised rather than inferred (finding 14).
 
 Two things the work settled:
@@ -1249,7 +1249,7 @@ compile with their real bodies selected. Doing so immediately surfaced four
 latent bugs that the stubs had been covering (missing wasm32 arms for
 `USER_STACK_TOP` and VM's phys range, `minix-libc`'s `c_long`-based C ABI, and
 `i8` used where `c_char` is unsigned on riscv64/aarch64). All are written up in
-`PORTING_PLAN.md`.
+`.notes/porting_plan.md`.
 
 One bycatch worth keeping: this target is the **only** way to run `cargo clippy`
 over `target_os = "minix"` code, because the fork's rustc has no clippy-driver.
@@ -1376,7 +1376,7 @@ main loop — which turns out to matter beyond tidiness, because with an answer 
 to the loop a client request can be dispatched to that service in the window where
 it is still inside the `SENDREC` carrying its answer. RS's next request to it is
 then refused as `ELOCKED` by the kernel's deadlock detector, whose size-2 escape
-covers a SEND/RECEIVE pair but not a sender that is mid-`SENDREC` (`PORTING_PLAN.md`
+covers a SEND/RECEIVE pair but not a sender that is mid-`SENDREC` (`.notes/porting_plan.md`
 finding 21). The other boot services are marked active when their slot is created
 because this port asks nothing of them; extending the table means adding the loop
 branch to that server first, and the period/heartbeat machinery that goes with a
@@ -1587,7 +1587,7 @@ its initial 16 MiB to 32 MiB to cover it, well clear of the wasm stack, which
 The device's length comes from the image's own superblock, not from a constant. That
 was not a preference: `RAMDISK_IMAGE_SIZE` had drifted to half the image, and a device
 that is too small reports end-of-file rather than an error, so the tail of any file
-past the mark would have read as zeros. `PORTING_PLAN.md` finding 22 has the
+past the mark would have read as zeros. `.notes/porting_plan.md` finding 22 has the
 measurement; `just test-arches` now boots all three hardware arches with the corrected
 device size, so the fix is not wasm-only.
 
@@ -1615,7 +1615,7 @@ VM is spawned at `VM_PROC_NR` first, because MFS's allocator runs during init an
 `brk()` goes through VM. It passes the same three checks. It looked for a while as
 though it did not — its 256 `SYS_VM_PAGING` calls in `vm_init_boot` filled a 64-entry
 trace that only kept the *head*, so nothing recorded the `RECEIVE` it reached
-afterwards. `PORTING_PLAN.md` finding 24 is the correction: the harness now keeps both
+afterwards. `.notes/porting_plan.md` finding 24 is the correction: the harness now keeps both
 the head and the tail, because the ordering checks need the one and the loop checks need
 the other.
 
@@ -1641,7 +1641,7 @@ instance spawned with **no device attached**, because `mount_root` names it as t
 preferred root driver and then asks whether it has a device — an honest `EIO` lets
 `bdev_driver_root` take the ramdisk fallback, and keeps the platform branch out of `fs`;
 and **devman**, because `mount_devman` blocks until it starts. Both were absent-peer
-stalls, and `PORTING_PLAN.md` finding 25 records the measurements and the reasoning.
+stalls, and `.notes/porting_plan.md` finding 25 records the measurements and the reasoning.
 
 With this the whole chain runs on wasm: **VM → ramdisk → MFS → VFS**, plus DS, RS, PM,
 an honest virtio_blk and devman. Nine instances, each in its own main loop, each blocked
@@ -1655,7 +1655,7 @@ forwarded only the first two argument registers into the kernel, so every server
 arrived with `count = 0` and returned success — and nothing noticed, because no server prints
 during a boot that works. It surfaced as a `panic!` whose message never appeared, which is
 also why a service's failure used to be indistinguishable from a service that had quietly
-stopped. `PORTING_PLAN.md` finding 29 has the diagnosis, including the branch that was blamed
+stopped. `.notes/porting_plan.md` finding 29 has the diagnosis, including the branch that was blamed
 for it first; finding 28 is the kernel-side read it uncovered next to it.
 
 What M3c does *not* do, and it is the rest of M3: nothing is running as a *user* process
@@ -1755,7 +1755,7 @@ Two things were worth establishing rather than assuming, and both came out favou
   `TTY_PROC_NR` in its dmap, so `/dev/console` resolves to this instance the moment the
   instance exists at that slot. It is a static table rather than C's protocol, and the
   code says so: `TODO(1A.5): replace with RS-driven registration once tty publishes its
-  dev_nr at boot` (`PORTING_PLAN.md` finding 30).
+  dev_nr at boot` (`.notes/porting_plan.md` finding 30).
 
 The first attempt at the open answered `ENOSYS`, and that turned out to be the most
 valuable part of the milestone: a server answering "I do not know that call" because the
@@ -1763,7 +1763,7 @@ message it received had no `m_type` in it. Every kernel-*forwarded* syscall was 
 request out of the wrong memory on this port — the kernel builds it in the caller's
 `p_sendmsg` and then asks the copy seam to fetch that address from the *caller's* instance,
 where it means something else entirely. Only the identity-mapped shipping arches made the
-fetch resolve to the right bytes. `PORTING_PLAN.md` finding 31 has the diagnosis and the
+fetch resolve to the right bytes. `.notes/porting_plan.md` finding 31 has the diagnosis and the
 fix; it is why the milestone could not have been reached before, and why nothing else
 noticed — no process's own IPC goes through that path.
 
@@ -1908,7 +1908,7 @@ Two things the step cost, both recorded rather than papered over:
 - **`RTS_NO_PRIV` is not decoration, and `do_fork`'s two statements are not separable here.**
   The first version copied `do_fork` line for line — the privilege link *and* the flag — and the
   program never ran: an empty syscall trace, and a run-queue check that failed because a
-  non-runnable process was sitting in a queue. `PORTING_PLAN.md` finding 34.
+  non-runnable process was sitting in a queue. `.notes/porting_plan.md` finding 34.
 
 One deliberate oddity: the harness starts the program at the first quiescence rather than with the
 boot processes. A spawned slot is immediately runnable, so the boot-time version was scheduled
@@ -2117,7 +2117,7 @@ The two checks, in the order they can be reached:
    return is two routes out of the same process table agreeing rather than one number asserted
    twice.
 
-   Three things it cost, all in `PORTING_PLAN.md`: finding 37 (every `asynsend3` on this port read
+   Three things it cost, all in `.notes/porting_plan.md`: finding 37 (every `asynsend3` on this port read
    its own request out of the kernel's memory, so PM's notify to VFS queued nothing and reported
    success), finding 38 (the two async delivery paths woke the receiver without handing it the
    message, and without setting the return value `RECEIVE` means as the sender's endpoint — a bug
@@ -2358,9 +2358,9 @@ file-backed exec path does not exist on this target, and `exec` is module instan
 (§7.2). That is the design working as intended, and it has a consequence worth naming rather than
 leaving implicit: **the target with the strongest harness is the one least able to exercise the
 port's most fragile path.** Two bugs on the hardware arches, found while this half of the port was
-being finished (`PORTING_PLAN.md` findings 57 and 58), were invisible here for exactly that reason —
+being finished (`.notes/porting_plan.md` findings 57 and 58), were invisible here for exactly that reason —
 every wasm check was green, and none of them could have been otherwise. A green wasm run is evidence
-about what wasm *executes*, not about the mechanism wasm replaces. `TEST_GATES.md` is where what each
+about what wasm *executes*, not about the mechanism wasm replaces. `.notes/test_gates.md` is where what each
 target does and does not cover is written down.
 
 ## 13. Open questions

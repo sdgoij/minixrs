@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Measure whether two processes mapping the same shared object share its frames.
 
-Phase 5 of `DYNAMIC_LINKING.md`. VM's file page cache is what makes a read-only
+Phase 5 of `.notes/dynamic_linking.md`. VM's file page cache is what makes a read-only
 DSO page one physical frame for every process that maps it, and that only holds if
 the loader maps the object's read-only segments *read-only* — a loader that maps
 them writable so it can patch them in place gets a private copy of every page. The
@@ -50,7 +50,7 @@ read-only bit (`AP[2]`) is inverted relative to these two, so it is its own chan
 a data entry. Phase 5's gate asks for two arches; x86_64 and riscv64 are the two.
 
 As first run it reported FAIL and invited a wrong conclusion: the pages were private, and
-only reading VM's own state showed why (`DYNAMIC_LINKING.md` §7 Phase 5). Its job is to
+only reading VM's own state showed why (`.notes/dynamic_linking.md` §7 Phase 5). Its job is to
 keep that verdict honest.
 
 Usage: python tools/dso_share_probe.py [--arch x86|riscv64] [MEM] [DYNCLIB_PATH]
@@ -123,7 +123,7 @@ ARCHS = {
             "-device", "virtio-tablet-pci,display=fb0",
             "-kernel", str(IMAGE),
         ],
-        # The x86 user base is 64 MiB, above the kernel image (`PHYSMAP.md` P4), so its
+        # The x86 user base is 64 MiB, above the kernel image (`.notes/physmap.md` P4), so its
         # objects start at 80 MiB and its programs link at 64 MiB.
         "dso_base": 0x0500_0000,
         "text_base": 0x0400_0000,

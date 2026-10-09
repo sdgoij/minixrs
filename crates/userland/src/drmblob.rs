@@ -1,4 +1,4 @@
-//! `/bin/drmblob` — the render node's blob objects (`WAYLAND.md` §6.10, stage 3b-4).
+//! `/bin/drmblob` — the render node's blob objects (`.notes/wayland.md` §6.10, stage 3b-4).
 //!
 //! A blob is a create whose request names the *kind* of memory it wants rather than a 2D shape,
 //! and it is the one create that carries its own backing: the pages travel inside the command, so

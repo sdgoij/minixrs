@@ -605,7 +605,7 @@ pub unsafe extern "C" fn kmain(hart_id: u64, dtb_ptr: u64) -> ! {
                 kernel::hal::write_cr3(boot_pt);
                 // The window goes in before the next line of output: with paging on, everything from
                 // here that reaches a frame or a device register needs it, and taking it this early
-                // is what lets the boot path stop leaning on the identity map (`PHYSMAP.md` P4).
+                // is what lets the boot path stop leaning on the identity map (`.notes/physmap.md` P4).
                 kernel_boot::boot_init::install_physmap_in_boot_tables();
                 serial_write("  SV39 enabled\r\n");
             } else {
@@ -671,7 +671,7 @@ pub unsafe extern "C" fn kmain(hart_id: u64, dtb_ptr: u64) -> ! {
                 kernel::hal::write_cr3(boot_pt);
                 // Before the UART and PLIC setup below, and before the next line of output: with
                 // paging on, everything from here that reaches a frame or a device register needs the
-                // window (`PHYSMAP.md` P4).
+                // window (`.notes/physmap.md` P4).
                 kernel_boot::boot_init::install_physmap_in_boot_tables();
                 // Enable UART FIFO for piped input support
                 arch_riscv64::uart::init_uart();
@@ -784,7 +784,7 @@ unsafe fn test_sbi_console() -> u32 {
 /// window (exec image, DSOs, loader, heap, mmap, stack) and, below it, the
 /// devices the port uses — the UART at 0x10000000, the PLIC at 0x0C000000 and
 /// the sifive test finisher at 0x10_0000. A kernel identity mapping over the
-/// window is the overlap `PHYSMAP.md` P4 removes; the kernel reaches those
+/// window is the overlap `.notes/physmap.md` P4 removes; the kernel reaches those
 /// devices through the physmap instead.
 ///
 /// Returns the physical address of the root page table.
@@ -822,7 +822,7 @@ unsafe fn create_boot_page_table() -> Option<u64> {
         // - L2[i] covers VA [i<<30, (i+1)<<30) → PA i<<30.
         // Entry 0 (0..1 GiB) is left out: it is the user window, and the
         // kernel reaches the devices inside it through the physmap
-        // (`PHYSMAP.md` P4).
+        // (`.notes/physmap.md` P4).
         // Per-process tables copy these supervisor-only entries, so the
         // kernel keeps identity access to all of RAM under any page table.
         let root = root_phys as *mut u64;

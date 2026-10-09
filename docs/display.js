@@ -3,7 +3,7 @@
 // A display is what `host.js`'s `display` parameter is — `{width, height, present(bytes)}` — and
 // this is the page's implementation of it. The mode is the canvas's, because a canvas has the
 // size the page gave it the way a panel has one the hardware fixed, and the guest's `fb` driver
-// adopts whatever the host names (M5a, `ARCH_WASM32.md` §11). A host with no display at all is
+// adopts whatever the host names (M5a, `.notes/arch_wasm32.md` §11). A host with no display at all is
 // `display = null`, and the driver then finds no device — which is what a headless run is.
 //
 // `present` is handed one frame of guest memory in the layout the driver's own

@@ -32,7 +32,7 @@ fn apply_mount_flags(sp: &mut SuperBlock, req_flags: u32) -> bool {
 /// The mount *succeeds*: reads work, the system comes up, and the first thing that reports the state
 /// is a write failing somewhere much later — which reads as a broken command rather than as a disk
 /// this boot may not write. Dropping to read-only is the reference's answer and it stays; saying so
-/// is this port's, because nothing else does (`PORTING_PLAN.md` finding 54, and the reason the page
+/// is this port's, because nothing else does (`.notes/porting_plan.md` finding 54, and the reason the page
 /// carries a control for a disk it cannot write).
 ///
 /// The read-only state is also *not* visible to VFS, which asked for a writable mount and is not
@@ -163,7 +163,7 @@ pub fn fs_unmount() -> i32 {
         // unmount a device with an open file description on it), and this port's
         // caches do not hold references that add up the way the C reference expects:
         // several paths take an FS reference VFS does not later put back
-        // (`PORTING_PLAN.md` has the measurements), so a strict count here would
+        // (`.notes/porting_plan.md` has the measurements), so a strict count here would
         // refuse the shutdown's unmount of a filesystem nothing is using.
         let forced = u32::from_ne_bytes(
             (&(*mfs).m_in.m_payload.raw)[0..4]

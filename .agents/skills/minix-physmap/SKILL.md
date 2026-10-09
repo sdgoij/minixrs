@@ -86,7 +86,7 @@ reason.
 
 ## Where this is pinned
 
-- `PHYSMAP.md` — the invariant, the per-stage plan (P1–P6) and the audit of every deref site.
+- `.notes/physmap.md` — the invariant, the per-stage plan (P1–P6) and the audit of every deref site.
 - `tools/check-physmap.py` — the static rule; run by `just check`.
 - `crates/kernel/src/pagetable.rs` (`table_ptr`, `frame_ptr`) and each arch's `vmparam.rs`
   (`phys_to_virt`, `identity_map_top`, the compile-time pins).

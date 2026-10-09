@@ -2415,7 +2415,7 @@ pub unsafe fn pm_isokendpt(endpoint: i32) -> Option<usize> {
 /// serves (`fork`), and every other process it knows comes from the kernel's image table
 /// (`init_boot_procs`, which is C's `sys_getimage` loop). A process the kernel has and the image
 /// does not name — a wasm host spawning a program straight into a slot (§7 of
-/// `ARCH_WASM32.md`) — is invisible to PM, and `PM_FORK` from one is dropped because
+/// `.notes/arch_wasm32.md`) — is invisible to PM, and `PM_FORK` from one is dropped because
 /// `pm_isokendpt` cannot place the sender.
 ///
 /// A message from an endpoint is proof its process exists, and the endpoint says where: its
@@ -4687,7 +4687,7 @@ fn clock_ticks_to_sec_nsec(clock: u64, boottime: i64, hz: u64) -> (i64, i64) {
 /// the port does not copy: the value would jump whenever the wall
 /// clock is set, and it would sit `boottime` seconds away from the
 /// kernel tick timeline that `vfs::alarm`/`timerfd`/`select` arm
-/// absolute deadlines against. Deliberate deviation — see `WAYLAND.md`
+/// absolute deadlines against. Deliberate deviation — see `.notes/wayland.md`
 /// §5.
 fn clock_gettime_reply(
     clk_id: i32,

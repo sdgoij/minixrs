@@ -1,4 +1,4 @@
-//! `/bin/drmctx` — the render node's rendering context (`WAYLAND.md` §6.10, stage 3b-4).
+//! `/bin/drmctx` — the render node's rendering context (`.notes/wayland.md` §6.10, stage 3b-4).
 //!
 //! A context is what everything with GL in it hangs off: a command buffer names one, and so does
 //! a transfer through it. It is also the first request that **reads** the caller's memory rather

@@ -6,7 +6,7 @@
 ENTRY(_start)
 
 /* Overridable: the target spec passes `--defsym=BASE_ADDRESS=<arch base>`,
-   because the base is per-arch (`PHYSMAP.md` P4 — x86's image occupies
+   because the base is per-arch (`.notes/physmap.md` P4 — x86's image occupies
    2..34 MiB, so its userland starts at 64 MiB). A bare `rustc` invocation
    that does not go through the spec still gets this default. */
 PROVIDE(BASE_ADDRESS = 0x01000000);

@@ -166,7 +166,7 @@ pub const UUCRED_GID_OFF: usize = 8;
 /// VFS intercepts this one: it keeps the descriptors itself (`vfs::scm`) and
 /// forwards the request only to learn which socket is the peer, which the
 /// driver answers in the reply payload rather than in a user buffer. See
-/// `WAYLAND.md` §5.
+/// `.notes/wayland.md` §5.
 pub const NWIOSUDSCTRL: u32 = ioc_encode(IOC_IN, b'u', 10, MSG_CONTROL_SIZE);
 /// `NWIOGUDSCTRL` — `recvmsg` control data. Bidirectional: the caller's
 /// `msg_controllen` is the space available, and the reply's is the amount

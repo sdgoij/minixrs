@@ -168,7 +168,7 @@ Paths are in this tree (`minixrs/crates/...`) unless noted.
       program fits **18 shared objects** (`MAX_REGIONS = 64`, 3 regions per
       object). Read-only DSO text is shared across processes by the inode-keyed
       file page cache (`crates/servers/src/vm/cache.rs`); measured 13/13 pages
-      (x86_64) and 11/11 (riscv64). `DYNAMIC_LINKING.md`.
+      (x86_64) and 11/11 (riscv64). `.notes/dynamic_linking.md`.
 - [x] **Static Rust `std` PAL**, `procfs`, `mfs`, `ext2`, `pfs`, `pfs`-style
       services, `virtio-net` + net server, `ramdisk`, `ahci`, `at_wini`,
       `virtio_blk`.
@@ -309,7 +309,7 @@ Answering the explicit question. "Ref" is
 | **Userland breadth** | ~150 command dirs (disk tools, mail, editors, net admin, `ipcs`/`ipcrm`, `top`) | ~60 coreutils + a handful of test binaries |
 | **SMP / watchdog / profile** | Present | Present in part (`smp`, `profile`, `bootwatch`) |
 | **Threads model** | `libmthread` — user-space M-threads; VFS worker threads; **no kernel thread abstraction** | **1:1 kernel threads + `futex` + TLS** — deliberate, better |
-| **Dynamic loader** | Present but **off by default** — `libexec/ld.elf_so`, with `LDSTATIC=-static` / `MKDYNAMICROOT=no` (`DYNAMIC_LINKING.md` §2.1) | Present on all three hardware arches (`/libexec/ld.so`, `/lib/libc.so`); default still static — same posture |
+| **Dynamic loader** | Present but **off by default** — `libexec/ld.elf_so`, with `LDSTATIC=-static` / `MKDYNAMICROOT=no` (`.notes/dynamic_linking.md` §2.1) | Present on all three hardware arches (`/libexec/ld.so`, `/lib/libc.so`); default still static — same posture |
 | **`dlopen`/`dlsym`** | Present — `lib/libc/dlfcn/dlfcn_elf.c` | Present — `crates/ldso/src/rtld.rs` (`RTLD_LOCAL`/`RTLD_GLOBAL` groups); `dlclose` succeeds without unmapping |
 | **eventfd / timerfd / signalfd** | **Absent** | Absent (parity — this is net-new work for both) |
 | **DRM / GL / Wayland / X11 / D-Bus** | **Absent** | Absent (parity) |
@@ -637,7 +637,7 @@ stack and link it six times".
 
 **The loader has already grown to meet this.** Three limits this section
 previously listed as prerequisites have landed, and the region work was done
-explicitly for this library set (`DYNAMIC_LINKING.md` says so):
+explicitly for this library set (`.notes/dynamic_linking.md` says so):
 
 | Was a gap | Now |
 |---|---|
@@ -662,7 +662,7 @@ What is left is small and does not block a stack installed under `/lib` or
 One deliberate toolchain decision worth recording: `--no-rosegment` would have
 taken the cost to 2 regions per object by folding read-only data into the
 executable segment, and was **declined** because it maps `.rodata` and `.dynstr`
-executable (`DYNAMIC_LINKING.md` §7 Phase 2). Eager binding is likewise kept —
+executable (`.notes/dynamic_linking.md` §7 Phase 2). Eager binding is likewise kept —
 it is a superset of what `RTLD_LAZY` promises.
 
 ### 6.10 Phase 3 — the accelerated render path (virgl first)
@@ -995,7 +995,7 @@ that a 3c failure can be attributed to one side or the other:
 |---|---|
 | `epoll`/`eventfd` for fences and `VIRTGPU_WAIT` | §6.3 — decision D4 |
 | `mmap` of a shared (blob) object | §6.4's anonymous-shared-frames work, or a direct device mapping |
-| `dlopen`, multi-module TLS, 18 objects | **Done** (§6.9, `DYNAMIC_LINKING.md`) |
+| `dlopen`, multi-module TLS, 18 objects | **Done** (§6.9, `.notes/dynamic_linking.md`) |
 | `mprotect` | Only the llvmpipe branch (its JIT) — not virgl |
 | `pthreads`, `futex`, large `mmap` | Already present |
 
@@ -1352,7 +1352,7 @@ alone gives it a window but hands it keycodes it cannot turn into text.
   Phase 1, not after.
 - **VFS in the data path.** Measure it before choosing worker threads vs. a
   direct path.
-- **`FILEMMAP.md` vs. the code.** §6 of that doc lists `MAP_SHARED` file
+- **`.notes/filemmap.md` vs. the code.** §6 of that doc lists `MAP_SHARED` file
   semantics as deferred, but `VR_SHARED` and `finish_mmap_file` implement them.
   Reconcile the doc — and treat `VR_SHARED` as the base for `memfd`, not as new
   work.
@@ -1375,7 +1375,7 @@ Traps found while writing this, for reviewers to consider:
 
 - `MAP_SHARED` file mappings are a **documented deviation**: the reference
   rejects writable ones (`ENXIO`), this port implements them via `VR_SHARED`.
-  `FILEMMAP.md` §6 still calls it deferred — the code is ahead of the doc.
+  `.notes/filemmap.md` §6 still calls it deferred — the code is ahead of the doc.
 - `VFS_COPYFD` requires super-user, and there is **no thread to answer it**:
   VFS is single-threaded and parked in the `sendrec` while a driver handles an
   ioctl, so the reference's `copyfd` back-call (`filedes.c` `do_copyfd`, used by
@@ -1419,7 +1419,7 @@ Traps found while writing this, for reviewers to consider:
   fits **18** DSOs. It is the *region table*, not memory, that caps this, and
   `MAX_REGIONS` and the loader's `MAX_OBJECTS` must move together; the failure is
   an `EAGAIN` from `mmap` that used to be misreported as a bad `DT_NEEDED`
-  (`DYNAMIC_LINKING.md` §8).
+  (`.notes/dynamic_linking.md` §8).
 - A `dlopen`ed object carrying `PT_TLS` lands in a slice the TLS layout reserved
   and is first-touch initialised for threads that already exist. `TPOFF64` is not
   implemented — an object using it will not load.

@@ -74,7 +74,7 @@ impl AllocCell {
 /// The page bitmap, held in the kernel image rather than at the top of RAM.
 ///
 /// It used to be placed at the top of the free range and reached through a raw pointer holding its
-/// physical address — the identity map, which `PHYSMAP.md` P4 shrinks to the kernel image. It cannot
+/// physical address — the identity map, which `.notes/physmap.md` P4 shrinks to the kernel image. It cannot
 /// simply become `phys_to_virt(bitmap_pa)`: `init_allocator` runs *before* the window is installed
 /// and uses the bitmap then. A static in `.bss` is inside the kernel image, so the same address
 /// works before the window exists and after, and nothing has to recover a physical address from a

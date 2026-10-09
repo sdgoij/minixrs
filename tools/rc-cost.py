@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Measure how much of a linked minix Rust binary a shared layer could share.
 
-Phase 4 of `DYNAMIC_LINKING.md` asks whether a dynamic `std`/`minix-std` would pay for
+Phase 4 of `.notes/dynamic_linking.md` asks whether a dynamic `std`/`minix-std` would pay for
 itself. The answer turns on two numbers per binary, and this reports both:
 
 * how much of a binary is **monomorphised instantiations** (`_RI...`): a generic or

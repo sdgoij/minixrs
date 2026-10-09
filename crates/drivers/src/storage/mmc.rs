@@ -539,7 +539,7 @@ pub fn mmc_open(minor: usize, _access: i32) -> Result<(), DriverError> {
     if minor > 0 {
         return Err(DriverError::NotFound);
     }
-    todo!("mmc_open needs slot/card state and partition support; see PORTING_PLAN.md 12.17")
+    todo!("mmc_open needs slot/card state and partition support; see .notes/porting_plan.md 12.17")
 }
 
 /// Close an MMC block device.
@@ -547,7 +547,7 @@ pub fn mmc_close(minor: usize) -> Result<(), DriverError> {
     if minor > 0 {
         return Err(DriverError::NotFound);
     }
-    todo!("mmc_close needs slot/card state; see PORTING_PLAN.md 12.17")
+    todo!("mmc_close needs slot/card state; see .notes/porting_plan.md 12.17")
 }
 
 /// Read or write blocks on an MMC device.
@@ -557,7 +557,7 @@ pub fn mmc_transfer(
     _position: u64,
     _buf: &mut [u8],
 ) -> Result<usize, DriverError> {
-    todo!("mmc_transfer needs SDHCI host + slot state; see PORTING_PLAN.md 12.17")
+    todo!("mmc_transfer needs SDHCI host + slot state; see .notes/porting_plan.md 12.17")
 }
 
 /// Block size for MMC devices (always 512 in this driver).

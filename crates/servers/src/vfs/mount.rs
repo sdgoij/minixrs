@@ -443,7 +443,7 @@ fn find_vmnt_by_dev(dev: u32) -> *mut Vmnt {
 /// reference per lookup (`eat_path` and `last_dir` dup'd the directory they started
 /// from, and `eat_path` dup'd its result on top of the reference `advance` already
 /// returns) and `pm_fork` copied a parent's root and working directories into the
-/// child without duplicating them; those are fixed, and `PORTING_PLAN.md` has the
+/// child without duplicating them; those are fixed, and `.notes/porting_plan.md` has the
 /// rest of what the reference counts still do not add up to. So what is checked here
 /// is the thing the count stands for — an open file description on the device —
 /// which is what C's check is for: putting a filesystem down under an open file is

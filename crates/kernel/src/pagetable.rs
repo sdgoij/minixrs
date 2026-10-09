@@ -63,7 +63,7 @@ pub struct PageWalkResult {
     pub pte_phys: u64,
     /// The kernel's pointer to that same entry, through the physmap — what a caller writes to.
     /// It is deliberately not `pte_phys` as a pointer: the identity address of a table page is
-    /// one a user window can occupy (`PHYSMAP.md` D4).
+    /// one a user window can occupy (`.notes/physmap.md` D4).
     pub pte_virt: *mut u64,
     pub pte_value: u64,
     pub level: u32,
@@ -101,7 +101,7 @@ pub(crate) unsafe fn free_pt_page(pa: u64) {
 /// runs on the calling process's page tables, so the *identity* address of a table page is a
 /// virtual address that process's own window can occupy — and a table page the allocator hands out
 /// inside that window would make every walk in the system read whatever the process put there,
-/// silently (`KNOWN_ISSUES.md` item 38, `PHYSMAP.md` D4). The physmap is above every user address,
+/// silently (`KNOWN_ISSUES.md` item 38, `.notes/physmap.md` D4). The physmap is above every user address,
 /// so it cannot be shadowed.
 ///
 /// Host tests are the exception, and deliberately so: they have no physmap and fabricate tables in
@@ -111,7 +111,7 @@ pub(crate) unsafe fn free_pt_page(pa: u64) {
 ///
 /// This is the only sanctioned way to turn a physical address into a pointer, in this crate and in
 /// `kernel-boot`: a caller that derefs a `pte_to_phys`/`alloc_phys_*` result directly is reaching
-/// through the identity map, which is the map `PHYSMAP.md` P4 shrinks.
+/// through the identity map, which is the map `.notes/physmap.md` P4 shrinks.
 #[inline]
 pub fn table_ptr(table_phys: u64) -> *mut PtEntry {
     #[cfg(test)]
@@ -125,7 +125,7 @@ pub fn table_ptr(table_phys: u64) -> *mut PtEntry {
 ///
 /// The same conversion, and the same host-test exception, as [`table_ptr`]: the kernel reaches a
 /// physical frame through the physmap, and a host test has no physmap and hands over the address of
-/// an ordinary buffer. Frames are P3's work in `PHYSMAP.md`, tables P2b's.
+/// an ordinary buffer. Frames are P3's work in `.notes/physmap.md`, tables P2b's.
 #[inline]
 pub fn frame_ptr(pa: u64) -> *mut u8 {
     #[cfg(test)]
@@ -643,7 +643,7 @@ mod tests {
 
     // Hardware-dependent tests: require bare metal (identity-mapped physical
     // memory) or QEMU. Gated to prevent crash on host test binaries.
-    // See PORTING_PLAN.md Phase 6.2: "Hardware-dependent tests require
+    // See .notes/porting_plan.md Phase 6.2: "Hardware-dependent tests require
     // bare-metal or QEMU execution; gated from host test runner."
 
     #[test]

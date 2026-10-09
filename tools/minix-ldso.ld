@@ -5,7 +5,7 @@
  * `--image-base` because an explicit section address in a script wins over it.
  *
  * Overridable: the target spec passes `--defsym=LOADER_BASE=<arch loader base>`,
- * because the base is per-arch (`PHYSMAP.md` P4 — x86's userland starts at
+ * because the base is per-arch (`.notes/physmap.md` P4 — x86's userland starts at
  * 64 MiB and the shared objects fill 80..128 MiB, so its loader is at 128 MiB).
  * A bare `rustc` invocation that does not go through the spec still gets this
  * default.

@@ -81,7 +81,7 @@ pub const fn mmap_base() -> u64 {
 /// (PUD[0]): the kernel's EL1-only identity map starts at 0x40000000, so a
 /// heap at the top of the range (0x3FE00000, as on x86) would collide with
 /// the kernel block after ~2 MiB of growth. RISC-V adopted this layout with
-/// `PHYSMAP.md` P4, for the same reason. The heap sits
+/// `.notes/physmap.md` P4, for the same reason. The heap sits
 /// below the anonymous-mmap base (0x30000000) so heap growth (up) and mmap
 /// regions (up from the mmap base) cannot overlap.
 pub const fn user_heap_base() -> u64 {
@@ -111,7 +111,7 @@ pub const fn identity_map_top() -> u64 {
 }
 
 /// Base of the kernel's physmap: the window through which a *physical*
-/// address is reached as a pointer (`PHYSMAP.md`).
+/// address is reached as a pointer (`.notes/physmap.md`).
 ///
 /// This kernel runs on the calling process's page tables, so any virtual
 /// address it uses for physical memory is one a user window could also be

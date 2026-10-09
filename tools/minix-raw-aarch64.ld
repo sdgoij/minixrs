@@ -44,7 +44,7 @@ SECTIONS
      * would hand the loader pages inside the running stack, and the loader's own
      * writes would then clobber its frame. (Not hypothetical: a kernel image
      * grown by a few KiB did exactly that to this arch's boot, silently, as an
-     * endless loop in `load_and_prepare_proc`. `PORTING_PLAN.md` finding 19.) */
+     * endless loop in `load_and_prepare_proc`. `.notes/porting_plan.md` finding 19.) */
     . = ALIGN(16);
     . = . + 65536;
     __stack_top = .;

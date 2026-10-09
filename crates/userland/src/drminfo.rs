@@ -1,4 +1,4 @@
-//! `/bin/drminfo` — what the DRM render node says it is (`WAYLAND.md` §6.10, stage 3b).
+//! `/bin/drminfo` — what the DRM render node says it is (`.notes/wayland.md` §6.10, stage 3b).
 //!
 //! This is also the second statement of the render node's ABI, and deliberately not the
 //! one the server implements: the request numbers and the three argument structs below are

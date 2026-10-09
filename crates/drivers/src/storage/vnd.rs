@@ -403,7 +403,7 @@ pub fn vnd_transfer(
 /// Real implementation calls VFS `copyfd()` to copy the fd identified
 /// by `user_fd` from `user_endpt` into our process's fd table.
 /// Returns the new fd on success, or a negative error code.
-/// See PORTING_PLAN.md Phase 12.14 follow-up.
+/// See .notes/porting_plan.md Phase 12.14 follow-up.
 ///
 /// # Safety
 ///
@@ -416,7 +416,7 @@ pub unsafe fn vnd_copyfd(_user_endpt: i32, _user_fd: i32) -> Result<i32, DriverE
 ///
 /// Real implementation calls `fstat(fd, &st)` to get the file's stat.
 /// Returns (st_dev, st_ino) on success.
-/// See PORTING_PLAN.md Phase 12.14 follow-up.
+/// See .notes/porting_plan.md Phase 12.14 follow-up.
 ///
 /// # Safety
 ///
