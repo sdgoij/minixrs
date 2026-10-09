@@ -269,6 +269,10 @@ pub const NONE: u32 = u32::MAX;
 /// Do not reply yet (suspend caller).
 pub const EDONTREPLY: i32 = -201;
 
+/// Data that fits in a deferred `CDEV_REPLY` after status (payload 0) and the
+/// caller endpoint (payload 4): the 48-byte payload leaves 40.
+const CDEV_REPLY_DATA_MAX: usize = 40;
+
 /// Non-blocking flag.
 pub const CDEV_NONBLOCK: i32 = 0x01;
 pub const CDEV_NOCTTY: i32 = 0x02;
@@ -491,6 +495,14 @@ pub struct Tty {
     pub tty_incaller: u32,
     /// ID of suspended read request.
     pub tty_inid: u32,
+    /// Endpoint to answer a suspended read at (the message sender, VFS), or
+    /// NONE. `tty_incaller` is the *user* process (what `sigchar` targets); the
+    /// reply goes here.
+    pub tty_inreply: u32,
+    /// A read is suspended and its completion (`in_transfer`) must send the
+    /// reply. C's `do_read` always returns `EDONTREPLY`; the port flags the
+    /// suspension so the pty path, which replies synchronously, is untouched.
+    pub tty_insuspended: bool,
     /// Grant where read data is to go.
     pub tty_ingrant: u32,
     /// How many chars are still needed.
@@ -510,6 +522,16 @@ pub struct Tty {
     pub tty_outleft: usize,
     /// Number of chars output so far.
     pub tty_outcum: usize,
+
+    /// Endpoint to answer a suspended write at (the message sender, VFS), or
+    /// NONE. `tty_outid` is the caller the reply names, which is how VFS matches
+    /// it (`cdev_io_reply`).
+    pub tty_outreply: u32,
+    /// Bytes to report when a suspended write completes (its request size; the
+    /// devwrite hooks zero `tty_outcum` on completion).
+    pub tty_outreply_n: usize,
+    /// A write is suspended and its completion (`handle_events`) must reply.
+    pub tty_outsuspended: bool,
 
     /// Process that made the ioctl call, or NONE.
     pub tty_iocaller: u32,
@@ -589,6 +611,8 @@ impl Tty {
             tty_openct: 0,
             tty_incaller: NONE,
             tty_inid: 0,
+            tty_inreply: NONE,
+            tty_insuspended: false,
             tty_ingrant: 0,
             tty_inleft: 0,
             tty_incum: 0,
@@ -598,6 +622,9 @@ impl Tty {
             tty_outgrant: 0,
             tty_outleft: 0,
             tty_outcum: 0,
+            tty_outreply: NONE,
+            tty_outreply_n: 0,
+            tty_outsuspended: false,
             tty_iocaller: NONE,
             tty_ioid: 0,
             tty_ioreq: 0,
@@ -1357,9 +1384,22 @@ pub fn in_transfer(tp: &mut Tty) {
         tp.tty_incum = end;
     }
 
-    // Usually reply to the reader, possibly even if incum == 0 (EOF).
-    if tp.tty_inleft == 0 {
-        // Keep incum and incaller for the reply path.
+    // The read is satisfied (possibly with 0 bytes, EOF). A *suspended* console
+    // read sends its own reply from here (C `in_transfer` calls
+    // `chardriver_reply_task`); the pty path replies synchronously from its
+    // caller and leaves `tty_insuspended` clear.
+    if tp.tty_inleft == 0 && tp.tty_insuspended {
+        let n = tp.tty_incum.min(CDEV_REPLY_DATA_MAX);
+        let reply_ep = tp.tty_inreply;
+        let id = tp.tty_incaller;
+        tp.tty_insuspended = false;
+        tp.tty_incaller = NONE;
+        tp.tty_inreply = NONE;
+        tp.tty_inleft = 0;
+        tp.tty_incum = 0;
+        chardriver_reply_task_data(reply_ep as i32, id, n as i32, &tp.tty_inbuf_user[..n]);
+    } else if tp.tty_inleft == 0 {
+        // Keep incum and incaller for the reply path (pty / synchronous read).
         tp.tty_inleft = 0;
     }
 }
@@ -1392,6 +1432,20 @@ pub fn handle_events(tp: &mut Tty) {
 
     // Transfer characters from the input queue to a waiting process.
     in_transfer(tp);
+
+    // The opposite of the read completion: a suspended write (output that could
+    // not drain at once) answers here once the output has gone out. The devwrite
+    // hooks zero `tty_outcum`, so the count is the request size kept aside.
+    if tp.tty_outleft == 0 && tp.tty_outsuspended {
+        let n = tp.tty_outreply_n;
+        let reply_ep = tp.tty_outreply;
+        let id = tp.tty_outid;
+        tp.tty_outsuspended = false;
+        tp.tty_outreply = NONE;
+        tp.tty_outreply_n = 0;
+        tp.tty_outcaller = NONE;
+        chardriver_reply_task_data(reply_ep as i32, id, n as i32, &[]);
+    }
 
     if tp.tty_select_ops != 0 {
         select_retry(tp);
@@ -2045,6 +2099,7 @@ pub fn do_read(
     minor: DevMinor,
     _position: Position,
     user_endpt: Endpoint,
+    reply_ep: Endpoint,
     size: usize,
     flags: i32,
     id: CDevId,
@@ -2052,6 +2107,9 @@ pub fn do_read(
     // PTY slave reads are non-blocking (EAGAIN when no line is queued) —
     // see the pty section header: a suspended read would freeze VFS.
     if let Some((_, false)) = minor_to_pty(minor) {
+        // The pty path answers synchronously from its caller; the reply
+        // endpoint is not needed here.
+        let _ = reply_ep;
         return do_read_pty_slave(minor, user_endpt, size, flags, id);
     }
 
@@ -2068,11 +2126,13 @@ pub fn do_read(
         return EINVAL;
     }
 
-    // tty_incaller is the USER process: VFS forwards the CDEV_READ and is
-    // only the message sender, so sigchar must target the real reader. The
-    // reply always goes back to VFS as the message sender.
+    // tty_incaller is the USER process (what `sigchar` targets); the reply goes
+    // to the message sender, VFS, which `in_transfer` answers when the read is
+    // satisfied.
     tp.tty_incaller = user_endpt as u32;
     tp.tty_inid = id;
+    tp.tty_inreply = reply_ep as u32;
+    tp.tty_insuspended = true;
     tp.tty_inleft = size;
     tp.tty_read_intr = false;
 
@@ -2095,7 +2155,8 @@ pub fn do_read(
     // ...then go back for more.
     handle_events(tp);
     if tp.tty_inleft == 0 {
-        return finish_read(tp);
+        // `in_transfer` already answered the suspended read.
+        return EDONTREPLY;
     }
 
     // There were no bytes in the input queue available.
@@ -2109,43 +2170,18 @@ pub fn do_read(
         tp.tty_inleft = 0;
         tp.tty_incum = 0;
         tp.tty_incaller = NONE;
+        tp.tty_inreply = NONE;
+        tp.tty_insuspended = false;
         tp.tty_read_intr = false;
         return r;
     }
 
-    // Blocking read: pull one byte at a time from the kernel serial ring
-    // and run it through the line discipline until the request completes
-    // or sigchar releases it with EINTR. The fd-0 read returns EAGAIN
-    // when the ring is empty; retry in user mode, but yield first so
-    // other runnable processes (the input server's SYS_SETALARM poll)
-    // get scheduled. A tight spin would hog the run-queue head forever:
-    // boot servers are kernel-scheduled, so the timer renews the quantum
-    // instead of preempting (proc_no_time) and pick_proc keeps returning
-    // the head process.
-    loop {
-        let mut byte = [0u8; 1];
-        let r = minix_rt::read(0, &mut byte);
-        if r == EAGAIN as i64 {
-            // Yield the CPU: marks us PREEMPTED, the syscall-return path
-            // re-enqueues at the tail and picks the next runnable server.
-            minix_rt::thread_yield();
-            continue;
-        }
-        if r <= 0 {
-            // The serial-ring path always delivers a byte; a failure here
-            // means the console is gone — release the caller.
-            tp.tty_inleft = 0;
-            tp.tty_incum = 0;
-            tp.tty_incaller = NONE;
-            tp.tty_read_intr = false;
-            return EIO;
-        }
-        in_process(tp, &byte);
-        in_transfer(tp);
-        if tp.tty_inleft == 0 {
-            return finish_read(tp);
-        }
-    }
+    // Suspend the caller. The read waits in the line's state and the console's
+    // input pump (`handle_events` -> `console_read` -> `in_transfer`) answers it
+    // when a byte arrives. C `tty.c` `do_read` returns `EDONTREPLY` here; the
+    // port used to busy-spin the whole tty server on this, which starved VFS and
+    // froze the console whenever input stopped (the gltriangle wedge).
+    EDONTREPLY
 }
 
 /// do_write — write to a TTY line.
@@ -2175,15 +2211,16 @@ pub fn do_write(
     tp.tty_outcaller = endpt as u32;
     tp.tty_outid = id;
     tp.tty_outgrant = grant;
+    tp.tty_outreply = endpt as u32;
+    tp.tty_outreply_n = size;
+    tp.tty_outsuspended = true;
     tp.tty_outleft = size;
 
     // Try to write.
     handle_events(tp);
     if tp.tty_outleft == 0 {
-        // Write completed — return the count.
-        let r = size as i32;
-        tp.tty_outcaller = NONE;
-        return r;
+        // Completed; `handle_events` sent the reply (already done).
+        return EDONTREPLY;
     }
 
     // None or not all the bytes could be written. For pty slave lines a
@@ -2193,6 +2230,9 @@ pub fn do_write(
         tp.tty_outleft = 0;
         tp.tty_outcum = 0;
         tp.tty_outcaller = NONE;
+        tp.tty_outreply = NONE;
+        tp.tty_outreply_n = 0;
+        tp.tty_outsuspended = false;
         return EAGAIN;
     }
 
@@ -2205,6 +2245,9 @@ pub fn do_write(
         tp.tty_outleft = 0;
         tp.tty_outcum = 0;
         tp.tty_outcaller = NONE;
+        tp.tty_outreply = NONE;
+        tp.tty_outreply_n = 0;
+        tp.tty_outsuspended = false;
         return r;
     }
 
@@ -2229,7 +2272,7 @@ pub fn do_ioctl(
     grant: CpGrantId,
     flags: i32,
     user_endpt: Endpoint,
-    id: CDevId,
+    _id: CDevId,
 ) -> i32 {
     // PTY master ioctls: only window-size ioctls are meaningful — they
     // apply to the slave line (the master is the controlling side; wterm
@@ -2278,8 +2321,10 @@ pub fn do_ioctl(
                 }
                 // Wait for all ongoing output processing to finish; the
                 // termios copy happens in dev_ioctl when the drain ends.
+                // `tty_iocaller` is the sender to answer (VFS) and `tty_ioid`
+                // is the caller it names, which is how VFS matches the reply.
                 tp.tty_iocaller = endpt as u32;
-                tp.tty_ioid = id;
+                tp.tty_ioid = user_endpt as u32;
                 tp.tty_ioreq = request;
                 tp.tty_iogrant = grant;
                 return EDONTREPLY;
@@ -2587,6 +2632,39 @@ fn as_bytes_mut<T>(v: &mut T) -> &mut [u8] {
     unsafe { core::slice::from_raw_parts_mut((v as *mut T) as *mut u8, core::mem::size_of::<T>()) }
 }
 
+/// `chardriver_reply_task`, carrying a read's bytes inline.
+///
+/// A suspended read is answered this way: VFS handed the request over without
+/// waiting, so it routes the reply through `cdev_reply` and needs the data with
+/// it (status @ payload 0, caller endpoint @ payload 4, data @ payload 8).
+pub fn chardriver_reply_task_data(endpt: i32, id: u32, status: i32, data: &[u8]) -> i32 {
+    let mut reply = arch_common::ipc::Message {
+        m_source: 0,
+        m_type: arch_common::com::CDEV_REPLY as i32,
+        m_payload: unsafe { core::mem::zeroed() },
+    };
+    unsafe {
+        reply.m_payload.m2.m2i1 = status;
+        reply.m_payload.m2.m2i2 = id as i32;
+    }
+    let n = data.len().min(CDEV_REPLY_DATA_MAX);
+    unsafe {
+        reply.m_payload.raw[8..8 + n].copy_from_slice(&data[..n]);
+    }
+    // Blocking SEND: VFS handed the request over without waiting, so it may be
+    // busy when the answer is ready. A `SENDNB` would be refused (`ENOTREADY`)
+    // and the reply lost — the caller would then wait forever. The reference's
+    // `chardriver_reply_task` sends the same way.
+    let _ = unsafe {
+        minix_rt::syscall2(
+            minix_rt::SEND_CALL,
+            endpt as u64,
+            &mut reply as *mut arch_common::ipc::Message as u64,
+        )
+    };
+    0
+}
+
 /// Reply to a suspended read/write/ioctl request (`CDEV_REPLY`).
 ///
 /// Message layout matches the C `m_lchardriver_vfs_reply`: status at
@@ -2601,9 +2679,11 @@ pub fn chardriver_reply_task(endpt: i32, id: u32, status: i32) -> i32 {
         reply.m_payload.m2.m2i1 = status;
         reply.m_payload.m2.m2i2 = id as i32;
     }
+    // Blocking SEND (see `chardriver_reply_task_data`): the reply must land even
+    // though VFS no longer blocks waiting for it.
     let _ = unsafe {
         minix_rt::syscall2(
-            minix_rt::SENDNB_CALL,
+            minix_rt::SEND_CALL,
             endpt as u64,
             &mut reply as *mut arch_common::ipc::Message as u64,
         )
@@ -2641,6 +2721,23 @@ fn tty_notify_select(endpt: u32) {
 
 // Server main loop stub
 
+/// Re-arm the console input-pump timer (`SYS_SETALARM`, kernel call 24).
+///
+/// The console's bytes wait in the kernel serial ring until something pulls
+/// them; a suspended read no longer busy-pulls it (that spin is what wedged
+/// VFS), so the server wakes on a short timer, pumps in `handle_events`
+/// (`console_read`), and arms the timer again. Same shape as the input server's
+/// `SYS_SETALARM` poll.
+fn arm_console_pump() {
+    #[cfg(target_os = "minix")]
+    {
+        let mut msg = [0u8; 64];
+        msg[8..16].copy_from_slice(&2u64.to_ne_bytes()); // exp_time: 2 ticks
+        msg[24..28].copy_from_slice(&0i32.to_ne_bytes()); // relative
+        let _ = minix_rt::kernel_call(24, &mut msg);
+    }
+}
+
 /// Main loop for the TTY server.
 ///
 /// Receives messages, dispatches character driver requests, handles
@@ -2675,6 +2772,8 @@ pub fn tty_server_main() {
         }
     }
 
+    arm_console_pump();
+
     loop {
         let mut msg = arch_common::ipc::Message {
             m_source: 0,
@@ -2705,24 +2804,49 @@ pub fn tty_server_main() {
                 let tp = unsafe { &mut *TTY_TABLE.as_ptr().add(i) };
                 handle_events(tp);
             }
+            arm_console_pump();
             continue;
         }
 
         // Handle CDEV requests.
         if is_cdev_rq(call_type) {
+            // The caller endpoint travels in the request (m2_i3 for read/write,
+            // m2_l1 for ioctl) and must be read before `handle_cdev_request`,
+            // which overwrites the payload for a read.
+            let reply_id = match call_type {
+                CDEV_READ | CDEV_WRITE => (unsafe { msg.m_payload.m2.m2i3 }) as u32,
+                CDEV_IOCTL => (unsafe { msg.m_payload.m2.m2l1 }) as u32,
+                _ => 0,
+            };
             let result = unsafe { handle_cdev_request(&mut msg, src_ep, call_type) };
             if result != EDONTREPLY {
-                msg.m_type = result;
-                unsafe {
-                    // SEND (not SENDREC): the reply is a one-way reply; a
-                    // SENDREC here would consume the caller's NEXT request
-                    // in its receive phase and discard it, deadlocking the
-                    // caller (observed: VFS's CDEV_WRITE vanished).
-                    minix_rt::syscall2(
-                        minix_rt::SEND_CALL,
-                        src_ep as u64,
-                        &mut msg as *mut arch_common::ipc::Message as u64,
-                    );
+                match call_type {
+                    // The I/O calls answer with `CDEV_REPLY`: VFS handed the
+                    // request over without waiting, so the reply must be the
+                    // type its main loop routes to `cdev_reply` (a plain reply
+                    // would be read as a VFS call of that number).
+                    CDEV_READ | CDEV_WRITE | CDEV_IOCTL => {
+                        let data: &[u8] = if call_type == CDEV_READ && result > 0 {
+                            unsafe { &msg.m_payload.raw[..(result as usize).min(48)] }
+                        } else {
+                            &[]
+                        };
+                        chardriver_reply_task_data(src_ep, reply_id, result, data);
+                    }
+                    _ => {
+                        msg.m_type = result;
+                        unsafe {
+                            // SEND (not SENDREC): the reply is a one-way reply; a
+                            // SENDREC here would consume the caller's NEXT request
+                            // in its receive phase and discard it, deadlocking the
+                            // caller (observed: VFS's CDEV_WRITE vanished).
+                            minix_rt::syscall2(
+                                minix_rt::SEND_CALL,
+                                src_ep as u64,
+                                &mut msg as *mut arch_common::ipc::Message as u64,
+                            );
+                        }
+                    }
                 }
             }
             continue;
@@ -2802,7 +2926,7 @@ unsafe fn handle_cdev_request(
                 }
                 return r;
             }
-            let result = do_read(minor, position, user, count, flags, 0);
+            let result = do_read(minor, position, user, who_e, count, flags, 0);
             // If read completed with data, copy into reply payload.
             if result > 0 {
                 let tp = line2tty(minor).unwrap();
@@ -2840,7 +2964,7 @@ unsafe fn handle_cdev_request(
                 tp_mut.tty_writeidx = 0;
                 tp_mut.tty_writecount = copy_len;
             }
-            do_write(minor, position, who_e, grant, copy_len, flags, 0)
+            do_write(minor, position, who_e, grant, copy_len, flags, grant)
         }
         CDEV_IOCTL => {
             // Grant-based ioctl arg protocol (matches VFS cdev_io):

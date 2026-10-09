@@ -303,6 +303,16 @@ unsafe fn handle_work() {
         return;
     }
 
+    // A character driver's reply (deferred read/write/ioctl): the sender is the
+    // driver, not a caller, so it must not go through the caller-fproc lookup
+    // below — the slot a driver endpoint decodes to is some other process's
+    // fproc, and writing `fp_endpoint` there corrupts where that process's reply
+    // is sent. `cdev_reply` finds the caller from the reply itself.
+    if arch_common::com::is_cdev_rs(call_nr as u32) {
+        let _ = crate::vfs::device::cdev_reply();
+        return;
+    }
+
     // Look up the caller's Fproc slot from the source endpoint.
     let fp = if source >= 0 {
         let slot = (source & 0xff) as usize;
@@ -324,13 +334,6 @@ unsafe fn handle_work() {
 
     if source == PM_PROC_NR {
         let _ = pm::service_pm();
-    } else if arch_common::com::is_cdev_rs(call_nr as u32) {
-        // Character-driver reply (deferred ioctl completion or select
-        // notification): consume it without replying to the driver. The
-        // reply status feeds the suspended worker in the async model; the
-        // port's synchronous model consumed the CDEV_REPLY inline in
-        // cdev_io, so this only sees late replies and select notifications.
-        let _ = crate::vfs::device::cdev_reply();
     } else {
         // Regular VFS calls are dispatched through the call table.
         let result = table::dispatch(call_nr);
