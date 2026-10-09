@@ -2181,7 +2181,48 @@ pub fn do_read(
     // when a byte arrives. C `tty.c` `do_read` returns `EDONTREPLY` here; the
     // port used to busy-spin the whole tty server on this, which starved VFS and
     // froze the console whenever input stopped (the gltriangle wedge).
-    EDONTREPLY
+    //
+    // That freeze is the hardware arches', where a boot server is scheduled
+    // without preemption and the spin never gives the CPU up. On wasm the spin
+    // *does* yield (the host reschedules at a `thread_yield`), and this target
+    // has no clock to fire the `SYS_SETALARM` that drives the pump, so a
+    // suspended read there would never be woken. Poll the ring on wasm, where it
+    // is the only thing that pulls console input.
+    #[cfg(target_arch = "wasm32")]
+    {
+        loop {
+            let mut byte = [0u8; 1];
+            let r = minix_rt::read(0, &mut byte);
+            if r == EAGAIN as i64 {
+                // Yield the CPU: marks us PREEMPTED, the syscall-return path
+                // re-enqueues at the tail and picks the next runnable server.
+                minix_rt::thread_yield();
+                continue;
+            }
+            if r <= 0 {
+                // The serial-ring path always delivers a byte; a failure here
+                // means the console is gone — release the caller.
+                tp.tty_inleft = 0;
+                tp.tty_incum = 0;
+                tp.tty_incaller = NONE;
+                tp.tty_inreply = NONE;
+                tp.tty_insuspended = false;
+                tp.tty_read_intr = false;
+                return EIO;
+            }
+            in_process(tp, &byte);
+            in_transfer(tp);
+            if tp.tty_inleft == 0 {
+                // `in_transfer` already answered the suspended read.
+                return EDONTREPLY;
+            }
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        EDONTREPLY
+    }
 }
 
 /// do_write — write to a TTY line.

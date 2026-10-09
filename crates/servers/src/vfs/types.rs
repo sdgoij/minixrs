@@ -259,6 +259,12 @@ pub struct Dmap {
     /// 12 bits, and their direction bits are each other's opposite, so VFS has to be told
     /// which one a request number is in rather than assuming either.
     pub dmap_linux_ioctl: bool,
+    /// The driver answers READ/WRITE/IOCTL asynchronously. VFS hands the request over
+    /// with `AMF_NOREPLY` and the caller waits for the driver's later `CDEV_REPLY`;
+    /// a driver that is not marked still answers inline from a synchronous `fs_sendrec`,
+    /// so `cdev_io` must block for that reply instead of suspending. Set for the tty
+    /// server, the driver converted to the reference's deferred protocol.
+    pub dmap_cdev_async: bool,
     pub dmap_label: [u8; LABEL_MAX],
 }
 
@@ -269,6 +275,7 @@ impl Default for Dmap {
             dmap_ep: -1,
             dmap_style: 0,
             dmap_linux_ioctl: false,
+            dmap_cdev_async: false,
             dmap_label: [0u8; LABEL_MAX],
         }
     }

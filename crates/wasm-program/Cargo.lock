@@ -38,6 +38,7 @@ dependencies = [
  "minix-rt",
  "minix-std",
  "minix-util",
+ "wayland",
 ]
 
 [[package]]
@@ -47,3 +48,7 @@ dependencies = [
  "minix-rt",
  "userland",
 ]
+
+[[package]]
+name = "wayland"
+version = "0.1.0"

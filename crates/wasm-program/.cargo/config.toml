@@ -2,12 +2,13 @@
 #
 # `--import-memory` is the design's arrangement (§5) and it matters more here than for a
 # server: the host owns each instance's memory, and a process's argv arrives by the host
-# writing it into the new instance's memory. `--initial-memory` is 16 MiB against a 256 MiB
+# writing it into the new instance's memory. `--initial-memory` is 48 MiB against a 256 MiB
 # maximum, which is what keeps a program's linear memory laid out like every other
-# instance's — `--stack-first` puts the 1 MiB stack at the bottom, and the port's heap
-# window (2..6 MiB) and declared stack region (14..16 MiB) have to stay clear of the image.
-# That region is also why the module's argv area is a reserved static rather than an
-# address picked by hand.
+# instance's — `--stack-first` puts the 1 MiB stack at the bottom, and the port's user-VA
+# windows start at 32 MiB (`arch_wasm32::hal`), above the static image, which the linker
+# grows upward from 1 MiB and which `boot.cjs` checks still ends below the first window
+# (`ARCH_WASM32.md` §5.4). That region is also why the module's argv area is a reserved
+# static rather than an address picked by hand.
 #
 # `wasm32-minix` is one of the fork's own targets
 # (`compiler/rustc_target/src/spec/targets/wasm32_minix.rs`), so this section is
@@ -26,6 +27,6 @@ rustflags = [
   "-C", "link-arg=--export=asyncify_scratch_ptr",
   "-C", "link-arg=--export=argv_area_ptr",
   "-C", "link-arg=--import-memory",
-  "-C", "link-arg=--initial-memory=16777216",
+  "-C", "link-arg=--initial-memory=50331648",
   "-C", "link-arg=--max-memory=268435456",
 ]

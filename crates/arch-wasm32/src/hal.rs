@@ -390,14 +390,21 @@ pub fn qemu_exit(code: u32) -> ! {
     trap()
 }
 
-// ------------------------------------------------------------- VA layout
-//
 // The layout is this port's own, and it is *compact* — which the x86_64 numbers
 // globbed from `arch-sim` are not. A wasm instance's linear memory is flat: there
 // is no page table to map a high virtual address onto a low physical one, so
 // every address a process uses has to physically exist in its instance. x86_64's
 // heap at 0x3FE0_0000 would therefore require every process to carry a gigabyte
-// of memory. These values instead describe a 16 MiB process that can grow.
+// of memory.
+//
+// The windows start at 32 MiB, not at a few, because the *linker* — not this
+// crate — places the module's static image, and on the servers module that image
+// is ~15.8 MiB and grows with the code (`ARCH_WASM32.md` §5.4). A window at 2 MiB
+// would sit inside the image, and the bump heap an allocator carves from it would
+// overwrite whatever static the linker put there. Starting the first window at
+// 32 MiB leaves ~16 MiB of headroom, and `tools/wasm-servers/boot.cjs` asserts the
+// image still ends below it, so a change that closes the gap fails the gate
+// instead of corrupting a static at run time.
 //
 // The heap base is load-bearing beyond this crate: `minix_rt::HEAP_BASE` and the
 // kernel's `sys_brk_handler` window both have to agree with it, and the kernel
@@ -413,22 +420,22 @@ pub const fn kern_vaddr() -> u64 {
 /// Bottom of the heap window: `[user_heap_base(), +1 MiB)` is what the kernel's
 /// brk accepts before VM would grow it.
 pub const fn user_heap_base() -> u64 {
-    0x0020_0000
+    0x0200_0000
 }
 
 /// Exclusive upper bound for brk growth, below the anonymous-mmap base.
 pub const fn user_heap_limit() -> u64 {
-    0x0060_0000
+    0x0240_0000
 }
 
 pub const fn mmap_base() -> u64 {
-    0x0060_0000
+    0x0240_0000
 }
 
 /// The stack region, growing down from its top. Kept clear of the heap and mmap
 /// ranges below it.
 pub const fn user_stack_base() -> u64 {
-    0x00E0_0000
+    0x02C0_0000
 }
 
 pub const fn user_stack_size() -> usize {
@@ -438,3 +445,24 @@ pub const fn user_stack_size() -> usize {
 /// The instance's grown ceiling: what `MAX_USER_ADDRESS` means is "how far this
 /// process may ever reach", and for an instance that is its memory maximum.
 pub const MAX_USER_ADDRESS: u64 = 0x1000_0000;
+
+// The windows stay ordered, inside the ceiling, and below the RAM disk window
+// (`arch_common::com::RAMDISK_IMAGE_VA`, 48 MiB). The headroom the layout needs
+// over the static image is a run-time property, so `boot.cjs` checks it.
+const _: () = assert!(
+    user_heap_base() < user_heap_limit(),
+    "non-empty heap window"
+);
+const _: () = assert!(
+    user_heap_limit() <= mmap_base(),
+    "heap stops at the mmap base"
+);
+const _: () = assert!(mmap_base() < user_stack_base(), "mmap sits below the stack");
+const _: () = assert!(
+    user_stack_base() + user_stack_size() as u64 <= 0x0300_0000,
+    "stack top stays below the RAM disk window"
+);
+const _: () = assert!(
+    0x0300_0000 < MAX_USER_ADDRESS,
+    "RAM disk window inside the ceiling"
+);

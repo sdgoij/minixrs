@@ -209,6 +209,7 @@ const fn new_dmap_array() -> [Dmap; NR_DEVICES] {
         dmap_ep: -1,
         dmap_style: 0,
         dmap_linux_ioctl: false,
+        dmap_cdev_async: false,
         dmap_label: [0u8; LABEL_MAX],
     }; NR_DEVICES]
 }

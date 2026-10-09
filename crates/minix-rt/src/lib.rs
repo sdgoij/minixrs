@@ -257,16 +257,19 @@ pub const NR_THREAD_SELF: u64 = 64;
 // used by the kernel's exec loader (`crates/kernel/src/hal.rs` re-exports).
 // The exec frame's pointer arithmetic depends on this value. 1MB stacks on
 // x86 (base 0x0FE00000), riscv and aarch64 (base 0x3FC00000), 2MB on wasm32
-// (base 0x00E00000). Note the wasm32 figure is
-// 0x01000000 — 16 MiB — which is the top of that stack *region*; it is not
+// (base 0x02C00000, above the module's static image). Note the wasm32 figure is
+// 0x02E00000 — 46 MiB — which is the top of that stack *region*; it is not
 // `arch_wasm32::hal::MAX_USER_ADDRESS` (0x10000000, 256 MiB), which is the
 // instance's memory ceiling and sits well above it.
 #[cfg(all(target_os = "minix", target_arch = "x86_64"))]
 const USER_STACK_TOP: u64 = 0x0FF0_0000;
-#[cfg(all(target_os = "minix", any(target_arch = "riscv64", target_arch = "aarch64")))]
+#[cfg(all(
+    target_os = "minix",
+    any(target_arch = "riscv64", target_arch = "aarch64")
+))]
 const USER_STACK_TOP: u64 = 0x3FD0_0000;
 #[cfg(all(target_os = "minix", target_arch = "wasm32"))]
-const USER_STACK_TOP: u64 = 0x0100_0000;
+const USER_STACK_TOP: u64 = 0x02E0_0000;
 
 /// Execute a new program via the PM→VFS chain (matching C `execve` in
 /// `.refs/minix-3.3.0/minix/lib/libc/sys/execve.c`).
@@ -1799,8 +1802,10 @@ pub const HEAP_BASE: usize = if cfg!(any(target_arch = "aarch64", target_arch = 
     0x2000_0000
 } else if cfg!(target_arch = "wasm32") {
     // Must match `arch_wasm32::hal::user_heap_base()`: the kernel's brk window is
-    // derived from that, and a mismatch would make every brk request ENOMEM.
-    0x0020_0000
+    // derived from that, and a mismatch would make every brk request ENOMEM. It
+    // sits above the module's static image (`ARCH_WASM32.md` §5.4), which the
+    // linker places and which grows with the code.
+    0x0200_0000
 } else {
     0x3FE0_0000
 };
@@ -1813,8 +1818,8 @@ pub const HEAP_LIMIT: usize = if cfg!(any(target_arch = "aarch64", target_arch =
 } else if cfg!(target_arch = "wasm32") {
     // Matches `arch_wasm32::hal::user_heap_limit()`. The 4 GiB the other targets
     // use is both unrepresentable in a 32-bit `usize` and unnecessary: a wasm
-    // instance starts at a few MiB and grows.
-    0x0060_0000
+    // instance grows only as far as the windows below the RAM disk need.
+    0x0240_0000
 } else {
     // Written through `u64` because every branch of a `cfg!` guard is still
     // type-checked, so the literal has to fit a 32-bit `usize` even on the

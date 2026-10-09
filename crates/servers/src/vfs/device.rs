@@ -438,6 +438,11 @@ pub fn cdev_io(op: i32, dev: u32, proc_e: i32, buf: u64, pos: i64, bytes: u64, _
     // endpoint (m2_i3) and VA (m2_l1). `flags` carries CDEV_DGRAM.
     let dgram = _flags & CDEV_DGRAM as i32 != 0;
 
+    // Only the drivers converted to the deferred protocol answer with a later
+    // `CDEV_REPLY` (the tty, `dmap_cdev_async`); the rest reply inline from a
+    // blocking `fs_sendrec` and must be waited on, not suspended.
+    let async_cdev = unsafe { (*dp).dmap_cdev_async };
+
     if op == CDEV_WRITE {
         if dgram {
             // One message per datagram: user VA in m2_l1, full length in m2_l2.
@@ -449,6 +454,42 @@ pub fn cdev_io(op: i32, dev: u32, proc_e: i32, buf: u64, pos: i64, bytes: u64, _
             request::w_i64(&mut msg, CDEV_POS_OFF, buf as i64);
             request::w_u64(&mut msg, CDEV_COUNT_OFF, bytes);
             return unsafe { request::fs_sendrec(drv_e, &mut msg) };
+        }
+        if !async_cdev {
+            // Synchronous driver: the reply is the write count. Writes travel
+            // inline in m2_l3 (last 8 payload bytes); loop so arbitrary user
+            // buffer lengths are written in full.
+            let mut written: u64 = 0;
+            let mut cur_pos = pos;
+            while written < bytes {
+                let chunk = ((bytes - written) as usize).min(INLINE_WRITE_MAX);
+                let mut msg = [0u8; 56];
+                request::w_i32(&mut msg, 4, CDEV_WRITE);
+                request::w_i32(&mut msg, CDEV_MINOR_OFF, minor);
+                request::w_i32(&mut msg, CDEV_FLAGS_OFF, 0);
+                request::w_i32(&mut msg, CDEV_USER_OFF, proc_e);
+                request::w_i64(&mut msg, CDEV_POS_OFF, cur_pos);
+                request::w_u64(&mut msg, CDEV_COUNT_OFF, chunk as u64);
+                let copy_r = unsafe {
+                    crate::vfs::call::sys_vircopy(
+                        proc_e,
+                        buf + written,
+                        crate::vfs::call::SELF,
+                        msg.as_mut_ptr() as u64 + CDEV_BUF_OFF as u64,
+                        chunk,
+                    )
+                };
+                if copy_r != 0 {
+                    return if written > 0 { written as i32 } else { copy_r };
+                }
+                let r = unsafe { request::fs_sendrec(drv_e, &mut msg) };
+                if r < 0 {
+                    return if written > 0 { written as i32 } else { r };
+                }
+                written += chunk as u64;
+                cur_pos += chunk as i64;
+            }
+            return written as i32;
         }
         // One inline chunk (m2_l3) per request; the reply drives the next
         // (`cdev_write_chunk` performs the user copy and the final reply).
@@ -487,6 +528,40 @@ pub fn cdev_io(op: i32, dev: u32, proc_e: i32, buf: u64, pos: i64, bytes: u64, _
             request::w_i64(&mut msg, CDEV_POS_OFF, buf as i64);
             request::w_u64(&mut msg, CDEV_COUNT_OFF, bytes);
             return unsafe { request::fs_sendrec(drv_e, &mut msg) };
+        }
+        if !async_cdev {
+            // Synchronous driver: it answers with the byte count and the data
+            // inline at payload 0 (the same shape `net::cdev_read` documents),
+            // which this copies into the caller's buffer. Request at most what
+            // the 48-byte payload carries per round trip.
+            let want = (bytes as usize).min(INLINE_READ_MAX);
+            let mut msg = [0u8; 56];
+            request::w_i32(&mut msg, 4, CDEV_READ);
+            request::w_i32(&mut msg, CDEV_MINOR_OFF, minor);
+            request::w_i32(&mut msg, CDEV_FLAGS_OFF, 0);
+            request::w_i32(&mut msg, CDEV_USER_OFF, proc_e);
+            request::w_i64(&mut msg, CDEV_POS_OFF, pos);
+            request::w_u64(&mut msg, CDEV_COUNT_OFF, want as u64);
+            let r = unsafe { request::fs_sendrec(drv_e, &mut msg) };
+            if r < 0 {
+                return r;
+            }
+            let n = r as usize;
+            if n > 0 && buf != 0 {
+                let copy_r = unsafe {
+                    crate::vfs::call::sys_vircopy(
+                        crate::vfs::call::SELF,
+                        msg.as_ptr() as u64 + 8, // reply data at payload[0..]
+                        proc_e,
+                        buf,
+                        n,
+                    )
+                };
+                if copy_r != 0 {
+                    return copy_r;
+                }
+            }
+            return r;
         }
         // A short read is fine (blocking reads return when a line/queue is
         // ready); the wait carries the request until the driver answers.
@@ -574,6 +649,21 @@ pub fn cdev_io(op: i32, dev: u32, proc_e: i32, buf: u64, pos: i64, bytes: u64, _
     } else {
         0
     };
+    if !async_cdev {
+        // Synchronous driver: block for the reply and revoke the arg grant, as
+        // before the deferred protocol. A driver that still answers a deferred
+        // ioctl with `CDEV_REPLY` is handled too (the tty no longer takes this
+        // path, but the shape stays for any driver that does).
+        let mut msg = build_cdev_ioctl_msg(minor, request, grant, proc_e, nonblock_flag);
+        let r = unsafe { request::fs_sendrec(drv_e, &mut msg) };
+        if grant != GRANT_INVALID {
+            crate::vfs::grant::cpf_revoke(grant);
+        }
+        if r as u32 == arch_common::com::CDEV_REPLY {
+            return request::r_i32(&msg, 8);
+        }
+        return r;
+    }
     let msg = build_cdev_ioctl_msg(minor, request, grant, proc_e, nonblock_flag);
     let fp = unsafe { (*vfs_global()).fp };
     let Some(i) = (unsafe {

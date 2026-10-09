@@ -49,6 +49,7 @@ pub unsafe fn init_dmap() {
         dp.dmap_ep = -1; // NONE
         dp.dmap_style = 0;
         dp.dmap_linux_ioctl = false;
+        dp.dmap_cdev_async = false;
         dp.dmap_label = [0u8; LABEL_MAX];
     }
 }
@@ -90,6 +91,22 @@ pub unsafe fn mark_linux_ioctl(major: i32) {
     let dp = get_dmap_by_major(major);
     if !dp.is_null() {
         (*dp).dmap_linux_ioctl = true;
+    }
+}
+
+/// Record that a mapped character driver answers READ/WRITE/IOCTL asynchronously.
+///
+/// Called next to [`map_driver`] for the drivers that speak the deferred protocol
+/// (`CDEV_REPLY` after a `SUSPEND`), so `cdev_io` knows not to block on a synchronous
+/// reply from them. A driver that answers inline leaves this clear.
+///
+/// # Safety
+///
+/// Requires exclusive access to the dmap table.
+pub unsafe fn mark_cdev_async(major: i32) {
+    let dp = get_dmap_by_major(major);
+    if !dp.is_null() {
+        (*dp).dmap_cdev_async = true;
     }
 }
 
@@ -221,6 +238,7 @@ pub fn dmap_unmap_by_endpt(proc_nr: i32) {
                 dp.dmap_ep = -1;
                 dp.dmap_style = 0;
                 dp.dmap_linux_ioctl = false;
+                dp.dmap_cdev_async = false;
                 dp.dmap_label = [0u8; LABEL_MAX];
             }
         }

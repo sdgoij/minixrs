@@ -123,6 +123,10 @@ unsafe fn sef_cb_init_fresh() -> i32 {
     // registration once tty publishes its dev_nr at boot.
     unsafe {
         dmap::map_driver(b"tty", 5, arch_common::com::TTY_PROC_NR);
+        // The tty is the driver converted to the deferred READ/WRITE/IOCTL protocol
+        // (`70fbb3ff8`): it answers with `CDEV_REPLY` after a `SUSPEND`, so VFS hands
+        // it requests without waiting. Every other driver still answers inline.
+        dmap::mark_cdev_async(5);
     }
 
     // Register the tty server as the PTY (major 9) character driver so
@@ -134,6 +138,7 @@ unsafe fn sef_cb_init_fresh() -> i32 {
             arch_common::dmap::PTY_MAJOR as i32,
             arch_common::com::TTY_PROC_NR,
         );
+        dmap::mark_cdev_async(arch_common::dmap::PTY_MAJOR as i32);
     }
 
     // Register the net server as the /dev/ip (major 14) character driver

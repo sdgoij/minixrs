@@ -40,9 +40,14 @@ const ramdiskImagePath = path.join(
   'wasm32-minix',
   'minixfs.img'
 );
-// `RAMDISK_IMAGE_VA` on wasm32: exactly `MAX_USER_ADDRESS`, so the window is
-// outside the process's own VA range. See `arch_common::com`.
-const RAMDISK_IMAGE_VA = 0x1000000;
+// `RAMDISK_IMAGE_VA` on wasm32: above every user-VA window and the module's
+// static image, so the window is outside the process's own VA range. See
+// `arch_common::com`.
+const RAMDISK_IMAGE_VA = 0x3000000;
+// The base of the first user-VA window, from `arch_wasm32::hal::user_heap_base()`.
+// Every module's static image has to end below it; see the check at the boot
+// report.
+const USER_HEAP_BASE = 0x2000000;
 const WASM_PAGE = 65536;
 
 const RECEIVE = 47;
@@ -774,7 +779,9 @@ function makeImports(st) {
 /// arguments — without changing which slot it is, and without the kernel having to know that
 /// the host did it.
 function instantiate(st, module, argv, entry) {
-  st.memory = new WebAssembly.Memory({ initial: 256, maximum: 4096 });
+  // 48 MiB, to cover the user-VA windows at 32 MiB (`arch_wasm32::hal`); the RAM
+  // disk instance grows further for the image at `RAMDISK_IMAGE_VA`.
+  st.memory = new WebAssembly.Memory({ initial: 768, maximum: 4096 });
   st.inst = new WebAssembly.Instance(module, makeImports(st));
   // The module names its own scratch region — the end of its static image, from
   // the linker. The 16-byte Asyncify struct goes at its start and the unwind
@@ -1037,6 +1044,24 @@ note(
     .map(
       (p) =>
         `${p.spec.label}: scratch=0x${p.scratch.toString(16)}, memory=${p.memory.buffer.byteLength}`
+    )
+    .join('; ')
+);
+
+// The linker places a module's static image and `arch_wasm32::hal` fixes the
+// user-VA windows independently, so a change that grows the image can push it
+// into a window an allocator owns, where a static is overwritten at run time
+// (`ARCH_WASM32.md` §5.4). `asyncify_scratch_ptr()` is the linker's `__heap_base`,
+// the end of the whole static image; if it reaches the first window, the two have
+// met and the boot is not trustworthy even when it looks green.
+check(
+  'every module image ends below the user-VA windows',
+  procs.every((p) => p.scratch <= USER_HEAP_BASE),
+  procs
+    .filter((p) => p.scratch > USER_HEAP_BASE)
+    .map(
+      (p) =>
+        `${p.spec.label}: scratch=0x${p.scratch.toString(16)} >= 0x${USER_HEAP_BASE.toString(16)}`
     )
     .join('; ')
 );

@@ -43,11 +43,11 @@
 
 const WASM_PAGE = 65536;
 
-/// The kernel's window onto the boot filesystem image, from `arch_common::com`. On wasm this is
-/// exactly `MAX_USER_ADDRESS`: an instance's memory holds the process and nothing else, so there
-/// is no high half for a device window and the image sits immediately above the process's own VA
-/// range.
-const RAMDISK_IMAGE_VA = 0x1000000;
+/// The kernel's window onto the boot filesystem image, from `arch_common::com`. On wasm this sits
+/// above every user-VA window and the module's static image: an instance's memory holds the
+/// process and nothing else, so there is no high half for a device window and the image goes
+/// above the process's own VA range.
+const RAMDISK_IMAGE_VA = 0x3000000;
 
 // Syscall numbers, from `minix-rt`. Only the shapes the host has to recognise are named.
 const NR_READ = 2;
@@ -608,7 +608,9 @@ export function createHost({
   /// function of the *slot*: exec replaces what a slot runs without changing which slot it is,
   /// and without the kernel knowing the host did it.
   function instantiate(st, module, argv, entry) {
-    st.memory = new WebAssembly.Memory({ initial: 256, maximum: 4096 });
+    // 48 MiB, to cover the user-VA windows at 32 MiB (`arch_wasm32::hal`); the RAM disk
+    // instance grows further for the image at `RAMDISK_IMAGE_VA`.
+    st.memory = new WebAssembly.Memory({ initial: 768, maximum: 4096 });
     st.inst = new WebAssembly.Instance(module, makeImports(st));
     // The module names its own scratch region — the end of its static image, from the linker.
     // The 16-byte Asyncify struct goes at its start and the unwind stack follows.

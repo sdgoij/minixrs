@@ -2,10 +2,12 @@
 #
 # `--import-memory` is the design's arrangement (§5): the host owns each
 # instance's memory, because only the host can move bytes between two processes.
-# `--initial-memory` is 16 MiB against a 256 MiB maximum, and lld's `--stack-first`
-# default puts its 1 MiB stack at the bottom of that; the port's heap window
-# (2..6 MiB) and declared stack region (14..16 MiB) have to stay clear of the
-# image. The boot log reports where the module itself ends.
+# `--initial-memory` is 48 MiB against a 256 MiB maximum, and lld's `--stack-first`
+# default puts its 1 MiB stack at the bottom of that. The port's user-VA windows
+# start at 32 MiB (`arch_wasm32::hal`), above the module's static image, which the
+# linker grows upward from 1 MiB and which `boot.cjs` checks still ends below the
+# first window (`ARCH_WASM32.md` §5.4); 48 MiB covers the stack top, and the RAM
+# disk instance grows further for the image at `RAMDISK_IMAGE_VA` (48 MiB).
 #
 # `wasm32-minix` is one of the fork's own targets
 # (`compiler/rustc_target/src/spec/targets/wasm32_minix.rs`), so this section is
@@ -24,6 +26,6 @@ rustflags = [
   # the Asyncify buffer instead of inferring it.
   "-C", "link-arg=--export=asyncify_scratch_ptr",
   "-C", "link-arg=--import-memory",
-  "-C", "link-arg=--initial-memory=16777216",
+  "-C", "link-arg=--initial-memory=50331648",
   "-C", "link-arg=--max-memory=268435456",
 ]

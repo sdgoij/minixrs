@@ -237,14 +237,16 @@ pub mod sys {
 #[cfg(not(target_arch = "wasm32"))]
 pub const RAMDISK_IMAGE_VA: u64 = 0x100000000;
 
-/// The wasm window starts exactly at `MAX_USER_ADDRESS` rather than above the
-/// 64-bit arches' code and stack, because those addresses do not exist here: a
-/// wasm instance's linear memory holds the process and nothing else, so there is
-/// no high half to put a device window in. Everything at or above this ceiling is
-/// outside the process's own VA range and only the RAM disk server reads there,
-/// which is what makes one flat 16 MiB image safe.
+/// The wasm window sits above every user-VA window rather than at the 64-bit
+/// arches' high half, because those addresses do not exist here: a wasm instance's
+/// linear memory holds the process and nothing else, so there is no high half to
+/// put a device window in. It has to be clear of the process's own VA range *and*
+/// of the module's static image, which the linker grows upward from 1 MiB
+/// (`ARCH_WASM32.md` §5.4) — hence 48 MiB, above the stack top (46 MiB) and with
+/// room under it for the image to grow. Only the RAM disk server reads here, which
+/// is what makes one flat 16 MiB image safe.
 #[cfg(target_arch = "wasm32")]
-pub const RAMDISK_IMAGE_VA: u64 = 0x0100_0000;
+pub const RAMDISK_IMAGE_VA: u64 = 0x0300_0000;
 
 /// Size of the boot filesystem image the build produces by default:
 /// `boot_image::minixfs::DEFAULT_BLOCKS` (4096) x `BLOCK_SIZE` (4096).
