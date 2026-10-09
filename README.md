@@ -26,12 +26,14 @@ This project implements the full MINIX 3 stack in Rust — kernel, architecture-
   building either is optional, since `just fetch-bash <arch>` and
   `just fetch-mesa <arch>` install the released artifacts
 - [Just](https://just.systems/) (build runner)
-- **For the wasm32 target only:** a Rust **nightly** with the `rust-src` component — that target is a
-  JSON spec built with `-Z build-std`, so it needs sources rather than a prebuilt sysroot —
-  [Binaryen](https://github.com/WebAssembly/binaryen) installed where the build looks for `wasm-opt`
-  (`npm install binaryen --prefix tools/fork-spike/.tools --no-save`), and **Node 22.4+** to run the
-  check harnesses — one of them drives the WebSocket client Node only ships from 22.4 on. The
-  three hardware arches need none of it.
+- **For the wasm32 target only:** [Binaryen](https://github.com/WebAssembly/binaryen) installed where
+  the build looks for `wasm-opt` (`npm install binaryen --prefix tools/fork-spike/.tools --no-save`)
+  and **Node 22.4+** to run the check harnesses — one drives the WebSocket client Node only ships
+  from 22.4 on. The target itself (`wasm32-minix`) is one of the fork's own, so it comes with the
+  stage1: no nightly, no `rust-src`, no `-Z build-std`. It does need a **Linux** host, though —
+  Windows has no wasm-capable `lld`, and the checkout there holds the Windows stage1 — so build it
+  from CI or a Linux guest such as WSL (`sh tools/wasm-verify.sh` builds and runs the three
+  harnesses). The three hardware arches need none of it.
 
 > **Windows users:** Just executes recipes with `sh` (the POSIX shell) —
 > without it, Just falls back to `cmd` and the recipes break. Git for
@@ -65,10 +67,10 @@ just debug aarch64            # Build and boot with GDB server on :1234
 just test-qemu aarch64        # Run the QEMU integration tests
 just test-boot aarch64        # Run the boot tests
 
-# wasm32 — the same system in a browser tab
+# wasm32 — the same system in a browser tab (run from a Linux host; see above)
 sh tools/wasm-browser/build.sh    # Build the artifacts and stage the page's copies of them
+sh tools/wasm-verify.sh           # Or: build and run the three check harnesses (boot/run/page)
 node tools/wasm-browser/serve.js  # Serve the page, then open http://127.0.0.1:8080/
-node tools/wasm-servers/boot.cjs  # Checks: the boot chain and every device, at quiescence
 just publish-wasm                 # Or: build and stage the demo into docs/ (what Pages serves)
 ```
 
@@ -356,7 +358,7 @@ The original C reference source is at `.refs/minix-3.3.0/` (git submodule).
 
 ## Build & Development
 
-- **Build runner:** `Justfile` — run `just <recipe>` for available commands
+- **Build runner:** `Justfile` — run `just --list` for available commands
 - **The browser demo:** [sdgoij.github.io/minixrs](https://sdgoij.github.io/minixrs/) — `just publish-wasm`
   builds the wasm system (kernel, servers, image) and stages the page into `docs/`, which GitHub Pages
   serves straight out of the repository: no CI, no server, no account. The assets are committed, so a

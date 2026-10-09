@@ -22,9 +22,13 @@ here=$(cd "$(dirname "$0")" && pwd)
 root=$(cd "$here/../.." && pwd)
 wasm_opt="$root/tools/fork-spike/.tools/node_modules/binaryen/bin/wasm-opt"
 
-rustc=$(ls "$root"/rust/build/*/stage1/bin/rustc.exe "$root"/rust/build/*/stage1/bin/rustc 2>/dev/null | head -1)
+# A checkout whose own `rust/build/*/stage1` is another host's, or is stale, needs a stage1 that
+# matches the linking host: `MINIXRS_RUSTC` names it (`tools/wasm-verify.sh` sets it for the
+# Windows-checkout-from-WSL case). Left unset, the checkout's stage1 is used.
+rustc=${MINIXRS_RUSTC:-$(ls "$root"/rust/build/*/stage1/bin/rustc.exe "$root"/rust/build/*/stage1/bin/rustc 2>/dev/null | head -1)}
 if [ -z "$rustc" ]; then
-  echo "error: the fork's stage1 compiler was not found - run \`just bootstrap\`" >&2
+  echo "error: the fork's stage1 compiler was not found - run `just bootstrap`," >&2
+  echo "       or point MINIXRS_RUSTC at one (see tools/wasm-verify.sh)" >&2
   exit 1
 fi
 
@@ -33,8 +37,9 @@ fi
 # what it finds handles `-flavor wasm`. It goes in through `CARGO_TARGET_WASM32_MINIX_LINKER`
 # rather than `RUSTFLAGS`: rustflags would displace the `--export`/`--import-memory` flags each
 # crate sets in its own `.cargo/config.toml`, and the env key is what cargo reads for exactly
-# this setting.
-lld=$(python "$root/tools/lld.py")
+# this setting. `MINIXRS_WASM_LINKER` overrides the resolver when the stage1 from `MINIXRS_RUSTC`
+# ships its own `rust-lld` (the fetched stage1 does).
+lld=${MINIXRS_WASM_LINKER:-$(python "$root/tools/lld.py")}
 if [ -z "$lld" ]; then
   echo "error: no lld to link the wasm modules with - run \`just bootstrap\`" >&2
   exit 1
