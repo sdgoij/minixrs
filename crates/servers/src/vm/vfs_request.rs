@@ -281,15 +281,6 @@ pub fn release_parked(dev: u32, ino: u32, ino_offset: u64, landed: bool) {
     // with the page in the cache the ordinary lookup finds it first, and without it there is
     // nothing left to wait for — so this terminates.
     while let Some(state) = take_parked(dev, ino, ino_offset) {
-        probe(
-            b"rel",
-            state.fault.ep,
-            dev,
-            ino,
-            ino_offset,
-            0,
-            if landed { 1 } else { 0 },
-        );
         if landed {
             // Map it here rather than making the process fault again for a frame that is now one
             // lookup away.
@@ -535,46 +526,6 @@ fn unmatched_line(reqid: u32) -> Line {
     line.push_i32(reqid as i32);
     line.push(b"\n");
     line
-}
-
-/// Base of the loader's DSO window (`crates/ldso/src/layout.rs::DSO_BASE` on the hardware
-/// arches). The fault probes report only addresses at or above it, so the log follows the
-/// dynamic loader's page-ins without every other process's; a `va` of 0 (a probe with no
-/// address) always prints.
-const PROBE_DSO_BASE: u64 = 0x0200_0000;
-
-/// One `V:` diagnostic line for the file-backed fault path: what a page is waiting on (a
-/// fill VFS was asked for, one the fault parked on, or the completion that clears the
-/// fault). Diagnostic only — it changes no state. This is the instrument that names the
-/// conversation a stuck page-in is in (`KNOWN_ISSUES` 14).
-pub fn probe(tag: &[u8], ep: i32, dev: u32, ino: u32, off: u64, va: u64, n: i32) {
-    #[cfg(not(target_os = "minix"))]
-    {
-        let _ = (tag, ep, dev, ino, off, va, n);
-    }
-    #[cfg(target_os = "minix")]
-    {
-        if va != 0 && va < PROBE_DSO_BASE {
-            return;
-        }
-        let mut line = Line::new();
-        line.push(b"V:");
-        line.push(tag);
-        line.push(b" ep ");
-        line.push_i32(ep);
-        line.push(b" va 0x");
-        line.push_hex32(va as u32);
-        line.push(b" dev ");
-        line.push_i32(dev as i32);
-        line.push(b" ino ");
-        line.push_i32(ino as i32);
-        line.push(b" off ");
-        line.push_i32(off as i32);
-        line.push(b" n ");
-        line.push_i32(n);
-        line.push(b"\n");
-        minix_rt::diag_write(line.as_bytes());
-    }
 }
 
 /// Report a reply of the wrong type, once.
