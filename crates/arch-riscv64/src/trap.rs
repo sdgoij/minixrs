@@ -256,6 +256,16 @@ pub unsafe extern "C" fn trap_handler(frame: &mut [u8; 296]) {
             _ => {}
         }
     } else {
+        // Run syscall/page-fault handling with interrupts masked. `trap_asm.rs`
+        // enters a *U-mode* trap's handler with `SIE=1` (so UART input keeps
+        // draining), which lets a timer tick be taken *inside* this code — and
+        // its accounting (`clock::timer_int_handler` → `context_stop` →
+        // `sched::proc_no_time`/`notify_scheduler`) walks the same run queue and
+        // process state the switch below and the page-fault forward mutate. On
+        // x86_64 and aarch64 this path runs with interrupts off; masking here
+        // makes riscv64 match them instead of interleaving a tick with a
+        // half-updated switch.
+        let irq = crate::hal::irq_save();
         match code {
             cause::ECALL_UMODE => {
                 let nr = u64::from_ne_bytes(frame[136..144].try_into().unwrap());
@@ -394,5 +404,6 @@ pub unsafe extern "C" fn trap_handler(frame: &mut [u8; 296]) {
                 }
             }
         }
+        crate::hal::irq_restore(irq);
     }
 }
