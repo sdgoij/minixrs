@@ -225,6 +225,13 @@ pub(crate) fn fail(e: i32) -> i32 {
 const HDR: usize = 16; // [size: usize][flags: usize]
 const ALIGN: usize = 16;
 const USED: usize = 1;
+/// The block has never been handed out since its page was mapped, so its
+/// payload is still the kernel's zero fill. The kernel clears every page it
+/// hands to a process (`VM_PAGING_ALLOC`), so this lets `calloc` skip its
+/// zero pass over a fresh block instead of faulting in and writing every page
+/// of it. Cleared by `free`: a caller may have written the block before
+/// returning it, so a reused block is never fresh.
+const FRESH: usize = 2;
 
 /// The page the target's `sbrk` works in. `sbrk` returns a page-aligned
 /// address and leaves the break page-aligned as well, so a heap block that
@@ -305,10 +312,10 @@ pub unsafe extern "C" fn malloc(size: usize) -> *mut c_void {
             }
             HEAP_START = base as usize;
             HEAP_END = HEAP_START + ask;
-            set_hdr(base as *mut u8, size, USED);
+            set_hdr(base as *mut u8, size, USED | FRESH);
             let pad = ask - size;
             if pad >= HDR + ALIGN {
-                set_hdr((HEAP_START + size) as *mut u8, pad, 0);
+                set_hdr((HEAP_START + size) as *mut u8, pad, FRESH);
             }
             return (HEAP_START + HDR) as *mut c_void;
         }
@@ -318,13 +325,17 @@ pub unsafe extern "C" fn malloc(size: usize) -> *mut c_void {
         let mut p = heap;
         while p < end {
             let sz = hdr_size(p as *mut u8);
-            if hdr_flags(p as *mut u8) == 0 && sz >= need {
+            let flags = hdr_flags(p as *mut u8);
+            if flags & USED == 0 && sz >= need {
+                // A fresh block's payload is still zero, and so is the
+                // remainder split off it; a used-and-freed block is not.
+                let fresh = flags & FRESH;
                 if sz >= need + HDR + ALIGN {
                     // Split off a free remainder.
-                    set_hdr(p as *mut u8, need, USED);
-                    set_hdr((p + need) as *mut u8, sz - need, 0);
+                    set_hdr(p as *mut u8, need, USED | fresh);
+                    set_hdr((p + need) as *mut u8, sz - need, fresh);
                 } else {
-                    set_hdr(p as *mut u8, sz, USED);
+                    set_hdr(p as *mut u8, sz, USED | fresh);
                 }
                 return (p + HDR) as *mut c_void;
             }
@@ -347,10 +358,10 @@ pub unsafe extern "C" fn malloc(size: usize) -> *mut c_void {
             return core::ptr::null_mut();
         }
         let b = r as usize;
-        set_hdr(b as *mut u8, size, USED);
+        set_hdr(b as *mut u8, size, USED | FRESH);
         let pad = ask - size;
         if pad >= HDR + ALIGN {
-            set_hdr((b + size) as *mut u8, pad, 0);
+            set_hdr((b + size) as *mut u8, pad, FRESH);
         }
         HEAP_END = b + ask;
         (b + HDR) as *mut c_void
@@ -370,7 +381,7 @@ pub unsafe extern "C" fn free(ptr: *mut c_void) {
         set_hdr(block as *mut u8, sz, 0);
         // Coalesce with the next block.
         let next = block + sz;
-        if next < HEAP_END && hdr_flags(next as *mut u8) == 0 {
+        if next < HEAP_END && hdr_flags(next as *mut u8) & USED == 0 {
             sz += hdr_size(next as *mut u8);
             set_hdr(block as *mut u8, sz, 0);
         }
@@ -378,7 +389,7 @@ pub unsafe extern "C" fn free(ptr: *mut c_void) {
         let mut prev = HEAP_START;
         while prev < block {
             let psz = hdr_size(prev as *mut u8);
-            if prev + psz == block && hdr_flags(prev as *mut u8) == 0 {
+            if prev + psz == block && hdr_flags(prev as *mut u8) & USED == 0 {
                 set_hdr(prev as *mut u8, psz + sz, 0);
                 break;
             }
@@ -396,7 +407,10 @@ pub unsafe extern "C" fn free(ptr: *mut c_void) {
 pub unsafe extern "C" fn calloc(nmemb: usize, size: usize) -> *mut c_void {
     let total = nmemb.saturating_mul(size);
     let p = unsafe { malloc(total) };
-    if !p.is_null() {
+    // A block `malloc` just carved from a fresh break extension is already
+    // zero, so the zero pass is skipped for it; a block reused from the free
+    // list holds the previous owner's bytes and still has to be cleared.
+    if !p.is_null() && unsafe { hdr_flags((p as usize - HDR) as *mut u8) } & FRESH == 0 {
         // SAFETY: `p` holds `total` bytes from `malloc`.
         unsafe { core::ptr::write_bytes(p as *mut u8, 0, total) };
     }
