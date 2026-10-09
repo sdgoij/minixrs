@@ -1,17 +1,13 @@
 # Known Issues — inventory across x86_64 / RISC-V / AArch64
 
-Status snapshot: 2026-08-12, after the stat-path fix (VFS `do_fstat`,
-MFS `fs_stat`/`fs_statvfs`), the server-stub cleanup (VM
-`clear_pagefault`/`do_vfs_reply`, clock server incl. CLOCK_SETTIME, tty
-chardriver primitives), and the tooling fixes (automated per-exec
-region/page-count probe, riscv64/aarch64 kernel-binary collision, MSYS
-env mangling). Supersedes the older "open questions" lists in .notes/filemmap.md §6
-where they overlap; FILEMMAP keeps the detailed write-up.
+Open issues are listed first, then the resolved ones under `# Resolved issues`; item numbers are stable across the move, so a `KNOWN_ISSUES N` reference still resolves. Detailed write-ups live in `.notes/` (e.g. `.notes/filemmap.md`). A platform or harness limitation captured in a skill sits in Resolved too, and says so.
 
 Legend: `[all]` affects all arches, `[x86]` / `[riscv]` / `[aarch64]`
 are arch-specific, `[env]` is tooling/platform, not kernel.
 
 ---
+
+# Open issues
 
 ## Cross-arch (`[all]`)
 
@@ -20,12 +16,14 @@ are arch-specific, `[env]` is tooling/platform, not kernel.
    private page and reads go straight to VFS/MFS each time. No eviction/LRU
    until the real cache lands. Correctness is fine; this is pure perf.
    (.notes/filemmap.md §6)
+
 2. **MFS read-path I/O amplification ~3–6×** — large sequential reads issue
    ~3–6× more virtio-blk I/Os than the file's block count (cat ≈2.8×,
    mmapfd ≈5.6×, 33 MiB `/bin/bign` pre-fault ≈5.8×). Two candidate fixes
    (make PREFETCH read; move `ONE_SHOT` off the `FULL_DATA_BLOCK` value)
    were tried and reverted. Open: profile MFS's cache/read-ahead against
    the virtio request stream. (.notes/filemmap.md §7)
+
 3. **`mmap(fd)` MAP_SHARED semantics** — implemented (MAP_SHARED sets
    `VR_SHARED`, the pages are file-cache frames shared between processes) and
    exercised by `mmapfd shared`, which forks and checks that the child's write is
@@ -35,16 +33,7 @@ are arch-specific, `[env]` is tooling/platform, not kernel.
    is still unbuilt is the *reverse* case — a shared *anonymous* mapping, or a
    file mapping whose cache page is evicted underneath it (item 1's stub cache).
    (.notes/filemmap.md §6)
-4. **~~VFS `do_fstat` never copies the `Stat` back~~ — FIXED.** The stat
-   path now works end-to-end: VFS `do_stat`/`do_fstat`/`do_lstat` pass the
-   caller's buffer + `size_of::<Stat>()` to `req_stat` (was `null_mut`, 0);
-   MFS `fs_stat`/`fs_statvfs` were `no_sys` in the dispatch table and are
-   now implemented (stadir.c port) with the stat written through the VFS
-   grant; `req_statvfs` created a bogus grant at VFS address 0 and now
-   grants the user's buffer like `req_stat`; userland `stat()`/`lstat()`
-   were added to minix-std. Verified: host tests (Stat/Statvfs layout pins,
-   `build_stat`/`estimate_blocks` mapping, message formats) + x86 boot test.
-   `mmapfd`'s `lseek(SEEK_END)` workaround is obsolete but harmless.
+
 5. **Kernel-mode fault attribution** — `handle_page_fault`
    attributes by `current_proc()`, which is wrong during a
    cross-address-space `virtual_copy` (CR3 owner vs. executor). The exec
@@ -74,6 +63,7 @@ are arch-specific, `[env]` is tooling/platform, not kernel.
      to VM, kernel-address faults stay fatal), the x86 `swapgs` +
      `save_fault_context` entry and kernel-mode `restore`, and the RISC-V S-mode
      forwarding.
+
 6. **Kernel-mode fault resume beyond exec** — all three arches' kernel-mode
    resume paths are in-commit and boot-verified, but the lazy coverage is
    exec-only (text fetch + pre-faulted regions). General kernel-mode copies
@@ -94,18 +84,22 @@ are arch-specific, `[env]` is tooling/platform, not kernel.
    in practice today and its breakage is invisible; it will have to be fixed
    (or the resume rebuilt the way `#PF` does it) before any of the coverage
    above can be added.
+
 7. **Server Phase 12/13 stubs** (not arch bugs, but known gaps):
    - `tty` — `sys_safecopyto/from` (SYS_SAFECOPYTO/FROM kernel calls) and
      `chardriver_reply_task`/`chardriver_reply_select` (CDEV_REPLY /
      CDEV_SEL2_REPLY builders) are implemented and wired into `dev_ioctl`
-     (TIOCDRAIN deferred reply) and `select_retry`. Remaining gaps: the
-     ioctl *arg-data* protocol — VFS copies ioctl args inline in the
-     message (`cdev_io` uses `ioc_size(request)`, which is 0 for the tty's
-     stub request codes 0..21, and the 32-byte inline area can't carry a
-     full `Termios`), and VFS's `cdev_reply` async-reply dispatch is still a
-     stub — so termios round-trips still don't move real bytes until the
-     codes/protocol are aligned; the server-side timer infra (VTIME
-     `settimer`) has no kernel timer API for servers.
+     (TIOCDRAIN deferred reply) and `select_retry`. The deferred
+     READ/WRITE/IOCTL protocol is implemented too: VFS hands the request
+     over without waiting and the driver answers `CDEV_REPLY`, which
+     `cdev_reply` -> `cdev_io_reply` completes (`70fbb3ff8`, gated per
+     driver by `dmap_cdev_async`, set for the tty). So `cdev_reply` is no
+     longer a stub for the `CDEV_REPLY` arm (the `SEL1`/`SEL2` arms still
+     are), and ioctl args move through a magic grant sized by `ioc_size`,
+     which the tty's `TIOCGETA`/`TIOCSETA*` codes carry as
+     `size_of::<Termios>()`, so a full `Termios` round-trips. What is still
+     missing is only the server-side timer infra (VTIME `settimer`), which
+     has no kernel timer API for servers.
    - `devman` main loop is a TODO — needs `start_vtreefs`'s VFS message
      loop, which is itself a TODO. Sized: the C libvtreefs is a full FS
      server (inode/link/mount/path/read/stadir/table ≈ 10 files), the
@@ -135,11 +129,390 @@ are arch-specific, `[env]` is tooling/platform, not kernel.
      Still true, and unrelated to that: `vm_remap`, `vm_getphys` and
      `vm_unmap` in `servers/src/ipc.rs` are *callers* of VM, so a server
      blocking on VM in those paths is the ordinary shape, not a cycle.
+
 8. **Threads (THREADS.md open workstreams)** — `thread_local!` in the minix
    std PAL, `Mutex`/`Condvar` over a futex sleep/wake, per-thread errno,
    C-ABI pthread surface; per-thread sigreturn is deferred (process-level
    signal delivery only). Kernel model (1:1, fork/exec/exit group sweep)
    is done and boot-verified.
+
+10. **Userland `mmap(fd)` has no real consumer** — `mmapfd` is a test
+    binary; exec remains the production user. (.notes/filemmap.md §6)
+
+13. **Free slots are left not-quite-free (2026-09-21, open, possibly benign).** An
+    exited child's slot is left holding `SLOT_FREE|P_STOP` (`rts=00000041`) or
+    `SLOT_FREE|NO_ENDPOINT` (`rts=00000101`), and `Proc::is_empty()` is *equality* with
+    `SLOT_FREE`, so such a slot reads as occupied while claiming to be free. `hangdump`
+    does not skip it, which made these look like wedged processes: every one of them sat
+    at `rip=0x1177dea`, which is `std::process::exit+0x1a` — simply the last instruction
+    each had executed. C's `get_free_proc` tests the *bit*
+    (`RTS_ISSET(rp, RTS_SLOT_FREE)`), so `is_empty` is the thing to reconcile; whether a
+    slot leaks because of it is not established.
+
+15. **`write_to_proc`/`read_from_proc` silently ignore their `proc` argument (2026-09-22, FIXED for
+    these two; `vm_memset`'s non-seam path still open).**
+    Both take a process number and a virtual address, but where the page tables are the kernel's to
+    walk (`CROSS_ADDRESS_SPACE_COPY` is `None` — x86_64, riscv64, aarch64; every hardware port)
+    they reduce to a bare `copy_nonoverlapping` through whatever address space is currently
+    loaded, so the copy happens in the *running* process's space at `addr` and `proc` participates
+    only on wasm. The precondition is therefore "the target is the current process", and nothing
+    says so: a caller that passes a third process's number gets no error, just a silent write into
+    the running process's memory at `addr` (or a kernel-mode fault where that address is
+    unmapped). Callers today are the exec-frame read (`do_exec_load_handler`), the grant-table
+    read in `grants.rs`'s `verify_grant` (the granter's `s_grant_pa` is physical, so it works only
+    because the identity map reaches it), and the devio/getmcontext/setmcontext copies, which
+    switch CR3 to the caller first — correct since the 2026-09-22 CR3-restore fix, and correct
+    *because* of it. Same family as that fix: a copy that is right only while the CPU happens to
+    be on the target's root, where being wrong means kernel data lands in some process's memory.
+    Fix by switching CR3 to `proc` for the copy as `delivermsg`/`virtual_copy` do, or by making
+    the "must be current" precondition explicit in the name and an assertion.
+
+    **Fixed in that direction (2026-09-22).** Both functions now read the target's `p_seg.p_cr3`
+    and, when it differs from the loaded root, switch for the copy and restore the caller's — the
+    shape `delivermsg` uses. It is a no-op wherever the caller already switched (devio, the
+    mcontext pair, the console read at `syscall.rs`, all of which pass `(*caller).p_nr`), and it
+    makes `grants.rs`'s `verify_grant` behave the way its own comment says C does ("`data_copy`,
+    which switches to the granter's page table"). Guarded on `boot_cr3() != 0`, so host tests and
+    pre-init keep the bare copy. Not covered: `vm_memset`'s non-seam path
+    (`kernel/src/vm.rs`, the `write_bytes` below the seam branch) still writes through the current
+    root while two of its three callers pass *another* process's number (`do_setgrant_handler`,
+    `system.rs`'s memset handler) — the same defect, and it should take the same switch.
+
+17. **The kernel's `brk` handler keeps one global `CURRENT_BRK` for a per-process quantity
+    (2026-09-22, open — possibly vestigial).** `syscall.rs`'s `CURRENT_BRK` is a process-global
+    `AtomicU64` used by `sys_brk_handler` (NR_BRK, registered as basic syscall 36) for both the query
+    and the update, so two processes growing their heap share one break and each sees the other's.
+    The port's userland goes through VM's `VM_BRK` instead (`do_brk` tracks `vm_region_top` per
+    `Vmproc`, and `.rules` says VM owns `brk`), so the kernel copy may be vestigial — but if anyone
+    calls it, it reports another process's break. Establish which of the two the port trusts; if the
+    handler is reachable, a `Proc`-resident break (or removal of the handler) is the fix.
+
+18. **Two physical page allocators are initialised over the same RAM (2026-09-22, latent).**
+    `kernel-boot/src/main.rs` feeds the *same* range to both: `arch_x86_64::alloc::init_allocator`
+    (the arch bitmap, lines ~304) and `kernel::vm::mem_init` (the MINIX bitmap, ~356) each get
+    `[kernel_end, mem_top)` minus the user stack/brk windows, so each believes the whole pool is free.
+    Nothing double-allocates today only because `vm::alloc_mem`'s callers are the test-only
+    `exec_setup_new_page_table` and the boot loader — but the comment claiming its purpose is
+    "used by kernel call 62 (VM_PAGING_ALLOC)" is stale: `do_vm_paging_handler` allocates from
+    `hal::alloc_phys_contig` (the arch allocator), which is also what `exec_elf_for_target` and
+    `boot_init` use. So the MINIX bitmap is effectively dead weight that must stay unused; anything
+    that starts calling `vm::alloc_mem` at run time hands out frames the arch allocator has already
+    handed to a process, with no ownership either side can see. Fix by initialising one allocator
+    (or by giving the two disjoint chunks), and delete the stale comment.
+
+20. **A name longer than 28 bytes cannot be created (2026-09-23, open — measured).**
+    `create`, `mkdir` and `mknod` carry their single name *inside* the request, so the
+    name is capped by the room left after the fixed fields: 28 bytes for
+    `req_create`/`req_mkdir`, 29 for `build_mknod_msg` (a 30-byte name wrote byte 56 of
+    56 as well; that write is bounded now), while `path_len` still advertises the
+    untruncated length. Measured in an x86 guest with `echo n > <name>`: names of 24,
+    25, 27 and **28** bytes create and read back; **29**, 30 and 32 bytes fail with
+    `sh: cannot create <name>: err=02` (ENOENT) and leave nothing behind — that is the
+    shell's own `>` redirect, so this is not a coreutils-only path. It fails loudly
+    rather than creating a file under a truncated name, which is the better half of the
+    news; `MFS_NAME_MAX` is 60, so 29-60 bytes is still a real gap for anything that
+    creates files. `coreutils mkdir`, `ln`, `truncate` and `split` are all in
+    `feat_minix`.
+    The fix is the one lookup just got — grant the name — and it has to land on both
+    sides at once: `parse_mknod_request`'s test in `crates/fs/src/mfs/main.rs` exists
+    because an earlier grant-based layout was never parsed and `mknod` created nothing.
+    Its gate belongs in `tools/smoke/long-path.tsv` (whose header says why no step goes
+    above the 28-byte create limit) or beside it.
+    Measured with a scratch scenario, `target/tmp/create-boundary.tsv`.
+
+24. **`std::env::current_dir` has no implementation for minix (2026-09-24,
+    open).** `rust/library/std/src/sys/paths/mod.rs` routes `target_os =
+    "minix"` to `sys::paths::unsupported`, so `current_dir` returns
+    "unsupported operation" whatever the libc can do — it does not call
+    `getcwd`, which is why item 23 does not fix it. `std::env::current_dir`,
+    `std::fs::canonicalize` and `Command::current_dir` all go through it, so
+    `coreutils pwd` fails and any applet that resolves a relative path in Rust
+    rather than leaving it to VFS is wrong. The fix is to route minix to
+    `sys/paths/unix.rs::getcwd` (which calls `libc::getcwd` and grows on
+    `ERANGE`); it needs the Rust fork and a stage1 rebuild, so it is not a change
+    to make alongside libc work.
+
+26. **`isatty` answers 1 for any of fd 0..2 (2026-09-24, open).**
+    `crates/minix-libc/src/c_sys.rs` decides "is this a terminal" by the fd
+    *number* — `if (0..=2).contains(&fd) { 1 } else { 0 }` — so a C program
+    redirected into a file or a pipe is still told it is on a terminal. bash
+    uses exactly that to decide whether to be interactive, and coreutils tools
+    use it for colour and piping behaviour, so this is not cosmetic. The real
+    test is available and now used by `ls` (`crates/userland/src/lib.rs`):
+    `fstat` and check `S_IFCHR` — the console's descriptors are character
+    devices, a pipe's vnode is `S_IFIFO` (PFS creates it `I_NAMED_PIPE`) and a
+    file's is `S_IFREG`. The ioctl is *not* a test: VFS answers an ioctl it does
+    not route with `OK`, which is how `ls | cat` laid out columns before the
+    check above existed. (`crates/minix-libc/src/c_sys.rs`)
+
+28. **Cloned character devices are not visible through `fstat` (2026-09-27, open — a missing
+    subsystem, not a stat bug).** MINIX gives every clone open its own *node*: VFS's
+    `cdev_clone` (`servers/vfs/device.c`) asks PFS to create a temporary device file whose
+    inode's `i_dev` **is** the clone device (`makedev(major(dev), new_minor)`), keeps that
+    vnode on the filp and records `vp->v_sdev`; PFS's `stat_inode` returns `st_dev = i_dev`,
+    so `fstat` names the clone. `libc`'s `socketpair.c` depends on exactly that: it passes
+    `fstat(sv[1]).st_dev` to `NWIOSUDSPAIR`, and the driver takes the peer's minor from it
+    (`minor(dev)`). This port has no clone-node machinery — a `CDEV_CLONED` open reply becomes
+    `filp_dev` alone (`servers/src/vfs/call.rs::do_open`) — and `do_fstat` forwards to the
+    filesystem server unchanged, so it reports the *node's* device: for a cloned socket fd,
+    `st_dev` is the filesystem and `st_rdev` the base device, not the clone. Routing is
+    unaffected (`filp_dev` is what `cdev_io` sends to the driver), so this is not a
+    correctness problem for I/O — only the reference's `fstat` idiom does not port.
+
+    **Decision (2026-09-27): keep clone nodes unimplemented; give a driver that needs its own
+    minor an explicit ioctl.** Replicating `cdev_clone` is a VFS+PFS change (a temporary node
+    per clone open, plus `v_sdev` on the vnode and a close path), and the port's routing does
+    not need it. `/dev/uds` exposes `NWIOGUDSMINOR` (`net::NWIOGUDSMINOR`,
+    `minix-std/src/uds.rs::socket_minor`) and its `socketpair` uses that. Revisit if a ported
+    binary needs `st_dev`/`st_rdev` to name a clone.
+
+29. **A driver cannot call VFS back while VFS waits on it (2026-09-27, settled for sockets,
+    open for VND).** MINIX's drivers make privileged *back-calls* into VFS during an ioctl: the
+    uds driver moves passed descriptors with `copyfd` (`ioc_uds.c` `send_fds`/`recv_fds`), and
+    VND opens its backing file with `copyfd` plus `fstat` (`vnd.c`). MINIX answers those on a
+    second VFS thread while the calling thread waits for the driver's ioctl reply. This port's
+    VFS is single-threaded and parks in `request::fs_sendrec` (`minix_std::sendrec`), so a
+    back-call would sit behind a receive that never comes — a deadlock, not a slow path.
+
+    **Sockets are settled by moving the work to VFS, not by making VFS reentrant.** VFS
+    intercepts the two `NWIOSUDSCTRL`/`NWIOGUDSCTRL` ioctls and does the descriptor transfer
+    itself (`crates/servers/src/vfs/scm.rs`); the driver's only new duty is answering "which
+    socket is your peer" in its ioctl reply, and `NWIOGUDSPEERCRED` is served from the peer's
+    recorded owner endpoint. `do_copyfd` stays implemented (`VFS_COPYFD`, root-only) for a
+    caller that genuinely has a thread to be answered on, but nothing in the tree uses it yet.
+    See `.notes/wayland.md` §5 row 5 and §6.2.
+
+    **VND is still open.** `vnd_copyfd`/`vnd_fstat` (`crates/drivers/src/storage/vnd.rs`) return
+    `Err(DriverError::Unsupported)`, so `VNDIOCSET` cannot open a backing file. Either give VFS
+    the same treatment (it would have to learn VND's ioctls, as it has learned the socket ones),
+    or introduce a mechanism to service a driver's back-call — which needs VFS's per-request
+    state saved around the nested call. No consumer needs VND yet, so this is recorded rather
+    than resolved. (`crates/servers/src/vfs/scm.rs`, `crates/servers/src/vfs/call.rs::do_copyfd`,
+    `crates/drivers/src/storage/vnd.rs`)
+
+30. **A `memfd` answers the operations a filesystem would, but not every one of them (2026-09-27,
+    open, deliberate).** `vfs::memfd` gives an anonymous shared-memory object an identity
+    (`MEMFD_DEV` plus a never-reused id) and deliberately no filesystem: `v_fs_e` is NONE and
+    `v_fs_count` is 0, which is what lets `put_vnode` skip its `req_putnode` without a special
+    case. VFS answers `read`, `write`, `ftruncate`, `fstat`, `fchmod` and `fchown` there, and the
+    mapping path needs nothing at all (VM's `(dev, ino)` page cache *is* the object).
+
+    The remaining filesystem-shaped operations still travel to `v_fs_e == NONE` and fail with
+    whatever an endpoint of NONE yields: `utimens` and `fsync` on a memfd, and `fstatvfs`, which
+    has no meaning for an object with no storage to measure. Nothing on the `wl_shm` path
+    (`memfd_create`, `ftruncate`, `mmap`, `SCM_RIGHTS`, `read`/`write`) reaches them, so they are
+    recorded rather than synthesized — a ported binary that `utimes` or `fsync`es a memfd gets a
+    failing call rather than a wrong answer. (`crates/servers/src/vfs/memfd.rs`,
+    `crates/servers/src/vfs/call.rs`)
+
+32. **`read` never blocks in VFS, so an `eventfd`/`timerfd` read on a zero count returns
+    `EAGAIN` (2026-09-28, open, deliberate).** The port has no suspend/revive for reads
+    (item 31's sibling: `vfs::pipe` reads return `EAGAIN` rather than suspending), and
+    `vfs::eventfd` and `vfs::timerfd` follow it — a POSIX read of a zero `eventfd` counter,
+    or of a `timerfd` whose timer has not expired, would block until it is nonzero / expires.
+    The expected consumer (`calloop`/smithay) polls before it reads, and `EFD_NONBLOCK` /
+    `TFD_NONBLOCK` is the common mode, so the deviation is recorded rather than papered over
+    with a busy retry. Fixing it properly means a general deferred-read mechanism, not a
+    per-object special case. (`crates/servers/src/vfs/eventfd.rs`,
+    `crates/servers/src/vfs/timerfd.rs`, `crates/servers/src/vfs/pipe.rs`)
+
+33. **`CLOCK_MONOTONIC` is time since boot, *not* `boottime + uptime` (2026-09-28,
+    deliberate deviation).** MINIX 3.3.0's `do_gettime` adds `boottime` to **both** clocks
+    (`servers/pm/time.c`: `sec = boottime + clock / system_hz`), so its `CLOCK_MONOTONIC` is
+    offset by the epoch seconds at boot — and moves if the wall clock is reset, which a
+    monotonic clock must not do. This port returns the uptime tick count alone for
+    `CLOCK_MONOTONIC` (`crates/servers/src/pm.rs`, `clock_gettime_reply`), matching POSIX and
+    the port's own `clock_server` (`clock_time_to_ts`). The concrete reason: an absolute
+    `CLOCK_MONOTONIC` deadline (`TFD_TIMER_ABSTIME`, exactly how `calloop`'s timer arms) is
+    named in the same units `clock_gettime(CLOCK_MONOTONIC)` returns, and that has to be the
+    kernel tick timeline `vfs::alarm` (`SYS_SETALARM`) arms against. With MINIX's offset the
+    deadline landed `boottime` seconds away (~1.79e9 ticks on the x86 image) and the timer
+    never fired. `CLOCK_REALTIME` keeps the `boottime` offset. (`crates/servers/src/pm.rs`,
+    `crates/servers/src/vfs/alarm.rs`, `crates/servers/src/vfs/timerfd.rs`)
+
+35. **`epoll` is level-triggered only, an instance is bounded to 64 interests, and a closed
+    registration is pruned lazily (2026-09-28, open, deliberate).** `vfs::epoll`
+    (`crates/servers/src/vfs/epoll.rs`) is net-new — MINIX emulates `poll` over `select` and
+    has no `epoll`. An instance holds a persistent interest set, and `epoll_wait` re-scans
+    the whole set through the shared readiness engine (`vfs::select`), so readiness is
+    level-triggered by construction. Deliberate limits, all in `.notes/wayland.md` §5 row 23:
+    `EPOLLET` and `EPOLLONESHOT` are accepted in the event mask but not honoured; an instance
+    holds at most `MAX_INTERESTS` (64) registrations (the wait entry's `MAX_WATCH`),
+    answering `ENOSPC` beyond that; and an interest whose fd the waiter has closed is dropped
+    lazily at the next `epoll_wait`, not at `close` (there is no close hook on a
+    VFS-internal object). `EPOLLERR`/`EPOLLHUP`/`EPOLLRDHUP` are not synthesised, matching
+    what the engine reports for `poll`. Two further edges: an epoll fd registered in
+    `epoll_ctl` is refused with `EINVAL` (no nesting), but one appearing in a *`poll`/`select`*
+    watch is treated as a regular file and reads as always-ready; and an instance whose
+    registrations were made by one process then waited on by another resolves them in the
+    *waiter's* fd table. `calloop` (and so smithay) uses level-triggered `EPOLLIN`,
+    deregisters before closing, and registers and waits in one process, so none of these bites
+    it. (`crates/servers/src/vfs/epoll.rs`, `crates/servers/src/vfs/select.rs`,
+    `crates/servers/src/vfs/call.rs`)
+
+41. **`VM_GETPHYS` puts the address and the reply in different fields on each side (2026-10-01,
+    open).** `crates/servers/src/ipc.rs`'s `vm_getphys` (`vm_getphys_stub`'s target arm) and
+    `do_get_phys` (`crates/servers/src/vm/mod.rs`) do not agree on the message:
+
+    - the caller writes `who` at message bytes 8..12 (`m1i1`) and the address at bytes 16..24
+      (`m1i3` + `m1i4`, through `msg_set_u64(&mut msg, 16, addr)`), then reads the reply from
+      bytes 24..28 (`m1i5`);
+    - `do_get_phys` reads the target from `m1i1` (which matches), the address from `m1i2`
+      (bytes 12..16 -- a field the caller never wrote), and replies in `m1i1`.
+
+    So the handler walks whatever the address slot happened to hold and the caller reads a field
+    the handler never writes. The value is truncated as well: `do_get_phys` does
+    `msg.m_payload.m1.m1i1 = pa as i32`, so a physical address above 4 GiB comes back wrong, and
+    above 2 GiB it is sign-extended -- the same trap the neighbouring `do_map_phys` guards
+    against by reading its field as `u32`. The right reply for an address is the convention
+    `do_mmap` already uses and `do_map_phys` was moved onto under `.notes/physmap.md` P5: a `u64` at
+    message bytes 8..16.
+
+    It is latent rather than live -- nothing calls `vm_getphys` except its own stub arm, and the
+    host arm returns 0 -- but it is a wrong answer rather than a missing feature, which is the
+    shape that survives longest. Fix it with the P5 reply convention when something needs it.
+
+---
+
+## RISC-V (`[riscv]`)
+
+6. **riscv64 ticked no clock at all, and its C heap leaked (2026-09-25).**
+   Found by driving bash in a riscv64 guest: three defects, all fixed, plus a
+   residual flake that is not.
+   *The timer was armed but never enabled.* `clint::init_timer` wrote `stimecmp`
+   and nothing ever set `sie.STIE`, so the deadline lapsed in silence — no clock
+   tick, no virtual timer, no `alarm`, nothing preempted, and
+   `kernel::bootwatch` (500 ticks of slack for the userspace boot phase) never
+   reached its deadline, which is why `just test-boot riscv64` failed. Compounding
+   it, the per-tick accounting sat *behind* the callback's SPP check, so it ran
+   only for a tick taken in U-mode — and every tick this port takes arrives in
+   S-mode (measured: sampling the 1st, 100th, 1000th and 10000th tick). The
+   accounting now runs for both, and the SPP check still decides whether the tick
+   may switch. Verified: `just test-boot riscv64` prints `ALL TESTS PASSED`,
+   where before it stopped at `phase 1 complete; releasing init`.
+   *The C heap leaked.* `realloc` took a block's size from the header at the
+   *user* pointer instead of `HDR` bytes below it, so a grow that read high
+   returned the same too-small block and the caller overran it; and `malloc`'s
+   extension path placed a fresh block at a page-rounded `sbrk` address while
+   leaving the free-list walk unable to cross the gap in front of it, so every
+   extension leaked its page (`free`'s O(heap) walk then turned the leak into a
+   crawl). Measured in the guest: a probe growing one buffer to 100000 bytes
+   prints `REALLOC ok`; a 300000-cycle varying-size churn probe goes from hanging
+   to `CHURN ok 300000`; `bash -c 'for i in {1..4000}; do s=$((s+i)); done; echo
+   S=$s'` goes from killed by SIGSEGV every time to `S=8002000`.
+   *The last of it was a trap-state bug, not a C one.* After those fixes a
+   `bash -c` step still died in about 5-10% of invocations: the child ended as a
+   signal (139 from the shell's `waitpid_status`) and VM's trace of the kill said
+   `pf-noregion 0x0` with error code 0x14 — a user *instruction* fetch at address
+   zero, which reads as a call through a null function pointer. It was not one.
+   The riscv64 trap handler read `stval` **live**, and `stval` is the one fault
+   CSR that is not part of the interrupted context: the trap entry saves `sepc`,
+   `sstatus` and `scause` into the frame but not `stval`, and the architecture
+   lets a trap that is not a load/store/instruction fault — an interrupt, and
+   this port takes its ticks *inside* a U-mode trap's handler — write 0 there.
+   Measured with the entry's value kept alongside: the live CSR read 0 while the
+   saved one held the real address (`cause=0xc`, `0x103257e`, inside bash's own
+   text). VM was therefore handed address 0, found no region covering it, and
+   killed a process that had done nothing wrong. `trap_asm.rs` now saves `stval`
+   into the trap frame's unused `288..296` slot (the same offsets in `hal.rs` are
+   the *sigframe*, a different 296-byte buffer on the user's stack), and `trap.rs`
+   reads the fault address from the frame, as it already did `scause`/`sepc`/
+   `sstatus`. Verified: 60 consecutive `bash -c` invocations in the prompt-paced
+   census with zero losses, `just test-bash riscv64` 3/3 green, and
+   `test-qemu`/`test-boot riscv64` plus the workspace suite green. Two things to
+   carry forward: the timer fix above is what took the arithmetic step from
+   failing two runs in three to not failing at all, and the zero that VM saw was
+   a plausible-looking NULL dereference until the frame's copy showed the real
+   address — the fault *address* a handler forwards is as much state as the
+   cause.
+
+   *The FP image, and the one measurement the first probe missed.* The trap frame
+   saves no `f`-register and the port kept no per-process image, so with
+   `PSL_USERSET`'s `FS=Dirty` (the registers, not the hardware's lazy
+   `FS=Off`-and-trap path) two processes each using floating point could see each
+   other's registers across a switch. Measured: a probe that names `fs0`, holds a
+   value in it across a `getpid()` and checks it afterwards reported `FPPROBE
+   parent bad=40000` and `FPPROBE child bad=40000` — every round, both processes —
+   while the same probe with the `fork` removed reported `FPONE bad=0`, so the loss
+   needed the other process to have run, not merely a trap. A first version of the
+   probe passed instead: `register double held asm("fs0")` around the call compiled
+   to `fsd fs0` before it and `fld fs0` after it, giving the value a stack home the
+   compiler reloaded, so the register never really held it; the set, the call and
+   the check are one `asm` block now. The fix saves at the *switch* rather than the
+   entry, because the kernel executes no floating point itself — nothing between a
+   process's last user instruction and the switch can disturb its registers — so
+   `riscv_post_syscall`, `riscv_timer_callback` and the boot `switch_to_user`
+   (`crates/kernel-boot/src/riscv64.rs`) call `kernel::fpu::save` on the process
+   being left and `restore` on the one being entered. `fork` saves the parent
+   before copying the image to the child, `exec` zeroes it, and `restore` writes
+   `fcsr` (rounding mode and accrued flags) as well as `f0`-`f31`, so neither leaks
+   either; `fcsr` lives past the 256 bytes of registers in the one-page area
+   (`RISCV_FCSR_OFF`), while the user-visible `mc_fpstate` stays registers-only.
+   Verified: the probe reports `FPPROBE ok` (both `bad=0`), 80/80 steps in the
+   prompt-paced census with zero losses, `just test-bash` 6/6 on all three arches,
+   `test-qemu`/`test-boot riscv64` green, and the workspace suite green.
+
+---
+
+## AArch64 (`[aarch64]`)
+
+5. **Least-tested port** — standing gotchas (aarch64-debugging skill):
+   re-derive every probe address after a rebuild (symbols move), verify the
+   embedded initramfs matches the on-disk binaries before suspecting the
+   kernel, and check for silent HAL stubs that fail kernel calls
+   (`Not implemented`/`TODO` in `crates/arch-aarch64/src/hal.rs` — none
+   remain today, but the pattern is the port's classic trap).
+
+6. **Per-process table layout is dual** — boot procs carry PUD[1] as a PMD
+   table of 2 MiB blocks; exec'd processes carry a 1 GiB block + the
+   low-GB alias PMD. Any generic 4-level walk must handle both, and the
+   low-GB alias window must come from the cached kernel geometry
+   (`VM_PAGING_MEMINFO`) — the exec-2 hang was exactly this class of bug.
+   (aarch64-debugging skill gotcha 9/10)
+
+9. **`/bin/coreutils` is built but not embedded on aarch64: it loses output
+   (2026-09-25, open — measured).** `coreutils seq 3` prints its three lines, but
+   `coreutils seq 20` (and 100/200/1000) intermittently writes **nothing** — an
+   empty file when redirected, no error, no signal the shell reports — while the
+   same scenario passes 10/10 on riscv64 and is the green gate on x86_64. Over
+   three boots the prompt-paced `tools/smoke/coreutils-wedge.tsv` scenario failed
+   all three times on aarch64 (it never got past `seq 200`) and the riscv64 runs
+   of it were 6/6. A whole output going missing with no diagnostic is the shape of
+   KNOWN_ISSUES 12 — whose x86 cause was the kernel clobbering a live process's XMM
+   registers on entry — but aarch64 is *not* that mechanism: its EL0 sync and IRQ
+   handlers already save and restore the caller-saved SIMD registers (`q0`-`q7`,
+   `q16`-`q31`) on every trap (`crates/arch-aarch64/src/exception.rs`), and `seq 3`
+   working while larger runs do not points at the allocation-heavy startup path, not
+   at a register. So the multicall *builds* for aarch64 (`just coreutils-aarch64`,
+   which needs an explicit `CC`/`AR` for blake3's NEON C — x86 falls back to Rust
+   intrinsics when no `cc` is found and riscv64 has no SIMD path, so aarch64 is the
+   only target whose multicall needs a C compiler at all) but the image deliberately
+   does not carry it: `crates/kernel/build.rs` skips `/bin/coreutils` on aarch64
+   alone, and the recipe is left in place for the bug hunt. Reproducer:
+   `just coreutils-aarch64`, then `FEED_SCENARIO=tools/smoke/coreutils-wedge.tsv sh
+   tools/smoke/feed.sh <log> 90 qemu-system-aarch64 -machine virt -cpu cortex-a57 -m
+   256M -nographic -no-reboot -global virtio-mmio.force-legacy=off -netdev
+   user,id=net0 -device virtio-net-device,netdev=net0 -device virtio-gpu-device
+   -device virtio-keyboard-device -kernel
+   target/aarch64-unknown-minix/release/kernel-boot-aarch64`.
+
+---
+
+# Resolved issues
+
+## Cross-arch (`[all]`)
+
+4. **~~VFS `do_fstat` never copies the `Stat` back~~ — FIXED.** The stat
+   path now works end-to-end: VFS `do_stat`/`do_fstat`/`do_lstat` pass the
+   caller's buffer + `size_of::<Stat>()` to `req_stat` (was `null_mut`, 0);
+   MFS `fs_stat`/`fs_statvfs` were `no_sys` in the dispatch table and are
+   now implemented (stadir.c port) with the stat written through the VFS
+   grant; `req_statvfs` created a bogus grant at VFS address 0 and now
+   grants the user's buffer like `req_stat`; userland `stat()`/`lstat()`
+   were added to minix-std. Verified: host tests (Stat/Statvfs layout pins,
+   `build_stat`/`estimate_blocks` mapping, message formats) + x86 boot test.
+   `mmapfd`'s `lseek(SEEK_END)` workaround is obsolete but harmless.
+
 9. **Fork-from-worker-thread ambiguity — DONE (2026-08-18).** The forking
    tid now flows through the whole fork protocol (userland `fork()` →
    PM_FORK → VM_FORK → SYS_FORK; new `SYS_thread_self` = 64 returns the
@@ -148,8 +521,7 @@ are arch-specific, `[env]` is tooling/platform, not kernel.
    best-effort scan (which stays only as a fallback). Verified by
    `/bin/forkthread` (fork-from-worker, child inherits the worker's tid)
    on x86.
-10. **Userland `mmap(fd)` has no real consumer** — `mmapfd` is a test
-    binary; exec remains the production user. (.notes/filemmap.md §6)
+
 11. **`EDONTREPLY` and its neighbours disagreed with C in three places — FIXED
     (2026-09).** `sys/sys/errno.h` has `ENOTREADY -201`, `EDEADSRCDST -202`,
     `EDONTREPLY -203`, `ELOCKED -208`, but `arch-common::ipc` had
@@ -927,16 +1299,7 @@ are arch-specific, `[env]` is tooling/platform, not kernel.
       `tools/smoke/coreutils-wedge.tsv`'s header now describe the green gate; the recipe itself went
       green with no edit to its steps, which is what it was written to do.
 
-13. **Free slots are left not-quite-free (2026-09-21, open, possibly benign).** An
-    exited child's slot is left holding `SLOT_FREE|P_STOP` (`rts=00000041`) or
-    `SLOT_FREE|NO_ENDPOINT` (`rts=00000101`), and `Proc::is_empty()` is *equality* with
-    `SLOT_FREE`, so such a slot reads as occupied while claiming to be free. `hangdump`
-    does not skip it, which made these look like wedged processes: every one of them sat
-    at `rip=0x1177dea`, which is `std::process::exit+0x1a` — simply the last instruction
-    each had executed. C's `get_free_proc` tests the *bit*
-    (`RTS_ISSET(rp, RTS_SLOT_FREE)`), so `is_empty` is the thing to reconcile; whether a
-    slot leaks because of it is not established.
-14. **A blocking console read parks VFS (2026-09-21, open — measured).** VFS's main loop is a
+14. **A blocking console read parks VFS — FIXED (2026-10-09; filed 2026-09-21).** VFS's main loop is a
     single blocking worker: `cdev_io` reaches a driver with `fs_sendrec`, so nothing else VFS owns
     is served while that round trip is outstanding. The tty's console `do_read` then *busy-loops
     inside its handler* until a byte arrives from the serial ring (its own comment: "retry in user
@@ -955,35 +1318,14 @@ are arch-specific, `[env]` is tooling/platform, not kernel.
     console read, or the VFS→MFS read behind it) is not yet pinned. Fixing the class means either a
     console read that returns EAGAIN to a retrying reader (the shell's `read_line` already retries
     on EAGAIN, `shell.rs`) or a real suspended-request path in VFS (`FP_BLOCKED_ON_CDEV` +
-    `cdev_reply`, still a stub — item 7).
-15. **`write_to_proc`/`read_from_proc` silently ignore their `proc` argument (2026-09-22, FIXED for
-    these two; `vm_memset`'s non-seam path still open).**
-    Both take a process number and a virtual address, but where the page tables are the kernel's to
-    walk (`CROSS_ADDRESS_SPACE_COPY` is `None` — x86_64, riscv64, aarch64; every hardware port)
-    they reduce to a bare `copy_nonoverlapping` through whatever address space is currently
-    loaded, so the copy happens in the *running* process's space at `addr` and `proc` participates
-    only on wasm. The precondition is therefore "the target is the current process", and nothing
-    says so: a caller that passes a third process's number gets no error, just a silent write into
-    the running process's memory at `addr` (or a kernel-mode fault where that address is
-    unmapped). Callers today are the exec-frame read (`do_exec_load_handler`), the grant-table
-    read in `grants.rs`'s `verify_grant` (the granter's `s_grant_pa` is physical, so it works only
-    because the identity map reaches it), and the devio/getmcontext/setmcontext copies, which
-    switch CR3 to the caller first — correct since the 2026-09-22 CR3-restore fix, and correct
-    *because* of it. Same family as that fix: a copy that is right only while the CPU happens to
-    be on the target's root, where being wrong means kernel data lands in some process's memory.
-    Fix by switching CR3 to `proc` for the copy as `delivermsg`/`virtual_copy` do, or by making
-    the "must be current" precondition explicit in the name and an assertion.
+    `cdev_reply`).
 
-    **Fixed in that direction (2026-09-22).** Both functions now read the target's `p_seg.p_cr3`
-    and, when it differs from the loaded root, switch for the copy and restore the caller's — the
-    shape `delivermsg` uses. It is a no-op wherever the caller already switched (devio, the
-    mcontext pair, the console read at `syscall.rs`, all of which pass `(*caller).p_nr`), and it
-    makes `grants.rs`'s `verify_grant` behave the way its own comment says C does ("`data_copy`,
-    which switches to the granter's page table"). Guarded on `boot_cr3() != 0`, so host tests and
-    pre-init keep the bare copy. Not covered: `vm_memset`'s non-seam path
-    (`kernel/src/vm.rs`, the `write_bytes` below the seam branch) still writes through the current
-    root while two of its three callers pass *another* process's number (`do_setgrant_handler`,
-    `system.rs`'s memset handler) — the same defect, and it should take the same switch.
+    **FIXED 2026-10-09.** That deferred path landed (`70fbb3ff8`): VFS hands READ/WRITE/IOCTL
+    to a driver without waiting and suspends the caller (`cdev_io`/`cdev_insert`; the driver
+    answers `CDEV_REPLY`, which `cdev_reply` -> `cdev_io_reply` completes), so a console read
+    no longer holds VFS. Gated per driver by `dmap_cdev_async` (set for the tty). The wasm
+    target has no timer to drive the console pump, so its `do_read` keeps a ring poll; the
+    hardware arches suspend.
 
 16. **A new process's root mapped low physical memory with *user* access -- FIXED (2026-10-02).**
     `exec_elf_for_target` builds the fresh root with `exec_create_root`, whose own comment said it
@@ -1016,26 +1358,7 @@ are arch-specific, `[env]` is tooling/platform, not kernel.
     `set_alias_window`, and VM's `VM_PAGING_MEMINFO` -- is now unreachable in practice (no mapping
     classifies as an alias), and can be removed in a follow-up; only the `frame == va` identity case
     is still needed, for the device window's split leaves.
-17. **The kernel's `brk` handler keeps one global `CURRENT_BRK` for a per-process quantity
-    (2026-09-22, open — possibly vestigial).** `syscall.rs`'s `CURRENT_BRK` is a process-global
-    `AtomicU64` used by `sys_brk_handler` (NR_BRK, registered as basic syscall 36) for both the query
-    and the update, so two processes growing their heap share one break and each sees the other's.
-    The port's userland goes through VM's `VM_BRK` instead (`do_brk` tracks `vm_region_top` per
-    `Vmproc`, and `.rules` says VM owns `brk`), so the kernel copy may be vestigial — but if anyone
-    calls it, it reports another process's break. Establish which of the two the port trusts; if the
-    handler is reachable, a `Proc`-resident break (or removal of the handler) is the fix.
-18. **Two physical page allocators are initialised over the same RAM (2026-09-22, latent).**
-    `kernel-boot/src/main.rs` feeds the *same* range to both: `arch_x86_64::alloc::init_allocator`
-    (the arch bitmap, lines ~304) and `kernel::vm::mem_init` (the MINIX bitmap, ~356) each get
-    `[kernel_end, mem_top)` minus the user stack/brk windows, so each believes the whole pool is free.
-    Nothing double-allocates today only because `vm::alloc_mem`'s callers are the test-only
-    `exec_setup_new_page_table` and the boot loader — but the comment claiming its purpose is
-    "used by kernel call 62 (VM_PAGING_ALLOC)" is stale: `do_vm_paging_handler` allocates from
-    `hal::alloc_phys_contig` (the arch allocator), which is also what `exec_elf_for_target` and
-    `boot_init` use. So the MINIX bitmap is effectively dead weight that must stay unused; anything
-    that starts calling `vm::alloc_mem` at run time hands out frames the arch allocator has already
-    handed to a process, with no ownership either side can see. Fix by initialising one allocator
-    (or by giving the two disjoint chunks), and delete the stale comment.
+
 19. **A lookup path of 24 bytes or more killed VFS (2026-09-23, FIXED).**
     `req_lookup` built the pathname into the 56-byte request message and wrote the NUL
     terminator at `PAYLOAD_OFF + 24 + path_copy_len`. The guard around that write tested
@@ -1075,25 +1398,7 @@ are arch-specific, `[env]` is tooling/platform, not kernel.
     step's output and a real failure went unseen — item 20's create limit "passed" that
     way at 30 bytes. It is the trap `silent-failure-traps` describes, met while writing
     the gate, and giving each step a distinct marker is what exposed item 20.
-20. **A name longer than 28 bytes cannot be created (2026-09-23, open — measured).**
-    `create`, `mkdir` and `mknod` carry their single name *inside* the request, so the
-    name is capped by the room left after the fixed fields: 28 bytes for
-    `req_create`/`req_mkdir`, 29 for `build_mknod_msg` (a 30-byte name wrote byte 56 of
-    56 as well; that write is bounded now), while `path_len` still advertises the
-    untruncated length. Measured in an x86 guest with `echo n > <name>`: names of 24,
-    25, 27 and **28** bytes create and read back; **29**, 30 and 32 bytes fail with
-    `sh: cannot create <name>: err=02` (ENOENT) and leave nothing behind — that is the
-    shell's own `>` redirect, so this is not a coreutils-only path. It fails loudly
-    rather than creating a file under a truncated name, which is the better half of the
-    news; `MFS_NAME_MAX` is 60, so 29-60 bytes is still a real gap for anything that
-    creates files. `coreutils mkdir`, `ln`, `truncate` and `split` are all in
-    `feat_minix`.
-    The fix is the one lookup just got — grant the name — and it has to land on both
-    sides at once: `parse_mknod_request`'s test in `crates/fs/src/mfs/main.rs` exists
-    because an earlier grant-based layout was never parsed and `mknod` created nothing.
-    Its gate belongs in `tools/smoke/long-path.tsv` (whose header says why no step goes
-    above the 28-byte create limit) or beside it.
-    Measured with a scratch scenario, `target/tmp/create-boundary.tsv`.
+
 21. **~~The environment did not survive `exec`~~ — FIXED (2026-09-24).**
     Every process started with an empty environment whatever its parent passed:
     the chain dropped `envp` at all three of its Rust-side links. The C
@@ -1128,6 +1433,7 @@ are arch-specific, `[env]` is tooling/platform, not kernel.
     `/bin/bash -c 'echo BASH-OK'` prints `BASH-OK`; before, it printed the
     unmatched-quote error. Unit tests (`shell::tests::tokenize_*`) cover the
     cases the guest cannot reach cheaply.
+
 23. **~~`getcwd` was a stub returning `ENOSYS`~~ — FIXED (2026-09-24).**
     VFS holds a directory's *vnode*, not its name, so the name has to be
     recovered by walking up: `stat(".")` and `stat("..")` identify the
@@ -1155,17 +1461,7 @@ are arch-specific, `[env]` is tooling/platform, not kernel.
     holds every message inside `strerror`'s buffer, which was 32 bytes and
     silently truncated the long ones.
     (`crates/minix-libc/src/c_sys.rs`, `crates/minix-libc/src/c_string.rs`)
-24. **`std::env::current_dir` has no implementation for minix (2026-09-24,
-    open).** `rust/library/std/src/sys/paths/mod.rs` routes `target_os =
-    "minix"` to `sys::paths::unsupported`, so `current_dir` returns
-    "unsupported operation" whatever the libc can do — it does not call
-    `getcwd`, which is why item 23 does not fix it. `std::env::current_dir`,
-    `std::fs::canonicalize` and `Command::current_dir` all go through it, so
-    `coreutils pwd` fails and any applet that resolves a relative path in Rust
-    rather than leaving it to VFS is wrong. The fix is to route minix to
-    `sys/paths/unix.rs::getcwd` (which calls `libc::getcwd` and grows on
-    `ERANGE`); it needs the Rust fork and a stage1 rebuild, so it is not a change
-    to make alongside libc work.
+
 25. **~~MFS `getdents` returned `OK` at end-of-directory without a reply payload~~
     — FIXED (2026-09-24).** The end-of-directory path returned a bare `0`,
     which the VFS reads as `OK`, and then took `nbytes` from a payload that path
@@ -1178,18 +1474,7 @@ are arch-specific, `[env]` is tooling/platform, not kernel.
     The path now replies with `seek_pos` unchanged and `nbytes = 0`. Measured:
     `ls` of a 41-entry `/bin` lists it in full, and `ls | cat` terminates.
     (`crates/fs/src/mfs/protect.rs`)
-26. **`isatty` answers 1 for any of fd 0..2 (2026-09-24, open).**
-    `crates/minix-libc/src/c_sys.rs` decides "is this a terminal" by the fd
-    *number* — `if (0..=2).contains(&fd) { 1 } else { 0 }` — so a C program
-    redirected into a file or a pipe is still told it is on a terminal. bash
-    uses exactly that to decide whether to be interactive, and coreutils tools
-    use it for colour and piping behaviour, so this is not cosmetic. The real
-    test is available and now used by `ls` (`crates/userland/src/lib.rs`):
-    `fstat` and check `S_IFCHR` — the console's descriptors are character
-    devices, a pipe's vnode is `S_IFIFO` (PFS creates it `I_NAMED_PIPE`) and a
-    file's is `S_IFREG`. The ioctl is *not* a test: VFS answers an ioctl it does
-    not route with `OK`, which is how `ls | cat` laid out columns before the
-    check above existed. (`crates/minix-libc/src/c_sys.rs`)
+
 27. **A fork shared the parent's writable pages with the child, so the parent's own writes
     reached the child (2026-09-24, FIXED).** `vm_paging_fork` clears `PG_RW` on the child's
     writable user leaves and leaves the parent's alone, so after a fork the parent still had
@@ -1230,63 +1515,7 @@ are arch-specific, `[env]` is tooling/platform, not kernel.
     `forktest: parent's write reached the child (fork not a snapshot)` and exits 6.
     (`crates/servers/src/vm/cow.rs`, `crates/servers/src/vm/mod.rs`,
     `crates/userland/src/bin/forktest.rs`)
-28. **Cloned character devices are not visible through `fstat` (2026-09-27, open — a missing
-    subsystem, not a stat bug).** MINIX gives every clone open its own *node*: VFS's
-    `cdev_clone` (`servers/vfs/device.c`) asks PFS to create a temporary device file whose
-    inode's `i_dev` **is** the clone device (`makedev(major(dev), new_minor)`), keeps that
-    vnode on the filp and records `vp->v_sdev`; PFS's `stat_inode` returns `st_dev = i_dev`,
-    so `fstat` names the clone. `libc`'s `socketpair.c` depends on exactly that: it passes
-    `fstat(sv[1]).st_dev` to `NWIOSUDSPAIR`, and the driver takes the peer's minor from it
-    (`minor(dev)`). This port has no clone-node machinery — a `CDEV_CLONED` open reply becomes
-    `filp_dev` alone (`servers/src/vfs/call.rs::do_open`) — and `do_fstat` forwards to the
-    filesystem server unchanged, so it reports the *node's* device: for a cloned socket fd,
-    `st_dev` is the filesystem and `st_rdev` the base device, not the clone. Routing is
-    unaffected (`filp_dev` is what `cdev_io` sends to the driver), so this is not a
-    correctness problem for I/O — only the reference's `fstat` idiom does not port.
 
-    **Decision (2026-09-27): keep clone nodes unimplemented; give a driver that needs its own
-    minor an explicit ioctl.** Replicating `cdev_clone` is a VFS+PFS change (a temporary node
-    per clone open, plus `v_sdev` on the vnode and a close path), and the port's routing does
-    not need it. `/dev/uds` exposes `NWIOGUDSMINOR` (`net::NWIOGUDSMINOR`,
-    `minix-std/src/uds.rs::socket_minor`) and its `socketpair` uses that. Revisit if a ported
-    binary needs `st_dev`/`st_rdev` to name a clone.
-29. **A driver cannot call VFS back while VFS waits on it (2026-09-27, settled for sockets,
-    open for VND).** MINIX's drivers make privileged *back-calls* into VFS during an ioctl: the
-    uds driver moves passed descriptors with `copyfd` (`ioc_uds.c` `send_fds`/`recv_fds`), and
-    VND opens its backing file with `copyfd` plus `fstat` (`vnd.c`). MINIX answers those on a
-    second VFS thread while the calling thread waits for the driver's ioctl reply. This port's
-    VFS is single-threaded and parks in `request::fs_sendrec` (`minix_std::sendrec`), so a
-    back-call would sit behind a receive that never comes — a deadlock, not a slow path.
-
-    **Sockets are settled by moving the work to VFS, not by making VFS reentrant.** VFS
-    intercepts the two `NWIOSUDSCTRL`/`NWIOGUDSCTRL` ioctls and does the descriptor transfer
-    itself (`crates/servers/src/vfs/scm.rs`); the driver's only new duty is answering "which
-    socket is your peer" in its ioctl reply, and `NWIOGUDSPEERCRED` is served from the peer's
-    recorded owner endpoint. `do_copyfd` stays implemented (`VFS_COPYFD`, root-only) for a
-    caller that genuinely has a thread to be answered on, but nothing in the tree uses it yet.
-    See `.notes/wayland.md` §5 row 5 and §6.2.
-
-    **VND is still open.** `vnd_copyfd`/`vnd_fstat` (`crates/drivers/src/storage/vnd.rs`) return
-    `Err(DriverError::Unsupported)`, so `VNDIOCSET` cannot open a backing file. Either give VFS
-    the same treatment (it would have to learn VND's ioctls, as it has learned the socket ones),
-    or introduce a mechanism to service a driver's back-call — which needs VFS's per-request
-    state saved around the nested call. No consumer needs VND yet, so this is recorded rather
-    than resolved. (`crates/servers/src/vfs/scm.rs`, `crates/servers/src/vfs/call.rs::do_copyfd`,
-    `crates/drivers/src/storage/vnd.rs`)
-30. **A `memfd` answers the operations a filesystem would, but not every one of them (2026-09-27,
-    open, deliberate).** `vfs::memfd` gives an anonymous shared-memory object an identity
-    (`MEMFD_DEV` plus a never-reused id) and deliberately no filesystem: `v_fs_e` is NONE and
-    `v_fs_count` is 0, which is what lets `put_vnode` skip its `req_putnode` without a special
-    case. VFS answers `read`, `write`, `ftruncate`, `fstat`, `fchmod` and `fchown` there, and the
-    mapping path needs nothing at all (VM's `(dev, ino)` page cache *is* the object).
-
-    The remaining filesystem-shaped operations still travel to `v_fs_e == NONE` and fail with
-    whatever an endpoint of NONE yields: `utimens` and `fsync` on a memfd, and `fstatvfs`, which
-    has no meaning for an object with no storage to measure. Nothing on the `wl_shm` path
-    (`memfd_create`, `ftruncate`, `mmap`, `SCM_RIGHTS`, `read`/`write`) reaches them, so they are
-    recorded rather than synthesized — a ported binary that `utimes` or `fsync`es a memfd gets a
-    failing call rather than a wrong answer. (`crates/servers/src/vfs/memfd.rs`,
-    `crates/servers/src/vfs/call.rs`)
 31. **A blocking `select`/`poll` on a pipe never wakes without a timeout (2026-09-28, FIXED).**
     The readiness engine (`crates/servers/src/vfs/select.rs`) asks `pipe_check` whether a pipe fd
     is ready, and a character device registers a late watch (`CDEV_SELECT`), but a pipe registered
@@ -1310,29 +1539,7 @@ are arch-specific, `[env]` is tooling/platform, not kernel.
     no deadline: a forked child writes, and the poll must come back with the byte.
     (`crates/servers/src/vfs/select.rs`, `crates/servers/src/vfs/pipe.rs`,
     `crates/servers/src/vfs/filedes.rs`, `crates/userland/src/lib.rs`)
-32. **`read` never blocks in VFS, so an `eventfd`/`timerfd` read on a zero count returns
-    `EAGAIN` (2026-09-28, open, deliberate).** The port has no suspend/revive for reads
-    (item 31's sibling: `vfs::pipe` reads return `EAGAIN` rather than suspending), and
-    `vfs::eventfd` and `vfs::timerfd` follow it — a POSIX read of a zero `eventfd` counter,
-    or of a `timerfd` whose timer has not expired, would block until it is nonzero / expires.
-    The expected consumer (`calloop`/smithay) polls before it reads, and `EFD_NONBLOCK` /
-    `TFD_NONBLOCK` is the common mode, so the deviation is recorded rather than papered over
-    with a busy retry. Fixing it properly means a general deferred-read mechanism, not a
-    per-object special case. (`crates/servers/src/vfs/eventfd.rs`,
-    `crates/servers/src/vfs/timerfd.rs`, `crates/servers/src/vfs/pipe.rs`)
-33. **`CLOCK_MONOTONIC` is time since boot, *not* `boottime + uptime` (2026-09-28,
-    deliberate deviation).** MINIX 3.3.0's `do_gettime` adds `boottime` to **both** clocks
-    (`servers/pm/time.c`: `sec = boottime + clock / system_hz`), so its `CLOCK_MONOTONIC` is
-    offset by the epoch seconds at boot — and moves if the wall clock is reset, which a
-    monotonic clock must not do. This port returns the uptime tick count alone for
-    `CLOCK_MONOTONIC` (`crates/servers/src/pm.rs`, `clock_gettime_reply`), matching POSIX and
-    the port's own `clock_server` (`clock_time_to_ts`). The concrete reason: an absolute
-    `CLOCK_MONOTONIC` deadline (`TFD_TIMER_ABSTIME`, exactly how `calloop`'s timer arms) is
-    named in the same units `clock_gettime(CLOCK_MONOTONIC)` returns, and that has to be the
-    kernel tick timeline `vfs::alarm` (`SYS_SETALARM`) arms against. With MINIX's offset the
-    deadline landed `boottime` seconds away (~1.79e9 ticks on the x86 image) and the timer
-    never fired. `CLOCK_REALTIME` keeps the `boottime` offset. (`crates/servers/src/pm.rs`,
-    `crates/servers/src/vfs/alarm.rs`, `crates/servers/src/vfs/timerfd.rs`)
+
 34. **A kernel timer must leave its queue before it is re-armed (2026-09-28, FIXED).**
     `tmrs_settimer` re-inserts a timer, and the reference *removes it first*
     (`.refs/minix-3.3.0/minix/lib/libtimers/tmrs_set.c`: `tmrs_clrtimer(tmrs, tp, NULL)`
@@ -1341,25 +1548,7 @@ are arch-specific, `[env]` is tooling/platform, not kernel.
     `SYS_SETALARM` re-arms the *same* per-process timer every time `vfs::alarm`'s earliest
     deadline changes, so `arm_earliest` re-arms a live timer on each change.
     (`crates/kernel/src/clock.rs`)
-35. **`epoll` is level-triggered only, an instance is bounded to 64 interests, and a closed
-    registration is pruned lazily (2026-09-28, open, deliberate).** `vfs::epoll`
-    (`crates/servers/src/vfs/epoll.rs`) is net-new — MINIX emulates `poll` over `select` and
-    has no `epoll`. An instance holds a persistent interest set, and `epoll_wait` re-scans
-    the whole set through the shared readiness engine (`vfs::select`), so readiness is
-    level-triggered by construction. Deliberate limits, all in `.notes/wayland.md` §5 row 23:
-    `EPOLLET` and `EPOLLONESHOT` are accepted in the event mask but not honoured; an instance
-    holds at most `MAX_INTERESTS` (64) registrations (the wait entry's `MAX_WATCH`),
-    answering `ENOSPC` beyond that; and an interest whose fd the waiter has closed is dropped
-    lazily at the next `epoll_wait`, not at `close` (there is no close hook on a
-    VFS-internal object). `EPOLLERR`/`EPOLLHUP`/`EPOLLRDHUP` are not synthesised, matching
-    what the engine reports for `poll`. Two further edges: an epoll fd registered in
-    `epoll_ctl` is refused with `EINVAL` (no nesting), but one appearing in a *`poll`/`select`*
-    watch is treated as a regular file and reads as always-ready; and an instance whose
-    registrations were made by one process then waited on by another resolves them in the
-    *waiter's* fd table. `calloop` (and so smithay) uses level-triggered `EPOLLIN`,
-    deregisters before closing, and registers and waits in one process, so none of these bites
-    it. (`crates/servers/src/vfs/epoll.rs`, `crates/servers/src/vfs/select.rs`,
-    `crates/servers/src/vfs/call.rs`)
+
 36. **A UDS socket could not wake `poll`/`epoll` (2026-09-28, FIXED).** Three faults, found
     together when `/bin/waylandtest` moved from retry loops to a real `poll`: (a) VFS's
     `select_request_char` asked the driver about `vnode.v_dev` — the **base** minor — while a
@@ -1688,28 +1877,6 @@ are arch-specific, `[env]` is tooling/platform, not kernel.
     and reports `OK allocator page=0x0000000086498000`, and `just test-arches` and
     `just test-dynlink-riscv64` are green.
 
-41. **`VM_GETPHYS` puts the address and the reply in different fields on each side (2026-10-01,
-    open).** `crates/servers/src/ipc.rs`'s `vm_getphys` (`vm_getphys_stub`'s target arm) and
-    `do_get_phys` (`crates/servers/src/vm/mod.rs`) do not agree on the message:
-
-    - the caller writes `who` at message bytes 8..12 (`m1i1`) and the address at bytes 16..24
-      (`m1i3` + `m1i4`, through `msg_set_u64(&mut msg, 16, addr)`), then reads the reply from
-      bytes 24..28 (`m1i5`);
-    - `do_get_phys` reads the target from `m1i1` (which matches), the address from `m1i2`
-      (bytes 12..16 -- a field the caller never wrote), and replies in `m1i1`.
-
-    So the handler walks whatever the address slot happened to hold and the caller reads a field
-    the handler never writes. The value is truncated as well: `do_get_phys` does
-    `msg.m_payload.m1.m1i1 = pa as i32`, so a physical address above 4 GiB comes back wrong, and
-    above 2 GiB it is sign-extended -- the same trap the neighbouring `do_map_phys` guards
-    against by reading its field as `u32`. The right reply for an address is the convention
-    `do_mmap` already uses and `do_map_phys` was moved onto under `.notes/physmap.md` P5: a `u64` at
-    message bytes 8..16.
-
-    It is latent rather than live -- nothing calls `vm_getphys` except its own stub arm, and the
-    host arm returns 0 -- but it is a wrong answer rather than a missing feature, which is the
-    shape that survives longest. Fix it with the P5 reply convention when something needs it.
-
 42. **On aarch64 a fork child that page-faults clobbered the parent's stack -- FIXED (2026-10-02).**
     Measuring item 16 made `/bin/winprobe`'s children fault for the first time on aarch64 (before the
     fix all four probed VAs were mapped, so no child ever faulted). With the fix, the per-VA
@@ -1766,15 +1933,18 @@ are arch-specific, `[env]` is tooling/platform, not kernel.
   Workaround for probes: write input one byte at a time with a ~3 ms gap
   (`su_setuid_probe.py` does this) — no drops observed. A guest-side fix
   would need the UART RX path to drain more aggressively (or QEMU-side
-  pacing); not scheduled.
+  pacing); not scheduled, and documented in the `bare-metal-debug`
+  skill as a platform/harness limitation rather than a code defect.
+
 - **Nothing outstanding in-tree.** The repeated-exec leak cascade (fdref
   self-reference, VM self-map VA march, exec-addrspace reclaim, munmap
   walk) is fixed: `exec_loop_mem.py 400` is flat (leak 0.0 KiB/exec), and
   the 100× degradation no longer reproduces. x86 is the best-tested port.
+
 - `[env]` **QEMU SYSRETQ SS.RPL quirk** — QEMU loads SS with the STAR-MSR
   selector without setting RPL=3; the timer ISR's pop-and-rebuild of the
-  IRET frame works around it. Platform limitation, workaround in place.
-  (bare-metal-debug skill)
+  IRET frame works around it. Platform limitation, workaround in place,
+  documented in the `bare-metal-debug` skill.
 
 ---
 
@@ -1793,15 +1963,20 @@ are arch-specific, `[env]` is tooling/platform, not kernel.
    KNOWN_ISSUES `[x86]`); (b) `-qmp` alone also delivers only 1–2 bytes
    of each pipe write to the FIFO (QEMU `-trace` shows the FIFO empty
    after the first pop — the rest never arrive; `-monitor none` does not
-   change it). Both are QEMU-side; probes must pace input (~3 ms/byte).
+   change it). Both are QEMU-side; probes must pace input (~3 ms/byte), and
+   the failure mode is documented in the `bare-metal-debug` skill.
+
 2. `[env]` **Windows 4 KiB pipe-buffer TX stall** — if a harness captures
    QEMU stdout without draining, the 16550 TX stalls and a blocking
-   `putchar` busy-wait looks like a boot hang. Always drain stdout. (RISCV.md)
+   `putchar` busy-wait looks like a boot hang. Always drain stdout.
+   (documented in the `bare-metal-debug` skill; a harness/platform limitation)
+
 3. ~~`[env]` **`just test-boot-riscv64` overwrites the normal kernel
    binary**~~ — **FIXED**: each variant is a distinct cargo bin target
    (`kernel-boot-riscv64-{boot,test}` write their own output path, never
    the normal `kernel-boot-riscv64`), so a later `just build-riscv64`
    always relinks the normal kernel (KNOWN_ISSUES tooling notes).
+
 4. ~~`[toolchain]` **virtio-blk reads fail after the 2026-09-17 fork rebase**~~
    — **FIXED**: RISC-V only; x86 and aarch64 were green. The transport
    overloaded bit 0 of `VirtioPhysBuf::addr` as the device-writable flag
@@ -1822,6 +1997,7 @@ are arch-specific, `[env]` is tooling/platform, not kernel.
    guest physical memory. The `mount_devman` null guard in
    `crates/servers/src/vfs/main.rs` keeps a future mount failure from turning
    into the VM livelock described here.
+
 5. **The register file has two byte layouts, and the HAL named the wrong one
    — FIXED (2026-09).** `p_reg` is *not* the trap frame. The trap entry saves
    x0..x31 at 0..248 with `sepc` at 256, `sstatus` at 264 and `scause` at 272
@@ -1838,81 +2014,6 @@ are arch-specific, `[env]` is tooling/platform, not kernel.
    tested in it never runs — see the testing notes); `bkl` is an empty no-op,
    which is what `BKL_LOCK` is on every other arch while SMP is off
    (`arch-x86_64/src/spinlock.rs` compiles the primitives out).
-6. **riscv64 ticked no clock at all, and its C heap leaked (2026-09-25).**
-   Found by driving bash in a riscv64 guest: three defects, all fixed, plus a
-   residual flake that is not.
-   *The timer was armed but never enabled.* `clint::init_timer` wrote `stimecmp`
-   and nothing ever set `sie.STIE`, so the deadline lapsed in silence — no clock
-   tick, no virtual timer, no `alarm`, nothing preempted, and
-   `kernel::bootwatch` (500 ticks of slack for the userspace boot phase) never
-   reached its deadline, which is why `just test-boot riscv64` failed. Compounding
-   it, the per-tick accounting sat *behind* the callback's SPP check, so it ran
-   only for a tick taken in U-mode — and every tick this port takes arrives in
-   S-mode (measured: sampling the 1st, 100th, 1000th and 10000th tick). The
-   accounting now runs for both, and the SPP check still decides whether the tick
-   may switch. Verified: `just test-boot riscv64` prints `ALL TESTS PASSED`,
-   where before it stopped at `phase 1 complete; releasing init`.
-   *The C heap leaked.* `realloc` took a block's size from the header at the
-   *user* pointer instead of `HDR` bytes below it, so a grow that read high
-   returned the same too-small block and the caller overran it; and `malloc`'s
-   extension path placed a fresh block at a page-rounded `sbrk` address while
-   leaving the free-list walk unable to cross the gap in front of it, so every
-   extension leaked its page (`free`'s O(heap) walk then turned the leak into a
-   crawl). Measured in the guest: a probe growing one buffer to 100000 bytes
-   prints `REALLOC ok`; a 300000-cycle varying-size churn probe goes from hanging
-   to `CHURN ok 300000`; `bash -c 'for i in {1..4000}; do s=$((s+i)); done; echo
-   S=$s'` goes from killed by SIGSEGV every time to `S=8002000`.
-   *The last of it was a trap-state bug, not a C one.* After those fixes a
-   `bash -c` step still died in about 5-10% of invocations: the child ended as a
-   signal (139 from the shell's `waitpid_status`) and VM's trace of the kill said
-   `pf-noregion 0x0` with error code 0x14 — a user *instruction* fetch at address
-   zero, which reads as a call through a null function pointer. It was not one.
-   The riscv64 trap handler read `stval` **live**, and `stval` is the one fault
-   CSR that is not part of the interrupted context: the trap entry saves `sepc`,
-   `sstatus` and `scause` into the frame but not `stval`, and the architecture
-   lets a trap that is not a load/store/instruction fault — an interrupt, and
-   this port takes its ticks *inside* a U-mode trap's handler — write 0 there.
-   Measured with the entry's value kept alongside: the live CSR read 0 while the
-   saved one held the real address (`cause=0xc`, `0x103257e`, inside bash's own
-   text). VM was therefore handed address 0, found no region covering it, and
-   killed a process that had done nothing wrong. `trap_asm.rs` now saves `stval`
-   into the trap frame's unused `288..296` slot (the same offsets in `hal.rs` are
-   the *sigframe*, a different 296-byte buffer on the user's stack), and `trap.rs`
-   reads the fault address from the frame, as it already did `scause`/`sepc`/
-   `sstatus`. Verified: 60 consecutive `bash -c` invocations in the prompt-paced
-   census with zero losses, `just test-bash riscv64` 3/3 green, and
-   `test-qemu`/`test-boot riscv64` plus the workspace suite green. Two things to
-   carry forward: the timer fix above is what took the arithmetic step from
-   failing two runs in three to not failing at all, and the zero that VM saw was
-   a plausible-looking NULL dereference until the frame's copy showed the real
-   address — the fault *address* a handler forwards is as much state as the
-   cause.
-
-   *The FP image, and the one measurement the first probe missed.* The trap frame
-   saves no `f`-register and the port kept no per-process image, so with
-   `PSL_USERSET`'s `FS=Dirty` (the registers, not the hardware's lazy
-   `FS=Off`-and-trap path) two processes each using floating point could see each
-   other's registers across a switch. Measured: a probe that names `fs0`, holds a
-   value in it across a `getpid()` and checks it afterwards reported `FPPROBE
-   parent bad=40000` and `FPPROBE child bad=40000` — every round, both processes —
-   while the same probe with the `fork` removed reported `FPONE bad=0`, so the loss
-   needed the other process to have run, not merely a trap. A first version of the
-   probe passed instead: `register double held asm("fs0")` around the call compiled
-   to `fsd fs0` before it and `fld fs0` after it, giving the value a stack home the
-   compiler reloaded, so the register never really held it; the set, the call and
-   the check are one `asm` block now. The fix saves at the *switch* rather than the
-   entry, because the kernel executes no floating point itself — nothing between a
-   process's last user instruction and the switch can disturb its registers — so
-   `riscv_post_syscall`, `riscv_timer_callback` and the boot `switch_to_user`
-   (`crates/kernel-boot/src/riscv64.rs`) call `kernel::fpu::save` on the process
-   being left and `restore` on the one being entered. `fork` saves the parent
-   before copying the image to the child, `exec` zeroes it, and `restore` writes
-   `fcsr` (rounding mode and accrued flags) as well as `f0`-`f31`, so neither leaks
-   either; `fcsr` lives past the 256 bytes of registers in the one-page area
-   (`RISCV_FCSR_OFF`), while the user-visible `mc_fpstate` stays registers-only.
-   Verified: the probe reports `FPPROBE ok` (both `bad=0`), 80/80 steps in the
-   prompt-paced census with zero losses, `just test-bash` 6/6 on all three arches,
-   `test-qemu`/`test-boot riscv64` green, and the workspace suite green.
 
 ---
 
@@ -1932,8 +2033,10 @@ are arch-specific, `[env]` is tooling/platform, not kernel.
    and the flat exec loop. That is `just test-fork aarch64` now, and it runs in `test-arches`,
    so the claim is checked rather than remembered.
    (`crates/arch-aarch64/src/fork.rs`, `crates/servers/src/vm/cow.rs`)
+
 2. **Per-exec leak: 0** — the exec loop is flat at leak 0.0 KiB/exec at
    256M/1G/4G.
+
 3. **Kernel-range fault gate — FIXED (D3, 2026-08-17).** aarch64's
    `MAX_USER_ADDRESS` used to cover the whole TTBR0 range (2^44 - 1), so a
    fault at a kernel-range VA (e.g. kernel code at 0x40000000) passed the
@@ -1947,6 +2050,7 @@ are arch-specific, `[env]` is tooling/platform, not kernel.
    `just test-boot-aarch64` ALL TESTS PASSED + normal boot to shell.
    (`crates/arch-aarch64/src/vmparam.rs`, `crates/arch-aarch64/src/hal.rs`,
    `crates/servers/src/vm/mod.rs`)
+
 4. **Piped-input verification — DONE (H2, 2026-08-18).** aarch64 piped
    input re-verified with a prompt-wait feed (never before the shell is
    reading): plain 10/10, `-s` 10/10, `-qmp` 8/10. The current kernel
@@ -1954,18 +2058,7 @@ are arch-specific, `[env]` is tooling/platform, not kernel.
    a partial count is a real delivery drop, not a boot-timing artifact.
    The `-qmp` drops are the QEMU chardev artifact (see `[riscv]` #1).
    Matrix recipe: `tools/piped_matrix.py <arch> <mode>`.
-5. **Least-tested port** — standing gotchas (aarch64-debugging skill):
-   re-derive every probe address after a rebuild (symbols move), verify the
-   embedded initramfs matches the on-disk binaries before suspecting the
-   kernel, and check for silent HAL stubs that fail kernel calls
-   (`Not implemented`/`TODO` in `crates/arch-aarch64/src/hal.rs` — none
-   remain today, but the pattern is the port's classic trap).
-6. **Per-process table layout is dual** — boot procs carry PUD[1] as a PMD
-   table of 2 MiB blocks; exec'd processes carry a 1 GiB block + the
-   low-GB alias PMD. Any generic 4-level walk must handle both, and the
-   low-GB alias window must come from the cached kernel geometry
-   (`VM_PAGING_MEMINFO`) — the exec-2 hang was exactly this class of bug.
-   (aarch64-debugging skill gotcha 9/10)
+
 7. **Boot stack vs. physical allocator overlap — FIXED (2026-09).**
    `tools/minix-raw-aarch64.ld` reserved the 64 KiB boot stack *before*
    `__kernel_end`, and `kmain` starts the physical allocator at `__kernel_end`,
@@ -1979,6 +2072,7 @@ are arch-specific, `[env]` is tooling/platform, not kernel.
    in both layouts, because by then the loader has moved the free cursor). Any
    change that grows the aarch64 image is a candidate to re-arm a latent overlap
    of this shape — see `.notes/porting_plan.md` finding 19.
+
 8. **`trapframe_to_mcontext` returned a zeroed context — FIXED (2026-09).**
    The pair was `Mcontext::default()` and an empty function, so
    `SYS_GETMCONTEXT` would have reported an all-zero register file rather than
@@ -1989,31 +2083,6 @@ are arch-specific, `[env]` is tooling/platform, not kernel.
    `Mcontext::from_frame`/`write_into_frame` where the host can test it.
    `tpidr_el0` is not in the frame at all: the kernel keeps it in `Proc::p_tls`
    and reloads it on every switch.
-9. **`/bin/coreutils` is built but not embedded on aarch64: it loses output
-   (2026-09-25, open — measured).** `coreutils seq 3` prints its three lines, but
-   `coreutils seq 20` (and 100/200/1000) intermittently writes **nothing** — an
-   empty file when redirected, no error, no signal the shell reports — while the
-   same scenario passes 10/10 on riscv64 and is the green gate on x86_64. Over
-   three boots the prompt-paced `tools/smoke/coreutils-wedge.tsv` scenario failed
-   all three times on aarch64 (it never got past `seq 200`) and the riscv64 runs
-   of it were 6/6. A whole output going missing with no diagnostic is the shape of
-   KNOWN_ISSUES 12 — whose x86 cause was the kernel clobbering a live process's XMM
-   registers on entry — but aarch64 is *not* that mechanism: its EL0 sync and IRQ
-   handlers already save and restore the caller-saved SIMD registers (`q0`-`q7`,
-   `q16`-`q31`) on every trap (`crates/arch-aarch64/src/exception.rs`), and `seq 3`
-   working while larger runs do not points at the allocation-heavy startup path, not
-   at a register. So the multicall *builds* for aarch64 (`just coreutils-aarch64`,
-   which needs an explicit `CC`/`AR` for blake3's NEON C — x86 falls back to Rust
-   intrinsics when no `cc` is found and riscv64 has no SIMD path, so aarch64 is the
-   only target whose multicall needs a C compiler at all) but the image deliberately
-   does not carry it: `crates/kernel/build.rs` skips `/bin/coreutils` on aarch64
-   alone, and the recipe is left in place for the bug hunt. Reproducer:
-   `just coreutils-aarch64`, then `FEED_SCENARIO=tools/smoke/coreutils-wedge.tsv sh
-   tools/smoke/feed.sh <log> 90 qemu-system-aarch64 -machine virt -cpu cortex-a57 -m
-   256M -nographic -no-reboot -global virtio-mmio.force-legacy=off -netdev
-   user,id=net0 -device virtio-net-device,netdev=net0 -device virtio-gpu-device
-   -device virtio-keyboard-device -kernel
-   target/aarch64-unknown-minix/release/kernel-boot-aarch64`.
 
 ---
 
