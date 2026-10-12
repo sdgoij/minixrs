@@ -49,8 +49,11 @@ fn panic(_info: &core::panic::PanicInfo) -> ! {
     minix_rt::exit(101)
 }
 
+use core::ffi::{c_int, c_uint, c_void};
+
+// The byte-sized C names appear only in the minix-only wrappers.
 #[cfg(target_os = "minix")]
-use core::ffi::{c_char, c_int, c_long, c_uint, c_ulong, c_void};
+use core::ffi::{c_char, c_long, c_ulong};
 
 // ---- errno ----
 
@@ -487,6 +490,171 @@ pub unsafe extern "C" fn write(fd: c_int, buf: *const c_void, count: size_t) -> 
         Ok(n) => n as isize,
         Err(e) => fail(e.0) as isize,
     }
+}
+
+/// `struct iovec` (`sys/uio.h`): one segment of a scatter/gather request.
+///
+/// The layout is the C caller's — a pointer and a `size_t` — so the structures
+/// `readv`/`writev`/`sendmsg` walk are the ones the compiler laid out.
+#[repr(C)]
+pub struct Iovec {
+    pub iov_base: *mut c_void,
+    pub iov_len: usize,
+}
+
+/// `IOV_MAX` (`sys/syslimits.h`): the most segments one vector call accepts.
+const IOV_MAX: c_int = 1024;
+
+/// The iovec array a vector call was given, and its summed length, or the
+/// (positive) errno to fail with.
+///
+/// Mirrors the reference's `vectorio` sanity checks
+/// (`lib/libc/sys/vectorio.c`): an over-long vector, a length overflow, or a
+/// null base with a non-zero length is refused before any I/O.
+///
+/// # Safety
+///
+/// `iov` must be null or point to `iovcnt` readable [`Iovec`] structures.
+unsafe fn iov_total<'a>(iov: *const Iovec, iovcnt: c_int) -> Result<(&'a [Iovec], usize), i32> {
+    if !(0..=IOV_MAX).contains(&iovcnt) {
+        return Err(22); // EINVAL
+    }
+    if iovcnt == 0 {
+        return Ok((&[], 0));
+    }
+    if iov.is_null() {
+        return Err(14); // EFAULT
+    }
+    let segs = unsafe { core::slice::from_raw_parts(iov, iovcnt as usize) };
+    let mut total = 0usize;
+    for seg in segs {
+        if seg.iov_len != 0 && seg.iov_base.is_null() {
+            return Err(14); // EFAULT
+        }
+        total = total.checked_add(seg.iov_len).ok_or(22)?; // EINVAL
+    }
+    Ok((segs, total))
+}
+
+/// Copy each segment's payload into `buf` in order — `writev`'s gather.
+/// Returns the bytes copied.
+///
+/// # Safety
+///
+/// Every `iov_base` must be valid for its `iov_len` bytes, and `buf` must be at
+/// least as long as the array's summed length.
+unsafe fn iov_gather(iovs: &[Iovec], buf: &mut [u8]) -> usize {
+    let mut off = 0usize;
+    for seg in iovs {
+        if seg.iov_len == 0 {
+            continue;
+        }
+        unsafe {
+            core::ptr::copy_nonoverlapping(
+                seg.iov_base as *const u8,
+                buf.as_mut_ptr().add(off),
+                seg.iov_len,
+            );
+        }
+        off += seg.iov_len;
+    }
+    off
+}
+
+/// Copy `buf` out into each segment in order — `readv`'s scatter, stopping once
+/// the segments are filled or `buf` is exhausted. Returns the bytes copied.
+///
+/// # Safety
+///
+/// Every `iov_base` must be valid for its `iov_len` bytes.
+unsafe fn iov_scatter(iovs: &[Iovec], buf: &[u8]) -> usize {
+    let mut off = 0usize;
+    let mut left = buf.len();
+    for seg in iovs {
+        if left == 0 {
+            break;
+        }
+        let len = left.min(seg.iov_len);
+        unsafe {
+            core::ptr::copy_nonoverlapping(buf.as_ptr().add(off), seg.iov_base as *mut u8, len);
+        }
+        off += len;
+        left -= len;
+    }
+    off
+}
+
+/// The common body of `readv`/`writev`.
+///
+/// Like the reference (`lib/libc/sys/vectorio.c`) this reads or writes the
+/// summed length in **one** call through an intermediate buffer, then scatters
+/// or gathers: a stream read returns what is available rather than blocking for
+/// the whole vector, and a datagram stays one message.
+///
+/// # Safety
+///
+/// As for [`iov_total`] and the direction's helper.
+#[cfg(target_os = "minix")]
+unsafe fn vectorio(fd: c_int, iov: *const Iovec, iovcnt: c_int, is_read: bool) -> isize {
+    let (segs, total) = match unsafe { iov_total(iov, iovcnt) } {
+        Ok(v) => v,
+        Err(e) => return fail(e) as isize,
+    };
+    if total == 0 {
+        return 0;
+    }
+    let buf = unsafe { malloc(total) } as *mut u8;
+    if buf.is_null() {
+        return -1; // malloc set errno
+    }
+    let result = if is_read {
+        let out = unsafe { core::slice::from_raw_parts_mut(buf, total) };
+        match unsafe { minix_std::fs::read(fd, out) } {
+            Ok(n) => {
+                let src = unsafe { core::slice::from_raw_parts(buf, n as usize) };
+                unsafe { iov_scatter(segs, src) as isize }
+            }
+            Err(e) => fail(e.0) as isize,
+        }
+    } else {
+        let out = unsafe { core::slice::from_raw_parts_mut(buf, total) };
+        unsafe { iov_gather(segs, out) };
+        match unsafe { minix_std::fs::write(fd, out) } {
+            Ok(n) => n as isize,
+            Err(e) => fail(e.0) as isize,
+        }
+    };
+    unsafe { free(buf as *mut c_void) };
+    result
+}
+
+/// `readv(2)`: scatter one read across `iovcnt` buffers.
+///
+/// A single read of the summed length into an intermediate buffer, scattered
+/// afterwards — the reference's `vectorio` (`lib/libc/sys/vectorio.c`), so a
+/// short read returns short instead of gathering across several reads.
+#[cfg(target_os = "minix")]
+#[unsafe(no_mangle)]
+/// # Safety
+///
+/// `iov` must be null or point to `iovcnt` readable [`Iovec`] structures whose
+/// base/length pairs describe writable memory.
+pub unsafe extern "C" fn readv(fd: c_int, iov: *const Iovec, iovcnt: c_int) -> ssize_t {
+    unsafe { vectorio(fd, iov, iovcnt, true) }
+}
+
+/// `writev(2)`: gather `iovcnt` buffers into one write.
+///
+/// The reference's copy-then-one-write (`lib/libc/sys/vectorio.c`): the segments
+/// are gathered first so the underlying write sees one message.
+#[cfg(target_os = "minix")]
+#[unsafe(no_mangle)]
+/// # Safety
+///
+/// `iov` must be null or point to `iovcnt` readable [`Iovec`] structures whose
+/// base/length pairs describe readable memory.
+pub unsafe extern "C" fn writev(fd: c_int, iov: *const Iovec, iovcnt: c_int) -> ssize_t {
+    unsafe { vectorio(fd, iov, iovcnt, false) }
 }
 
 #[cfg(target_os = "minix")]
@@ -1451,6 +1619,95 @@ pub unsafe extern "C" fn recv(sock: c_int, buf: *mut c_void, len: usize, flags: 
     }
 }
 
+/// `struct msghdr` (`sys/socket.h`): the header `sendmsg`/`recvmsg` pass,
+/// carrying the scatter/gather body and any ancillary (control) data.
+///
+/// The layout is the C caller's; a `socklen_t` is an `unsigned int`, so the
+/// fields land where the compiler put them.
+#[repr(C)]
+pub struct Msghdr {
+    pub msg_name: *mut c_void,
+    pub msg_namelen: c_uint,
+    pub msg_iov: *mut Iovec,
+    pub msg_iovlen: c_int,
+    pub msg_control: *mut c_void,
+    pub msg_controllen: c_uint,
+    pub msg_flags: c_int,
+}
+
+/// `sendmsg(2)`: send an `msghdr`'s body, carrying any control data (an
+/// `SCM_RIGHTS` descriptor list travels this way).
+///
+/// The reference splits the uds call in two — the control goes out as
+/// `NWIOSUDSCTRL` first, then `writev` sends the body
+/// (`lib/libc/sys/sendmsg.c`, `_uds_sendmsg_conn`).
+#[cfg(target_os = "minix")]
+#[unsafe(no_mangle)]
+/// # Safety
+///
+/// `msg` must point to a readable [`Msghdr`] whose `msg_iov`/`msg_control`
+/// describe valid memory of the stated lengths.
+pub unsafe extern "C" fn sendmsg(fd: c_int, msg: *const Msghdr, flags: c_int) -> ssize_t {
+    if msg.is_null() {
+        return fail(14) as isize; // EFAULT
+    }
+    if flags != 0 {
+        // The reference's uds path refuses every flag (`sendmsg.c`).
+        return fail(78) as isize; // ENOSYS
+    }
+    let m = unsafe { &*msg };
+    if !m.msg_control.is_null() && m.msg_controllen > 0 {
+        let control = unsafe {
+            core::slice::from_raw_parts(m.msg_control as *const u8, m.msg_controllen as usize)
+        };
+        if let Err(e) = minix_std::uds::send_control_raw(fd, control) {
+            return fail(e.0) as isize;
+        }
+    }
+    unsafe { writev(fd, m.msg_iov, m.msg_iovlen) }
+}
+
+/// `recvmsg(2)`: receive an `msghdr`'s body and any accompanying control data.
+///
+/// The reference reads the body first and lifts the control out afterwards
+/// (`lib/libc/sys/recvmsg.c`, `_uds_recvmsg_conn`).
+#[cfg(target_os = "minix")]
+#[unsafe(no_mangle)]
+/// # Safety
+///
+/// `msg` must point to a writable [`Msghdr`] whose `msg_iov`/`msg_control`
+/// describe valid memory of the stated lengths.
+pub unsafe extern "C" fn recvmsg(fd: c_int, msg: *mut Msghdr, flags: c_int) -> ssize_t {
+    if msg.is_null() {
+        return fail(14) as isize; // EFAULT
+    }
+    if flags != 0 {
+        return fail(78) as isize; // ENOSYS
+    }
+    let m = unsafe { &mut *msg };
+    if !m.msg_name.is_null() && m.msg_namelen > 0 {
+        // The reference fills the peer's name from `NWIOGUDSPADDR`; the port has
+        // no uds peer-address ioctl, so rather than hand back a buffer nobody
+        // wrote, say the call is unimplemented.
+        return fail(78) as isize; // ENOSYS
+    }
+    let n = unsafe { readv(fd, m.msg_iov, m.msg_iovlen) };
+    if n < 0 {
+        return n;
+    }
+    if !m.msg_control.is_null() && m.msg_controllen > 0 {
+        let buf = unsafe {
+            core::slice::from_raw_parts_mut(m.msg_control as *mut u8, m.msg_controllen as usize)
+        };
+        match minix_std::uds::recv_control_raw(fd, buf, m.msg_controllen as usize) {
+            Ok(got) => m.msg_controllen = got as c_uint,
+            Err(e) => return fail(e.0) as isize,
+        }
+    }
+    m.msg_flags = 0;
+    n
+}
+
 /// `listen(2)`: mark a bound socket as a listener with the given backlog.
 #[cfg(target_os = "minix")]
 #[unsafe(no_mangle)]
@@ -2157,5 +2414,104 @@ mod tests {
         _addr_out(accept);
         _addr_out(getpeername);
         _addr_out(getsockname);
+    }
+
+    // Host-runnable: the iovec sanity checks and the gather/scatter copies that
+    // `readv`/`writev` are built from (`lib/libc/sys/vectorio.c`).
+    #[test]
+    fn iov_total_rejects_bad_vectors() {
+        // An over-long vector and a negative count are both EINVAL.
+        assert!(matches!(
+            unsafe { iov_total(core::ptr::null(), 1025) },
+            Err(22)
+        ));
+        assert!(matches!(
+            unsafe { iov_total(core::ptr::null(), -1) },
+            Err(22)
+        ));
+        // A null array with a non-zero count is EFAULT.
+        assert!(matches!(
+            unsafe { iov_total(core::ptr::null(), 1) },
+            Err(14)
+        ));
+        // A null count is fine, and names no memory.
+        let (segs, total) = unsafe { iov_total(core::ptr::null(), 0) }.unwrap();
+        assert!(segs.is_empty());
+        assert_eq!(total, 0);
+    }
+
+    #[test]
+    fn iov_total_flags_a_null_segment_base_and_sums_lengths() {
+        let mut a = [0u8; 3];
+        let zero = Iovec {
+            iov_base: core::ptr::null_mut(),
+            iov_len: 0,
+        };
+        let null_len = Iovec {
+            iov_base: core::ptr::null_mut(),
+            iov_len: 1,
+        };
+        let one = Iovec {
+            iov_base: a.as_mut_ptr().cast(),
+            iov_len: 3,
+        };
+        let segs = [zero, one];
+        let (_, total) = unsafe { iov_total(segs.as_ptr(), 2) }.unwrap();
+        assert_eq!(total, 3);
+        let bad = [null_len];
+        assert!(matches!(unsafe { iov_total(bad.as_ptr(), 1) }, Err(14)));
+    }
+
+    #[test]
+    fn iov_gather_and_scatter_round_trip() {
+        let mut a = [1u8, 2, 3];
+        let mut b = [4u8, 5];
+        let iovs = [
+            Iovec {
+                iov_base: a.as_mut_ptr().cast(),
+                iov_len: 3,
+            },
+            Iovec {
+                iov_base: b.as_mut_ptr().cast(),
+                iov_len: 2,
+            },
+        ];
+        let mut buf = [0u8; 5];
+        assert_eq!(unsafe { iov_gather(&iovs, &mut buf) }, 5);
+        assert_eq!(buf, [1, 2, 3, 4, 5]);
+        // Scatter into differently-shaped segments: 4 then 1.
+        let mut c = [0u8; 4];
+        let mut d = [0u8; 1];
+        let out = [
+            Iovec {
+                iov_base: c.as_mut_ptr().cast(),
+                iov_len: 4,
+            },
+            Iovec {
+                iov_base: d.as_mut_ptr().cast(),
+                iov_len: 1,
+            },
+        ];
+        assert_eq!(unsafe { iov_scatter(&out, &buf) }, 5);
+        assert_eq!(c, [1, 2, 3, 4]);
+        assert_eq!(d, [5]);
+    }
+
+    #[cfg(target_os = "minix")]
+    #[test]
+    fn test_vector_and_message_signatures() {
+        fn _vec(f: unsafe extern "C" fn(c_int, *const Iovec, c_int) -> isize) {
+            let _ = f;
+        }
+        fn _sendmsg(f: unsafe extern "C" fn(c_int, *const Msghdr, c_int) -> isize) {
+            let _ = f;
+        }
+        fn _recvmsg(f: unsafe extern "C" fn(c_int, *mut Msghdr, c_int) -> isize) {
+            let _ = f;
+        }
+        _vec(readv);
+        _vec(writev);
+        _sendmsg(sendmsg);
+        _recvmsg(recvmsg);
     }
 }

@@ -201,6 +201,43 @@ fn recv_control(
     Ok((n, net::parse_creds(&ctrl, controllen)))
 }
 
+/// `sendmsg(2)` control data, verbatim: copy the caller's `cmsghdr` chain into a
+/// wire `MsgControl` and issue `NWIOSUDSCTRL`.
+///
+/// [`send_fds`] *builds* the cmsgs from a descriptor list; this passes through the
+/// bytes a C caller already has, which is what `sendmsg` receives (C
+/// `lib/libc/sys/sendmsg.c`, `_uds_sendmsg_conn`).
+pub fn send_control_raw(fd: i32, control: &[u8]) -> Result<(), MinixErr> {
+    if control.len() > net::MSG_CONTROL_MAX {
+        return Err(MinixErr::from_i32(EINVAL));
+    }
+    let mut ctrl = [0u8; MSG_CONTROL_SIZE];
+    ctrl[..control.len()].copy_from_slice(control);
+    ctrl[MSG_CONTROL_LEN_OFF..MSG_CONTROL_LEN_OFF + 4]
+        .copy_from_slice(&(control.len() as u32).to_ne_bytes());
+    unsafe { ioctl(fd, NWIOSUDSCTRL, ctrl.as_mut_ptr()) }.map(|_| ())
+}
+
+/// `recvmsg(2)` control data, verbatim: offer `offer` bytes, then copy back what
+/// the peer left and return its length.
+///
+/// The reference lifts control out *after* the data read (C
+/// `lib/libc/sys/recvmsg.c`, `_uds_recvmsg_conn`), so read the body first.
+pub fn recv_control_raw(fd: i32, control: &mut [u8], offer: usize) -> Result<usize, MinixErr> {
+    let mut ctrl = [0u8; MSG_CONTROL_SIZE];
+    ctrl[MSG_CONTROL_LEN_OFF..MSG_CONTROL_LEN_OFF + 4]
+        .copy_from_slice(&(offer as u32).to_ne_bytes());
+    unsafe { ioctl(fd, NWIOGUDSCTRL, ctrl.as_mut_ptr()) }?;
+    let got = u32::from_ne_bytes(
+        ctrl[MSG_CONTROL_LEN_OFF..MSG_CONTROL_LEN_OFF + 4]
+            .try_into()
+            .unwrap_or([0; 4]),
+    ) as usize;
+    let n = got.min(control.len());
+    control[..n].copy_from_slice(&ctrl[..n]);
+    Ok(n)
+}
+
 /// `getsockopt(SO_PEERCRED)`: the peer's effective uid and gid.
 ///
 /// The reference serves this from the peer's recorded owner

@@ -168,7 +168,7 @@ DRM_OPTIONS = (
 # `flock`; a first GL triangle does not need it.
 MESON_OPTIONS = (
     "--buildtype=release",
-    "-Dgallium-drivers=softpipe",
+    "-Dgallium-drivers=softpipe,virgl",
     "-Dvulkan-drivers=",
     "-Dplatforms=",
     "-Dglx=disabled",
