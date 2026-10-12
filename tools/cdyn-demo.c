@@ -26,6 +26,13 @@ int main(void) {
         printf("cdyn-bad open succeeded\n");
         return 1;
     }
-    printf("cdyn-ok %s\n", strerror(*__errno_location()));
+    /* The conversions the format engine carries, through varargs no host test can
+     * reach: `0.1`'s real expansion, an exact tie (`%.0f` of 2.5 -> 2), the `%e`
+     * and `%g` forms, octal, `#`, and the `hh`/`ll` length modifiers. The
+     * expectations are regexes, so the values are ones whose output keeps no
+     * metacharacter -- a positive exponent would print a `+`. */
+    printf("cdyn-ok %s fmt %o %hhd %lld %.0f %.20f %g %e %#x\n",
+           strerror(*__errno_location()), 64, 130, -9223372036854775807LL,
+           2.5, 0.1, 0.00001, 0.001, 255);
     return 0;
 }

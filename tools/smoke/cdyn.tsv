@@ -11,10 +11,15 @@
 # One step per line, as `tools/smoke/scenario.tsv` documents: the command, a tab, and the
 # whole line its output must produce.
 #
-# The expected output is `strerror(ENOENT)` from `libc.so`, reached through the loader.
-# Nothing in `tools/cdyn-demo.c` computes that string, and `printf`, `open`, `strerror` and
-# `errno` (a thread local in the object) are all resolved from `/lib/libc.so` at run time —
-# so the line is evidence of the whole chain and not of one call. The gate fails if the
-# program itself contains the message.
+# The expected output is `strerror(ENOENT)` from `libc.so`, reached through the loader,
+# followed by the format conversions the engine carries. Nothing in `tools/cdyn-demo.c`
+# computes that string, and `printf`, `open`, `strerror` and `errno` (a thread local in the
+# object) are all resolved from `/lib/libc.so` at run time — so the line is evidence of the
+# whole chain and not of one call. The gate fails if the program itself contains the
+# message.
+#
+# The tail is the other half: no host test can reach `vformat`'s varargs, so this is where
+# the floats (`0.1`'s exact expansion, the `2.5` tie rounding to even, `%e`, `%g`), the
+# octal and `#` forms, and the `hh`/`ll` length modifiers are checked end to end.
 
-/bin/cdyn-demo	cdyn-ok No such file or directory
+/bin/cdyn-demo	cdyn-ok No such file or directory fmt 100 -126 -9223372036854775807 2 0.10000000000000000555 1e-05 1.000000e-03 0xff

@@ -1,14 +1,16 @@
 //! C stdio: unbuffered FILE streams and the printf family.
 //!
-//! The format engine is a faithful port of the old `tools/c-libc.c`
-//! `vformat`, keeping the same conversion set (`%d %i %u %x %X %p %s %c
-//! %%`, with `l`/`z` length prefixes) and the same (ASCII-only) behavior.
+//! The format engine is a port of the old `tools/c-libc.c` `vformat` with the
+//! integer, string, character and pointer conversions and every length modifier,
+//! plus `%f`/`%e`/`%g` over the value's exact decimal digits (see the float
+//! section below). `%a`/`%A` (hex float) are the one conversion that still falls
+//! through to the literal echo.
 
 #[cfg(target_os = "minix")]
 use core::ffi::VaList;
 use core::ffi::{c_char, c_int};
 #[cfg(target_os = "minix")]
-use core::ffi::{c_long, c_ulong, c_void};
+use core::ffi::{c_long, c_longlong, c_uint, c_ulong, c_ulonglong, c_void};
 
 fn c_strlen(s: *const c_char) -> usize {
     if s.is_null() {
@@ -257,6 +259,677 @@ fn emit_signed(l: i64, spec: &Spec, emit: &mut Emit<'_>) -> i32 {
     }
 }
 
+// ---- float formatting ----
+//
+// `%f`/`%e`/`%g` need the value's *exact* decimal digits: the digit past the one
+// printed decides the rounding, and an f64's exact value is not the short decimal
+// it prints as (`0.1` is 0.1000000000000000055511151231257827..., and `2.5` at
+// zero precision is a tie that rounds to even). An f64 is `m * 2^e`, so its
+// expansion is finite and ends `-e` places after the point: `m << e` for `e >= 0`,
+// and `m * 5^-e / 10^-e` for `e < 0`. Both numerators are integers, built here in
+// a fixed-limb bignum and read out one decimal digit at a time.
+
+/// Limbs for `m * 5^1074` (the smallest subnormal): 2547 bits, rounded up.
+const BIG_LIMBS: usize = 80;
+
+/// Room for the longest expansion an f64 has: 16 integer digits (no value below
+/// `2^53` needs more) plus its 1074 fractional ones, with slack for a carry.
+const FIXED_CAP: usize = 1100;
+
+/// A little-endian non-negative integer, big enough for every intermediate above.
+#[derive(Clone, Copy)]
+struct Big {
+    limb: [u32; BIG_LIMBS],
+    n: usize,
+}
+
+impl Big {
+    const fn new() -> Self {
+        Self {
+            limb: [0; BIG_LIMBS],
+            n: 0,
+        }
+    }
+
+    fn from_u64(mut v: u64) -> Self {
+        let mut b = Self::new();
+        while v != 0 {
+            b.limb[b.n] = v as u32;
+            b.n += 1;
+            v >>= 32;
+        }
+        b
+    }
+
+    fn is_zero(&self) -> bool {
+        self.n == 0
+    }
+
+    /// Multiply in place by one limb. `m` is only 2 or 5 below, and the operands
+    /// are sized so the result never needs an extra limb of its own.
+    fn mul_small(&mut self, m: u32) {
+        let n = self.n;
+        let mut carry: u64 = 0;
+        for limb in &mut self.limb[..n] {
+            let t = u64::from(*limb) * u64::from(m) + carry;
+            *limb = t as u32;
+            carry = t >> 32;
+        }
+        if carry != 0 {
+            debug_assert!(n < BIG_LIMBS);
+            self.limb[n] = carry as u32;
+            self.n = n + 1;
+        }
+    }
+
+    /// Divide in place by one limb, returning the remainder.
+    fn divmod_small(&mut self, d: u32) -> u32 {
+        let mut rem: u64 = 0;
+        for i in (0..self.n).rev() {
+            let cur = (rem << 32) | u64::from(self.limb[i]);
+            self.limb[i] = (cur / u64::from(d)) as u32;
+            rem = cur % u64::from(d);
+        }
+        while self.n > 0 && self.limb[self.n - 1] == 0 {
+            self.n -= 1;
+        }
+        rem as u32
+    }
+}
+
+/// The decimal digits of a finite non-negative value, most significant *integer*
+/// digit first, with the point after `int_len` of them. `flen` is how many are
+/// stored; anything past them is zero, because the expansion is finite.
+struct Fixed {
+    int_len: usize,
+    flen: usize,
+}
+
+/// Write `b`'s decimal digits into `f[start..]`, most significant first, and
+/// return how many there are. `b` is consumed.
+fn write_digits(b: &mut Big, f: &mut [u8; FIXED_CAP], start: usize) -> usize {
+    let mut n = 0;
+    while !b.is_zero() {
+        let d = b.divmod_small(10);
+        f[start + n] = b'0' + d as u8;
+        n += 1;
+    }
+    if n == 0 {
+        f[start] = b'0';
+        n = 1;
+    }
+    f[start..start + n].reverse();
+    n
+}
+
+/// Split a finite positive value into its exact decimal digits.
+fn decompose(v: f64, f: &mut [u8; FIXED_CAP]) -> Fixed {
+    let bits = v.to_bits();
+    let biased = ((bits >> 52) & 0x7ff) as i32;
+    let frac = bits & ((1u64 << 52) - 1);
+    let (m, e2) = if biased == 0 {
+        // Subnormal: there is no implicit leading bit.
+        (frac, -1074)
+    } else {
+        (frac | (1u64 << 52), biased - 1075)
+    };
+    if e2 >= 0 {
+        let mut b = Big::from_u64(m);
+        for _ in 0..e2 {
+            b.mul_small(2);
+        }
+        let k = write_digits(&mut b, f, 0);
+        Fixed {
+            int_len: k,
+            flen: k,
+        }
+    } else {
+        // `v = m / 2^k = (m * 5^k) / 10^k`: the digits of `m * 5^k` with the point
+        // `k` places from the right.
+        let k = (-e2) as usize;
+        let mut b = Big::from_u64(m);
+        for _ in 0..k {
+            b.mul_small(5);
+        }
+        let n = write_digits(&mut b, f, 0);
+        if n > k {
+            Fixed {
+                int_len: n - k,
+                flen: n,
+            }
+        } else {
+            // Below 1: a `0` for the integer part, then the fractional zeros that
+            // come before the first significant digit.
+            let shift = 1 + (k - n);
+            f.copy_within(0..n, shift);
+            for d in &mut f[..shift] {
+                *d = b'0';
+            }
+            Fixed {
+                int_len: 1,
+                flen: shift + n,
+            }
+        }
+    }
+}
+
+/// Whether the dropped digit `rd` (with `sticky` digits after it) rounds the
+/// value up. An exact tie rounds to even, like the hardware default C follows.
+fn rounds_up(rd: u8, sticky: bool, last_kept: u8) -> bool {
+    match rd {
+        b'0'..=b'4' => false,
+        b'6'..=b'9' => true,
+        b'5' => sticky || (last_kept - b'0') % 2 == 1,
+        _ => false,
+    }
+}
+
+/// Add one to `f[..len]`, returning the digit count -- one more when every digit
+/// was a nine, which is the only way the integer part grows.
+fn increment(f: &mut [u8; FIXED_CAP], len: usize) -> usize {
+    let mut i = len;
+    while i > 0 {
+        i -= 1;
+        if f[i] == b'9' {
+            f[i] = b'0';
+        } else {
+            f[i] += 1;
+            return len;
+        }
+    }
+    f.copy_within(0..len, 1);
+    f[0] = b'1';
+    len + 1
+}
+
+/// Round to `prec` places after the point. Returns the integer digit count after
+/// the carry, and how many fractional digits of `f` the rounding kept.
+fn round_fixed(f: &mut [u8; FIXED_CAP], fx: &Fixed, prec: usize) -> (usize, usize) {
+    let avail = fx.flen - fx.int_len;
+    let keep = prec.min(avail);
+    let (rd, sticky) = if prec < avail {
+        let i = fx.int_len + prec;
+        (f[i], f[i + 1..fx.flen].iter().any(|&d| d != b'0'))
+    } else {
+        (b'0', false)
+    };
+    let last = if keep > 0 {
+        f[fx.int_len + keep - 1]
+    } else {
+        f[fx.int_len - 1]
+    };
+    let mut int_len = fx.int_len;
+    if rounds_up(rd, sticky, last) {
+        let kept = int_len + keep;
+        int_len += increment(f, kept) - kept;
+    }
+    (int_len, keep)
+}
+
+/// Round to `want = prec + 1` significant digits, counted from `sig0`. Returns
+/// how many digits of `f` that kept, and the exponent (a carry advances it).
+fn round_exp(
+    f: &mut [u8; FIXED_CAP],
+    fx: &Fixed,
+    sig0: usize,
+    mut exp: i32,
+    want: usize,
+) -> (usize, i32) {
+    let nfull = fx.flen - sig0;
+    let keep = want.min(nfull);
+    let (rd, sticky) = if want < nfull {
+        (
+            f[sig0 + want],
+            f[sig0 + want + 1..fx.flen].iter().any(|&d| d != b'0'),
+        )
+    } else {
+        (b'0', false)
+    };
+    if rounds_up(rd, sticky, f[sig0 + keep - 1]) {
+        let mut i = sig0 + keep;
+        let mut carry = true;
+        while carry && i > sig0 {
+            i -= 1;
+            if f[i] == b'9' {
+                f[i] = b'0';
+            } else {
+                f[i] += 1;
+                carry = false;
+            }
+        }
+        if carry {
+            // Every kept digit was a nine: `1.00...` and one up on the exponent.
+            f[sig0] = b'1';
+            for d in &mut f[sig0 + 1..sig0 + keep] {
+                *d = b'0';
+            }
+            exp += 1;
+        }
+    }
+    (keep, exp)
+}
+
+/// How many decimal digits the exponent needs, at least two.
+fn exp_digits(exp: i32) -> usize {
+    let mut a = exp.unsigned_abs();
+    let mut n = 1;
+    while a >= 10 {
+        a /= 10;
+        n += 1;
+    }
+    n.max(2)
+}
+
+/// Emit `e`/`E`, the exponent's sign, and its magnitude to at least two digits.
+fn emit_exp_part(exp: i32, upper: bool, emit: &mut Emit<'_>) -> i32 {
+    emit(if upper { b'E' } else { b'e' });
+    emit(if exp < 0 { b'-' } else { b'+' });
+    let mut buf = [0u8; 4];
+    let mut n = 0;
+    let mut a = exp.unsigned_abs();
+    loop {
+        buf[n] = b'0' + (a % 10) as u8;
+        n += 1;
+        a /= 10;
+        if a == 0 {
+            break;
+        }
+    }
+    while n < 2 {
+        buf[n] = b'0';
+        n += 1;
+    }
+    for d in buf[..n].iter().rev() {
+        emit(*d);
+    }
+    n as i32 + 2
+}
+
+/// Emit a body bracketed by the sign and the field width. `body_len` is what the
+/// closure will emit, so the padding can be decided first.
+fn emit_field(
+    sign: Option<u8>,
+    body_len: usize,
+    spec: &Spec,
+    emit: &mut Emit<'_>,
+    mut body: impl FnMut(&mut Emit<'_>) -> i32,
+) -> i32 {
+    let pad = (spec.width - body_len as i32 - i32::from(sign.is_some())).max(0);
+    let mut count = 0;
+    if spec.zero && !spec.left {
+        if let Some(c) = sign {
+            emit(c);
+            count += 1;
+        }
+        emit_pad(b'0', pad, emit);
+        count += pad;
+    } else {
+        if !spec.left {
+            emit_pad(b' ', pad, emit);
+            count += pad;
+        }
+        if let Some(c) = sign {
+            emit(c);
+            count += 1;
+        }
+    }
+    count += body(emit);
+    if spec.left {
+        emit_pad(b' ', pad, emit);
+        count += pad;
+    }
+    count
+}
+
+/// `inf`/`nan`: width still applies, but never zero-padding.
+fn emit_special(sign: Option<u8>, word: &[u8], spec: &Spec, emit: &mut Emit<'_>) -> i32 {
+    let pad = (spec.width - word.len() as i32 - i32::from(sign.is_some())).max(0);
+    let mut count = 0;
+    if !spec.left {
+        emit_pad(b' ', pad, emit);
+        count += pad;
+    }
+    if let Some(c) = sign {
+        emit(c);
+        count += 1;
+    }
+    for b in word {
+        emit(*b);
+        count += 1;
+    }
+    if spec.left {
+        emit_pad(b' ', pad, emit);
+        count += pad;
+    }
+    count
+}
+
+fn emit_fixed(
+    f: &mut [u8; FIXED_CAP],
+    fx: &Fixed,
+    sign: Option<u8>,
+    prec: usize,
+    spec: &Spec,
+    emit: &mut Emit<'_>,
+) -> i32 {
+    let (int_len, keep) = round_fixed(f, fx, prec);
+    let point = prec > 0 || spec.alt;
+    let body_len = int_len + usize::from(point) + prec;
+    emit_field(sign, body_len, spec, emit, |e| {
+        let mut n = 0;
+        for &d in &f[..int_len] {
+            e(d);
+            n += 1;
+        }
+        if point {
+            e(b'.');
+            n += 1;
+        }
+        for &d in &f[int_len..int_len + keep] {
+            e(d);
+            n += 1;
+        }
+        for _ in keep..prec {
+            e(b'0');
+            n += 1;
+        }
+        n
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn emit_exp(
+    f: &mut [u8; FIXED_CAP],
+    fx: &Fixed,
+    sig0: usize,
+    exp: i32,
+    sign: Option<u8>,
+    prec: usize,
+    spec: &Spec,
+    upper: bool,
+    emit: &mut Emit<'_>,
+) -> i32 {
+    let want = prec + 1;
+    let (keep, exp) = round_exp(f, fx, sig0, exp, want);
+    let point = prec > 0 || spec.alt;
+    let body_len = 1 + usize::from(point) + prec + 2 + exp_digits(exp);
+    emit_field(sign, body_len, spec, emit, |e| {
+        let mut n = 1;
+        e(f[sig0]);
+        if point {
+            e(b'.');
+            n += 1;
+        }
+        for &d in &f[sig0 + 1..sig0 + keep] {
+            e(d);
+            n += 1;
+        }
+        for _ in keep..want {
+            e(b'0');
+            n += 1;
+        }
+        n + emit_exp_part(exp, upper, e)
+    })
+}
+
+/// How many leading digits of `d` are significant: trailing zeros dropped, but
+/// always at least one digit kept.
+fn trim(d: &[u8]) -> usize {
+    let mut n = d.len();
+    while n > 1 && d[n - 1] == b'0' {
+        n -= 1;
+    }
+    n
+}
+
+/// How many fractional digits `%g` prints after dropping trailing zeros: the
+/// digits held in `f` plus the zeros that pad out to `fp` places.
+fn trim_frac(f: &[u8; FIXED_CAP], int_len: usize, keep: usize, fp: usize) -> usize {
+    let mut zeros = fp - keep;
+    let mut n = keep;
+    while n > 0 && f[int_len + n - 1] == b'0' {
+        zeros += 1;
+        n -= 1;
+    }
+    fp - zeros
+}
+
+#[allow(clippy::too_many_arguments)]
+fn emit_gen(
+    f: &mut [u8; FIXED_CAP],
+    fx: &Fixed,
+    sig0: usize,
+    exp: i32,
+    sign: Option<u8>,
+    prec: usize,
+    spec: &Spec,
+    upper: bool,
+    emit: &mut Emit<'_>,
+) -> i32 {
+    // `%g`'s precision is significant digits, and a precision of zero means one.
+    let p = if prec == 0 { 1 } else { prec };
+    if exp < -4 || exp >= p as i32 {
+        // `%e` with `p - 1` digits after the point.
+        let (keep, exp) = round_exp(f, fx, sig0, exp, p);
+        let digits = if spec.alt {
+            p
+        } else {
+            trim(&f[sig0..sig0 + keep])
+        };
+        let point = digits > 1;
+        let body_len = 1 + usize::from(point) + (digits - 1) + 2 + exp_digits(exp);
+        emit_field(sign, body_len, spec, emit, |e| {
+            let mut n = 1;
+            e(f[sig0]);
+            if point {
+                e(b'.');
+                n += 1;
+            }
+            let shown = digits.min(keep);
+            for &d in &f[sig0 + 1..sig0 + shown] {
+                e(d);
+                n += 1;
+            }
+            for _ in shown..digits {
+                e(b'0');
+                n += 1;
+            }
+            n + emit_exp_part(exp, upper, e)
+        })
+    } else {
+        // `%f` with `p - 1 - exp` digits after the point.
+        let fp = (p as i32 - 1 - exp) as usize;
+        let (int_len, keep) = round_fixed(f, fx, fp);
+        let fraclen = if spec.alt {
+            fp
+        } else {
+            trim_frac(f, int_len, keep, fp)
+        };
+        let point = fraclen > 0;
+        let body_len = int_len + usize::from(point) + fraclen;
+        emit_field(sign, body_len, spec, emit, |e| {
+            let mut n = 0;
+            for &d in &f[..int_len] {
+                e(d);
+                n += 1;
+            }
+            if point {
+                e(b'.');
+                n += 1;
+            }
+            let shown = fraclen.min(keep);
+            for &d in &f[int_len..int_len + shown] {
+                e(d);
+                n += 1;
+            }
+            for _ in shown..fraclen {
+                e(b'0');
+                n += 1;
+            }
+            n
+        })
+    }
+}
+
+fn emit_zero(
+    kind: FloatKind,
+    upper: bool,
+    sign: Option<u8>,
+    prec: usize,
+    spec: &Spec,
+    emit: &mut Emit<'_>,
+) -> i32 {
+    match kind {
+        FloatKind::Fixed => {
+            let point = prec > 0 || spec.alt;
+            let body_len = 1 + usize::from(point) + prec;
+            emit_field(sign, body_len, spec, emit, |e| {
+                let mut n = 1;
+                e(b'0');
+                if point {
+                    e(b'.');
+                    n += 1;
+                }
+                for _ in 0..prec {
+                    e(b'0');
+                    n += 1;
+                }
+                n
+            })
+        }
+        FloatKind::Exp => {
+            let point = prec > 0 || spec.alt;
+            let body_len = 1 + usize::from(point) + prec + 4;
+            emit_field(sign, body_len, spec, emit, |e| {
+                let mut n = 1;
+                e(b'0');
+                if point {
+                    e(b'.');
+                    n += 1;
+                }
+                for _ in 0..prec {
+                    e(b'0');
+                    n += 1;
+                }
+                n + emit_exp_part(0, upper, e)
+            })
+        }
+        FloatKind::Gen => {
+            let p = if prec == 0 { 1 } else { prec };
+            let keep = if spec.alt { p - 1 } else { 0 };
+            let point = keep > 0;
+            let body_len = 1 + usize::from(point) + keep;
+            emit_field(sign, body_len, spec, emit, |e| {
+                let mut n = 1;
+                e(b'0');
+                if point {
+                    e(b'.');
+                    n += 1;
+                }
+                for _ in 0..keep {
+                    e(b'0');
+                    n += 1;
+                }
+                n
+            })
+        }
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum FloatKind {
+    /// `%f`
+    Fixed,
+    /// `%e`
+    Exp,
+    /// `%g`
+    Gen,
+}
+
+/// Format `v` as `%f`, `%e` or `%g` under `spec`; `upper` selects `F`/`E`/`G`.
+fn emit_float(v: f64, kind: FloatKind, upper: bool, spec: &Spec, emit: &mut Emit<'_>) -> i32 {
+    let neg = v.is_sign_negative();
+    let sign = spec.sign(neg);
+    if v.is_nan() {
+        return emit_special(sign, if upper { b"NAN" } else { b"nan" }, spec, emit);
+    }
+    if v.is_infinite() {
+        return emit_special(sign, if upper { b"INF" } else { b"inf" }, spec, emit);
+    }
+    let prec = spec.prec.unwrap_or(6).max(0) as usize;
+    let mag = if neg { -v } else { v };
+    if mag == 0.0 {
+        return emit_zero(kind, upper, sign, prec, spec, emit);
+    }
+    let mut f = [0u8; FIXED_CAP];
+    let fx = decompose(mag, &mut f);
+    let sig0 = f[..fx.flen].iter().position(|&d| d != b'0').unwrap_or(0);
+    let exp = fx.int_len as i32 - 1 - sig0 as i32;
+    match kind {
+        FloatKind::Fixed => emit_fixed(&mut f, &fx, sign, prec, spec, emit),
+        FloatKind::Exp => emit_exp(&mut f, &fx, sig0, exp, sign, prec, spec, upper, emit),
+        FloatKind::Gen => emit_gen(&mut f, &fx, sig0, exp, sign, prec, spec, upper, emit),
+    }
+}
+
+/// The largest width or precision honored, so a format like `%999999999999d`
+/// saturates instead of overflowing the counter.
+const MAX_FIELD: i32 = 1 << 20;
+
+/// Read a run of decimal digits into a saturated `i32`, advancing `*p`.
+unsafe fn parse_number(p: &mut *const c_char) -> i32 {
+    let mut v: i32 = 0;
+    while (unsafe { **p } as u8).is_ascii_digit() {
+        v = v
+            .saturating_mul(10)
+            .saturating_add(i32::from(unsafe { **p } as u8 - b'0'));
+        *p = unsafe { (*p).add(1) };
+    }
+    v.min(MAX_FIELD)
+}
+
+#[cfg(target_os = "minix")]
+/// Read a vararg integer for the conversion's length modifier, applying the
+/// narrowing `hh`/`h` ask for.
+unsafe fn read_signed(len: Length, args: &mut VaList<'_>) -> i64 {
+    match len {
+        Length::Hh => i64::from(unsafe { args.next_arg::<c_int>() } as i8),
+        Length::H => i64::from(unsafe { args.next_arg::<c_int>() } as i16),
+        Length::L => i64::from(unsafe { args.next_arg::<c_long>() }),
+        Length::Ll | Length::J => unsafe { args.next_arg::<c_longlong>() },
+        Length::Z | Length::T => unsafe { args.next_arg::<isize>() as i64 },
+        Length::None | Length::Big => i64::from(unsafe { args.next_arg::<c_int>() }),
+    }
+}
+
+#[cfg(target_os = "minix")]
+/// The unsigned counterpart of `read_signed`.
+unsafe fn read_unsigned(len: Length, args: &mut VaList<'_>) -> u64 {
+    match len {
+        Length::Hh => u64::from(unsafe { args.next_arg::<c_uint>() } as u8),
+        Length::H => u64::from(unsafe { args.next_arg::<c_uint>() } as u16),
+        Length::L => u64::from(unsafe { args.next_arg::<c_ulong>() }),
+        Length::Ll | Length::J => unsafe { args.next_arg::<c_ulonglong>() },
+        Length::Z | Length::T => unsafe { args.next_arg::<usize>() as u64 },
+        Length::None | Length::Big => u64::from(unsafe { args.next_arg::<c_uint>() }),
+    }
+}
+
+#[cfg(target_os = "minix")]
+/// `%n`: store the characters written so far through the pointer the caller gave.
+unsafe fn write_count(len: Length, args: &mut VaList<'_>, count: i32) {
+    match len {
+        Length::Hh => unsafe { *args.next_arg::<*mut i8>() = count as i8 },
+        Length::H => unsafe { *args.next_arg::<*mut i16>() = count as i16 },
+        Length::L => unsafe { *args.next_arg::<*mut c_long>() = c_long::from(count) },
+        Length::Ll | Length::J => unsafe {
+            *args.next_arg::<*mut c_longlong>() = c_longlong::from(count)
+        },
+        Length::Z | Length::T => unsafe { *args.next_arg::<*mut isize>() = count as isize },
+        Length::None | Length::Big => unsafe { *args.next_arg::<*mut c_int>() = count },
+    }
+}
+
 #[cfg(target_os = "minix")]
 /// Format `fmt` with the C varargs in `args`, feeding output to `emit`.
 /// Returns the number of characters that would be written.
@@ -292,19 +965,12 @@ unsafe fn vformat(fmt: *const c_char, args: &mut VaList<'_>, mut emit: Emit<'_>)
             }
             p = unsafe { p.add(1) };
         }
-        while (unsafe { *p } as u8).is_ascii_digit() {
-            spec.width = spec.width * 10 + (unsafe { *p } as u8 - b'0') as i32;
-            p = unsafe { p.add(1) };
-        }
+        spec.width = unsafe { parse_number(&mut p) };
         if (unsafe { *p } as u8) == b'.' {
             p = unsafe { p.add(1) };
-            let mut prec = 0i32;
-            while (unsafe { *p } as u8).is_ascii_digit() {
-                prec = prec * 10 + (unsafe { *p } as u8 - b'0') as i32;
-                p = unsafe { p.add(1) };
-            }
-            spec.prec = Some(prec);
+            spec.prec = Some(unsafe { parse_number(&mut p) });
         }
+        let len = unsafe { parse_length(&mut p) };
         let conv = unsafe { *p } as u8;
         match conv {
             b'%' => {
@@ -348,8 +1014,20 @@ unsafe fn vformat(fmt: *const c_char, args: &mut VaList<'_>, mut emit: Emit<'_>)
                 let v = unsafe { args.next_arg::<*const c_void>() } as usize as u64;
                 count += emit_int(v, 16, b"0123456789abcdef", None, &[], &spec, &mut emit);
             }
+            b'd' | b'i' => {
+                count += emit_signed(unsafe { read_signed(len, args) }, &spec, &mut emit);
+            }
+            b'u' => {
+                let v = unsafe { read_unsigned(len, args) };
+                count += emit_int(v, 10, b"0123456789", None, &[], &spec, &mut emit);
+            }
+            b'o' => {
+                let v = unsafe { read_unsigned(len, args) };
+                let prefix: &[u8] = if spec.alt && v != 0 { b"0" } else { &[] };
+                count += emit_int(v, 8, b"01234567", None, prefix, &spec, &mut emit);
+            }
             b'x' | b'X' => {
-                let v = unsafe { args.next_arg::<u32>() } as u64;
+                let v = unsafe { read_unsigned(len, args) };
                 let (digits, prefix): (&[u8], &[u8]) = if conv == b'x' {
                     (b"0123456789abcdef", b"0x")
                 } else {
@@ -358,62 +1036,19 @@ unsafe fn vformat(fmt: *const c_char, args: &mut VaList<'_>, mut emit: Emit<'_>)
                 let prefix: &[u8] = if spec.alt && v != 0 { prefix } else { &[] };
                 count += emit_int(v, 16, digits, None, prefix, &spec, &mut emit);
             }
-            b'u' => {
-                let v = unsafe { args.next_arg::<u32>() } as u64;
-                count += emit_int(v, 10, b"0123456789", None, &[], &spec, &mut emit);
+            b'f' | b'F' => {
+                let v = unsafe { args.next_arg::<f64>() };
+                count += emit_float(v, FloatKind::Fixed, conv == b'F', &spec, &mut emit);
             }
-            b'd' | b'i' => {
-                let l = unsafe { args.next_arg::<c_int>() } as i64;
-                count += emit_signed(l, &spec, &mut emit);
+            b'e' | b'E' => {
+                let v = unsafe { args.next_arg::<f64>() };
+                count += emit_float(v, FloatKind::Exp, conv == b'E', &spec, &mut emit);
             }
-            b'l' => {
-                p = unsafe { p.add(1) };
-                let lc = unsafe { *p } as u8;
-                match lc {
-                    b'd' | b'i' => {
-                        let l = unsafe { args.next_arg::<c_long>() } as i64;
-                        count += emit_signed(l, &spec, &mut emit);
-                    }
-                    b'u' => {
-                        let v = unsafe { args.next_arg::<c_ulong>() } as u64;
-                        count += emit_int(v, 10, b"0123456789", None, &[], &spec, &mut emit);
-                    }
-                    b'x' | b'X' => {
-                        let v = unsafe { args.next_arg::<c_ulong>() } as u64;
-                        let (digits, prefix): (&[u8], &[u8]) = if lc == b'x' {
-                            (b"0123456789abcdef", b"0x")
-                        } else {
-                            (b"0123456789ABCDEF", b"0X")
-                        };
-                        let prefix: &[u8] = if spec.alt && v != 0 { prefix } else { &[] };
-                        count += emit_int(v, 16, digits, None, prefix, &spec, &mut emit);
-                    }
-                    _ => {
-                        emit(b'%');
-                        emit(b'l');
-                        count += 2;
-                    }
-                }
+            b'g' | b'G' => {
+                let v = unsafe { args.next_arg::<f64>() };
+                count += emit_float(v, FloatKind::Gen, conv == b'G', &spec, &mut emit);
             }
-            b'z' => {
-                p = unsafe { p.add(1) };
-                let zc = unsafe { *p } as u8;
-                match zc {
-                    b'u' => {
-                        let v = unsafe { args.next_arg::<usize>() } as u64;
-                        count += emit_int(v, 10, b"0123456789", None, &[], &spec, &mut emit);
-                    }
-                    b'd' | b'i' => {
-                        let l = unsafe { args.next_arg::<isize>() } as i64;
-                        count += emit_signed(l, &spec, &mut emit);
-                    }
-                    _ => {
-                        emit(b'%');
-                        emit(b'z');
-                        count += 2;
-                    }
-                }
-            }
+            b'n' => unsafe { write_count(len, args, count) },
             other => {
                 emit(b'%');
                 emit(other);
@@ -2172,5 +2807,140 @@ mod tests {
         assert_eq!(fmt_signed(7, &spec(" ", 0, None)), (b" 7".to_vec(), 2));
         assert_eq!(fmt_signed(-7, &spec("+", 0, None)), (b"-7".to_vec(), 2));
         assert_eq!(fmt_signed(-7, &spec("0", 5, None)), (b"-0007".to_vec(), 5));
+    }
+
+    fn fmt_float(v: f64, kind: FloatKind, spec: &Spec) -> (Vec<u8>, i32) {
+        let mut out = Vec::new();
+        let mut emit: Emit<'_> = &mut |c: u8| out.push(c);
+        let n = emit_float(v, kind, false, spec, &mut emit);
+        (out, n)
+    }
+
+    fn fmt_upper(v: f64, kind: FloatKind, spec: &Spec) -> Vec<u8> {
+        let mut out = Vec::new();
+        let mut emit: Emit<'_> = &mut |c: u8| out.push(c);
+        emit_float(v, kind, true, spec, &mut emit);
+        out
+    }
+
+    fn fmt_f(v: f64, prec: Option<i32>) -> Vec<u8> {
+        fmt_float(v, FloatKind::Fixed, &spec("", 0, prec)).0
+    }
+
+    fn fmt_e(v: f64, prec: Option<i32>) -> Vec<u8> {
+        fmt_float(v, FloatKind::Exp, &spec("", 0, prec)).0
+    }
+
+    fn fmt_g(v: f64, prec: Option<i32>, alt: bool) -> Vec<u8> {
+        fmt_float(
+            v,
+            FloatKind::Gen,
+            &spec(if alt { "#" } else { "" }, 0, prec),
+        )
+        .0
+    }
+
+    /// Every expectation here is what C's `printf` prints, and each covers a
+    /// corner the exact-digit machinery exists for: an exact tie, `0.1`'s real
+    /// expansion, a carry that grows the integer part, a subnormal, `%e`'s
+    /// exponent form, and `%g`'s choice between the two.
+    #[test]
+    fn emit_fixed_matches_printf() {
+        assert_eq!(fmt_f(0.0, None), b"0.000000");
+        assert_eq!(fmt_f(-0.0, None), b"-0.000000");
+        assert_eq!(fmt_f(1.23456, Some(2)), b"1.23");
+        assert_eq!(fmt_f(100.0, Some(2)), b"100.00");
+        assert_eq!(fmt_f(123456.789, Some(3)), b"123456.789");
+        assert_eq!(fmt_f(1e-5, Some(7)), b"0.0000100");
+        // An exact tie rounds to even, and only the exact value decides.
+        assert_eq!(fmt_f(2.5, Some(0)), b"2");
+        assert_eq!(fmt_f(3.5, Some(0)), b"4");
+        assert_eq!(fmt_f(0.5, Some(0)), b"0");
+        assert_eq!(fmt_f(1.005, Some(2)), b"1.00");
+        assert_eq!(fmt_f(0.1, Some(20)), b"0.10000000000000000555");
+        // A carry that grows the integer part.
+        assert_eq!(fmt_f(9.9999999, Some(6)), b"10.000000");
+        assert_eq!(fmt_f(5e-324, Some(0)), b"0");
+    }
+
+    #[test]
+    fn emit_fixed_of_a_huge_value_is_exact() {
+        let want: &[u8] = b"1000000000000000052504760255204420248704468581108159154915854115511802457988908195786371375080447864043704443832883878176942523235360430575644792184786706982848387200926575803737830233794788090059368953234970799945081119038967640880074652742780142494579258788820056842838115669472196386865459400540160";
+        assert_eq!(fmt_f(1e300, Some(0)), want);
+    }
+
+    #[test]
+    fn emit_exp_matches_printf() {
+        assert_eq!(fmt_e(0.0, None), b"0.000000e+00");
+        assert_eq!(fmt_e(1.0, None), b"1.000000e+00");
+        assert_eq!(fmt_e(1234.5, Some(2)), b"1.23e+03");
+        assert_eq!(fmt_e(0.00012345, Some(4)), b"1.2345e-04");
+        assert_eq!(fmt_e(9.9999999, Some(3)), b"1.000e+01");
+        assert_eq!(fmt_e(1.0, Some(0)), b"1e+00");
+        let (out, n) = fmt_float(1.0, FloatKind::Exp, &spec("", 0, Some(2)));
+        assert_eq!(n as usize, out.len());
+        assert_eq!(
+            fmt_upper(1.0, FloatKind::Exp, &spec("", 0, Some(2))),
+            b"1.00E+00"
+        );
+        assert_eq!(
+            fmt_upper(f64::INFINITY, FloatKind::Fixed, &spec("", 0, None)),
+            b"INF"
+        );
+    }
+
+    #[test]
+    fn emit_gen_matches_printf() {
+        assert_eq!(fmt_g(0.0, None, false), b"0");
+        assert_eq!(fmt_g(100.0, None, false), b"100");
+        assert_eq!(fmt_g(0.0001, None, false), b"0.0001");
+        assert_eq!(fmt_g(0.0001234, None, false), b"0.0001234");
+        // Outside `%f`'s window: `%e` with the zeros trimmed.
+        assert_eq!(fmt_g(1234567.0, None, false), b"1.23457e+06");
+        assert_eq!(fmt_g(1000000.0, None, false), b"1e+06");
+        assert_eq!(fmt_g(0.00001, None, false), b"1e-05");
+        assert_eq!(fmt_g(1.5, Some(1), false), b"2");
+        assert_eq!(fmt_g(1.0, Some(0), false), b"1");
+        assert_eq!(fmt_g(100.0, Some(4), false), b"100");
+        // `#` keeps the trailing zeros.
+        assert_eq!(fmt_g(1.0, None, true), b"1.00000");
+    }
+
+    #[test]
+    fn emit_float_specials_and_field() {
+        let s = spec("", 0, None);
+        assert_eq!(fmt_float(f64::INFINITY, FloatKind::Fixed, &s).0, b"inf");
+        assert_eq!(
+            fmt_float(f64::NEG_INFINITY, FloatKind::Fixed, &s).0,
+            b"-inf"
+        );
+        assert_eq!(fmt_float(f64::NAN, FloatKind::Fixed, &s).0, b"nan");
+        assert_eq!(
+            fmt_float(3.0, FloatKind::Fixed, &spec("#", 0, Some(0))).0,
+            b"3."
+        );
+        assert_eq!(
+            fmt_float(-1.23456, FloatKind::Fixed, &spec("", 0, Some(2))).0,
+            b"-1.23"
+        );
+        assert_eq!(
+            fmt_float(1.23456, FloatKind::Fixed, &spec("+", 0, Some(2))).0,
+            b"+1.23"
+        );
+        assert_eq!(
+            fmt_float(1.23456, FloatKind::Fixed, &spec("0", 8, Some(2))).0,
+            b"00001.23"
+        );
+        assert_eq!(
+            fmt_float(-1.23456, FloatKind::Fixed, &spec("0", 8, Some(2))).0,
+            b"-0001.23"
+        );
+        assert_eq!(
+            fmt_float(1.23456, FloatKind::Fixed, &spec("-", 8, Some(2))).0,
+            b"1.23    "
+        );
+        // The count covers the whole field, like the integer conversions.
+        let (out, n) = fmt_float(1.23456, FloatKind::Fixed, &spec("0", 8, Some(2)));
+        assert_eq!(n as usize, out.len());
     }
 }
