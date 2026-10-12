@@ -1,0 +1,17 @@
+# The `just test-wlgl-x86` scenario: /bin/wlgl renders a GLES2 triangle with Mesa on
+# the virtio-gpu render node, commits it to /sbin/wlserver as a wl_shm surface, and
+# reads the composited frame back from /dev/fb — .notes/wayland.md §6.10 stage 3d-a.
+#
+#   FEED_SCENARIO=tools/smoke/wlgl.tsv sh tools/smoke/feed.sh <log> <seconds> <qemu command…>
+#
+# The client, the Mesa DSOs and their dependencies are injected into the disk image by
+# the recipe. `/bin/wlgl` is the tree's first *dynamically linked Rust* program, and has
+# to be one: `dlopen` needs a loader in the address space, and a statically linked minix
+# image has none. The line it must print is the whole gate — the render node was found,
+# Mesa rendered on it, the compositor presented the surface, and the pixel read back is
+# the triangle's rather than a leftover.
+#
+# The recipe also asserts `GL_RENDERER=virgl`, so the frame did not come from the
+# software fallback.
+
+/bin/wlgl	wlgl: PASS

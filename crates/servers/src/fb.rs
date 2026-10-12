@@ -622,11 +622,12 @@ unsafe fn handle_cdev_request(
                 -95 // EOPNOTSUPP
             }
             #[cfg(not(target_arch = "wasm32"))]
-            // Device-memory mmap: reply with the framebuffer's physical
-            // range (phys u64 @ payload 0, len u64 @ payload 8). For bochs
-            // the arch's `dev.base` is the identity-mapped device VA
-            // (equals the phys); for virtio-gpu it is the backing buffer's
-            // guest-physical address directly.
+            // Device-memory mmap: reply with the framebuffer's *physical*
+            // range (phys u64 @ payload 0, len u64 @ payload 8), which is
+            // what VM maps into the client. `dev.base` is that physical base
+            // on every backend — bochs' BAR, or virtio-gpu's backing buffer —
+            // while the driver reaches its own pixels through `mem()`, a
+            // window that need not equal the physical address.
             match arch.device(minor as usize) {
                 Ok(dev) => {
                     unsafe {

@@ -756,6 +756,31 @@ test-gltriangle-virgl-x86 boot-timeout="180": gltriangle-x86 boot-image-x86
     @just _assert-qemu-log target/test-gltriangle-virgl-x86.log "gltriangle: GL_RENDERER=virgl"
     @echo "gltriangle-virgl: the GLES2 triangle rendered through surfaceless EGL on the render node, via virgl (x86_64)"
 
+# wlgl: build /bin/wlgl, the GL present client (§6.10 stage 3d-a). It is the tree's
+# first *dynamically linked Rust* program, and it has to be one: `dlopen` needs a
+# loader in the address space and a statically linked minix image has none
+# (`crates/minix-libc/src/lib.rs`), so a program that loads Mesa must be dynamic.
+# `tools/build-wlgl.py` is the link: the arch's C crt0 for `_start`, `minix-user.ld`,
+# and Mesa's headers for the GL half (`tools/wlgl_render.c`).
+wlgl-x86: userland-x86 dynlib-x86
+    python tools/build-mesa.py x86 --stage
+    @test -f target/mesa/x86/lib/libEGL.so.1 || (echo 'wlgl: no Mesa DSOs — run `just build-mesa x86 --build` first' >&2; exit 1)
+    python tools/build-wlgl.py x86
+    @echo "wlgl: /bin/wlgl built and the Mesa DSOs staged (x86_64)"
+
+# The 3d-a gate: the client renders a GL surface with Mesa on the render node and
+# commits it through /sbin/wlserver to /dev/fb, then reads the composited frame back.
+# `GL_RENDERER=virgl` is asserted too, so the frame is the host GPU's and not the
+# software fallback's. It is a dev-host gate like 3c-3 — headless CI has no GL.
+test-wlgl-x86 boot-timeout="60": wlgl-x86 boot-image-x86
+    @just _assert-qemu-version qemu-system-x86_64
+    M=target/mesa/x86; E="/lib/libdrm.so.2=$M/lib/libdrm.so.2;/lib/libEGL.so.1=$M/lib/libEGL.so.1;/lib/libexpat.so.1=$M/lib/libexpat.so.1;/lib/libgallium-25.3.6.so=$M/lib/libgallium-25.3.6.so;/lib/libGLESv2.so.2=$M/lib/libGLESv2.so.2;/lib/libz.so.1=$M/lib/libz.so.1;/bin/wlgl=$M/bin/wlgl"; MINIXFS_EXTRA="$E" MINIXFS_BLOCKS=16384 cargo run -q -p boot-image --bin mkminixfs --release -- x86_64
+    @just mkfs-x86
+    FEED_PACE=0.02 FEED_SCENARIO=tools/smoke/wlgl.tsv sh tools/smoke/feed.sh target/test-wlgl-x86.log {{boot-timeout}} qemu-system-x86_64 -display egl-headless -serial stdio -m 512M -no-reboot -vga none -device bochs-display,id=fb0 -kernel target/images/x86_64-pc-minix/minix-x86-boot.elf -drive if=none,id=disk0,file=target/images/x86_64-pc-minix/disk.img,format=raw,cache=writethrough -device virtio-blk-pci,disable-legacy=on,drive=disk0 -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0 -device virtio-tablet-pci,display=fb0 -device virtio-gpu-gl-pci,blob=on
+    @just _assert-qemu-log target/test-wlgl-x86.log "wlgl: GL_RENDERER=virgl"
+    @just _assert-qemu-log target/test-wlgl-x86.log "wlgl: PASS"
+    @echo "wlgl: a GL surface rendered on the render node, committed through the compositor, and read back from /dev/fb (x86_64)"
+
 test-gltriangle-riscv64 boot-timeout="180": gltriangle-riscv64 boot-image-riscv64
     @just _assert-qemu-version qemu-system-riscv64
     M=target/mesa/riscv64; E="/lib/libdrm.so.2=$M/lib/libdrm.so.2;/lib/libEGL.so.1=$M/lib/libEGL.so.1;/lib/libexpat.so.1=$M/lib/libexpat.so.1;/lib/libgallium-25.3.6.so=$M/lib/libgallium-25.3.6.so;/lib/libGLESv2.so.2=$M/lib/libGLESv2.so.2;/lib/libz.so.1=$M/lib/libz.so.1;/lib/swrast_dri.so=$M/lib/swrast_dri.so;/bin/gltriangle=$M/bin/gltriangle"; MINIXFS_EXTRA="$E" MINIXFS_BLOCKS=16384 cargo run -q -p boot-image --bin mkminixfs --release -- riscv64

@@ -129,11 +129,15 @@ pub const FBIOFLUSH: u32 = 0x4604;
 pub trait FbArch {
     fn init(&mut self, minor: usize) -> Result<(), DriverError>;
     fn device(&self, minor: usize) -> Result<FbDevice, DriverError>;
-    /// Address the driver reads/writes framebuffer bytes through. For
-    /// device-memory backends this is the identity-mapped device VA (the
-    /// same as `device().base`); for RAM-backed backends (virtio-gpu) it
-    /// is the buffer's image VA while `device().base` is the guest-physical
-    /// address handed to VFS for mmap.
+    /// Address the driver reads/writes framebuffer bytes through, while
+    /// `device().base` is the guest-physical range handed to VFS for
+    /// `mmap`. The two differ wherever device memory is reached through a
+    /// mapped window instead of at its physical address: bochs writes
+    /// through the window the physmap hook returned and reports the BAR's
+    /// physical base, and virtio-gpu writes through the buffer's image VA
+    /// and reports the buffer's guest-physical address. The default suits a
+    /// backend whose memory *is* at the reported address (the test backends
+    /// and the legacy, identity-mapped LFB).
     fn mem(&self, minor: usize) -> Result<u64, DriverError> {
         self.device(minor).map(|d| d.base)
     }
@@ -262,9 +266,10 @@ const VBE_LFB_DEFAULT_SIZE: u64 = 4 * 1024 * 1024;
 /// host tests install a fake register file).
 pub type DevioFn = fn(request: u32, port: u16, value: u32) -> u32;
 
-/// Physical-memory mapping hook: map `phys..phys+len` and return the VA
-/// (the fb server routes this through VM_MAP_PHYS on MINIX, which maps
-/// identity; host tests return a fake buffer).
+/// Physical-memory mapping hook: map `phys..phys+len` into this process and
+/// return the window VA it was mapped at, which need not equal `phys` (the
+/// fb server routes this through VM_MAP_PHYS on MINIX; host tests return a
+/// fake buffer).
 pub type PhysMapFn = fn(phys: u64, len: usize) -> u64;
 
 static DEVIO_FN: AtomicUsize = AtomicUsize::new(0);
@@ -312,8 +317,14 @@ unsafe fn physmap(phys: u64, len: usize) -> u64 {
 ///   ports `0x1CE`/`0x1CF`; the LFB appears at `0xE0000000` once enabled.
 #[repr(C)]
 pub struct BochsArch {
-    /// Framebuffer VA + size.
+    /// Framebuffer guest-physical base + size — the range `CDEV_MAP` reports
+    /// to a client. On the PCI path this is the BAR's physical base; the
+    /// pixels are reached through `mem_va`. On the legacy path it is
+    /// `VBE_LFB_PHYS`, which is both.
     pub dev: FbDevice,
+    /// Window this process reads/writes the framebuffer through, as the
+    /// physmap hook returned it. Zero before `init`.
+    pub mem_va: u64,
     /// MMIO register BAR VA (0 → legacy I/O port registers).
     pub regs: u64,
     pub var: FbVarScreeninfo,
@@ -324,6 +335,7 @@ impl BochsArch {
     pub const fn new() -> Self {
         Self {
             dev: FbDevice::new(),
+            mem_va: 0,
             regs: 0,
             var: FbVarScreeninfo::new(),
             fix: FbFixScreeninfo::new(),
@@ -453,9 +465,10 @@ impl FbArch for BochsArch {
                         return Err(DriverError::NotFound);
                     }
                     self.dev = FbDevice {
-                        base: fb_va,
+                        base: fb_phys,
                         size: fb_len as u64,
                     };
+                    self.mem_va = fb_va;
                     self.regs = 0;
                     if reg_raw != 0 {
                         let r_phys = (reg_raw & !0xF) as u64;
@@ -481,6 +494,7 @@ impl FbArch for BochsArch {
                 base: VBE_LFB_PHYS,
                 size: VBE_LFB_DEFAULT_SIZE,
             };
+            self.mem_va = VBE_LFB_PHYS;
         }
 
         if unsafe { self.mode_set() }.is_err() {
@@ -529,6 +543,13 @@ impl FbArch for BochsArch {
             return Err(DriverError::NotFound);
         }
         Ok(self.dev)
+    }
+
+    fn mem(&self, _minor: usize) -> Result<u64, DriverError> {
+        if self.mem_va == 0 {
+            return Err(DriverError::NotFound);
+        }
+        Ok(self.mem_va)
     }
 
     fn var_screeninfo(&self, _minor: usize) -> Result<FbVarScreeninfo, DriverError> {
@@ -1187,11 +1208,12 @@ mod tests {
     fn test_bochs_arch_layout() {
         // repr(C) pins the field offsets so gdb/FB_ARCH reads and any
         // future ioctl marshalling are deterministic.
-        assert_eq!(size_of::<BochsArch>(), 200);
+        assert_eq!(size_of::<BochsArch>(), 208);
         assert_eq!(core::mem::offset_of!(BochsArch, dev), 0);
-        assert_eq!(core::mem::offset_of!(BochsArch, regs), 16);
-        assert_eq!(core::mem::offset_of!(BochsArch, var), 24);
-        assert_eq!(core::mem::offset_of!(BochsArch, fix), 120);
+        assert_eq!(core::mem::offset_of!(BochsArch, mem_va), 16);
+        assert_eq!(core::mem::offset_of!(BochsArch, regs), 24);
+        assert_eq!(core::mem::offset_of!(BochsArch, var), 32);
+        assert_eq!(core::mem::offset_of!(BochsArch, fix), 128);
     }
 
     #[test]
@@ -1530,7 +1552,8 @@ mod tests {
                 VBE_DISPI_ENABLED | VBE_DISPI_LFB_ENABLED
             );
             assert_eq!(vbe_regs(VBE_DISPI_INDEX_XRES), BOCHS_DEFAULT_XRES as u16);
-            assert_eq!(arch.dev.base, fb_ptr() as u64);
+            assert_eq!(arch.dev.base, FAKE_BAR0_PHYS);
+            assert_eq!(arch.mem(0).unwrap(), fb_ptr() as u64);
             assert_eq!(arch.dev.size, 16 * 1024 * 1024);
             assert_eq!(arch.var.xres, BOCHS_DEFAULT_XRES);
             assert_eq!(arch.fix.line_length, BOCHS_DEFAULT_XRES * 4);
@@ -1562,6 +1585,7 @@ mod tests {
             assert_eq!(enable, VBE_DISPI_ENABLED | VBE_DISPI_LFB_ENABLED);
             assert_eq!(arch.regs, regs_ptr() as u64 + VBE_DISPI_MMIO_REG_OFFSET);
             assert_eq!(arch.dev.size, 16 * 1024 * 1024);
+            assert_eq!(arch.mem(0).unwrap(), fb_ptr() as u64);
             assert_eq!(arch.fix.mmio_start, FAKE_BAR2_PHYS);
             assert_eq!(arch.fix.mmio_len, 4096);
         }
@@ -1578,6 +1602,7 @@ mod tests {
             assert!(arch.init(0).is_ok());
             assert_eq!(arch.regs, 0);
             assert_eq!(arch.dev.base, VBE_LFB_PHYS);
+            assert_eq!(arch.mem(0).unwrap(), VBE_LFB_PHYS);
             assert_eq!(arch.dev.size, VBE_LFB_DEFAULT_SIZE);
             // The port register dance still ran.
             assert_eq!(

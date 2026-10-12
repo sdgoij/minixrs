@@ -38,6 +38,11 @@ toolchain. `.notes/wayland.md` §6.10 is the design; these are the recipes and t
   `libc.so`. It is the piece that grows a feature every time Mesa asks for one.
 - `just gltriangle <arch>` — builds the surfaceless-EGL GLES2 triangle client
   (`tools/gl_triangle.c`, `tools/build-gltest.py`) and stages the DSOs.
+- `just wlgl-x86` — `tools/build-wlgl.py` builds `/bin/wlgl`, the 3d-a client that
+  presents a GL surface through the in-house Wayland compositor: `wlclient`'s
+  protocol half plus `tools/wlgl_render.c` for the GL half. It is the tree's first
+  *dynamically linked Rust* program, and the link is the interesting part (see the
+  trap below).
 
 ## Traps that cost a session
 
@@ -97,6 +102,22 @@ toolchain. `.notes/wayland.md` §6.10 is the design; these are the recipes and t
   the stream (`Error assigning TGSI`, `context 1 failed to dispatch CREATE_OBJECT:
   22`). `vsnprintf`'s return must also be the *field* length, because `tgsi_dump`'s
   `str_dump_ctx_printf` advances a write cursor by it.
+- **A program that loads Mesa must be *dynamically linked*, and linking a dynamic
+  Rust one needs care.** `dlopen` is `#[cfg(feature = "so")]` in `minix-libc`: a
+  static image has no loader, so `dlopen` returns NULL and Mesa's DSOs never come
+  in (the C `gltriangle`/`cdyn-demo` work because C has no lang items to collide).
+  `/bin/wlgl` is therefore linked with the arch's C crt0, `minix-user.ld`,
+  `-Bdynamic -l:libc.so -l:libEGL.so.1 -l:libGLESv2.so.2` and
+  `--dynamic-linker=/libexec/ld.so`. Three things bite: `minix-rt`'s `_start`
+  collides with the C crt0's, so the crt0's is renamed (`-D_start=minix_crt0_entry`
+  while compiling the `.S`, then `-e minix_crt0_entry`, since the linker script still
+  says `ENTRY(_start)`); rustc needs the crate search path as
+  `-L dependency=<release>/deps`, because `-C link-arg=-L` only reaches the linker
+  (`E0460` otherwise); and the stub must not define its own `#[panic_handler]`
+  (`E0152`, duplicate lang item with `minix-rt`). The GL half is
+  `#[cfg(target_os = "minix")]` in `crates/userland/src/wlclient.rs`, because
+  `wlgl_render` is a C object present only in the wlgl link and a *host* build of
+  the crate must not reference it.
 
 ## The runtime gate
 
@@ -118,6 +139,12 @@ system image it publishes.
 node and asserts `GL_RENDERER=virgl` as well as the readback. It needs a GL-capable
 dev host (headless CI has none) and is not a CI gate.
 
+`just test-wlgl-x86` is the 3d-a gate: `/bin/wlgl` renders the triangle on the render
+node, commits it to `/sbin/wlserver` as a `wl_shm` surface, and reads the composited
+frame back from `/dev/fb`, asserting `GL_RENDERER=virgl` too. Like 3c-3 it needs a
+GL-capable dev host and is not a CI gate. It shares `/dev/fb`'s `mmap` path with
+`/bin/wlclient`, so a break there fails both gates with a black framebuffer.
+
 ## Validating a change
 
 ```
@@ -126,6 +153,7 @@ just build-mesa <arch> --build       # compiles everything; 0 FAILED in the log
 just fetch-mesa <arch>               # or the pinned DSOs, without building
 just test-gltriangle-<arch>          # boots the triangle through surfaceless EGL
 just test-gltriangle-virgl-x86       # the 3c-3 gate: the same triangle on virgl (GL dev host)
+just test-wlgl-x86                   # the 3d-a gate: the triangle through wlserver to /dev/fb (GL dev host)
 just check                           # host clippy + header contract + physmap
 ```
 

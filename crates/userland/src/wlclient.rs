@@ -50,6 +50,14 @@ fn fail(code: i32, msg: &[u8]) -> i32 {
     code
 }
 
+/// `fail`, with the client's name in front of the message: both `/bin/wlclient`
+/// and `/bin/wlgl` drive the same present flow, and a gate failure has to say
+/// which of them broke.
+fn failt(tag: &[u8], code: i32, msg: &[u8]) -> i32 {
+    write_err(tag);
+    fail(code, msg)
+}
+
 /// Build one request with `f` and send it.
 fn send_req<R, F>(conn: i32, req: &mut [u8; 512], f: F) -> Result<R, i32>
 where
@@ -256,10 +264,17 @@ fn await_release(
     }
 }
 
-fn run() -> Result<(), i32> {
+/// The `wl_shm` present flow, with the pool's contents and the read-back check
+/// supplied by the caller: `/bin/wlclient` paints a magenta square, `/bin/wlgl`
+/// renders with GL, and both commit through the server and check `/dev/fb`.
+fn present(
+    tag: &[u8],
+    paint: impl FnOnce(*mut u8) -> Result<(), i32>,
+    verify: impl Fn(*const u32) -> Result<(), i32>,
+) -> Result<(), i32> {
     // ---- map the framebuffer so the frame can be read back ----
     let fb_fd = unsafe { fs::open(b"/dev/fb", fs::O_RDWR, 0) }
-        .map_err(|_| fail(20, b"wlclient: open /dev/fb failed\n"))?;
+        .map_err(|_| failt(tag, 20, b"open /dev/fb failed\n"))?;
     let fb = unsafe {
         vmem::mmap(
             core::ptr::null_mut(),
@@ -271,13 +286,12 @@ fn run() -> Result<(), i32> {
         )
     };
     if fb == vmem::MAP_FAILED {
-        return Err(fail(21, b"wlclient: mmap /dev/fb failed\n"));
+        return Err(failt(tag, 21, b"mmap /dev/fb failed\n"));
     }
 
     // ---- the pool: a memfd this client draws into and shares ----
-    let pool_fd = fs::memfd_create(0).map_err(|_| fail(22, b"wlclient: memfd_create failed\n"))?;
-    fs::truncate(pool_fd, POOL_SIZE as i64)
-        .map_err(|_| fail(23, b"wlclient: ftruncate failed\n"))?;
+    let pool_fd = fs::memfd_create(0).map_err(|_| failt(tag, 22, b"memfd_create failed\n"))?;
+    fs::truncate(pool_fd, POOL_SIZE as i64).map_err(|_| failt(tag, 23, b"ftruncate failed\n"))?;
     let pool = unsafe {
         vmem::mmap(
             core::ptr::null_mut(),
@@ -289,11 +303,9 @@ fn run() -> Result<(), i32> {
         )
     };
     if pool == vmem::MAP_FAILED {
-        return Err(fail(24, b"wlclient: mmap of the pool failed\n"));
+        return Err(failt(tag, 24, b"mmap of the pool failed\n"));
     }
-    for i in 0..(WIDTH * HEIGHT) as usize {
-        unsafe { core::ptr::write_volatile(pool.add(i * 4).cast::<u32>(), COLOR) };
-    }
+    paint(pool)?;
 
     // ---- the protocol ----
     let conn = connect()?;
@@ -325,7 +337,7 @@ fn run() -> Result<(), i32> {
     await_callback(conn, &client, callback, &mut inbuf, &mut chunk)?;
 
     // ---- create the pool, passing the fd by SCM_RIGHTS ----
-    uds::send_fds(conn, &[pool_fd]).map_err(|_| fail(25, b"wlclient: send_fds failed\n"))?;
+    uds::send_fds(conn, &[pool_fd]).map_err(|_| failt(tag, 25, b"send_fds failed\n"))?;
     let pool_obj = send_req(conn, &mut req, |q| client.create_pool(shm, 0, POOL_SIZE, q))?;
     let buffer = send_req(conn, &mut req, |q| {
         client.create_buffer(
@@ -351,16 +363,87 @@ fn run() -> Result<(), i32> {
     // ---- the frame must be on the display ----
     // The server composites at (0,0); the client reads the same device memory
     // back, so this is the whole present path checked end to end.
-    let px = unsafe { core::ptr::read_volatile(fb.cast::<u32>()) };
+    verify(fb.cast::<u32>())?;
+
+    let _ = unsafe { vmem::munmap(pool, POOL_SIZE as usize) };
+    let _ = uds::close_fd(conn);
+    Ok(())
+}
+
+fn run() -> Result<(), i32> {
+    present(b"wlclient: ", paint_square, check_square)
+}
+
+/// The magenta square `/bin/wlclient` draws.
+fn paint_square(pool: *mut u8) -> Result<(), i32> {
+    for i in 0..(WIDTH * HEIGHT) as usize {
+        unsafe { core::ptr::write_volatile(pool.add(i * 4).cast::<u32>(), COLOR) };
+    }
+    Ok(())
+}
+
+fn check_square(fb: *const u32) -> Result<(), i32> {
+    let px = unsafe { core::ptr::read_volatile(fb) };
     if px != COLOR {
         write_err(b"wlclient: framebuffer pixel is 0x");
         print_hex(px);
         write_err(b", wanted 0x00FF00FF\n");
         return Err(fail(26, b"wlclient: the frame did not reach /dev/fb\n"));
     }
+    Ok(())
+}
 
-    let _ = unsafe { vmem::munmap(pool, POOL_SIZE as usize) };
-    let _ = uds::close_fd(conn);
+// ---- /bin/wlgl: the GL present path (§6.10 stage 3d-a) ----
+
+// The triangle renderer, `tools/wlgl_render.c`: surfaceless EGL, a GLES2 triangle
+// into a pbuffer, `glReadPixels`, and the pixels written into `dst` in the
+// `XRGB8888` order the server and the framebuffer both use. Returns 0.
+//
+// The whole GL half is minix-only: `wlgl_render` is a C object linked into the
+// `/bin/wlgl` image by `tools/build-wlgl.py`, so a host build of this crate has
+// no such symbol, and nothing on the host calls `wl_gl` anyway.
+#[cfg(target_os = "minix")]
+unsafe extern "C" {
+    fn wlgl_render(dst: *mut u8, w: i32, h: i32) -> i32;
+}
+
+/// The triangle's centroid pixel and the black of a corner, in the `XRGB8888`
+/// order the pool and the framebuffer share (LE bytes B,G,R,X).
+#[cfg(target_os = "minix")]
+const TRI_RED: u32 = 0x00FF_0000;
+#[cfg(target_os = "minix")]
+const TRI_BLACK: u32 = 0x0000_0000;
+
+#[cfg(target_os = "minix")]
+fn run_gl() -> Result<(), i32> {
+    present(b"wlgl: ", paint_gl, check_triangle)
+}
+
+#[cfg(target_os = "minix")]
+fn paint_gl(pool: *mut u8) -> Result<(), i32> {
+    let rc = unsafe { wlgl_render(pool, WIDTH, HEIGHT) };
+    if rc != 0 {
+        return Err(fail(30, b"wlgl: the GL renderer failed\n"));
+    }
+    Ok(())
+}
+
+/// The composited frame: the triangle's centroid red, a corner black. Read at the
+/// surface's own coordinates, since the server composites at (0,0). Both points are
+/// inside the surface for either row order, so the check does not depend on whether
+/// the pool is scanned top-down or bottom-up.
+#[cfg(target_os = "minix")]
+fn check_triangle(fb: *const u32) -> Result<(), i32> {
+    let centre = unsafe { core::ptr::read_volatile(fb.add(32 * FB_WIDTH + 32)) };
+    let corner = unsafe { core::ptr::read_volatile(fb) };
+    if centre != TRI_RED || corner != TRI_BLACK {
+        write_err(b"wlgl: framebuffer centre is 0x");
+        print_hex(centre);
+        write_err(b", corner 0x");
+        print_hex(corner);
+        write_err(b"\n");
+        return Err(fail(31, b"wlgl: the GL frame did not reach /dev/fb\n"));
+    }
     Ok(())
 }
 
@@ -1824,6 +1907,19 @@ pub fn wl_client(_args: &[&str]) -> i32 {
     match run() {
         Ok(()) => {
             write_out(b"wlclient: PASS\n");
+            0
+        }
+        Err(code) => code,
+    }
+}
+
+/// `/bin/wlgl`: the `3d-a` present path — a GL-rendered surface committed through
+/// the compositor to `/dev/fb`, checked by reading the frame back.
+#[cfg(target_os = "minix")]
+pub fn wl_gl(_args: &[&str]) -> i32 {
+    match run_gl() {
+        Ok(()) => {
+            write_out(b"wlgl: PASS\n");
             0
         }
         Err(code) => code,
