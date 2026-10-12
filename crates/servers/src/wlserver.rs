@@ -204,6 +204,29 @@ mod imp {
         };
     }
 
+    /// Point the fb server's scanout at a caller buffer (`FBIO_SCANOUT_SRC`), or back at its own
+    /// when `len == 0`. Direct to the fb server like `fb_flush`, with the argument in the payload
+    /// rather than a grant: there is no VFS on this path to create one. Returns the reply status:
+    /// a backend that cannot re-back a scanout (bochs) refuses, and the caller blits instead.
+    fn fb_scanout(va: u64, len: u64) -> i64 {
+        let mut msg = Message {
+            m_source: 0,
+            m_type: arch_common::com::CDEV_IOCTL as i32,
+            m_payload: unsafe { core::mem::zeroed() },
+        };
+        msg.m_payload.m2.m2i1 = 0; // minor
+        msg.m_payload.m2.m2i2 = fs::FBIO_SCANOUT_SRC as i32; // request
+        msg.m_payload.m2.m2l2 = va as i64;
+        msg.m_payload.m2.m2l3 = len as i64;
+        unsafe {
+            minix_rt::syscall2(
+                minix_rt::SENDREC_CALL,
+                arch_common::com::FB_PROC_NR as u64,
+                &mut msg as *mut Message as u64,
+            )
+        }
+    }
+
     /// Composite a commit onto the display and present it.
     ///
     /// Only the commit's damage is recomposited (2d): a client that names a small
@@ -244,6 +267,25 @@ mod imp {
         }
         let bytes = unsafe { core::slice::from_raw_parts(src, len) };
         let full = c.buffer();
+        // A commit that covers the whole output and carries no cursor *is* the frame: hand it to
+        // the fb server as the scanout, which presents it without copying anything (§6.10, 3d-b).
+        // A backend that cannot re-back its scanout (bochs) refuses, and the blit below runs.
+        if cursor.is_none() && full.width == XRES as i32 && full.height == YRES as i32 {
+            // Resolve the pool's pages in this process's table before anything resolves them *for*
+            // us: the fb server asks VM for the buffer's frames, and a mapping nobody has touched
+            // has none to give it (the client wrote its own view).
+            let mut touch = 0usize;
+            while touch < len {
+                let _ = unsafe { core::ptr::read_volatile(src.add(touch)) };
+                touch += 4096;
+            }
+            if fb_scanout(src as u64, len as u64) == 0 {
+                let _ = unsafe { vmem::munmap(src, len) };
+                return;
+            }
+        }
+        // Otherwise the frame is composited here, so the scanout has to be the server's own buffer.
+        let _ = fb_scanout(0, 0);
         let mut rejected = false;
         match c.damage {
             // No damage named: take the whole buffer rather than risk staleness.

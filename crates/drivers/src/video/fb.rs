@@ -113,6 +113,15 @@ impl FbDevice {
     }
 }
 
+/// One guest-memory range a scanout's contents live in, as `ATTACH_BACKING` takes them: a
+/// physical base and a length. The caller (a device server) resolves a client's buffer to these;
+/// the driver only programmes them.
+#[derive(Debug, Clone, Copy)]
+pub struct ScanRange {
+    pub pa: u64,
+    pub len: u32,
+}
+
 // IOCTL constants (from `sys/ioc_fb.h`)
 
 pub const FBIOGET_VSCREENINFO: u32 = 0x4600;
@@ -122,6 +131,19 @@ pub const FBIOPAN_DISPLAY: u32 = 0x4603;
 /// Push the framebuffer to the display (no-op on VGA-style devices whose
 /// LFB is always scanned out; virtio-gpu needs an explicit RESOURCE_FLUSH).
 pub const FBIOFLUSH: u32 = 0x4604;
+
+/// Present the calling process's own buffer by making it the scanout. The argument is a
+/// [`FbScanoutSrc`]; a zero length restores the driver's own buffer. Served by the fb server, not
+/// the driver: resolving the caller's buffer needs a page table this driver has not got.
+pub const FBIO_SCANOUT_SRC: u32 = 0x4605;
+
+/// Argument of [`FBIO_SCANOUT_SRC`]: a buffer in the caller's address space, page-aligned.
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct FbScanoutSrc {
+    pub va: u64,
+    pub len: u64,
+}
 
 // Arch trait
 
@@ -153,6 +175,19 @@ pub trait FbArch {
     /// (VGA-style LFBs are scanned out continuously).
     fn flush(&mut self) -> Result<(), DriverError> {
         Ok(())
+    }
+    /// Present guest memory this server does not own — the zero-copy path: re-point the output at
+    /// `ranges`, so the buffer *is* the scanout and presenting it is a flush. The default refuses;
+    /// only a backend whose scanout can be re-backed (virtio-gpu) answers it.
+    fn set_scanout_source(&mut self, ranges: &[ScanRange]) -> Result<(), DriverError> {
+        let _ = ranges;
+        Err(DriverError::Unsupported)
+    }
+    /// Point the output back at the backend's own buffer, after [`set_scanout_source`].
+    ///
+    /// [`set_scanout_source`]: FbArch::set_scanout_source
+    fn clear_scanout_source(&mut self) -> Result<(), DriverError> {
+        Err(DriverError::Unsupported)
     }
 }
 
@@ -822,6 +857,22 @@ impl FbArch for FbBackend {
             FbBackend::Bochs(a) => a.flush(),
             FbBackend::VirtioGpu(a) => a.flush(),
             FbBackend::Canvas(a) => a.flush(),
+        }
+    }
+
+    fn set_scanout_source(&mut self, ranges: &[ScanRange]) -> Result<(), DriverError> {
+        match self {
+            FbBackend::Bochs(a) => a.set_scanout_source(ranges),
+            FbBackend::VirtioGpu(a) => a.set_scanout_source(ranges),
+            FbBackend::Canvas(a) => a.set_scanout_source(ranges),
+        }
+    }
+
+    fn clear_scanout_source(&mut self) -> Result<(), DriverError> {
+        match self {
+            FbBackend::Bochs(a) => a.clear_scanout_source(),
+            FbBackend::VirtioGpu(a) => a.clear_scanout_source(),
+            FbBackend::Canvas(a) => a.clear_scanout_source(),
         }
     }
 }

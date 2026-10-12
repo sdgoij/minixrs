@@ -337,6 +337,13 @@ See `.agents/skills/` for domain deep-dives:
   linking gate is: wasm drives that one and has no `/dev/fb` to map. `arch-tests` runs it on
   every arch, which is what catches a physmap change quietly making every client's `mmap` land
   where the framebuffer is not.
+- **Zero-copy present:** `just test-wlfull-<arch>` boots with a `virtio-gpu` as the *output* and runs
+  `/bin/wlclient full`, a whole-output `wl_shm` client. `/sbin/wlserver` hands the client's buffer to
+  the fb server instead of blitting it, so the scanout *is* the client's memory and the compositor
+  copies nothing; `tools/wlfull_probe.py` checks the display with a QMP screendump and the fb
+  server's `fb: scanout src` line. Because the frame is the client's buffer, `/dev/fb` no longer
+  shows it — which is why this gate screendumps rather than reading the framebuffer back. It needs
+  no GL host.
 - **The C graphics stack:** `just test-gltriangle-<arch>` cross-builds Mesa/libdrm as shared
   objects (`just build-mesa <arch> --build`, or `just fetch-mesa <arch>` for the published
   ones) and boots a surfaceless-EGL client that draws a GLES2 triangle on `softpipe` and

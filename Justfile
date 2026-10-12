@@ -807,6 +807,32 @@ test-wlgl-x86 boot-timeout="60": wlgl-x86 boot-image-x86
     @just _assert-qemu-log target/test-wlgl-x86.log "wlgl: PASS"
     @echo "wlgl: a GL surface rendered on the render node, committed through the compositor, and read back from /dev/fb (x86_64)"
 
+# The 3d-b gate: a whole-output `wl_shm` client is presented by re-pointing the scanout at its own
+# buffer, so the compositor copies nothing (§6.10). `/dev/fb` no longer holds the frame (the frame
+# *is* the client's pool), so tools/wlfull_probe.py checks the display with a QMP screendump and the
+# fb server's `fb: scanout src` line. On x86 the output device is a `virtio-gpu`, not `bochs`: the
+# re-point is a virtio-gpu capability (D11); on riscv64/aarch64 the `virtio-gpu` is already the
+# output, so only the full-output client is new.
+test-wlfull arch="x86":
+    @just test-wlfull-{{arch}}
+
+test-wlfull-x86: build-x86
+    mkdir -p target/images/x86_64-pc-minix
+    cp target/trampoline.elf target/images/x86_64-pc-minix/minix-x86.elf
+    @just _assert-qemu-version qemu-system-x86_64
+    python tools/wlfull_probe.py qemu-system-x86_64 -nographic -monitor none -display none -vga none -device virtio-gpu-pci -m 256M -no-reboot -qmp tcp:127.0.0.1:4447,server=on,wait=off -kernel target/images/x86_64-pc-minix/minix-x86.elf -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0
+    @echo "wlfull: a whole-output wl_shm frame was scanned out of the client's own buffer (x86_64)"
+
+test-wlfull-riscv64: system-image-riscv64
+    @just _assert-qemu-version qemu-system-riscv64
+    python tools/wlfull_probe.py qemu-system-riscv64 -machine virt -m 256M -nographic -monitor none -display none -global virtio-mmio.force-legacy=off -drive if=none,id=disk0,file=target/images/riscv64gc-unknown-minix/disk.img,format=raw,cache=writethrough -device virtio-blk-device,drive=disk0 -netdev user,id=net0 -device virtio-net-device,netdev=net0 -device virtio-gpu-device -device virtio-keyboard-device -kernel target/images/riscv64gc-unknown-minix/minix-riscv64-boot.elf -qmp tcp:127.0.0.1:4447,server=on,wait=off
+    @echo "wlfull: a whole-output wl_shm frame was scanned out of the client's own buffer (riscv64)"
+
+test-wlfull-aarch64: system-image-aarch64
+    @just _assert-qemu-version qemu-system-aarch64
+    python tools/wlfull_probe.py qemu-system-aarch64 -machine virt -cpu cortex-a57 -m 256M -nographic -monitor none -display none -no-reboot -global virtio-mmio.force-legacy=off -drive if=none,id=disk0,file=target/images/aarch64-unknown-minix/disk.img,format=raw,cache=writethrough -device virtio-blk-device,drive=disk0 -netdev user,id=net0 -device virtio-net-device,netdev=net0 -device virtio-gpu-device -device virtio-keyboard-device -kernel target/images/aarch64-unknown-minix/minix-aarch64-boot.elf -qmp tcp:127.0.0.1:4447,server=on,wait=off
+    @echo "wlfull: a whole-output wl_shm frame was scanned out of the client's own buffer (aarch64)"
+
 test-gltriangle-riscv64 boot-timeout="180": gltriangle-riscv64 boot-image-riscv64
     @just _assert-qemu-version qemu-system-riscv64
     M=target/mesa/riscv64; E="/lib/libdrm.so.2=$M/lib/libdrm.so.2;/lib/libEGL.so.1=$M/lib/libEGL.so.1;/lib/libexpat.so.1=$M/lib/libexpat.so.1;/lib/libgallium-25.3.6.so=$M/lib/libgallium-25.3.6.so;/lib/libGLESv2.so.2=$M/lib/libGLESv2.so.2;/lib/libz.so.1=$M/lib/libz.so.1;/lib/swrast_dri.so=$M/lib/swrast_dri.so;/bin/gltriangle=$M/bin/gltriangle"; MINIXFS_EXTRA="$E" MINIXFS_BLOCKS=16384 cargo run -q -p boot-image --bin mkminixfs --release -- riscv64

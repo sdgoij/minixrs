@@ -26,8 +26,6 @@ const SOCK_PATH: &[u8] = b"/run/wayland-0";
 /// mode the port has (the smallest is 1024x768).
 const WIDTH: i32 = 64;
 const HEIGHT: i32 = 64;
-const STRIDE: i32 = WIDTH * 4;
-const POOL_SIZE: i32 = STRIDE * HEIGHT;
 
 /// XRGB8888 magenta (LE bytes B,G,R,0 = FF,00,FF,00) — distinctive enough that a
 /// framebuffer pixel equal to it is this frame and not a leftover.
@@ -269,9 +267,13 @@ fn await_release(
 /// renders with GL, and both commit through the server and check `/dev/fb`.
 fn present(
     tag: &[u8],
-    paint: impl FnOnce(*mut u8) -> Result<(), i32>,
+    width: i32,
+    height: i32,
+    paint: impl FnOnce(*mut u8, i32, i32) -> Result<(), i32>,
     verify: impl Fn(*const u32) -> Result<(), i32>,
 ) -> Result<(), i32> {
+    let stride = width * 4;
+    let pool_size = stride * height;
     // ---- map the framebuffer so the frame can be read back ----
     let fb_fd = unsafe { fs::open(b"/dev/fb", fs::O_RDWR, 0) }
         .map_err(|_| failt(tag, 20, b"open /dev/fb failed\n"))?;
@@ -291,11 +293,11 @@ fn present(
 
     // ---- the pool: a memfd this client draws into and shares ----
     let pool_fd = fs::memfd_create(0).map_err(|_| failt(tag, 22, b"memfd_create failed\n"))?;
-    fs::truncate(pool_fd, POOL_SIZE as i64).map_err(|_| failt(tag, 23, b"ftruncate failed\n"))?;
+    fs::truncate(pool_fd, pool_size as i64).map_err(|_| failt(tag, 23, b"ftruncate failed\n"))?;
     let pool = unsafe {
         vmem::mmap(
             core::ptr::null_mut(),
-            POOL_SIZE as usize,
+            pool_size as usize,
             vmem::PROT_READ | vmem::PROT_WRITE,
             vmem::MAP_SHARED,
             pool_fd,
@@ -305,7 +307,7 @@ fn present(
     if pool == vmem::MAP_FAILED {
         return Err(failt(tag, 24, b"mmap of the pool failed\n"));
     }
-    paint(pool)?;
+    paint(pool, width, height)?;
 
     // ---- the protocol ----
     let conn = connect()?;
@@ -338,14 +340,14 @@ fn present(
 
     // ---- create the pool, passing the fd by SCM_RIGHTS ----
     uds::send_fds(conn, &[pool_fd]).map_err(|_| failt(tag, 25, b"send_fds failed\n"))?;
-    let pool_obj = send_req(conn, &mut req, |q| client.create_pool(shm, 0, POOL_SIZE, q))?;
+    let pool_obj = send_req(conn, &mut req, |q| client.create_pool(shm, 0, pool_size, q))?;
     let buffer = send_req(conn, &mut req, |q| {
         client.create_buffer(
             pool_obj,
             0,
-            WIDTH,
-            HEIGHT,
-            STRIDE,
+            width,
+            height,
+            stride,
             protocol::WL_SHM_FORMAT_ARGB8888,
             q,
         )
@@ -354,7 +356,7 @@ fn present(
     // ---- present: attach, damage, commit ----
     send_req(conn, &mut req, |q| client.attach(surface, buffer, 0, 0, q))?;
     send_req(conn, &mut req, |q| {
-        client.damage(surface, 0, 0, WIDTH, HEIGHT, q)
+        client.damage(surface, 0, 0, width, height, q)
     })?;
     send_req(conn, &mut req, |q| client.commit(surface, q))?;
 
@@ -365,20 +367,39 @@ fn present(
     // back, so this is the whole present path checked end to end.
     verify(fb.cast::<u32>())?;
 
-    let _ = unsafe { vmem::munmap(pool, POOL_SIZE as usize) };
+    let _ = unsafe { vmem::munmap(pool, pool_size as usize) };
     let _ = uds::close_fd(conn);
     Ok(())
 }
 
 fn run() -> Result<(), i32> {
-    present(b"wlclient: ", paint_square, check_square)
+    present(b"wlclient: ", WIDTH, HEIGHT, paint_square, check_square)
 }
 
-/// The magenta square `/bin/wlclient` draws.
-fn paint_square(pool: *mut u8) -> Result<(), i32> {
-    for i in 0..(WIDTH * HEIGHT) as usize {
+/// The whole-output client (`/bin/wlclient full`): a pool the size of the output, so the server
+/// can scan it out instead of blitting it (§6.10, 3d-b). There is nothing to read back — the frame
+/// *is* the pool now — so the display is checked from the host, not here.
+fn run_full() -> Result<(), i32> {
+    present(
+        b"wlclient: ",
+        FB_WIDTH as i32,
+        FB_HEIGHT as i32,
+        paint_square,
+        check_none,
+    )
+}
+
+/// Fill the whole pool with the frame colour.
+fn paint_square(pool: *mut u8, width: i32, height: i32) -> Result<(), i32> {
+    for i in 0..(width * height) as usize {
         unsafe { core::ptr::write_volatile(pool.add(i * 4).cast::<u32>(), COLOR) };
     }
+    Ok(())
+}
+
+/// No read-back: used when the frame is the scanout itself, so `/dev/fb` holds the server's own
+/// buffer rather than the frame.
+fn check_none(_fb: *const u32) -> Result<(), i32> {
     Ok(())
 }
 
@@ -416,12 +437,12 @@ const TRI_BLACK: u32 = 0x0000_0000;
 
 #[cfg(target_os = "minix")]
 fn run_gl() -> Result<(), i32> {
-    present(b"wlgl: ", paint_gl, check_triangle)
+    present(b"wlgl: ", WIDTH, HEIGHT, paint_gl, check_triangle)
 }
 
 #[cfg(target_os = "minix")]
-fn paint_gl(pool: *mut u8) -> Result<(), i32> {
-    let rc = unsafe { wlgl_render(pool, WIDTH, HEIGHT) };
+fn paint_gl(pool: *mut u8, width: i32, height: i32) -> Result<(), i32> {
+    let rc = unsafe { wlgl_render(pool, width, height) };
     if rc != 0 {
         return Err(fail(30, b"wlgl: the GL renderer failed\n"));
     }
@@ -1903,8 +1924,13 @@ fn await_decoration(
 }
 
 /// Run the client: `PASS` on success, otherwise the failing step's code.
-pub fn wl_client(_args: &[&str]) -> i32 {
-    match run() {
+pub fn wl_client(args: &[&str]) -> i32 {
+    let result = if args.get(1).copied() == Some("full") {
+        run_full()
+    } else {
+        run()
+    };
+    match result {
         Ok(()) => {
             write_out(b"wlclient: PASS\n");
             0

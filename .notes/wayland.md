@@ -1,10 +1,10 @@
 # Wayland on minixrs — design proposal and gap analysis
 
-Status: **Phases 0–2 landed, and Phase 3 through stage 3d-a on x86_64, with
+Status: **Phases 0–2 landed, and Phase 3 through stage 3d-b-1, with
 the softpipe triangle (3c-2) on all three arches.** The loader support it
 depends on has landed (dynamic linking, `dlopen`, multi-module TLS, an 18-object
 budget — §6.9). §7 carries the per-phase state; what remains is Phase 2's
-multi-output, stage 3d-b (designed in §6.10, not yet built), and Phases 4–5. The softpipe triangle
+multi-output, stage 3d-b-2..5 (3d-b-1 landed in §6.10), and Phases 4–5. The softpipe triangle
 (3c-2) passes `just test-gltriangle-<arch>` on x86_64, riscv64 and aarch64 — EGL
 1.5 / GLES 3.1 on `softpipe`, a red centroid over a black corner — the virgl
 triangle (3c-3) passes `just test-gltriangle-virgl-x86` on the render node
@@ -811,7 +811,7 @@ Each stage has a gate that can be run without the next stage existing.
 | **3b** | **Landed** (`just test-drmmap-x86`, `just test-drmgl-x86`). The `virtgpu` DRM node (`crates/drivers/src/video/drm.rs`): `/dev/dri/renderD128`, GEM, `GETPARAM`/`CONTEXT_INIT`/`RESOURCE_CREATE(_BLOB)`/`EXECBUFFER`/`MAP_BLOB`/`WAIT`, `mmap` of a blob | A **hand-written C program** (not Mesa) does ctx-create → create blob → map → exec → wait → read the result. This is the stage that isolates "our DRM ABI" from "Mesa's bugs". |
 | **3c** | **Landed** (`just test-gltriangle-<arch>` under softpipe; `just test-gltriangle-virgl-x86` on the render node). `libdrm` + Mesa (`virgl`) as DSOs; EGL surfaceless; a triangle into an FBO; readback | The triangle reads back red-on-black in QEMU, and the **same program** also runs under the software driver as a cross-check — if the software path works and virgl does not, the bug is ours, not Mesa's |
 | **3d-a** | **Landed** (`just test-wlgl-x86`). A GL surface committed through the in-house compositor: `/bin/wlgl` renders the triangle with Mesa on the render node, hands the pool to `/sbin/wlserver` as a `wl_shm` surface, and reads the composited frame back from `/dev/fb`. `/bin/wlgl` is the tree's first *dynamically linked Rust* program — a static image has no loader to bring Mesa's DSOs in with. | The compositor composes a GL surface and the frame reaches `/dev/fb` (read back red-on-black, `GL_RENDERER=virgl`) |
-| **3d-b** | **Designed** (*3d-b — the zero-readback present path*, below). dmabuf/GBM, or a zero-readback present path; the renderer wired into the output backend so presenting does not copy through the CPU. Five stages, `3d-b-1` (the scan-out present path) first | The frame reaches the display without a full CPU readback |
+| **3d-b** | **3d-b-1 landed** (`just test-wlfull-<arch>`); designed below (*3d-b — the zero-readback present path*). The scan-out present path re-backs the output with the client's own buffer, so the compositor copies nothing. **Open:** 3d-b-2..5 (PRIME, `libgbm`, `linux-dmabuf`, GPU composition) | The frame reaches the display without a full CPU readback |
 
 **3a and 3b are the two that must be done carefully.** 3c is mostly a porting
 exercise; 3d is where the design can still change.
@@ -1157,7 +1157,7 @@ and a plane layout, and is what smithay's `gbm` renderer binds in Phase 4.
 
 | Stage | Deliverable | Gate |
 |---|---|---|
-| **3d-b-1** | **The scan-out present path** — the `Output` abstraction (§6.5) and the `/dev/fb` operation of D10; the compositor scans out a full-output buffer instead of blitting it. | On riscv64/aarch64 a full-screen `wl_shm` client's frame is scanned out with no CPU copy (a host screendump), and x86 is untouched |
+| **3d-b-1** | **Landed** (`just test-wlfull-<arch>`). The scan-out present path: the fb server gains `FBIO_SCANOUT_SRC` (the compositor names its buffer, the server resolves the frames through VM and re-points the scanout), and `wlserver` hands over any full-output, cursor-free commit instead of blitting it. | A whole-output `wl_shm` client's frame is scanned out with no CPU copy — the display shows it (a host screendump) and the fb server reports `fb: scanout src` — on x86_64, riscv64 and aarch64 |
 | **3d-b-2** | **`PRIME` on the render node** — `HANDLE_TO_FD`/`FD_TO_HANDLE` over the object table, and `DRM_CAP_PRIME` reporting it. Settles what backs an exportable object. | A hand-written C probe exports an object to an fd, imports it back, and the bytes survive |
 | **3d-b-3** | **`libgbm`** — built (`-Dgbm=disabled` → `enabled`) over the node, with whatever `gbm_create_device` asks for read out of `libgbm` (3c's method). | `gbm_bo_create`/`gbm_bo_get_fd` round-trip a BO through the node |
 | **3d-b-4** | **`zwp_linux_dmabuf_v1`** in `crates/wayland`, the server and the client — the client hands over a dma-buf, the compositor imports it and scans it out on the same device. | The virgl triangle reaches a `virtio-gpu` output by scan-out, with no `TRANSFER` and no memcpy |
@@ -1168,6 +1168,14 @@ boundary, so **D12's fence is the real risk**, not the plumbing. And the `wl_shm
 path has to keep working throughout: a compositor that speaks only `linux-dmabuf` (or
 only scan-out) breaks every client with nothing to scan out, which is every client on a
 `bochs` output.
+
+3d-b-1 met one trap worth recording. **A shared mapping the compositor has not touched has no
+frames for the fb server to resolve** — it read physical 0, and on riscv64 that is below RAM, so
+the host refused the backing (`fb: scanout src refused: device-io`, while the same code worked on
+x86_64 where physical 0 *is* RAM). Faulting the pool in before the handoff fixed it; the general
+form is that a process must have resolved its own pages before asking another to present them.
+`VM_GETPHYS`'s 32-bit, one-page-per-call shape is a known limit (`KNOWN_ISSUES` 41) worked around
+here, not retired.
 
 ### 6.11 Phase 1 — the in-house Wayland server
 
@@ -1466,7 +1474,7 @@ alone gives it a window but hands it keycodes it cannot turn into text.
 | **0** | AF_UNIX server + `socketpair` + `sendmsg`/`recvmsg` + `SCM_RIGHTS`/`SO_PEERCRED`; native `poll`/`epoll`/`eventfd`/`timerfd`; `memfd_create` + `ftruncate` + anonymous shared frames; `mprotect`; `select` timeouts. **Landed:** sockets + fd passing (`test-uds-x86`), memfd (`test-memfd-x86`), `mprotect`, `select`/native `poll` with real deadlines (`test-select-x86`), `eventfd` (`test-eventfd-x86`), `timerfd` (`test-timerfd-x86`), `epoll` (`test-epoll-x86`). **Open:** none. | Two processes connect over the socket and **pass an fd**; a third `epoll_wait`s on it. Host + QEMU test |
 | **1** | In-house Wayland server, scoped in **§6.11**. **Landed:** 1a — the wire/interface crate and the registry + `sync` handshake over `/dev/uds` (`test-wayland-x86`); 1b — the `wl_shm` present path: `/sbin/wlserver` (boot proc 20) maps `/dev/fb`, `/bin/wlclient` draws into a memfd pool and commits a surface, and the frame is read back from `/dev/fb` (`test-wlshm-x86`); 1c — input: `wl_seat` keyboard/pointer, focus and `enter`, and a key routed from the device to a client (`test-wlkey-x86`), over an input-server ring that keeps a cursor per consumer and a terminal readiness path that reports instead of pushing (`KNOWN_ISSUES` 36, `test-pty-x86`). **Open:** none. | A `wl_shm` client renders through the server to `/dev/fb`, driven by a QEMU smoke scenario (same shape as `tools/smoke/`); a **ported stock** client later, on the same protocol |
 | **2** | `xdg_shell`, decorations, `layer_shell`, popups, damage tracking, cursor, keymaps, multi-output — scoped in **§6.12**. **Landed:** 2a — the seat's keymap, compiled into `wlserver` and served over an fd (`test-wlkey-x86`); 2b — `xdg_shell`: `xdg_wm_base`/`xdg_surface`/`xdg_toplevel`, `configure`/`ack_configure`, `ping`/`pong`, and a toplevel presented at the configured size (`test-wlx-x86`); 2c — several clients at once and per-surface focus, with input routed to the focused connection (`test-wlfocus-x86`); 2d — damage tracking, so only the damaged rectangle is recomposited, and the pointer's cursor image (`test-wlxd-x86`); 2e — popups, `zwlr_layer_shell_v1` and client-side decorations (`test-wlxe-x86`). **Open:** multi-output. | A real toolkit client runs a window with chrome and input |
-| **3** | GL rendering, scoped in **§6.10** — virgl over `virtio-gpu` first: 3D transport, a `virtgpu` render node, Mesa + `libdrm` as DSOs; llvmpipe kept as the fallback. **Landed:** 3a — the 3D transport and virgl negotiation (`test-gpu3d-x86`, `test-gpu3d-nogl-x86`); 3b — the `/dev/dri/renderD128` node: GEM, contexts, blobs, transfers, submits, `WAIT` and `mmap` (`test-drmmap-x86`, `test-drmgl-x86`); 3c's build half — Mesa builds with the `virgl` gallium driver and the C socket cmsg surface is in `minix-libc` (3c-3a). **Landed:** 3c-3 — the virgl triangle on the render node (`just test-gltriangle-virgl-x86`, `GL_RENDERER=virgl`); 3d-a — a GL surface through the in-house compositor (`just test-wlgl-x86`). **Designed:** 3d-b — the zero-readback present path (§6.10), five stages, not yet built. | The compositor renders GL content |
+| **3** | GL rendering, scoped in **§6.10** — virgl over `virtio-gpu` first: 3D transport, a `virtgpu` render node, Mesa + `libdrm` as DSOs; llvmpipe kept as the fallback. **Landed:** 3a — the 3D transport and virgl negotiation (`test-gpu3d-x86`, `test-gpu3d-nogl-x86`); 3b — the `/dev/dri/renderD128` node: GEM, contexts, blobs, transfers, submits, `WAIT` and `mmap` (`test-drmmap-x86`, `test-drmgl-x86`); 3c's build half — Mesa builds with the `virgl` gallium driver and the C socket cmsg surface is in `minix-libc` (3c-3a). **Landed:** 3c-3 — the virgl triangle on the render node (`just test-gltriangle-virgl-x86`, `GL_RENDERER=virgl`); 3d-a — a GL surface through the in-house compositor (`just test-wlgl-x86`). **Landed:** 3d-b-1 — the scan-out present path, a whole-output `wl_shm` frame presented out of the client's own buffer with no CPU copy (`just test-wlfull-<arch>`, x86_64/riscv64/aarch64). **Open:** 3d-b-2..5 (PRIME, `libgbm`, `linux-dmabuf`, GPU composition, §6.10). | The compositor renders GL content |
 | **4** | smithay port; `cosmic-comp` against our backends; `cosmic-session` + D-Bus | `cosmic-comp` on screen; a `libcosmic` app connects |
 | **5** | Portals, fonts, the `libcosmic` suite | A usable session |
 

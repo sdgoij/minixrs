@@ -19,7 +19,7 @@ use crate::bus::virtio::{self, VirtioDevice, VirtioPhysBuf};
 use crate::video::drm;
 use crate::video::fb::{
     BOCHS_DEFAULT_XRES, BOCHS_DEFAULT_YRES, FbArch, FbBitfield, FbDevice, FbFixScreeninfo,
-    FbVarScreeninfo,
+    FbVarScreeninfo, ScanRange,
 };
 use core::cell::UnsafeCell;
 
@@ -243,6 +243,11 @@ static PROBE_BUF: ProbeBufCell = ProbeBufCell::new();
 
 /// Resource ID of the single scanout resource this backend manages.
 const RESOURCE_ID: u32 = 1;
+
+/// The resource a scanout of a *client's* buffer is made with, when the output is re-pointed at
+/// guest memory this process does not own ([`FbArch::set_scanout_source`]). A virtio-gpu resource
+/// takes its backing once, so a new source replaces this one rather than re-attaching.
+const EXT_SCANOUT_RESOURCE_ID: u32 = 2;
 
 /// Framebuffer geometry (matches `BOCHS_DEFAULT_XRES`/`YRES`, which the
 /// wserver/fbterm hardcode).
@@ -653,6 +658,32 @@ pub struct VirtioGpuArch {
     /// Response type of the last command, so a caller can say *why* one did not
     /// answer as expected (0 = nothing arrived before the spin budget).
     pub last_response: u32,
+    /// The resource scanout 0 currently shows: the driver's own buffer, or the client's after
+    /// [`VirtioGpuArch::set_scanout_source`] re-pointed it.
+    scanout_resource: u32,
+    /// Whether `EXT_SCANOUT_RESOURCE_ID` exists and is backed. A resource is created with its
+    /// backing, so a new source replaces it instead of re-attaching.
+    ext_resource: bool,
+}
+
+/// Build `RESOURCE_ATTACH_BACKING` with one entry per range into `out`, returning its length, or
+/// `None` when there are no ranges or they do not fit. Free-standing so the layout is
+/// host-testable, and because the entry count varies with the buffer.
+fn attach_backing_bytes(resource_id: u32, ranges: &[ScanRange], out: &mut [u8]) -> Option<usize> {
+    let need = 32 + ranges.len() * 16;
+    if ranges.is_empty() || need > out.len() {
+        return None;
+    }
+    out[..need].fill(0);
+    out[0..4].copy_from_slice(&CMD_RESOURCE_ATTACH_BACKING.to_le_bytes());
+    out[24..28].copy_from_slice(&resource_id.to_le_bytes());
+    out[28..32].copy_from_slice(&(ranges.len() as u32).to_le_bytes());
+    for (i, r) in ranges.iter().enumerate() {
+        let o = 32 + i * 16;
+        out[o..o + 8].copy_from_slice(&r.pa.to_le_bytes());
+        out[o + 8..o + 12].copy_from_slice(&r.len.to_le_bytes());
+    }
+    Some(need)
 }
 
 impl VirtioGpuArch {
@@ -665,6 +696,8 @@ impl VirtioGpuArch {
             initialized: false,
             vdev: None,
             last_response: 0,
+            scanout_resource: RESOURCE_ID,
+            ext_resource: false,
         }
     }
 
@@ -683,13 +716,23 @@ impl VirtioGpuArch {
             return Err(DriverError::InvalidArgument);
         }
         cmd_slot[..cmd.len()].copy_from_slice(cmd);
+        self.submit_slot(cmd.len())
+    }
+
+    /// Submit the first `len` bytes of the command slot as they already stand — for a command
+    /// whose body is built in place because its size varies, an `ATTACH_BACKING` entry list.
+    fn submit_slot(&mut self, len: usize) -> Result<(u32, u32), DriverError> {
+        let cmd_slot: &mut [u8; CMD_BUF_LEN] = unsafe { &mut *GPU_CMD.get() };
+        if len > cmd_slot.len() {
+            return Err(DriverError::InvalidArgument);
+        }
         let cmd_addr = cmd_slot.as_ptr() as u64;
         let resp_addr = GPU_RESP.get() as u64;
         let dev = self.vdev.as_mut().ok_or(DriverError::NotFound)?;
         let bufs = [
             VirtioPhysBuf {
                 addr: cmd_addr,
-                size: cmd.len() as u32,
+                size: len as u32,
                 writable: false,
             },
             VirtioPhysBuf {
@@ -712,6 +755,14 @@ impl VirtioGpuArch {
         };
         self.last_response = self.resp_u32(0);
         Ok((self.last_response, used_len))
+    }
+
+    /// Submit the command slot, built in place by a free function, and require `NODATA`.
+    fn send_cmd_slot(&mut self, len: usize) -> Result<(), DriverError> {
+        match self.submit_slot(len)? {
+            (RESP_OK_NODATA, _) => Ok(()),
+            (rtype, _) => Err(resp_error(rtype)),
+        }
     }
 
     /// Submit `cmd` and require the `NODATA` acknowledgement.
@@ -868,6 +919,53 @@ impl VirtioGpuArch {
                 length: len,
                 padding: 0,
             }],
+        };
+        self.send_cmd(struct_bytes(&cmd))
+    }
+
+    /// `RESOURCE_ATTACH_BACKING` with one entry per range. The entry count is the buffer's page
+    /// count — a 1024×768 frame is 768 — so the body is built in the command slot rather than in
+    /// a fixed-size struct: at 16 bytes an entry it reaches ~1000 within the slot's 16 KiB.
+    fn attach_backing_ranges(
+        &mut self,
+        resource_id: u32,
+        ranges: &[ScanRange],
+    ) -> Result<(), DriverError> {
+        let slot: &mut [u8; CMD_BUF_LEN] = unsafe { &mut *GPU_CMD.get() };
+        let need = attach_backing_bytes(resource_id, ranges, &mut slot[..])
+            .ok_or(DriverError::InvalidArgument)?;
+        self.send_cmd_slot(need)
+    }
+
+    /// `SET_SCANOUT` at scanout 0, pointing it at `resource_id`.
+    fn set_scanout_resource(&mut self, resource_id: u32) -> Result<(), DriverError> {
+        let cmd = SetScanout {
+            hdr: CtrlHdr::new(CMD_SET_SCANOUT),
+            r: Rect {
+                x: 0,
+                y: 0,
+                width: XRES,
+                height: YRES,
+            },
+            scanout_id: 0,
+            resource_id,
+        };
+        self.send_cmd(struct_bytes(&cmd))
+    }
+
+    /// `RESOURCE_FLUSH` of `resource_id` alone: a resource whose contents *are* guest memory needs
+    /// no transfer, only a nudge for the host to re-read the scanout from it.
+    fn flush_resource(&mut self, resource_id: u32) -> Result<(), DriverError> {
+        let cmd = ResourceFlush {
+            hdr: CtrlHdr::new(CMD_RESOURCE_FLUSH),
+            r: Rect {
+                x: 0,
+                y: 0,
+                width: XRES,
+                height: YRES,
+            },
+            resource_id,
+            padding: 0,
         };
         self.send_cmd(struct_bytes(&cmd))
     }
@@ -1923,6 +2021,52 @@ impl FbArch for VirtioGpuArch {
     }
 
     fn flush(&mut self) -> Result<(), DriverError> {
+        if self.scanout_resource == EXT_SCANOUT_RESOURCE_ID {
+            // The scanout is the client's own memory: only the host's re-read is owed, and a
+            // TRANSFER would copy guest memory onto itself.
+            self.flush_resource(EXT_SCANOUT_RESOURCE_ID)
+        } else {
+            self.flush_inner()
+        }
+    }
+
+    /// Present guest memory this process does not own: create a 2D resource backed by `ranges` and
+    /// point scanout 0 at it. The scanout then *is* the buffer, so presenting it is a flush — no
+    /// transfer and no blit. The ranges are the caller's to translate (a device server has no page
+    /// tables of its own to walk for another process's buffer).
+    fn set_scanout_source(&mut self, ranges: &[ScanRange]) -> Result<(), DriverError> {
+        if !self.initialized {
+            return Err(DriverError::NotFound);
+        }
+        if self.ext_resource {
+            self.resource_unref(EXT_SCANOUT_RESOURCE_ID)?;
+            self.ext_resource = false;
+        }
+        self.resource_create_2d(
+            EXT_SCANOUT_RESOURCE_ID,
+            VIRTIO_GPU_FORMAT_B8G8R8X8,
+            XRES,
+            YRES,
+        )?;
+        self.attach_backing_ranges(EXT_SCANOUT_RESOURCE_ID, ranges)?;
+        self.set_scanout_resource(EXT_SCANOUT_RESOURCE_ID)?;
+        self.ext_resource = true;
+        self.scanout_resource = EXT_SCANOUT_RESOURCE_ID;
+        self.flush_resource(EXT_SCANOUT_RESOURCE_ID)
+    }
+
+    /// Point the output back at the driver's own buffer and drop the external resource.
+    fn clear_scanout_source(&mut self) -> Result<(), DriverError> {
+        if !self.initialized {
+            return Err(DriverError::NotFound);
+        }
+        if !self.ext_resource {
+            return Ok(());
+        }
+        self.set_scanout_resource(RESOURCE_ID)?;
+        self.resource_unref(EXT_SCANOUT_RESOURCE_ID)?;
+        self.ext_resource = false;
+        self.scanout_resource = RESOURCE_ID;
         self.flush_inner()
     }
 }
@@ -1998,6 +2142,51 @@ mod tests {
         );
         assert_eq!(u32::from_le_bytes(bytes[32..36].try_into().unwrap()), 1024);
         assert_eq!(u32::from_le_bytes(bytes[36..40].try_into().unwrap()), 768);
+    }
+
+    #[test]
+    fn attach_backing_ranges_lays_entries_after_the_body() {
+        let ranges = [
+            ScanRange {
+                pa: 0x1000_0000,
+                len: 4096,
+            },
+            ScanRange {
+                pa: 0x2000_0000,
+                len: 8192,
+            },
+            ScanRange {
+                pa: 0x3000_0000,
+                len: 4096,
+            },
+        ];
+        let mut out = [0u8; 128];
+        let n = attach_backing_bytes(7, &ranges, &mut out).unwrap();
+        assert_eq!(n, 32 + 3 * 16);
+        assert_eq!(
+            u32::from_le_bytes(out[0..4].try_into().unwrap()),
+            CMD_RESOURCE_ATTACH_BACKING
+        );
+        assert_eq!(u32::from_le_bytes(out[24..28].try_into().unwrap()), 7);
+        assert_eq!(u32::from_le_bytes(out[28..32].try_into().unwrap()), 3);
+        // Entries begin at 32 and are 16 bytes each: addr u64, length u32, padding u32.
+        assert_eq!(
+            u64::from_le_bytes(out[32..40].try_into().unwrap()),
+            0x1000_0000
+        );
+        assert_eq!(u32::from_le_bytes(out[40..44].try_into().unwrap()), 4096);
+        assert_eq!(
+            u64::from_le_bytes(out[48..56].try_into().unwrap()),
+            0x2000_0000
+        );
+        assert_eq!(u32::from_le_bytes(out[56..60].try_into().unwrap()), 8192);
+        assert_eq!(
+            u64::from_le_bytes(out[64..72].try_into().unwrap()),
+            0x3000_0000
+        );
+        // No ranges, or one that does not fit the buffer, is refused rather than truncated.
+        assert!(attach_backing_bytes(1, &[], &mut out).is_none());
+        assert!(attach_backing_bytes(1, &ranges, &mut out[..40]).is_none());
     }
 
     #[test]

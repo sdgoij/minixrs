@@ -21,8 +21,8 @@ use drivers::video::fb::CanvasArch;
 #[cfg(not(target_arch = "wasm32"))]
 use drivers::video::fb::VirtioGpuArch;
 use drivers::video::fb::{
-    FBIOFLUSH, FBIOGET_FSCREENINFO, FBIOGET_VSCREENINFO, FBIOPAN_DISPLAY, FBIOPUT_VSCREENINFO,
-    FbArch, FbBackend, Framebuffer,
+    FBIO_SCANOUT_SRC, FBIOFLUSH, FBIOGET_FSCREENINFO, FBIOGET_VSCREENINFO, FBIOPAN_DISPLAY,
+    FBIOPUT_VSCREENINFO, FbArch, FbBackend, FbScanoutSrc, Framebuffer, ScanRange,
 };
 
 /// Global driver state — one backend + one driver instance (no heap).
@@ -56,6 +56,43 @@ static FB_BUF: FbBufCell = FbBufCell::new();
 
 /// Scratch space for ioctl arg structs and inline write data.
 static mut FB_SCRATCH: [u8; 128] = [0; 128];
+
+/// Page size for resolving a client buffer to frames.
+#[cfg(all(target_os = "minix", not(target_arch = "wasm32")))]
+const SCANOUT_PAGE: u64 = 4096;
+
+/// The most ranges one `ATTACH_BACKING` carries — the driver's own ceiling, its 16 KiB command
+/// slot at 16 bytes an entry. A 1024×768 frame at 4 KiB pages is 768 of them.
+#[cfg(all(target_os = "minix", not(target_arch = "wasm32")))]
+const MAX_SCANOUT_RANGES: usize = 1024;
+
+/// The buffer scanout 0 currently shows when it is a client's: `(endpoint, va, len)`, or a zero
+/// endpoint for the driver's own. Re-pointing the scanout resolves every page through VM, so a
+/// repeat commit of the same buffer only owes a flush.
+#[cfg(all(target_os = "minix", not(target_arch = "wasm32")))]
+static mut FB_SCANOUT_SRC: (i32, u64, u64) = (0, 0, 0);
+
+/// Ranges for one scanout re-point, in BSS because a frame's page count is a runtime number.
+#[cfg(all(target_os = "minix", not(target_arch = "wasm32")))]
+static mut FB_SCANOUT_RANGES: [ScanRange; MAX_SCANOUT_RANGES] =
+    [ScanRange { pa: 0, len: 0 }; MAX_SCANOUT_RANGES];
+
+/// `true` once a refused re-point has been reported, so the status line is not per-frame.
+#[cfg(all(target_os = "minix", not(target_arch = "wasm32")))]
+static mut FB_SCANOUT_REFUSED: bool = false;
+
+/// Report a refused scanout re-point once, with the class of failure: a fast path that silently
+/// declines is worth a line, and not one per frame.
+#[cfg(all(target_os = "minix", not(target_arch = "wasm32")))]
+fn scanout_refused(why: &[u8]) {
+    let reported = unsafe { &mut *core::ptr::addr_of_mut!(FB_SCANOUT_REFUSED) };
+    if !*reported {
+        *reported = true;
+        slog(b"fb: scanout src refused: ");
+        slog(why);
+        slog(b"\n");
+    }
+}
 
 /// The backing the render node's memory objects come from (`.notes/wayland.md` §6.10, stage 3b-3).
 ///
@@ -607,6 +644,16 @@ unsafe fn handle_cdev_request(
         }
         CDEV_IOCTL => {
             let request = unsafe { msg.m_payload.m2.m2i2 as u32 };
+            // FBIO_SCANOUT_SRC: the compositor sends this one straight here (it cannot afford a
+            // VFS round trip, §6.11), so its argument rides in the payload — m2l2 = the buffer's
+            // VA, m2l3 = its length — and the caller is the sender, not a grant's holder.
+            if request == FBIO_SCANOUT_SRC {
+                let src = FbScanoutSrc {
+                    va: unsafe { msg.m_payload.m2.m2l2 } as u64,
+                    len: unsafe { msg.m_payload.m2.m2l3 } as u64,
+                };
+                return scanout_src(who_e, src);
+            }
             let grant = unsafe { msg.m_payload.m2.m2i3 as u32 };
             let user = unsafe { msg.m_payload.m2.m2l1 } as i32;
             do_ioctl(minor, request, who_e, grant, user)
@@ -690,6 +737,118 @@ unsafe fn frame_write(
         return -14; // EFAULT
     }
     count as i32
+}
+
+/// `FBIO_SCANOUT_SRC`: point scanout 0 at the caller's buffer (`src.len == 0` restores the
+/// driver's own). `user_ep` is the caller, whose page tables the range resolves through — a device
+/// server has no page table of another process to walk.
+#[cfg(all(target_os = "minix", not(target_arch = "wasm32")))]
+fn scanout_src(user_ep: i32, src: FbScanoutSrc) -> i32 {
+    let arch = unsafe { &mut *core::ptr::addr_of_mut!(FB_BACKEND) };
+    let arch: &mut dyn FbArch = arch;
+    let cache = unsafe { &mut *core::ptr::addr_of_mut!(FB_SCANOUT_SRC) };
+
+    if src.len == 0 {
+        *cache = (0, 0, 0);
+        return match arch.clear_scanout_source() {
+            Ok(()) => 0,
+            Err(_) => -25, // ENOTTY: this output cannot re-back a scanout
+        };
+    }
+    if src.va & (SCANOUT_PAGE - 1) != 0 || src.len & (SCANOUT_PAGE - 1) != 0 {
+        return -22; // EINVAL
+    }
+    let npages = (src.len / SCANOUT_PAGE) as usize;
+    if npages == 0 || npages > MAX_SCANOUT_RANGES {
+        return -7; // E2BIG
+    }
+    if *cache == (user_ep, src.va, src.len) {
+        // The same buffer as last time: the host only needs its re-read.
+        return match arch.flush() {
+            Ok(()) => 0,
+            Err(_) => -5,
+        };
+    }
+
+    let ranges = unsafe { &mut *core::ptr::addr_of_mut!(FB_SCANOUT_RANGES) };
+    let mut n = 0usize;
+    let mut i = 0usize;
+    while i < npages {
+        let pa = match vm_getphys(user_ep, src.va + i as u64 * SCANOUT_PAGE) {
+            Some(pa) => pa,
+            None => {
+                scanout_refused(b"translate");
+                return -14; // EFAULT: a page of the buffer is not mapped
+            }
+        };
+        let mut j = i + 1;
+        // Coalesce contiguous pages into one entry, which is what a linear allocation produces.
+        while j < npages {
+            match vm_getphys(user_ep, src.va + j as u64 * SCANOUT_PAGE) {
+                Some(p) if p == pa + (j - i) as u64 * SCANOUT_PAGE => j += 1,
+                _ => break,
+            }
+        }
+        ranges[n] = ScanRange {
+            pa,
+            len: ((j - i) as u32) * SCANOUT_PAGE as u32,
+        };
+        n += 1;
+        i = j;
+    }
+
+    match arch.set_scanout_source(&ranges[..n]) {
+        Ok(()) => {
+            *cache = (user_ep, src.va, src.len);
+            // A status line, not a trace: the re-point is rare and the gate reads it as proof the
+            // scanout path was taken (the frame is the client's buffer, so `/dev/fb` cannot show it).
+            slog(b"fb: scanout src\n");
+            0
+        }
+        Err(e) => {
+            use drivers::DriverError as E;
+            scanout_refused(match e {
+                E::NotFound => b"device-notfound",
+                E::Busy => b"device-busy",
+                E::InvalidArgument => b"device-invalid",
+                E::Unsupported => b"device-unsupported",
+                E::Io => b"device-io",
+                _ => b"device-unknown",
+            });
+            -25
+        }
+    }
+}
+
+/// Resolve one page of `target`'s address space with `VM_GETPHYS`. The call takes a 32-bit address
+/// and answers with a 32-bit physical address, which this port's user addresses and a 256 MiB guest
+/// both fit; a 64-bit bulk form is a later VM call (`KNOWN_ISSUES` 41).
+#[cfg(all(target_os = "minix", not(target_arch = "wasm32")))]
+fn vm_getphys(target: i32, va: u64) -> Option<u64> {
+    let mut msg = [0u8; 64];
+    msg[4..8].copy_from_slice(&(arch_common::com::VM_GETPHYS as i32).to_ne_bytes());
+    msg[8..12].copy_from_slice(&target.to_ne_bytes());
+    msg[12..16].copy_from_slice(&((va as u32) as i32).to_ne_bytes());
+    let r = unsafe {
+        minix_rt::syscall2(
+            minix_rt::SENDREC_CALL,
+            arch_common::com::VM_PROC_NR as u64,
+            msg.as_mut_ptr() as u64,
+        )
+    };
+    if r < 0 {
+        return None;
+    }
+    if i32::from_ne_bytes(msg[4..8].try_into().ok()?) != 0 {
+        return None;
+    }
+    Some((i32::from_ne_bytes(msg[8..12].try_into().ok()?) as u32) as u64)
+}
+
+/// wasm has no device scanout to re-point.
+#[cfg(not(all(target_os = "minix", not(target_arch = "wasm32"))))]
+fn scanout_src(_user_ep: i32, _src: FbScanoutSrc) -> i32 {
+    -25
 }
 
 /// Grant-based fb ioctl: read the arg struct from the caller's buffer via
