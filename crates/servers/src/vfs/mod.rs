@@ -28,6 +28,7 @@ pub mod anon;
 pub mod call;
 pub mod consts;
 pub mod device;
+pub mod dmabuf;
 pub mod dmap;
 pub mod epoll;
 pub mod eventfd;

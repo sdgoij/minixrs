@@ -30,6 +30,9 @@ pub mod drminfo;
 /// The DRM render node's memory objects, mapped by a client — `/bin/drmmap` (§6.10, 3b-3).
 pub mod drmmap;
 
+/// The DRM render node's PRIME handoff — `/bin/drmprime` (§6.10, 3d-b-2).
+pub mod drmprime;
+
 /// The DRM render node's rendering context — `/bin/drmctx` (§6.10, 3b-4).
 pub mod drmctx;
 

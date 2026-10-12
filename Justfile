@@ -495,6 +495,20 @@ test-drmmap-x86 boot-timeout="20": build-x86
     @just _assert-qemu-log target/test-drmmap-x86.log "fb: gpu3d device, no VIRTIO_GPU_F_VIRGL"
     @echo "drmmap: a client created a render node memory object, mapped it twice, found one set of frames, saw a second object be other memory, and closed it (x86_64)"
 
+# The render node's PRIME handoff (`tools/smoke/drmprime.tsv`): `/bin/drmprime` exports a
+# memory object to a dma-buf descriptor, checks the descriptor's own kind and device with
+# `fstat`, imports it back to the object's handle, and reads the bytes through it. The device
+# is the same plain `virtio-gpu-pci` the other node gates use, for their reason: sharing is a
+# property of the node's object table, not of GL, so the degraded device exercises the same
+# code without a GL host to drop serial bytes.
+test-drmprime-x86 boot-timeout="20": build-x86
+    mkdir -p target/images/x86_64-pc-minix
+    cp target/trampoline.elf target/images/x86_64-pc-minix/minix-x86.elf
+    @just _assert-qemu-version qemu-system-x86_64
+    FEED_SCENARIO=tools/smoke/drmprime.tsv sh tools/smoke/feed.sh target/test-drmprime-x86.log {{boot-timeout}} qemu-system-x86_64 -nographic -m 256M -no-reboot -vga none -device bochs-display,id=fb0 -kernel target/images/x86_64-pc-minix/minix-x86.elf -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0 -device virtio-tablet-pci,display=fb0 -device virtio-gpu-pci
+    @just _assert-qemu-log target/test-drmprime-x86.log "fb: gpu3d device, no VIRTIO_GPU_F_VIRGL"
+    @echo "drmprime: a client exported a render node object to a dma-buf descriptor and imported it back, and the bytes survived (x86_64)"
+
 # `readlink(2)`, which nothing proved until now: the three pieces that move a filesystem
 # server's bytes into a user process (`tools/smoke/readlink.tsv` has the whole reason) are all
 # stubs of some kind before this, so the gate is the first exercise of the path. No device is

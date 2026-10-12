@@ -200,6 +200,10 @@ pub const BOOT_BINS: &[(&str, &str)] = &[
     // `/bin/drmmap` makes a render node memory object, maps it, and proves the mapping is
     // that object's memory (§6.10, stage 3b-3).
     ("/bin/drmmap", "drmmap"),
+    // `/bin/drmprime` exports a render node object to a dma-buf descriptor, checks the
+    // descriptor with `fstat`, imports it back to the object's handle, and reads the bytes
+    // through it — the node's PRIME handoff (§6.10, stage 3d-b-2).
+    ("/bin/drmprime", "drmprime"),
     // `/bin/drmctx` makes the render node's rendering context, which is what a command buffer
     // and a transfer through one hang off (§6.10, stage 3b-4).
     ("/bin/drmctx", "drmctx"),

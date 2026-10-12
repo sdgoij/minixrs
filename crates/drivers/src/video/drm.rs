@@ -109,6 +109,23 @@ pub const DRM_IOCTL_GET_CAP: u32 = iowr(DRM_IOCTL_BASE, 0x0c, 16);
 /// libdrm's OpenBSD/DragonFly spelling (`xf86drm.c`), served here so libdrm on that branch
 /// can learn the node's PCI identity with no sysfs.
 pub const DRM_IOCTL_GET_PCIINFO: u32 = ior(DRM_IOCTL_BASE, 0x15, SZ_PCIINFO);
+/// `DRM_IOCTL_PRIME_HANDLE_TO_FD`, `struct drm_prime_handle`. The export half of PRIME: a
+/// GEM handle becomes a dma-buf descriptor.
+pub const DRM_IOCTL_PRIME_HANDLE_TO_FD: u32 = iowr(DRM_IOCTL_BASE, 0x2d, SZ_PRIME_HANDLE);
+/// `DRM_IOCTL_PRIME_FD_TO_HANDLE`, `struct drm_prime_handle`. The import half: a dma-buf
+/// descriptor becomes (or finds) the GEM handle for the object behind it.
+pub const DRM_IOCTL_PRIME_FD_TO_HANDLE: u32 = iowr(DRM_IOCTL_BASE, 0x2e, SZ_PRIME_HANDLE);
+
+/// `struct drm_prime_handle`: `u32 handle`, `u32 flags`, `s32 fd`. The `flags` are the
+/// ABI's `DRM_CLOEXEC`/`DRM_RDWR`, and only mean anything for an export.
+const SZ_PRIME_HANDLE: u32 = 12;
+
+/// `DRM_CLOEXEC` — the ABI's spelling of `O_CLOEXEC`, a flag an export may ask for the
+/// descriptor to carry. The port's value, because the client is built against the port's
+/// `<fcntl.h>` (Linux's `O_CLOEXEC` is `0x80000`; this port's is `0o200000`).
+pub const DRM_CLOEXEC: u32 = 0o200000;
+/// `DRM_RDWR` — the ABI's spelling of `O_RDWR`, the other flag an export may carry.
+pub const DRM_RDWR: u32 = 0o02;
 
 /// Sizes of the virtgpu argument structs, which is what a request number carries.
 const SZ_MAP: u32 = 16; // struct drm_virtgpu_map
@@ -252,8 +269,12 @@ pub const VIRTGPU_BLOB_FLAG_USE_MASK: u32 = VIRTGPU_BLOB_FLAG_USE_MAPPABLE
 
 /// `DRM_CAP_DUMB_BUFFER`: the mode-setting dumb-buffer ioctl. A render node has none.
 pub const DRM_CAP_DUMB_BUFFER: u64 = 0x1;
-/// `DRM_CAP_PRIME`: dma-buf import/export. Not yet.
+/// `DRM_CAP_PRIME`: a bitfield of the PRIME capabilities below.
 pub const DRM_CAP_PRIME: u64 = 0x5;
+/// `DRM_PRIME_CAP_IMPORT`: `PRIME_FD_TO_HANDLE` is supported.
+pub const DRM_PRIME_CAP_IMPORT: u64 = 0x1;
+/// `DRM_PRIME_CAP_EXPORT`: `PRIME_HANDLE_TO_FD` is supported.
+pub const DRM_PRIME_CAP_EXPORT: u64 = 0x2;
 
 /// The most a single `GET_CAPS` will fetch: the capset blob is ~3 KiB (virgl v1 is 308
 /// bytes), and the copy is driven from a scratch buffer of this size because the device
@@ -369,6 +390,23 @@ pub trait RenderNode {
     /// `DRM_IOCTL_VIRTGPU_WAIT`: wait for an object's work to finish, or with `nowait` report
     /// whether it has. An unknown handle is `ENOENT`.
     fn wait(&mut self, handle: u32, nowait: bool) -> Result<(), i32>;
+
+    /// `DRM_IOCTL_PRIME_HANDLE_TO_FD`: the *export token* naming the object behind `handle`,
+    /// or `ENOENT` for a handle this node does not hold.
+    ///
+    /// The ABI's `fd` is a descriptor, and descriptors belong to VFS; the token is what
+    /// crosses this boundary, and VFS turns it into a descriptor. The token is the object's
+    /// own identity — the same page-granular name [`RenderNode::map_offset`] hands out — so
+    /// [`RenderNode::prime_import`] can name the object back with it. The ABI's export
+    /// `flags` (`DRM_CLOEXEC`/`DRM_RDWR`) describe the *descriptor* VFS makes, so they never
+    /// reach the node.
+    fn prime_export(&mut self, handle: u32) -> Result<u32, i32>;
+
+    /// `DRM_IOCTL_PRIME_FD_TO_HANDLE`: the GEM handle naming the object a token came from,
+    /// or `ENOENT` for a token this node did not export (or whose object is gone). The ABI
+    /// returns the *existing* handle when one already names the object, which is what this
+    /// node's one handle per object gives for free.
+    fn prime_import(&mut self, token: u32) -> Result<u32, i32>;
 }
 
 /// `struct drm_virtgpu_3d_transfer_to_host` (and `_from_host`, which is the same shape): one box
@@ -1064,6 +1102,37 @@ pub fn dispatch(
                 Err(e) => e,
             }
         }
+        DRM_IOCTL_PRIME_HANDLE_TO_FD => {
+            if !fits(arg, request) {
+                return EINVAL;
+            }
+            let handle = rd_u32(arg, 0);
+            // The ABI's out field is an fd. This node has no descriptors — VFS owns them —
+            // so the answer is the object's export token, and VFS replaces it with a real
+            // descriptor before the caller ever reads the field.
+            match node.prime_export(handle) {
+                Ok(token) => {
+                    wr_u32(arg, 8, token);
+                    0
+                }
+                Err(e) => e,
+            }
+        }
+        DRM_IOCTL_PRIME_FD_TO_HANDLE => {
+            if !fits(arg, request) {
+                return EINVAL;
+            }
+            // The ABI's in field is an fd; VFS resolved it and put the export token it
+            // stood for in the same word, so the node's side is the token.
+            let token = rd_u32(arg, 8);
+            match node.prime_import(token) {
+                Ok(handle) => {
+                    wr_u32(arg, 0, handle);
+                    0
+                }
+                Err(e) => e,
+            }
+        }
         _ => ENOTTY,
     }
 }
@@ -1112,8 +1181,9 @@ mod tests {
         }
         fn get_cap(&mut self, capability: u64) -> Result<u64, i32> {
             match capability {
+                // Known but not had: a render node has no dumb-buffer ioctl, so this reads 0.
                 DRM_CAP_DUMB_BUFFER => Ok(0),
-                DRM_CAP_PRIME => Ok(0),
+                DRM_CAP_PRIME => Ok(DRM_PRIME_CAP_IMPORT | DRM_PRIME_CAP_EXPORT),
                 _ => Err(EINVAL),
             }
         }
@@ -1240,6 +1310,22 @@ mod tests {
                 return Err(ENOENT);
             }
             Ok(())
+        }
+
+        /// The object's export token is the offset `map_offset` names it by — the one number
+        /// every other identity on this node is derived from — so the token's field and the
+        /// handle's cannot be confused in a test.
+        fn prime_export(&mut self, handle: u32) -> Result<u32, i32> {
+            self.map_offset(handle).map(|offset| offset as u32)
+        }
+
+        /// A token is a live object on this node, so importing it yields that object's handle.
+        /// A token the node never issued — here, anything but object 7's offset — is `ENOENT`.
+        fn prime_import(&mut self, token: u32) -> Result<u32, i32> {
+            if token != 0x7000 {
+                return Err(ENOENT);
+            }
+            Ok(OBJECT)
         }
     }
 
@@ -2057,6 +2143,16 @@ mod tests {
         arg
     }
 
+    /// A `struct drm_prime_handle`: the handle, the flags, and the `fd` field an export
+    /// writes the object's token into and an import reads it from.
+    fn prime_arg(handle: u32, flags: u32, fd: u32) -> [u8; 12] {
+        let mut arg = [0u8; 12];
+        wr_u32(&mut arg, 0, handle);
+        wr_u32(&mut arg, 4, flags);
+        wr_u32(&mut arg, 8, fd);
+        arg
+    }
+
     /// The request numbers, spelled out: a client computes these with `_IOWR`/`_IOW`, so
     /// any disagreement is a number the client asks about and never gets an answer to.
     #[test]
@@ -2069,6 +2165,10 @@ mod tests {
         // `_IOR('d', 0x15, struct drm_pciinfo)`: libdrm's OpenBSD/DragonFly request, the
         // one this port serves so libdrm can find the node without sysfs.
         assert_eq!(DRM_IOCTL_GET_PCIINFO, 0x8010_6415);
+        // `_IOWR('d', 0x2d/0x2e, struct drm_prime_handle)`: the two PRIME requests, whose
+        // 12-byte argument is the size field of the number.
+        assert_eq!(DRM_IOCTL_PRIME_HANDLE_TO_FD, 0xC00C_642D);
+        assert_eq!(DRM_IOCTL_PRIME_FD_TO_HANDLE, 0xC00C_642E);
 
         // The virtgpu set: `_IOWR('d', 0x40 + n, sizeof(struct))`, so each number's low
         // byte is its request id and its size field is the argument struct's size.
@@ -2121,6 +2221,12 @@ mod tests {
         // `GET_PCIINFO` is `_IOR`: the identity travels out only.
         assert!(!carries_in(DRM_IOCTL_GET_PCIINFO));
         assert!(carries_out(DRM_IOCTL_GET_PCIINFO));
+        // Both PRIME requests are `_IOWR`: the handle goes in and a handle or token comes
+        // back, through one `struct drm_prime_handle`.
+        assert!(carries_in(DRM_IOCTL_PRIME_HANDLE_TO_FD));
+        assert!(carries_out(DRM_IOCTL_PRIME_HANDLE_TO_FD));
+        assert!(carries_in(DRM_IOCTL_PRIME_FD_TO_HANDLE));
+        assert!(carries_out(DRM_IOCTL_PRIME_FD_TO_HANDLE));
     }
 
     /// `DRM_IOCTL_GET_PCIINFO` fills the 16-byte `struct drm_pciinfo` libdrm's
@@ -2270,12 +2376,21 @@ mod tests {
         let mut node = FakeNode;
         let mut users = FakeUser::new();
         let mut arg = [0xffu8; 16];
-        wr_u64(&mut arg, 0, DRM_CAP_PRIME);
+        wr_u64(&mut arg, 0, DRM_CAP_DUMB_BUFFER);
         assert_eq!(
             dispatch(&mut node, &mut users, DRM_IOCTL_GET_CAP, &mut arg),
             0
         );
         assert_eq!(rd_u64(&arg, 8), 0);
+
+        // PRIME is one the node does have, and the answer is the capability bitfield.
+        let mut arg = [0xffu8; 16];
+        wr_u64(&mut arg, 0, DRM_CAP_PRIME);
+        assert_eq!(
+            dispatch(&mut node, &mut users, DRM_IOCTL_GET_CAP, &mut arg),
+            0
+        );
+        assert_eq!(rd_u64(&arg, 8), DRM_PRIME_CAP_IMPORT | DRM_PRIME_CAP_EXPORT);
 
         let mut arg = [0xffu8; 16];
         wr_u64(&mut arg, 0, 0x99);
@@ -2284,6 +2399,74 @@ mod tests {
             EINVAL
         );
         assert_eq!(rd_u64(&arg, 8), 0);
+    }
+
+    /// `PRIME_HANDLE_TO_FD` answers with the object's export token in the ABI's `fd` field,
+    /// and `PRIME_FD_TO_HANDLE` names the handle back from that token — the two directions of
+    /// one identity, meeting in the field they share.
+    #[test]
+    fn prime_moves_the_object_token_through_the_fd_field() {
+        let mut node = FakeNode;
+        let mut users = FakeUser::new();
+
+        let mut arg = prime_arg(OBJECT, 0, 0);
+        assert_eq!(
+            dispatch(
+                &mut node,
+                &mut users,
+                DRM_IOCTL_PRIME_HANDLE_TO_FD,
+                &mut arg
+            ),
+            0
+        );
+        let token = rd_u32(&arg, 8);
+        assert_eq!(token, 0x7000, "the token is the object's own identity");
+        assert_eq!(
+            rd_u32(&arg, 0),
+            OBJECT,
+            "an export leaves its handle as sent"
+        );
+
+        let mut arg = prime_arg(0, 0, token);
+        assert_eq!(
+            dispatch(
+                &mut node,
+                &mut users,
+                DRM_IOCTL_PRIME_FD_TO_HANDLE,
+                &mut arg
+            ),
+            0
+        );
+        assert_eq!(rd_u32(&arg, 0), OBJECT, "the token names the object back");
+
+        // A handle the node does not hold, and a token it never issued.
+        let mut arg = prime_arg(0x99, 0, 0);
+        assert_eq!(
+            dispatch(
+                &mut node,
+                &mut users,
+                DRM_IOCTL_PRIME_HANDLE_TO_FD,
+                &mut arg
+            ),
+            ENOENT
+        );
+        let mut arg = prime_arg(0, 0, 0x1234);
+        assert_eq!(
+            dispatch(
+                &mut node,
+                &mut users,
+                DRM_IOCTL_PRIME_FD_TO_HANDLE,
+                &mut arg
+            ),
+            ENOENT
+        );
+
+        // A number that differs only in the size it encodes is a different request.
+        let wrong_size = DRM_IOCTL_PRIME_HANDLE_TO_FD + (4u32 << IOC_SIZESHIFT);
+        assert_eq!(
+            dispatch(&mut node, &mut users, wrong_size, &mut arg),
+            ENOTTY
+        );
     }
 
     /// `get_caps` copies the smaller of the caller's buffer and the blob, and writes

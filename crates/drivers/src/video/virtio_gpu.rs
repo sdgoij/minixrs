@@ -1477,10 +1477,12 @@ impl drm::RenderNode for DrmNode {
     }
 
     fn get_cap(&mut self, capability: u64) -> Result<u64, i32> {
-        // A render node has neither: dumb buffers belong to the mode-setting path, and
-        // PRIME is dma-buf sharing, which this port does not have yet.
+        // A render node has no dumb buffers — those belong to the mode-setting path — and it
+        // does have PRIME: every object is guest memory the node can name, so export and
+        // import are both answerable (§6.10, 3d-b-2).
         match capability {
-            drm::DRM_CAP_DUMB_BUFFER | drm::DRM_CAP_PRIME => Ok(0),
+            drm::DRM_CAP_DUMB_BUFFER => Ok(0),
+            drm::DRM_CAP_PRIME => Ok(drm::DRM_PRIME_CAP_IMPORT | drm::DRM_PRIME_CAP_EXPORT),
             _ => Err(drm::EINVAL),
         }
     }
@@ -1797,6 +1799,31 @@ impl drm::RenderNode for DrmNode {
         // for. `nowait` therefore changes nothing, and blocking would be a lie about work this
         // node does not have (`.notes/wayland.md` §6.10 D4: no fence objects yet).
         Ok(())
+    }
+
+    /// The object's export token is the page-granular name `map_offset` hands out, so the
+    /// number a client gets from an export is the same identity the object answers `mmap`
+    /// with — one name for one object, whether it is being mapped or shared.
+    fn prime_export(&mut self, handle: u32) -> Result<u32, i32> {
+        let Some((slot, _)) = self.gems.lookup(handle) else {
+            return Err(drm::ENOENT);
+        };
+        Ok(drm::GemTable::offset_of(slot) as u32)
+    }
+
+    /// A token names a slot, and a slot is a live object only while it holds one — so a token
+    /// the node never issued, or one whose object was closed, is `ENOENT`. `len_at_offset` is
+    /// the same liveness test `map_offset` uses; the handle is the slot's own number, so an
+    /// import yields the *existing* handle for the object, which is Linux's documented
+    /// behavior for a second import of one object on one file description.
+    fn prime_import(&mut self, token: u32) -> Result<u32, i32> {
+        if self.gems.len_at_offset(token as u64).is_none() {
+            return Err(drm::ENOENT);
+        }
+        let Some(slot) = drm::GemTable::slot_of_offset(token as u64) else {
+            return Err(drm::ENOENT);
+        };
+        Ok(slot as u32 + 1)
     }
 }
 
@@ -2700,14 +2727,49 @@ mod tests {
         );
     }
 
-    /// A render node has neither dumb buffers nor PRIME, and anything else is refused
-    /// rather than answered 0, so a caller can tell "not capable" from "not asked about".
+    /// PRIME is the capability this node does have, as a bitfield; dumb buffers it does not,
+    /// and anything else is refused rather than answered 0, so a caller can tell "not
+    /// capable" from "not asked about".
     #[test]
-    fn get_cap_answers_only_the_two_it_knows() {
+    fn get_cap_reports_prime_and_refuses_the_rest() {
         let mut node = drm_node(&[], true, false, false);
         assert_eq!(node.get_cap(drm::DRM_CAP_DUMB_BUFFER), Ok(0));
-        assert_eq!(node.get_cap(drm::DRM_CAP_PRIME), Ok(0));
+        assert_eq!(
+            node.get_cap(drm::DRM_CAP_PRIME),
+            Ok(drm::DRM_PRIME_CAP_IMPORT | drm::DRM_PRIME_CAP_EXPORT)
+        );
         assert_eq!(node.get_cap(0x99), Err(drm::EINVAL));
+    }
+
+    /// An object's export token is the name `map_offset` gives it, and importing that token
+    /// yields the object's handle back — the round trip that makes the descriptor VFS builds
+    /// over a token meaningful. A token the node never issued, or one whose object was
+    /// closed, is `ENOENT`, which is what keeps a stale descriptor from naming a slot that
+    /// has since been reused.
+    #[test]
+    fn prime_round_trips_an_objects_own_name_and_refuses_a_stale_token() {
+        let mut node = drm_node(&[], true, false, false);
+        node.gems = drm::GemTable::new(4096);
+        let object = node.gems.create(4096).expect("one page fits the slot");
+        let other = node.gems.create(4096).expect("the next slot is free");
+
+        let token = node
+            .prime_export(object.handle)
+            .expect("a live handle exports");
+        assert_eq!(token as u64, node.map_offset(object.handle).unwrap());
+        assert_eq!(node.prime_import(token), Ok(object.handle));
+        assert_ne!(token as u64, node.map_offset(other.handle).unwrap());
+
+        // A handle the node does not hold, and tokens it never issued: zero, and a free
+        // slot's own name.
+        assert_eq!(node.prime_export(0x99), Err(drm::ENOENT));
+        assert_eq!(node.prime_import(0), Err(drm::ENOENT));
+        let free_token = drm::GemTable::offset_of(drm::MAX_OBJECTS - 1) as u32;
+        assert_eq!(node.prime_import(free_token), Err(drm::ENOENT));
+
+        // Closing the object takes its token away with it.
+        node.gems.remove(object.handle);
+        assert_eq!(node.prime_import(token), Err(drm::ENOENT));
     }
 
     /// The two refusals `GET_CAPS` makes before it would touch the device: a capset the

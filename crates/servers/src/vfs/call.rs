@@ -639,6 +639,11 @@ pub fn do_read() -> i32 {
         if crate::vfs::epoll::is_epoll(vp) {
             return EINVAL;
         }
+        // A dma-buf descriptor is not a byte stream either: a consumer imports it to a
+        // GEM handle and maps that, it does not read it (`vfs::dmabuf`).
+        if crate::vfs::dmabuf::is_dmabuf(vp) {
+            return EINVAL;
+        }
         // A memfd's bytes are VM's cache pages for the object, not a
         // filesystem's: read them through the same frames a mapping maps.
         if crate::vfs::memfd::is_memfd(vp) {
@@ -741,6 +746,10 @@ pub fn do_write() -> i32 {
         }
         // Nor can an epoll instance.
         if crate::vfs::epoll::is_epoll(vp) {
+            return EINVAL;
+        }
+        // Nor a dma-buf: it is a handle onto a render node's object, not a byte stream.
+        if crate::vfs::dmabuf::is_dmabuf(vp) {
             return EINVAL;
         }
         // A memfd's bytes are VM's cache pages for the object (see `do_read`).
@@ -974,6 +983,21 @@ pub fn do_ioctl() -> i32 {
             && matches!(request, net::NWIOSUDSCTRL | net::NWIOGUDSCTRL)
         {
             return crate::vfs::scm::control_ioctl(request, dev, fp.fp_endpoint, buf);
+        }
+        // PRIME is the other ioctl pair that needs a descriptor, so VFS owns it for the
+        // same reason it owns the socket control ones: it asks the node for the object's
+        // name, wraps that in a descriptor, and resolves one back (see `vfs::dmabuf`).
+        // Every other DRM request travels to the driver as usual.
+        if (dev >> 16) == arch_common::com::DRM_MAJOR
+            && let Some(r) = crate::vfs::dmabuf::prime_ioctl(
+                request,
+                dev,
+                fp.fp_endpoint,
+                buf,
+                filp.filp_flags as i32,
+            )
+        {
+            return r;
         }
         crate::vfs::device::cdev_io(
             CDEV_IOCTL,
@@ -1644,6 +1668,10 @@ pub fn do_fstat() -> i32 {
         // ...or an epoll instance.
         if crate::vfs::epoll::is_epoll(vp) {
             return crate::vfs::epoll::fstat(vp, fp.fp_endpoint, buf_addr);
+        }
+        // ...or a dma-buf.
+        if crate::vfs::dmabuf::is_dmabuf(vp) {
+            return crate::vfs::dmabuf::fstat(vp, fp.fp_endpoint, buf_addr);
         }
         crate::vfs::request::req_stat(
             (*vp).v_fs_e,

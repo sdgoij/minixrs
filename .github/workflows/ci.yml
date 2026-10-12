@@ -463,6 +463,14 @@ jobs:
       - name: The zero-copy present path
         run: just test-wlfull ${{ matrix.arch }}
 
+      # The render node's PRIME handoff (`tools/smoke/drmprime.tsv`): a client exports an object
+      # to a dma-buf descriptor, imports it back, and reads its bytes. x86 only, because the
+      # render node exists only where the display is bochs and virtio-gpu is a *second* device;
+      # where virtio-gpu *is* the display, the node is the display's and there is no other.
+      - name: The render node's PRIME handoff
+        if: matrix.arch == 'x86'
+        run: just test-drmprime-x86
+
   # Decides whether the pinned bash commit needs a release before anything consumes
   # one. Read-only; `bash-release` below does the publishing.
   bash-pin:

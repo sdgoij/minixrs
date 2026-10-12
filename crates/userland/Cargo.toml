@@ -46,6 +46,11 @@ path = "src/bin/drmmap.rs"
 test = false
 
 [[bin]]
+name = "drmprime"
+path = "src/bin/drmprime.rs"
+test = false
+
+[[bin]]
 name = "drmctx"
 path = "src/bin/drmctx.rs"
 test = false

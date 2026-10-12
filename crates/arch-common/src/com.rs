@@ -91,6 +91,15 @@ pub const TIMERFD_DEV: u32 = TIMERFD_MAJOR << 16;
 /// the readiness objects whose interests it holds.
 pub const EPOLL_MAJOR: u32 = 24;
 pub const EPOLL_DEV: u32 = EPOLL_MAJOR << 16;
+/// The device number every dma-buf descriptor is keyed on (`vfs::dmabuf`).
+///
+/// A dma-buf descriptor names a render node's memory object, so — unlike a memfd —
+/// it has a *source device*: the object lives on the node the exporter held open. This
+/// value is only the descriptor object's own identity tag (no driver is registered for
+/// the major and no path lookup reaches it), which is what lets VFS, not a filesystem,
+/// answer the descriptor.
+pub const DMABUF_MAJOR: u32 = 25;
+pub const DMABUF_DEV: u32 = DMABUF_MAJOR << 16;
 
 pub const LAST_SPECIAL_PROC_NR: Endpoint = 10;
 pub const INIT_PROC_NR: Endpoint = LAST_SPECIAL_PROC_NR;

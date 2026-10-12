@@ -1,0 +1,28 @@
+# The `just test-drmprime-x86` scenario: the render node's PRIME handoff — an object exported
+# to a dma-buf descriptor and imported back (`.notes/wayland.md` §6.10, stage 3d-b-2). One step,
+# because the proof is one program's whole session, and no single call of it says anything on
+# its own.
+#
+# The device is the plain `virtio-gpu-pci` that `drminfo.tsv`/`drmmap.tsv` use, for their reason
+# and one more. Their reason is that this gate types into the guest, and a GL device needs a GL
+# display backend whose host workload drops serial bytes (measured). The extra one is that PRIME
+# is a property of the *node's object table*, not of GL: sharing an object needs no capset and no
+# host renderer, so the degraded device exercises exactly the same code.
+#
+# The expected line is the whole session's verdict, so each field is a claim:
+#
+#   cap=3            `DRM_CAP_PRIME` reports import|export (the ABI's bitfield)
+#   h=1 size=16384   the object the node made, and the length `RESOURCE_INFO` reports for it
+#   alias=16384      every byte written through the object's handle is read back through the
+#                    handle the *import* returned — the round trip carried the same frames
+#   same=1           the import named the object's own handle back, which is what the ABI
+#                    documents for a second import of one object on one file description
+#   kind=32768       `fstat` on the exported descriptor says `S_IFREG` (32768) — the thing in the
+#   major=25         middle is a real descriptor, and its device is `DMABUF_MAJOR` (25), which
+#                    the node's name for the object does not have
+#   export_errno=2   `ENOENT` for exporting a handle the node does not hold
+#   import_errno=22  `EINVAL` for importing a descriptor that is not a dma-buf (the node's own fd)
+#   stale_errno=2    `ENOENT` for importing the descriptor after `GEM_CLOSE`: the token names a
+#                    slot that no longer holds an object, refused rather than re-aimed
+
+/bin/drmprime	drmprime: cap=3 h=1 size=16384 alias=16384 same=1 kind=32768 major=25 export_errno=2 import_errno=22 stale_errno=2
