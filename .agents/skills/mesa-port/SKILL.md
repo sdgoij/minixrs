@@ -89,6 +89,14 @@ toolchain. `.notes/wayland.md` §6.10 is the design; these are the recipes and t
 - **`abort`/`exit` must be `noreturn`**, or libc++'s `system_error.cpp`
   (compiled with `-Werror=return-type`) trips on a function whose only exit is
   `std::abort()`.
+- **Mesa builds its shader text with the *port's* `printf`, so a `printf` gap is a
+  corrupted shader, not just a garbled log.** `virgl_encode_shader_state` calls
+  `tgsi_dump_str`, which formats the TGSI into the string sent to the host through
+  `vsnprintf`. Mesa labels each instruction `"% 3u"`; with the space flag
+  unimplemented the literal `% 3u` reached the wire and the host's parser refused
+  the stream (`Error assigning TGSI`, `context 1 failed to dispatch CREATE_OBJECT:
+  22`). `vsnprintf`'s return must also be the *field* length, because `tgsi_dump`'s
+  `str_dump_ctx_printf` advances a write cursor by it.
 
 ## The runtime gate
 
@@ -105,6 +113,11 @@ a system image, not a blocker. It needs `just libcxx <arch>` and `just build-mes
 publishes the seven DSOs as `mesa-<arch>`, which the release injects into the
 system image it publishes.
 
+`just test-gltriangle-virgl-x86` is the 3c-3 gate: the same client on a GL device
+(`-device virtio-gpu-gl-pci,blob=on`), which takes the `virgl` driver on the render
+node and asserts `GL_RENDERER=virgl` as well as the readback. It needs a GL-capable
+dev host (headless CI has none) and is not a CI gate.
+
 ## Validating a change
 
 ```
@@ -112,6 +125,7 @@ just libcxx <arch>                  # the C++ runtime (x86|riscv64|aarch64)
 just build-mesa <arch> --build       # compiles everything; 0 FAILED in the log
 just fetch-mesa <arch>               # or the pinned DSOs, without building
 just test-gltriangle-<arch>          # boots the triangle through surfaceless EGL
+just test-gltriangle-virgl-x86       # the 3c-3 gate: the same triangle on virgl (GL dev host)
 just check                           # host clippy + header contract + physmap
 ```
 

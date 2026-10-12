@@ -380,7 +380,9 @@ def build_mesa(arch: Arch, ninja: str) -> None:
 
 # The sonames the client and the driver ask for. libEGL/libGLESv2 name
 # `libgallium-25.3.6.so` in their DT_NEEDED, and the EGL DRI path dlopens the
-# driver by its `_dri.so` name, so that one file is staged under both names.
+# software driver by its `_dri.so` name — so that one merged file is staged under
+# its own name and as `swrast_dri.so`. A hardware driver needs no third name: the
+# `virtio_gpu` descriptor comes out of the same `libgallium`.
 def stage_sources(arch: Arch) -> list[tuple[str, pathlib.Path]]:
     build = mesa_build_dir(arch)
     gallium = build / "src" / "gallium" / "targets" / "dri" / "libgallium-25.3.6.so"

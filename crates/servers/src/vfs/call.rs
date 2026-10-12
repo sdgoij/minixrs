@@ -1040,7 +1040,11 @@ pub fn do_fcntl() -> i32 {
         c if matches!(c, F_SETLK | F_SETLKW | F_GETLK) || c == F_UNLCK as i32 => unsafe {
             crate::vfs::lock::lock_op()
         },
-        _ => ENOSYS,
+        // EINVAL, as the reference answers (`misc.c`'s `default`), and not just for the value:
+        // callers probe for commands a platform may not have and branch on `EINVAL`. Mesa's
+        // `os_dupfd_cloexec` is one — it asks for `F_DUPFD_CLOEXEC` and falls back to `F_DUPFD`
+        // **only** when that fails with `EINVAL`, so any other errno loses it the fallback.
+        _ => EINVAL,
     }
 }
 
@@ -3363,7 +3367,9 @@ mod tests {
             fs_m_in[FD_OFF..FD_OFF + 4].copy_from_slice(&0i32.to_le_bytes());
             fs_m_in[FCNTL_CMD_OFF..FCNTL_CMD_OFF + 4].copy_from_slice(&99i32.to_le_bytes());
         }
-        assert_eq!(do_fcntl(), ENOSYS);
+        // `EINVAL`, not `ENOSYS`: a caller probing for a command this platform lacks (Mesa's
+        // `F_DUPFD_CLOEXEC` fallback) branches on EINVAL to decide whether to retry.
+        assert_eq!(do_fcntl(), EINVAL);
     }
 
     #[test]

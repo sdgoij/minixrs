@@ -118,57 +118,142 @@ fn emit_pad(c: u8, n: i32, emit: &mut Emit<'_>) {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-fn emit_num(
-    mut v: u64,
-    base: u32,
-    digits: &[u8],
-    neg: bool,
+/// One parsed conversion specification: `%[flags][width][.precision]<conv>`.
+/// The five C flags for these conversions are `-`, `+`, ` `, `0` and `#`.
+struct Spec {
     left: bool,
     zero: bool,
+    plus: bool,
+    space: bool,
+    alt: bool,
     width: i32,
+    prec: Option<i32>,
+}
+
+impl Spec {
+    const fn new() -> Self {
+        Self {
+            left: false,
+            zero: false,
+            plus: false,
+            space: false,
+            alt: false,
+            width: 0,
+            prec: None,
+        }
+    }
+
+    /// The character that precedes a signed conversion's digits, if any.
+    fn sign(&self, neg: bool) -> Option<u8> {
+        if neg {
+            Some(b'-')
+        } else if self.plus {
+            Some(b'+')
+        } else if self.space {
+            Some(b' ')
+        } else {
+            None
+        }
+    }
+}
+
+/// Emit `v` in `base` with `digits`, returning how many characters it wrote.
+///
+/// The return counts the whole field, padding included -- that is what C
+/// requires of `printf`, and callers such as Mesa's `tgsi_dump` advance a
+/// write cursor by it, so a short count would clobber what follows.
+#[allow(clippy::too_many_arguments)]
+fn emit_int(
+    v: u64,
+    base: u32,
+    digits: &[u8],
+    sign: Option<u8>,
+    prefix: &[u8],
+    spec: &Spec,
     emit: &mut Emit<'_>,
 ) -> i32 {
     let mut buf = [0u8; 40];
-    let mut n: i32 = 0;
+    let mut n = 0usize;
+    let mut x = v;
     loop {
-        buf[n as usize] = digits[(v % base as u64) as usize];
+        buf[n] = digits[(x % base as u64) as usize];
         n += 1;
-        v /= base as u64;
-        if v == 0 {
+        x /= base as u64;
+        if x == 0 {
             break;
         }
     }
-    let padn = width - n - neg as i32;
-    if !left && zero {
-        if neg {
-            emit(b'-');
+    // A precision sets a minimum digit count; a precision of zero prints no
+    // digits at all for a zero value (C11 7.21.6.1p6).
+    let mut zeros = 0i32;
+    if let Some(p) = spec.prec {
+        let p = p.max(0);
+        if p == 0 && v == 0 {
+            n = 0;
+        } else if p > n as i32 {
+            zeros = p - n as i32;
+        }
+    }
+    let body = n + zeros as usize + usize::from(sign.is_some()) + prefix.len();
+    let padn = (spec.width - body as i32).max(0);
+    // The `0` flag is ignored when a precision is given.
+    let zero_pad = spec.zero && !spec.left && spec.prec.is_none();
+    let mut count = 0;
+    if zero_pad {
+        // The sign and any `#` prefix come before the zero padding.
+        if let Some(c) = sign {
+            emit(c);
+            count += 1;
+        }
+        for b in prefix {
+            emit(*b);
+            count += 1;
         }
         emit_pad(b'0', padn, emit);
+        count += padn;
     } else {
-        if !left {
+        if !spec.left {
             emit_pad(b' ', padn, emit);
+            count += padn;
         }
-        if neg {
-            emit(b'-');
+        if let Some(c) = sign {
+            emit(c);
+            count += 1;
+        }
+        for b in prefix {
+            emit(*b);
+            count += 1;
         }
     }
+    emit_pad(b'0', zeros, emit);
+    count += zeros;
     for i in (0..n).rev() {
-        emit(buf[i as usize]);
+        emit(buf[i]);
+        count += 1;
     }
-    if left {
+    if spec.left {
         emit_pad(b' ', padn, emit);
+        count += padn;
     }
-    n + neg as i32
+    count
 }
 
-fn signed_num(l: i64, left: bool, zero: bool, width: i32, emit: &mut Emit<'_>) -> i32 {
+/// Emit a signed base-10 value under `spec`.
+fn emit_signed(l: i64, spec: &Spec, emit: &mut Emit<'_>) -> i32 {
     if l < 0 {
         // Two's-complement negation without overflowing the min value.
         let v = (!(l as u64)).wrapping_add(1);
-        emit_num(v, 10, b"0123456789", true, left, zero, width, emit)
+        emit_int(v, 10, b"0123456789", spec.sign(true), &[], spec, emit)
     } else {
-        emit_num(l as u64, 10, b"0123456789", false, left, zero, width, emit)
+        emit_int(
+            l as u64,
+            10,
+            b"0123456789",
+            spec.sign(false),
+            &[],
+            spec,
+            emit,
+        )
     }
 }
 
@@ -195,21 +280,30 @@ unsafe fn vformat(fmt: *const c_char, args: &mut VaList<'_>, mut emit: Emit<'_>)
             continue;
         }
         p = unsafe { p.add(1) };
-        let (mut left, mut zero, mut width) = (false, false, 0i32);
+        let mut spec = Spec::new();
         loop {
-            let d = unsafe { *p } as u8;
-            if d == b'-' {
-                left = true;
-            } else if d == b'0' {
-                zero = true;
-            } else {
-                break;
+            match unsafe { *p } as u8 {
+                b'-' => spec.left = true,
+                b'+' => spec.plus = true,
+                b' ' => spec.space = true,
+                b'0' => spec.zero = true,
+                b'#' => spec.alt = true,
+                _ => break,
             }
             p = unsafe { p.add(1) };
         }
         while (unsafe { *p } as u8).is_ascii_digit() {
-            width = width * 10 + (unsafe { *p } as u8 - b'0') as i32;
+            spec.width = spec.width * 10 + (unsafe { *p } as u8 - b'0') as i32;
             p = unsafe { p.add(1) };
+        }
+        if (unsafe { *p } as u8) == b'.' {
+            p = unsafe { p.add(1) };
+            let mut prec = 0i32;
+            while (unsafe { *p } as u8).is_ascii_digit() {
+                prec = prec * 10 + (unsafe { *p } as u8 - b'0') as i32;
+                p = unsafe { p.add(1) };
+            }
+            spec.prec = Some(prec);
         }
         let conv = unsafe { *p } as u8;
         match conv {
@@ -218,57 +312,59 @@ unsafe fn vformat(fmt: *const c_char, args: &mut VaList<'_>, mut emit: Emit<'_>)
                 count += 1;
             }
             b'c' => {
-                let c = unsafe { args.next_arg::<c_int>() };
-                emit(c as u8);
-                count += 1;
+                let c = unsafe { args.next_arg::<c_int>() } as u8;
+                let padn = (spec.width - 1).max(0);
+                if !spec.left {
+                    emit_pad(b' ', padn, &mut emit);
+                }
+                emit(c);
+                if spec.left {
+                    emit_pad(b' ', padn, &mut emit);
+                }
+                count += 1 + padn;
             }
             b's' => {
                 let mut s = unsafe { args.next_arg::<*const c_char>() };
                 if s.is_null() {
                     s = b"(null)".as_ptr() as *const c_char;
                 }
-                let len = c_strlen(s) as i32;
-                let padn = if width > len { width - len } else { 0 };
-                if !left {
+                let mut len = c_strlen(s) as i32;
+                if let Some(prec) = spec.prec {
+                    len = len.min(prec.max(0));
+                }
+                let padn = (spec.width - len).max(0);
+                if !spec.left {
                     emit_pad(b' ', padn, &mut emit);
                 }
                 for i in 0..len {
                     emit(unsafe { *s.add(i as usize) } as u8);
                 }
-                if left {
+                if spec.left {
                     emit_pad(b' ', padn, &mut emit);
                 }
-                count += len;
+                count += len + padn;
             }
             b'p' => {
                 let v = unsafe { args.next_arg::<*const c_void>() } as usize as u64;
-                count += emit_num(
-                    v,
-                    16,
-                    b"0123456789abcdef",
-                    false,
-                    left,
-                    zero,
-                    width,
-                    &mut emit,
-                );
+                count += emit_int(v, 16, b"0123456789abcdef", None, &[], &spec, &mut emit);
             }
             b'x' | b'X' => {
                 let v = unsafe { args.next_arg::<u32>() } as u64;
-                let digits: &[u8] = if conv == b'x' {
-                    b"0123456789abcdef"
+                let (digits, prefix): (&[u8], &[u8]) = if conv == b'x' {
+                    (b"0123456789abcdef", b"0x")
                 } else {
-                    b"0123456789ABCDEF"
+                    (b"0123456789ABCDEF", b"0X")
                 };
-                count += emit_num(v, 16, digits, false, left, zero, width, &mut emit);
+                let prefix: &[u8] = if spec.alt && v != 0 { prefix } else { &[] };
+                count += emit_int(v, 16, digits, None, prefix, &spec, &mut emit);
             }
             b'u' => {
                 let v = unsafe { args.next_arg::<u32>() } as u64;
-                count += emit_num(v, 10, b"0123456789", false, left, zero, width, &mut emit);
+                count += emit_int(v, 10, b"0123456789", None, &[], &spec, &mut emit);
             }
             b'd' | b'i' => {
                 let l = unsafe { args.next_arg::<c_int>() } as i64;
-                count += signed_num(l, left, zero, width, &mut emit);
+                count += emit_signed(l, &spec, &mut emit);
             }
             b'l' => {
                 p = unsafe { p.add(1) };
@@ -276,21 +372,21 @@ unsafe fn vformat(fmt: *const c_char, args: &mut VaList<'_>, mut emit: Emit<'_>)
                 match lc {
                     b'd' | b'i' => {
                         let l = unsafe { args.next_arg::<c_long>() } as i64;
-                        count += signed_num(l, left, zero, width, &mut emit);
+                        count += emit_signed(l, &spec, &mut emit);
                     }
                     b'u' => {
                         let v = unsafe { args.next_arg::<c_ulong>() } as u64;
-                        count +=
-                            emit_num(v, 10, b"0123456789", false, left, zero, width, &mut emit);
+                        count += emit_int(v, 10, b"0123456789", None, &[], &spec, &mut emit);
                     }
                     b'x' | b'X' => {
                         let v = unsafe { args.next_arg::<c_ulong>() } as u64;
-                        let digits: &[u8] = if lc == b'x' {
-                            b"0123456789abcdef"
+                        let (digits, prefix): (&[u8], &[u8]) = if lc == b'x' {
+                            (b"0123456789abcdef", b"0x")
                         } else {
-                            b"0123456789ABCDEF"
+                            (b"0123456789ABCDEF", b"0X")
                         };
-                        count += emit_num(v, 16, digits, false, left, zero, width, &mut emit);
+                        let prefix: &[u8] = if spec.alt && v != 0 { prefix } else { &[] };
+                        count += emit_int(v, 16, digits, None, prefix, &spec, &mut emit);
                     }
                     _ => {
                         emit(b'%');
@@ -305,12 +401,11 @@ unsafe fn vformat(fmt: *const c_char, args: &mut VaList<'_>, mut emit: Emit<'_>)
                 match zc {
                     b'u' => {
                         let v = unsafe { args.next_arg::<usize>() } as u64;
-                        count +=
-                            emit_num(v, 10, b"0123456789", false, left, zero, width, &mut emit);
+                        count += emit_int(v, 10, b"0123456789", None, &[], &spec, &mut emit);
                     }
                     b'd' | b'i' => {
                         let l = unsafe { args.next_arg::<isize>() } as i64;
-                        count += signed_num(l, left, zero, width, &mut emit);
+                        count += emit_signed(l, &spec, &mut emit);
                     }
                     _ => {
                         emit(b'%');
@@ -1954,9 +2049,9 @@ mod tests {
                 0x1Fu32,
             )
         };
-        assert_eq!(r, 13);
-        assert_eq!(&buf[..13], b"n=42 s=hi h=1f%");
-        assert_eq!(buf[13], 0);
+        assert_eq!(r, 15); // full length reported
+        assert_eq!(&buf[..15], b"n=42 s=hi h=1f%");
+        assert_eq!(buf[15], 0);
     }
 
     #[cfg(target_os = "minix")]
@@ -1995,23 +2090,87 @@ mod tests {
         assert_eq!(buf[7], 0);
     }
 
-    #[test]
-    fn emit_num_zero_padding() {
+    fn spec(flags: &str, width: i32, prec: Option<i32>) -> Spec {
+        let mut s = Spec::new();
+        for f in flags.bytes() {
+            match f {
+                b'-' => s.left = true,
+                b'+' => s.plus = true,
+                b' ' => s.space = true,
+                b'0' => s.zero = true,
+                b'#' => s.alt = true,
+                _ => panic!("bad flag"),
+            }
+        }
+        s.width = width;
+        s.prec = prec;
+        s
+    }
+
+    fn fmt_int(v: u64, base: u32, digits: &[u8], s: &Spec) -> (Vec<u8>, i32) {
         let mut out = Vec::new();
         let mut emit: Emit<'_> = &mut |c: u8| out.push(c);
-        let n = emit_num(
-            0x2A,
-            16,
-            b"0123456789abcdef",
-            false,
-            false,
-            true,
-            8,
-            &mut emit,
-        );
-        // The return counts digits (+ sign); padding is emitted but not
-        // counted, matching the C source.
-        assert_eq!(n, 2);
+        let n = emit_int(v, base, digits, None, &[], s, &mut emit);
+        (out, n)
+    }
+
+    fn fmt_signed(l: i64, s: &Spec) -> (Vec<u8>, i32) {
+        let mut out = Vec::new();
+        let mut emit: Emit<'_> = &mut |c: u8| out.push(c);
+        let n = emit_signed(l, s, &mut emit);
+        (out, n)
+    }
+
+    #[test]
+    fn emit_int_counts_padding() {
+        // The zero padding is part of the field, so it is part of the count
+        // too -- a caller advancing a cursor by the count must land on the
+        // terminator.
+        let (out, n) = fmt_int(0x2A, 16, b"0123456789abcdef", &spec("0", 8, None));
         assert_eq!(out, b"0000002a");
+        assert_eq!(n, 8);
+    }
+
+    #[test]
+    fn emit_int_space_flag() {
+        // Mesa's `tgsi_dump` labels each instruction with `"% 3u"`; the space
+        // flag has to be recognized or the literal `% 3u` reaches the wire.
+        let (out, n) = fmt_int(0, 10, b"0123456789", &spec(" ", 3, None));
+        assert_eq!(out, b"  0");
+        assert_eq!(n, 3);
+    }
+
+    #[test]
+    fn emit_int_precision_sets_min_digits() {
+        let (out, n) = fmt_int(0x2A, 16, b"0123456789abcdef", &spec("", 0, Some(4)));
+        assert_eq!(out, b"002a");
+        assert_eq!(n, 4);
+        // A precision of zero prints nothing for a zero value.
+        let (out, n) = fmt_int(0, 10, b"0123456789", &spec("", 0, Some(0)));
+        assert_eq!(out, b"");
+        assert_eq!(n, 0);
+    }
+
+    #[test]
+    fn emit_int_left_justifies() {
+        let (out, n) = fmt_int(7, 10, b"0123456789", &spec("-", 5, None));
+        assert_eq!(out, b"7    ");
+        assert_eq!(n, 5);
+    }
+
+    #[test]
+    fn emit_int_alt_prefixes_hex() {
+        let (out, n) = fmt_int(0x2A, 16, b"0123456789abcdef", &spec("#", 0, None));
+        // `#` is applied by the caller, which is what supplies the prefix.
+        assert_eq!(out, b"2a");
+        assert_eq!(n, 2);
+    }
+
+    #[test]
+    fn emit_signed_sign_flags() {
+        assert_eq!(fmt_signed(7, &spec("+", 0, None)), (b"+7".to_vec(), 2));
+        assert_eq!(fmt_signed(7, &spec(" ", 0, None)), (b" 7".to_vec(), 2));
+        assert_eq!(fmt_signed(-7, &spec("+", 0, None)), (b"-7".to_vec(), 2));
+        assert_eq!(fmt_signed(-7, &spec("0", 5, None)), (b"-0007".to_vec(), 5));
     }
 }

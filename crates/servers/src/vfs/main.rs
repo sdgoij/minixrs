@@ -180,7 +180,8 @@ unsafe fn sef_cb_init_fresh() -> i32 {
         );
     }
 
-    // Register the DRM render node (/dev/dri/renderD128, major 25). The fb server serves
+    // Register the DRM render node (/dev/dri/renderD128, major `DRM_MAJOR` = 145,
+    // libdrm's OpenBSD/DragonFly value). The fb server serves
     // it because it is the process holding the `virtio-gpu` device; the major is the
     // render node's own so that the day it moves to a server of its own, this is the line
     // that changes and nothing else does.

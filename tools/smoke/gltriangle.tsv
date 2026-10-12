@@ -1,14 +1,17 @@
-# The `just test-gltriangle-x86` scenario: /bin/gltriangle draws a GLES2 triangle
-# through surfaceless EGL on Mesa's `softpipe` and checks the readback —
-# .notes/wayland.md §6.10 stage 3c-2.
+# The `just test-gltriangle-x86` and `just test-gltriangle-virgl-x86` scenario:
+# /bin/gltriangle draws a GLES2 triangle through surfaceless EGL and checks the
+# readback — .notes/wayland.md §6.10 stages 3c-2 and 3c-3.
 #
 #   FEED_SCENARIO=tools/smoke/gltriangle.tsv sh tools/smoke/feed.sh <log> <seconds> <qemu command…>
 #
 # The client, the Mesa DSOs and their dependencies are injected into the disk
-# image by the recipe; the program sets LIBGL_ALWAYS_SOFTWARE / EGL_PLATFORM /
-# LIBGL_DRIVERS_PATH itself, so the line it must print is the whole gate: EGL had
-# to initialise, load the swrast driver, compile the GLSL, run softpipe and give
-# a red centroid and a black corner back.
+# image by the recipe. The program sets EGL_PLATFORM / LIBGL_DRIVERS_PATH itself
+# and picks its driver from whether `/dev/dri/renderD128` opens: the 3c-2 gate
+# gives the guest no `virtio-gpu` device, so it does not, and EGL is forced onto
+# `softpipe`; the 3c-3 gate gives it a GL device, so it does, and EGL takes
+# `virtio_gpu` (virgl) instead. Either way the line it must print is the whole
+# gate: EGL had to initialise, load a driver, compile the GLSL, render, and give a
+# red centroid and a black corner back.
 #
 # One step per line, as `tools/smoke/scenario.tsv` documents: the command, a tab,
 # and the whole line its output must produce.

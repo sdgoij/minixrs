@@ -129,8 +129,13 @@ const RESP_CAPSET_INFO_SIZE: usize = 32;
 /// than overrun. (virgl's capset is ~3 KiB.)
 const CAPSET_BUF_LEN: usize = 4096;
 
-/// Largest command this driver sends (`CTX_CREATE`, 96 bytes).
-const CMD_BUF_LEN: usize = 128;
+/// Largest command this driver sends.
+///
+/// `CTX_CREATE` is 96 bytes, but a `SUBMIT_3D` carries a whole virgl command buffer after its
+/// 32-byte header, and Mesa submits shader/state setup of a few KiB for even a first triangle. A
+/// slot smaller than the buffer the host is handed makes `submit` answer `EINVAL` and the render
+/// silently produce nothing, so the slot is sized for that payload, not for the control commands.
+const CMD_BUF_LEN: usize = 16384;
 
 /// The control queue's command slot.
 ///

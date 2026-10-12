@@ -1,13 +1,15 @@
 # Wayland on minixrs — design proposal and gap analysis
 
-Status: **Phases 0–2 landed, and Phase 3 through stage 3c-2 on all three arches.** The
-loader support it
+Status: **Phases 0–2 landed, and Phase 3 through stage 3c-3 (virgl) on x86_64, with
+the softpipe triangle (3c-2) on all three arches.** The loader support it
 depends on has landed (dynamic linking, `dlopen`, multi-module TLS, an 18-object
 budget — §6.9). §7 carries the per-phase state; what remains is Phase 2's
-multi-output, stage 3c-3 (virgl) and 3d, and Phases 4–5. The softpipe triangle
+multi-output, stage 3d, and Phases 4–5. The softpipe triangle
 (3c-2) passes `just test-gltriangle-<arch>` on x86_64, riscv64 and aarch64 — EGL
-1.5 / GLES 3.1 on `softpipe`, a red centroid over a black corner — and CI builds
-the stack per arch and injects it into the released system image. This
+1.5 / GLES 3.1 on `softpipe`, a red centroid over a black corner — and the virgl
+triangle (3c-3) passes `just test-gltriangle-virgl-x86` on the render node, with
+`GL_RENDERER=virgl`. CI builds the stack per arch and injects it into the released
+system image. This
 document proposes how to get a Wayland compositor — and eventually a desktop —
 running on this port, and records what the reference tree has that we do not, so
 the deviations are deliberate rather than accidental.
@@ -823,7 +825,7 @@ least of the kernel:
 | **3c-0** | The build plumbing: Mesa and `libdrm` pinned and fetched under `target/` (the way `tools/build-bash.py` pins bash, `target/bash-src`), and a `tools/build-mesa.py` that drives their build against the minix C toolchain — including the `cc` that produces `*-minix-elf` shared objects. | `just build-mesa x86` reaches configure and either completes it or fails at a *named* missing libc symbol, with the log written where the next stage reads it |
 | **3c-1** | **The software rasteriser first — `softpipe`, not llvmpipe.** Mesa builds llvmpipe only with LLVM (`-Dllvm=enabled`), and an LLVM port is a much larger project than Mesa; `softpipe` is the same software family with no JIT (and so no `mprotect`). `surfaceless_probe_device_sw` opens no DRM node and loads it under `LIBGL_ALWAYS_SOFTWARE=1`, so this runs with no DRM node at all. Build the `softpipe` gallium driver, `libEGL`/`libGLESv2` and `libglapi` as DSOs, surfaceless-only (`-Dplatforms=`, `-Dgallium-drivers=softpipe`). | In a guest with `LIBGL_ALWAYS_SOFTWARE=1`: `eglGetDisplay(EGL_DEFAULT_DISPLAY)` + `eglInitialize` + `eglQueryString` return a real EGL, and the `libgallium_dri.so` `PT_TLS` block measures ≤ 2048 bytes (`readelf -l`), which is what the loader's surplus TLS slot allows |
 | **3c-2** | **Landed on all three arches** (`just test-gltriangle-<arch>`). The triangle over `softpipe`: the client makes a pbuffer, draws a GLES2 triangle, `glReadPixels`, and checks a red centroid against a black corner. | The triangle reads back red-on-black in QEMU with no DRM node opened (the `/dev/fb` present path is 3d's, not this one) |
-| **3c-3** | **virgl**: `libdrm` (D6 — a dependency, not a reimplementation), Mesa's `virgl` gallium driver, and the DRM device question — `/dev/dri/renderD128` plus libdrm's device discovery, settled as libdrm's OpenBSD/DragonFly branch reading the identity from the driver (`DRM_IOCTL_GET_PCIINFO`, §5 row 24). **Build half landed (3c-3a):** `-Dgallium-drivers=softpipe,virgl` builds cleanly (`just build-mesa x86 --build`, 1004/1004) once `tools/c-include` grew `<sys/uio.h>`, the `msghdr`/`cmsghdr`/`CMSG_*`/`SCM_RIGHTS`/`PF_UNIX` surface and `sendmsg`/`recvmsg`, and `minix-libc` grew `readv`/`writev`/`sendmsg`/`recvmsg`. **Open:** the runtime triangle under `-device virtio-gpu-gl-pci`. | The same triangle runs through virgl (`-device virtio-gpu-gl-pci`), differing from 3c-2 only in which gallium driver Mesa loads |
+| **3c-3** | **virgl**: `libdrm` (D6 — a dependency, not a reimplementation), Mesa's `virgl` gallium driver, and the DRM device question — `/dev/dri/renderD128` plus libdrm's device discovery, settled as libdrm's OpenBSD/DragonFly branch reading the identity from the driver (`DRM_IOCTL_GET_PCIINFO`, §5 row 24). **Build half landed (3c-3a):** `-Dgallium-drivers=softpipe,virgl` builds cleanly (`just build-mesa x86 --build`, 1004/1004) once `tools/c-include` grew `<sys/uio.h>`, the `msghdr`/`cmsghdr`/`CMSG_*`/`SCM_RIGHTS`/`PF_UNIX` surface and `sendmsg`/`recvmsg`, and `minix-libc` grew `readv`/`writev`/`sendmsg`/`recvmsg`. **Landed.** The node is enumerated and its driver is `virgl` — `libdrm` finds `/dev/dri/renderD128` and EGL takes `virtio_gpu` rather than falling back to softpipe. That needed the port's C `dev_t` view to match its own encoding (`major(dev) = dev >> 16`, not `>> 8`; `tools/c-include/sys/types.h`) and `<sys/ioccom.h>` to build DRM's requests with Linux's direction bits so `DRM_IOCTL_GET_PCIINFO` reaches the node. The *host* then rejected the submitted command stream (`context 1 failed to dispatch CREATE_OBJECT: 22`) because Mesa builds the shader text with the port's `vsnprintf`, whose missing space flag turned every `"% 3u"` instruction label into the literal `% 3u` (see below). | The same triangle runs through virgl (`-device virtio-gpu-gl-pci`), differing from 3c-2 only in which gallium driver Mesa loads |
 
 softpipe is first deliberately: §6.10's measurement is that the software branch
 reaches a triangle with no DRM device at all, so the first on-screen GL frame is
@@ -858,8 +860,32 @@ port would have to *claim* Linux — whose `drm.h` branch wants
 Mesa with `-D__managarm__`. The render node answers that ioctl with the virtio-gpu ids
 (`1af4:1050`, which Mesa's loader maps to `virtio_gpu`), and the node's major moves from
 25 to 145 to match that branch's `DRM_MAJOR` (recorded in §5 row 24). No libdrm patch,
-so nothing to refresh on a pin bump. The **runtime** half of 3c-3 — staging
-`virtio_gpu_dri.so` and the triangle under `-device virtio-gpu-gl-pci` — remains open.
+so nothing to refresh on a pin bump. The **runtime** half of 3c-3 is landed: `just test-gltriangle-virgl-x86` runs the
+client on a GL device (`-device virtio-gpu-gl-pci,blob=on`), the render node opens,
+EGL takes `virtio_gpu`, and the triangle reads back a red centroid over a black
+corner with `GL_RENDERER=virgl`. Three things had to be fixed along the way: VFS's
+dmap table was `[Dmap; 64]`, so `map_driver(145)` failed silently and
+`/dev/dri/renderD128` answered `ENXIO` — fixed by raising `NR_DEVICES` to 256; the
+merged `libgallium-25.3.6.so` needs no `__driDriverGetExtensions_*` entry point,
+because `libEGL`/`libGLESv2` name it in `DT_NEEDED` and share its
+`drm_driver_descriptor` table, so EGL reaches `virtio_gpu` without a `dlopen`ed
+`*_dri.so` (no `virtio_gpu_dri.so` is staged); and `minix-libc`'s `printf` was
+incomplete.
+
+**Mesa sends the shader as TGSI text, and the port's `printf` corrupted it.**
+`virgl_encode_shader_state` builds that text with `tgsi_dump_str`, which formats
+into the string sent to the host through the port's own `vsnprintf`. With the
+stream reaching the host, `vrend_shader_assign_tgsi` returned `EINVAL` — `context 1
+failed to dispatch CREATE_OBJECT: 22` — and nothing drew. Dumping the text showed
+every instruction label as the literal `% 3u` instead of `  0`: Mesa's `INSTID`
+macro formats `"% 3u"`, and `vformat` parsed only `-` and `0`, so the space flag
+fell through to the unknown-conversion arm and the digits leaked as text. The host's
+TGSI parser will not take `%` where a label's digits belong. The flag parsing alone
+was not the whole defect: `emit_num` returned the digit count rather than the field
+width, and `str_dump_ctx_printf` advances its write cursor by `vsnprintf`'s return
+value, so a short count would overwrite the tail of what was just written. Both are
+fixed in `crates/minix-libc/src/c_stdio.rs` — the full C flag/width/precision
+grammar, and a count that includes padding.
 
 **A prerequisite the phase did not name: Mesa is C++.** Its `meson.build` opens
 `project('mesa', ['c', 'cpp'], …)` and calls `meson.get_compiler('cpp')`, so a
@@ -1337,7 +1363,7 @@ alone gives it a window but hands it keycodes it cannot turn into text.
 | **0** | AF_UNIX server + `socketpair` + `sendmsg`/`recvmsg` + `SCM_RIGHTS`/`SO_PEERCRED`; native `poll`/`epoll`/`eventfd`/`timerfd`; `memfd_create` + `ftruncate` + anonymous shared frames; `mprotect`; `select` timeouts. **Landed:** sockets + fd passing (`test-uds-x86`), memfd (`test-memfd-x86`), `mprotect`, `select`/native `poll` with real deadlines (`test-select-x86`), `eventfd` (`test-eventfd-x86`), `timerfd` (`test-timerfd-x86`), `epoll` (`test-epoll-x86`). **Open:** none. | Two processes connect over the socket and **pass an fd**; a third `epoll_wait`s on it. Host + QEMU test |
 | **1** | In-house Wayland server, scoped in **§6.11**. **Landed:** 1a — the wire/interface crate and the registry + `sync` handshake over `/dev/uds` (`test-wayland-x86`); 1b — the `wl_shm` present path: `/sbin/wlserver` (boot proc 20) maps `/dev/fb`, `/bin/wlclient` draws into a memfd pool and commits a surface, and the frame is read back from `/dev/fb` (`test-wlshm-x86`); 1c — input: `wl_seat` keyboard/pointer, focus and `enter`, and a key routed from the device to a client (`test-wlkey-x86`), over an input-server ring that keeps a cursor per consumer and a terminal readiness path that reports instead of pushing (`KNOWN_ISSUES` 36, `test-pty-x86`). **Open:** none. | A `wl_shm` client renders through the server to `/dev/fb`, driven by a QEMU smoke scenario (same shape as `tools/smoke/`); a **ported stock** client later, on the same protocol |
 | **2** | `xdg_shell`, decorations, `layer_shell`, popups, damage tracking, cursor, keymaps, multi-output — scoped in **§6.12**. **Landed:** 2a — the seat's keymap, compiled into `wlserver` and served over an fd (`test-wlkey-x86`); 2b — `xdg_shell`: `xdg_wm_base`/`xdg_surface`/`xdg_toplevel`, `configure`/`ack_configure`, `ping`/`pong`, and a toplevel presented at the configured size (`test-wlx-x86`); 2c — several clients at once and per-surface focus, with input routed to the focused connection (`test-wlfocus-x86`); 2d — damage tracking, so only the damaged rectangle is recomposited, and the pointer's cursor image (`test-wlxd-x86`); 2e — popups, `zwlr_layer_shell_v1` and client-side decorations (`test-wlxe-x86`). **Open:** multi-output. | A real toolkit client runs a window with chrome and input |
-| **3** | GL rendering, scoped in **§6.10** — virgl over `virtio-gpu` first: 3D transport, a `virtgpu` render node, Mesa + `libdrm` as DSOs; llvmpipe kept as the fallback. **Landed:** 3a — the 3D transport and virgl negotiation (`test-gpu3d-x86`, `test-gpu3d-nogl-x86`); 3b — the `/dev/dri/renderD128` node: GEM, contexts, blobs, transfers, submits, `WAIT` and `mmap` (`test-drmmap-x86`, `test-drmgl-x86`); 3c's build half — Mesa builds with the `virgl` gallium driver and the C socket cmsg surface is in `minix-libc` (3c-3a). **Open:** 3c's runtime gate (EGL surfaceless triangle under virgl) and 3d (dmabuf/zero-readback present). | The compositor renders GL content |
+| **3** | GL rendering, scoped in **§6.10** — virgl over `virtio-gpu` first: 3D transport, a `virtgpu` render node, Mesa + `libdrm` as DSOs; llvmpipe kept as the fallback. **Landed:** 3a — the 3D transport and virgl negotiation (`test-gpu3d-x86`, `test-gpu3d-nogl-x86`); 3b — the `/dev/dri/renderD128` node: GEM, contexts, blobs, transfers, submits, `WAIT` and `mmap` (`test-drmmap-x86`, `test-drmgl-x86`); 3c's build half — Mesa builds with the `virgl` gallium driver and the C socket cmsg surface is in `minix-libc` (3c-3a). **Landed:** 3c-3 — the virgl triangle on the render node (`just test-gltriangle-virgl-x86`, `GL_RENDERER=virgl`). **Open:** 3d (dmabuf/zero-readback present). | The compositor renders GL content |
 | **4** | smithay port; `cosmic-comp` against our backends; `cosmic-session` + D-Bus | `cosmic-comp` on screen; a `libcosmic` app connects |
 | **5** | Portals, fonts, the `libcosmic` suite | A usable session |
 

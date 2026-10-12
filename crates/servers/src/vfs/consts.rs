@@ -47,7 +47,12 @@ pub const LABEL_MAX: usize = 16;
 pub const DEV_PER_DRIVER: usize = 256;
 
 /// Number of device table slots.
-pub const NR_DEVICES: usize = 64;
+///
+/// Sized past the largest major any driver here uses: the DRM render node's is
+/// `DRM_MAJOR` 145 — libdrm's OpenBSD/DragonFly value, which its `drmNodeIsDRM`
+/// compares the node's major against (`.notes/wayland.md` §5 row 24) — so the
+/// table must reach at least 146. 256 also covers MINIX's own majors (up to 134).
+pub const NR_DEVICES: usize = 256;
 
 // Misc constants
 

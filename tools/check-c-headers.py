@@ -66,12 +66,20 @@ def declarations() -> dict[str, str]:
         rel = path.relative_to(INC).as_posix()
         depth = 0
         pending = ""
+        macro_cont = False
         for raw in path.read_text(encoding="utf-8", errors="replace").splitlines():
             line = raw.strip()
+            if macro_cont:
+                # A continuation of a skipped `#define`: it is not a declaration,
+                # even when it starts with an identifier (`__CMSG_ALIGN ...`) that
+                # the matcher below would otherwise take for a function name.
+                macro_cont = line.endswith("\\")
+                continue
             if depth > 0:
                 depth += line.count("{") - line.count("}")
                 continue
             if not line or line.startswith(("#", "//", "/*", "*", "typedef", 'extern "C"')):
+                macro_cont = line.endswith("\\")
                 continue
             if "{" in line:
                 # A body: a struct, a union, an enum, an inline function. Its

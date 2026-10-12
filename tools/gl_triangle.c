@@ -1,18 +1,26 @@
-/* A GLES2 triangle through surfaceless EGL on the software rasteriser.
+/* A GLES2 triangle through surfaceless EGL.
  *
- * This is §6.10's 3c-2 client: it opens no DRM node, renders into a pbuffer with
- * `softpipe`, reads the framebuffer back and checks the triangle landed. It is
- * the first thing to run on top of the Mesa DSOs (`just build-mesa`), so it sets
- * the software/loader environment itself (setenv, before EGL init) and prints
- * one `pass`/`fail` line the boot scenario can match.
+ * This is §6.10's 3c-2 client: it renders into a pbuffer, reads the framebuffer
+ * back and checks the triangle landed. It sets the loader environment itself
+ * (setenv, before EGL init) and prints one `pass`/`fail` line the boot scenario
+ * can match.
+ *
+ * Which driver it lands on is decided by whether the guest has a render node:
+ * 3c-2's gate gives the guest no `virtio-gpu` device, so `/dev/dri/renderD128`
+ * refuses to open and EGL is forced onto `softpipe`; 3c-3's virgl gate gives it a
+ * GL device, the node opens, and surfaceless EGL takes the `virtio_gpu` driver
+ * instead. The probe is the same call Mesa makes, so the driver choice does not
+ * depend on the guest shell passing an environment variable.
  *
  * The triangle is red on black: the centroid's readback must be red and a corner
  * must be black. A renderer that did nothing, or drew nothing, fails both. */
 #include <EGL/egl.h>
 #include <GLES2/gl2.h>
 
+#include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <unistd.h>
 
 #define W 64
 #define H 64
@@ -43,7 +51,13 @@ static GLuint compile(GLenum type, const char *src)
 
 int main(void)
 {
-    setenv("LIBGL_ALWAYS_SOFTWARE", "1", 1);
+    /* The render node opens only when the guest has a `virtio-gpu` device (see the
+     * note above): with no device, force `softpipe`; with one, let EGL take it. */
+    int node = open("/dev/dri/renderD128", O_RDWR);
+    if (node < 0)
+        setenv("LIBGL_ALWAYS_SOFTWARE", "1", 1);
+    else
+        close(node);
     setenv("LIBGL_DRIVERS_PATH", "/lib", 1);
     setenv("EGL_PLATFORM", "surfaceless", 1);
 

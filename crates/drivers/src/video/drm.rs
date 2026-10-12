@@ -205,7 +205,7 @@ pub const MAX_CONTEXT_PARAMS: usize = 3;
 /// descriptor (`virtio_gpu.rs`'s `submit_3d`), so the device's command slot is the limit, and a
 /// longer buffer has nowhere to go. This is what `dispatch` reads the caller's buffer into, so
 /// it is also the most it will copy from one.
-pub const MAX_COMMAND_BYTES: usize = 1024;
+pub const MAX_COMMAND_BYTES: usize = 16384;
 
 /// The most handles one submit may name. The node's object table is smaller than this, so a
 /// longer list cannot be fully resolved anyway; the bound exists so that `dispatch` can read the
