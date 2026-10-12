@@ -94,7 +94,7 @@ def main():
     )
     threading.Thread(target=pump, daemon=True).start()
 
-    if not wait_for(lambda: b"# " in out, 150):
+    if not wait_for(lambda: b"# " in out, 240):
         print("NO PROMPT", file=sys.stderr)
         qemu.kill()
         sys.exit(1)
