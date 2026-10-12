@@ -1,0 +1,15 @@
+# The `just test-fbmmap-<arch>` scenario: a userland `mmap` of `/dev/fb` must alias the
+# live framebuffer, not some other physical range.
+#
+#   FEED_SCENARIO=tools/smoke/fbmmap.tsv sh tools/smoke/feed.sh <log> <seconds> <qemu command…>
+#
+# Every compositor present path — `wserver`, `/sbin/wlserver`, and the clients that read
+# the frame back — depends on this. `/bin/fbmmap paint` mmaps `/dev/fb` `MAP_SHARED`,
+# paints a 200×200 white block, then reads back both the block (white) and two points of
+# the boot pattern (the middle third green, the right third blue). The read-back only
+# matches when the mapping is the device's own memory; when the fb server reported the
+# physmap *window* as the physical base instead of the BAR's, every client's `mmap`
+# landed elsewhere and the read-back was black (`.notes/wayland.md` §6.11). The tool
+# leaves the block white; nothing after it in this scenario looks at the frame.
+
+/bin/fbmmap paint	fbmmap: paint ok

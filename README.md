@@ -330,6 +330,13 @@ See `.agents/skills/` for domain deep-dives:
   measures read-only frame sharing between two processes from the host's page tables, and
   `cargo test -p ldso` covers the loader's parsing, relocation rules and name resolution on
   the host. The boot test asserts that an image carries the loader and the two objects.
+- **The framebuffer `mmap` path:** `just test-fbmmap <arch>` boots the split system image and
+  drives `tools/smoke/fbmmap.tsv` — `/bin/fbmmap paint` mmaps `/dev/fb` `MAP_SHARED`, paints a
+  block and reads it back, which only matches when the mapping aliases the device's own memory.
+  It is a per-arch scenario rather than a `scenario.tsv` step for the same reason the dynamic
+  linking gate is: wasm drives that one and has no `/dev/fb` to map. `arch-tests` runs it on
+  every arch, which is what catches a physmap change quietly making every client's `mmap` land
+  where the framebuffer is not.
 - **The C graphics stack:** `just test-gltriangle-<arch>` cross-builds Mesa/libdrm as shared
   objects (`just build-mesa <arch> --build`, or `just fetch-mesa <arch>` for the published
   ones) and boots a surfaceless-EGL client that draws a GLES2 triangle on `softpipe` and

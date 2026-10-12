@@ -274,6 +274,32 @@ test-system-image-aarch64 boot-timeout="60": system-image-aarch64
     sh tools/smoke/feed.sh target/test-system-image-aarch64.log {{boot-timeout}} qemu-system-aarch64 -machine virt -cpu cortex-a57 -m 256M -nographic -no-reboot -global virtio-mmio.force-legacy=off -drive if=none,id=disk0,file=target/images/aarch64-unknown-minix/disk.img,format=raw,cache=writethrough -device virtio-blk-device,drive=disk0 -netdev user,id=net0 -device virtio-net-device,netdev=net0 -device virtio-gpu-device -device virtio-keyboard-device -kernel target/images/aarch64-unknown-minix/minix-aarch64-boot.elf
     @just _assert-qemu-log target/test-system-image-aarch64.log "wserver: ready"
 
+# The `/dev/fb` `mmap` path: a userland `mmap` of the framebuffer must alias the device's
+# own memory, which every present path (`wserver`, `/sbin/wlserver`, and the clients that
+# read the frame back) depends on. It broke silently once: after `VM_MAP_PHYS` began
+# returning a *window* rather than the physical address (`.notes/physmap.md` D5), the fb
+# server reported that window as the physical base, so every client's `mmap` landed where
+# the device is not and read a black frame. `/bin/fbmmap` does the whole check itself —
+# paint, then read back the block and the boot pattern — so this needs no screenshot and
+# no GL host, and it runs on every arch.
+test-fbmmap arch="x86" boot-timeout="40":
+    @just test-fbmmap-{{arch}} {{boot-timeout}}
+
+test-fbmmap-x86 boot-timeout="40": system-image-x86
+    @just _assert-qemu-version qemu-system-x86_64
+    FEED_SCENARIO=tools/smoke/fbmmap.tsv sh tools/smoke/feed.sh target/test-fbmmap-x86.log {{boot-timeout}} qemu-system-x86_64 -nographic -m 256M -no-reboot -vga none -device bochs-display,id=fb0 -kernel target/images/x86_64-pc-minix/minix-x86-boot.elf -drive if=none,id=disk0,file=target/images/x86_64-pc-minix/disk.img,format=raw,cache=writethrough -device virtio-blk-pci,disable-legacy=on,drive=disk0 -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0 -device virtio-tablet-pci,display=fb0
+    @echo "fbmmap: a userland mmap of /dev/fb aliases the live framebuffer (x86_64)"
+
+test-fbmmap-riscv64 boot-timeout="60": system-image-riscv64
+    @just _assert-qemu-version qemu-system-riscv64
+    FEED_SCENARIO=tools/smoke/fbmmap.tsv sh tools/smoke/feed.sh target/test-fbmmap-riscv64.log {{boot-timeout}} qemu-system-riscv64 -machine virt -m 256M -nographic -global virtio-mmio.force-legacy=off -drive if=none,id=disk0,file=target/images/riscv64gc-unknown-minix/disk.img,format=raw,cache=writethrough -device virtio-blk-device,drive=disk0 -netdev user,id=net0 -device virtio-net-device,netdev=net0 -device virtio-gpu-device -device virtio-keyboard-device -kernel target/images/riscv64gc-unknown-minix/minix-riscv64-boot.elf
+    @echo "fbmmap: a userland mmap of /dev/fb aliases the live framebuffer (riscv64)"
+
+test-fbmmap-aarch64 boot-timeout="60": system-image-aarch64
+    @just _assert-qemu-version qemu-system-aarch64
+    FEED_SCENARIO=tools/smoke/fbmmap.tsv sh tools/smoke/feed.sh target/test-fbmmap-aarch64.log {{boot-timeout}} qemu-system-aarch64 -machine virt -cpu cortex-a57 -m 256M -nographic -no-reboot -global virtio-mmio.force-legacy=off -drive if=none,id=disk0,file=target/images/aarch64-unknown-minix/disk.img,format=raw,cache=writethrough -device virtio-blk-device,drive=disk0 -netdev user,id=net0 -device virtio-net-device,netdev=net0 -device virtio-gpu-device -device virtio-keyboard-device -kernel target/images/aarch64-unknown-minix/minix-aarch64-boot.elf
+    @echo "fbmmap: a userland mmap of /dev/fb aliases the live framebuffer (aarch64)"
+
 # Interactive bash: readline polls the console instead of blocking on a line read,
 # so this drives a *typed* line at `bash-5.3#` — the part the `bash -c` scenario in
 # `test-bash-<arch>` cannot see. It boots the split pair (the shipping artifact),

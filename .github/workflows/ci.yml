@@ -449,6 +449,13 @@ jobs:
       - name: The shipped image, driven through the smoke scenario
         run: just image ${{ matrix.arch }} 120
 
+      # The `/dev/fb` mmap path (`tools/smoke/fbmmap.tsv`): a userland mmap of the
+      # framebuffer has to alias the device's memory, which every present path
+      # (`wserver`, `/sbin/wlserver`, and the clients reading the frame back) depends on.
+      # A physmap change once made it silently wrong on all of them.
+      - name: The framebuffer mmap path
+        run: just test-fbmmap ${{ matrix.arch }}
+
   # Decides whether the pinned bash commit needs a release before anything consumes
   # one. Read-only; `bash-release` below does the publishing.
   bash-pin:
