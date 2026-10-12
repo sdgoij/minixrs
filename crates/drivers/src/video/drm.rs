@@ -77,6 +77,11 @@ const fn iow(type_: u32, nr: u32, size: u32) -> u32 {
     ioc(IOC_WRITE, type_, nr, size)
 }
 
+/// `_IOR`: the argument carries data out only.
+const fn ior(type_: u32, nr: u32, size: u32) -> u32 {
+    ioc(IOC_READ, type_, nr, size)
+}
+
 /// The argument size encoded in a request number. [`dispatch`] checks it before it reads
 /// any field, which is what makes the field offsets safe by construction.
 pub const fn arg_size(request: u32) -> u32 {
@@ -100,6 +105,10 @@ pub const DRM_IOCTL_VERSION: u32 = iowr(DRM_IOCTL_BASE, 0x00, 64);
 pub const DRM_IOCTL_GEM_CLOSE: u32 = iow(DRM_IOCTL_BASE, 0x09, 8);
 /// `DRM_IOCTL_GET_CAP`, `struct drm_get_cap`.
 pub const DRM_IOCTL_GET_CAP: u32 = iowr(DRM_IOCTL_BASE, 0x0c, 16);
+/// `DRM_IOCTL_GET_PCIINFO`, `struct drm_pciinfo`. Not a core DRM request on Linux — it is
+/// libdrm's OpenBSD/DragonFly spelling (`xf86drm.c`), served here so libdrm on that branch
+/// can learn the node's PCI identity with no sysfs.
+pub const DRM_IOCTL_GET_PCIINFO: u32 = ior(DRM_IOCTL_BASE, 0x15, SZ_PCIINFO);
 
 /// Sizes of the virtgpu argument structs, which is what a request number carries.
 const SZ_MAP: u32 = 16; // struct drm_virtgpu_map
@@ -112,6 +121,9 @@ const SZ_3D_WAIT: u32 = 8; // struct drm_virtgpu_3d_wait
 const SZ_GET_CAPS: u32 = 24; // struct drm_virtgpu_get_caps
 const SZ_RESOURCE_CREATE_BLOB: u32 = 56; // struct drm_virtgpu_resource_create_blob
 const SZ_CONTEXT_INIT: u32 = 16; // struct drm_virtgpu_context_init
+/// `struct drm_pciinfo`: `u16 domain`, three `u8`s, a padding byte, four `u16` ids and the
+/// revision — 15 bytes rounded to 16 by `u16` alignment.
+const SZ_PCIINFO: u32 = 16;
 
 /// `DRM_IOCTL_VIRTGPU_MAP`.
 pub const DRM_IOCTL_VIRTGPU_MAP: u32 = iowr(DRM_IOCTL_BASE, DRM_COMMAND_BASE + 0x01, SZ_MAP);
@@ -234,8 +246,9 @@ pub const VIRTGPU_BLOB_FLAG_USE_SHAREABLE: u32 = 0x0002;
 pub const VIRTGPU_BLOB_FLAG_USE_CROSS_DEVICE: u32 = 0x0004;
 /// `VIRTGPU_BLOB_FLAG_USE_MASK` — the flags this ABI defines, and so the mask a request's flags
 /// are checked against before anything else about it is believed.
-pub const VIRTGPU_BLOB_FLAG_USE_MASK: u32 =
-    VIRTGPU_BLOB_FLAG_USE_MAPPABLE | VIRTGPU_BLOB_FLAG_USE_SHAREABLE | VIRTGPU_BLOB_FLAG_USE_CROSS_DEVICE;
+pub const VIRTGPU_BLOB_FLAG_USE_MASK: u32 = VIRTGPU_BLOB_FLAG_USE_MAPPABLE
+    | VIRTGPU_BLOB_FLAG_USE_SHAREABLE
+    | VIRTGPU_BLOB_FLAG_USE_CROSS_DEVICE;
 
 /// `DRM_CAP_DUMB_BUFFER`: the mode-setting dumb-buffer ioctl. A render node has none.
 pub const DRM_CAP_DUMB_BUFFER: u64 = 0x1;
@@ -259,6 +272,22 @@ pub struct DrmVersion {
     pub desc: &'static str,
 }
 
+/// `struct drm_pciinfo`: the PCI identity a render node reports through
+/// [`DRM_IOCTL_GET_PCIINFO`], which libdrm's OpenBSD/DragonFly device discovery reads to
+/// name the DRI driver to load (there is no sysfs to read it from here).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PciInfo {
+    pub domain: u16,
+    pub bus: u8,
+    pub dev: u8,
+    pub func: u8,
+    pub vendor_id: u16,
+    pub device_id: u16,
+    pub subvendor_id: u16,
+    pub subdevice_id: u16,
+    pub revision_id: u8,
+}
+
 /// The device behind the ABI.
 ///
 /// `get_caps` takes a slice rather than a user address because the device's job is to
@@ -267,6 +296,11 @@ pub struct DrmVersion {
 pub trait RenderNode {
     /// `DRM_IOCTL_VERSION`.
     fn version(&self) -> DrmVersion;
+
+    /// `DRM_IOCTL_GET_PCIINFO`: the node's PCI identity, which libdrm's
+    /// OpenBSD/DragonFly device discovery reads to name the DRI driver. The node
+    /// here is a virtio-gpu, so the ids are the virtio-gpu ones on every arch.
+    fn pci_info(&self) -> PciInfo;
 
     /// `DRM_IOCTL_GET_CAP`: the value of a generic DRM capability, or `EINVAL` for one
     /// this node does not know.
@@ -647,6 +681,20 @@ fn wr_u64(arg: &mut [u8], off: usize, v: u64) {
     }
 }
 
+/// Store `v` as a `u16` at `off`.
+fn wr_u16(arg: &mut [u8], off: usize, v: u16) {
+    if let Some(s) = arg.get_mut(off..off + 2) {
+        s.copy_from_slice(&v.to_le_bytes());
+    }
+}
+
+/// Store `v` as a `u8` at `off`.
+fn wr_u8(arg: &mut [u8], off: usize, v: u8) {
+    if let Some(s) = arg.get_mut(off) {
+        *s = v;
+    }
+}
+
 /// `drm_copy_field`: hand the caller `min(value.len(), the length it passed)` bytes of
 /// `value` and report `value`'s whole length.
 ///
@@ -726,6 +774,24 @@ pub fn dispatch(
                 }
                 Err(e) => e,
             }
+        }
+        DRM_IOCTL_GET_PCIINFO => {
+            if !fits(arg, request) {
+                return EINVAL;
+            }
+            let p = node.pci_info();
+            // struct drm_pciinfo: u16 domain; u8 bus, dev, func; a padding byte;
+            // u16 vendor, device, subvendor, subdevice; u8 revision.
+            wr_u16(arg, 0, p.domain);
+            wr_u8(arg, 2, p.bus);
+            wr_u8(arg, 3, p.dev);
+            wr_u8(arg, 4, p.func);
+            wr_u16(arg, 6, p.vendor_id);
+            wr_u16(arg, 8, p.device_id);
+            wr_u16(arg, 10, p.subvendor_id);
+            wr_u16(arg, 12, p.subdevice_id);
+            wr_u8(arg, 14, p.revision_id);
+            0
         }
         DRM_IOCTL_VIRTGPU_GETPARAM => {
             if !fits(arg, request) {
@@ -1031,6 +1097,19 @@ mod tests {
                 desc: DESC,
             }
         }
+        fn pci_info(&self) -> PciInfo {
+            PciInfo {
+                domain: 0,
+                bus: 0x01,
+                dev: 0x02,
+                func: 0x03,
+                vendor_id: 0x1af4,
+                device_id: 0x1050,
+                subvendor_id: 0x1af4,
+                subdevice_id: 0x1050,
+                revision_id: 0x04,
+            }
+        }
         fn get_cap(&mut self, capability: u64) -> Result<u64, i32> {
             match capability {
                 DRM_CAP_DUMB_BUFFER => Ok(0),
@@ -1124,9 +1203,8 @@ mod tests {
                 p.param == VIRTGPU_CONTEXT_PARAM_CAPSET_ID
                     && p.value == VIRTGPU_DRM_CAPSET_VIRGL2 as u64
             };
-            let rings = |p: &ContextParam| {
-                p.param == VIRTGPU_CONTEXT_PARAM_NUM_RINGS && p.value == 1
-            };
+            let rings =
+                |p: &ContextParam| p.param == VIRTGPU_CONTEXT_PARAM_NUM_RINGS && p.value == 1;
             match params {
                 [only] if capset(only) => Ok(()),
                 [first, second] if rings(first) && capset(second) => Ok(()),
@@ -1358,7 +1436,11 @@ mod tests {
     fn blob_create_writes_the_handles_and_refuses_what_the_node_cannot_read() {
         let mut node = FakeNode;
         let mut users = FakeUser::new();
-        let mut arg = blob_create_arg(VIRTGPU_BLOB_MEM_GUEST, VIRTGPU_BLOB_FLAG_USE_MAPPABLE, 16384);
+        let mut arg = blob_create_arg(
+            VIRTGPU_BLOB_MEM_GUEST,
+            VIRTGPU_BLOB_FLAG_USE_MAPPABLE,
+            16384,
+        );
         // The length is an input: a node that rounded it in place would be writing a number this
         // ABI never writes, and `RESOURCE_INFO` is where a client reads what it got.
         assert_eq!(
@@ -1651,7 +1733,12 @@ mod tests {
 
         let mut arg = execbuffer_arg(0, 8, 0x4000, 0x5000, 1);
         assert_eq!(
-            dispatch(&mut node, &mut users, DRM_IOCTL_VIRTGPU_EXECBUFFER, &mut arg),
+            dispatch(
+                &mut node,
+                &mut users,
+                DRM_IOCTL_VIRTGPU_EXECBUFFER,
+                &mut arg
+            ),
             0
         );
 
@@ -1660,7 +1747,12 @@ mod tests {
         for size in [7u32, 0, MAX_COMMAND_BYTES as u32 + 4] {
             let mut arg = execbuffer_arg(0, size, 0x4000, 0x5000, 1);
             assert_eq!(
-                dispatch(&mut node, &mut users, DRM_IOCTL_VIRTGPU_EXECBUFFER, &mut arg),
+                dispatch(
+                    &mut node,
+                    &mut users,
+                    DRM_IOCTL_VIRTGPU_EXECBUFFER,
+                    &mut arg
+                ),
                 EINVAL,
                 "size {size}"
             );
@@ -1671,12 +1763,22 @@ mod tests {
         // and the node simply cannot do it.
         let mut arg = execbuffer_arg(0x80, 8, 0x4000, 0x5000, 1);
         assert_eq!(
-            dispatch(&mut node, &mut users, DRM_IOCTL_VIRTGPU_EXECBUFFER, &mut arg),
+            dispatch(
+                &mut node,
+                &mut users,
+                DRM_IOCTL_VIRTGPU_EXECBUFFER,
+                &mut arg
+            ),
             EINVAL
         );
         let mut arg = execbuffer_arg(VIRTGPU_EXECBUF_FENCE_FD_OUT, 8, 0x4000, 0x5000, 1);
         assert_eq!(
-            dispatch(&mut node, &mut users, DRM_IOCTL_VIRTGPU_EXECBUFFER, &mut arg),
+            dispatch(
+                &mut node,
+                &mut users,
+                DRM_IOCTL_VIRTGPU_EXECBUFFER,
+                &mut arg
+            ),
             ENOSYS
         );
 
@@ -1684,31 +1786,56 @@ mod tests {
         let mut arg = execbuffer_arg(0, 8, 0x4000, 0x5000, 1);
         wr_u32(&mut arg, 40, 1);
         assert_eq!(
-            dispatch(&mut node, &mut users, DRM_IOCTL_VIRTGPU_EXECBUFFER, &mut arg),
+            dispatch(
+                &mut node,
+                &mut users,
+                DRM_IOCTL_VIRTGPU_EXECBUFFER,
+                &mut arg
+            ),
             EINVAL
         );
 
         // Pointers that name nothing, and more handles than the node will read.
         let mut arg = execbuffer_arg(0, 8, 0, 0x5000, 1);
         assert_eq!(
-            dispatch(&mut node, &mut users, DRM_IOCTL_VIRTGPU_EXECBUFFER, &mut arg),
+            dispatch(
+                &mut node,
+                &mut users,
+                DRM_IOCTL_VIRTGPU_EXECBUFFER,
+                &mut arg
+            ),
             EFAULT
         );
         let mut arg = execbuffer_arg(0, 8, 0x4000, 0, 1);
         assert_eq!(
-            dispatch(&mut node, &mut users, DRM_IOCTL_VIRTGPU_EXECBUFFER, &mut arg),
+            dispatch(
+                &mut node,
+                &mut users,
+                DRM_IOCTL_VIRTGPU_EXECBUFFER,
+                &mut arg
+            ),
             EFAULT
         );
         let mut arg = execbuffer_arg(0, 8, 0x4000, 0x5000, MAX_BO_HANDLES as u32 + 1);
         assert_eq!(
-            dispatch(&mut node, &mut users, DRM_IOCTL_VIRTGPU_EXECBUFFER, &mut arg),
+            dispatch(
+                &mut node,
+                &mut users,
+                DRM_IOCTL_VIRTGPU_EXECBUFFER,
+                &mut arg
+            ),
             EINVAL
         );
 
         // No handles at all is a submit with nothing attached, which the node decides on.
         let mut arg = execbuffer_arg(0, 8, 0x4000, 0, 0);
         assert_eq!(
-            dispatch(&mut node, &mut users, DRM_IOCTL_VIRTGPU_EXECBUFFER, &mut arg),
+            dispatch(
+                &mut node,
+                &mut users,
+                DRM_IOCTL_VIRTGPU_EXECBUFFER,
+                &mut arg
+            ),
             EINVAL,
             "the fake wants the one handle"
         );
@@ -1768,7 +1895,11 @@ mod tests {
         assert_eq!(objects.lookup(2), Some((1, 8192)));
         assert_eq!(objects.remove(2), Some((1, 2)));
         assert_eq!(objects.lookup(2), None, "a closed handle is gone");
-        assert_eq!(objects.remove(2), None, "and closing it twice is not an answer");
+        assert_eq!(
+            objects.remove(2),
+            None,
+            "and closing it twice is not an answer"
+        );
         // The freed slot is the one reused, and its offset names the new object.
         let third = objects.create(4096).expect("the slot is free again");
         assert_eq!(third.handle, 2);
@@ -1823,7 +1954,10 @@ mod tests {
 
         // A blob is bounded by the backing exactly as an ordinary object is, and its kind does not
         // survive the handle it was made under.
-        assert_eq!(objects.create_blob(8193, VIRTGPU_BLOB_MEM_GUEST), Err(EINVAL));
+        assert_eq!(
+            objects.create_blob(8193, VIRTGPU_BLOB_MEM_GUEST),
+            Err(EINVAL)
+        );
         assert_eq!(objects.remove(blob.handle), Some((0, blob.handle)));
         assert_eq!(objects.blob_mem(blob.handle), 0, "the slot is free again");
         assert_eq!(objects.blob_mem(99), 0, "a handle this table never issued");
@@ -1888,9 +2022,7 @@ mod tests {
             if self.fail {
                 return Err(EFAULT);
             }
-            let Some((_, buf, n)) = self.slots[..self.count]
-                .iter()
-                .find(|(a, _, _)| *a == addr)
+            let Some((_, buf, n)) = self.slots[..self.count].iter().find(|(a, _, _)| *a == addr)
             else {
                 return Err(EFAULT);
             };
@@ -1934,6 +2066,9 @@ mod tests {
         assert_eq!(DRM_IOCTL_VERSION, 0xC040_6400);
         assert_eq!(DRM_IOCTL_GEM_CLOSE, 0x4008_6409);
         assert_eq!(DRM_IOCTL_GET_CAP, 0xC010_640C);
+        // `_IOR('d', 0x15, struct drm_pciinfo)`: libdrm's OpenBSD/DragonFly request, the
+        // one this port serves so libdrm can find the node without sysfs.
+        assert_eq!(DRM_IOCTL_GET_PCIINFO, 0x8010_6415);
 
         // The virtgpu set: `_IOWR('d', 0x40 + n, sizeof(struct))`, so each number's low
         // byte is its request id and its size field is the argument struct's size.
@@ -1983,6 +2118,35 @@ mod tests {
         }
         assert!(carries_in(DRM_IOCTL_GEM_CLOSE));
         assert!(!carries_out(DRM_IOCTL_GEM_CLOSE));
+        // `GET_PCIINFO` is `_IOR`: the identity travels out only.
+        assert!(!carries_in(DRM_IOCTL_GET_PCIINFO));
+        assert!(carries_out(DRM_IOCTL_GET_PCIINFO));
+    }
+
+    /// `DRM_IOCTL_GET_PCIINFO` fills the 16-byte `struct drm_pciinfo` libdrm's
+    /// OpenBSD/DragonFly discovery reads: `u16 domain`, three `u8`s, a padding byte, four
+    /// `u16` ids, then the revision.
+    #[test]
+    fn get_pciinfo_reports_the_nodes_pci_identity() {
+        let mut node = FakeNode;
+        let mut users = FakeUser::new();
+        let mut arg = [0u8; 16];
+        assert_eq!(
+            dispatch(&mut node, &mut users, DRM_IOCTL_GET_PCIINFO, &mut arg),
+            0
+        );
+        #[rustfmt::skip]
+        let want: [u8; 16] = [
+            0x00, 0x00, // domain
+            0x01, 0x02, 0x03, // bus, dev, func
+            0x00, // padding
+            0xf4, 0x1a, // vendor 0x1af4
+            0x50, 0x10, // device 0x1050
+            0xf4, 0x1a, // subvendor
+            0x50, 0x10, // subdevice
+            0x04, 0x00, // revision, padding
+        ];
+        assert_eq!(arg, want);
     }
 
     /// `getparam`'s value field is a user *pointer* and the value behind it is an `int`,

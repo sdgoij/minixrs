@@ -373,6 +373,7 @@ not now, record it.
 | 21 | `timerfd` | no such thing; an event loop would emulate a timeout over `select` | a VFS-internal timer object with a synthetic identity (`TIMERFD_DEV`), one-shot or periodic, absolute or relative; its next expiry folds into the **one** `SYS_SETALARM` deadline that `select`/`poll` also arm, and the tick calls `timerfd::expire`. Deviation: a read with a zero expiry count answers `EAGAIN` rather than blocking (same as `eventfd`/pipes) | **Net-new** (no original to follow) |
 | 22 | `CLOCK_MONOTONIC` | `do_gettime` returns `boottime + uptime` for **both** clocks (`servers/pm/time.c`: `sec = boottime + clock / system_hz`) — so the "monotonic" clock jumps when the wall clock is set, and sits `boottime` seconds off the kernel tick timeline | `CLOCK_MONOTONIC` is the uptime tick count alone (time since boot); `CLOCK_REALTIME` keeps the `boottime` offset. Matches POSIX and the port's own `clock_server` | **Deviate** (fixes a MINIX defect, and is what lets an absolute `CLOCK_MONOTONIC` `timerfd` deadline name the same timeline `vfs::alarm` arms against — `calloop`'s timer depends on it) |
 | 23 | `epoll` | no such thing; `poll` is emulated over `select` (25 slots, one outstanding query per major) | a VFS-internal instance with a persistent interest set; `epoll_wait` re-scans it through the shared wait table, level-triggered. Deviations: an instance holds at most `MAX_INTERESTS` (64) registrations; `EPOLLET`/`EPOLLONESHOT` are accepted in the mask but served level-triggered; an interest whose fd the waiter closed is dropped lazily at the next `epoll_wait` (not at close); `EPOLLERR`/`EPOLLHUP`/`EPOLLRDHUP` are not synthesised | **Net-new** (no original to follow) |
+| 24 | libdrm device discovery | reads `/sys/dev/char/<maj>:<min>/device/…` for the bus/device id, and hardcodes Linux's `DRM_MAJOR` 226; its `#else` branch (a platform with no macro) is `#warning` + `-EINVAL` | libdrm is built as its **OpenBSD/DragonFly branch** (`-Dc_args=-D__DragonFly__` in `build-mesa.py`), the one whose discovery is a *driver* ioctl: the port's render node answers `DRM_IOCTL_GET_PCIINFO` with the virtio-gpu ids `1af4:1050`, and `DRM_MAJOR` is 145, that branch's value | **Deviate** — no sysfs in the port, and a driver ioctl fits better than fabricated sysfs; the identity comes from the device, and there is no libdrm patch to rot on a pin bump (same move as Mesa's `-D__managarm__`) |
 
 ---
 
@@ -820,9 +821,9 @@ least of the kernel:
 | Stage | Deliverable | Gate |
 |---|---|---|
 | **3c-0** | The build plumbing: Mesa and `libdrm` pinned and fetched under `target/` (the way `tools/build-bash.py` pins bash, `target/bash-src`), and a `tools/build-mesa.py` that drives their build against the minix C toolchain — including the `cc` that produces `*-minix-elf` shared objects. | `just build-mesa x86` reaches configure and either completes it or fails at a *named* missing libc symbol, with the log written where the next stage reads it |
-| **3c-1** | **The software rasteriser first — `softpipe`, not llvmpipe.** Mesa builds llvmpipe only with LLVM (`-Dllvm=enabled`), and an LLVM port is a much larger project than Mesa; `softpipe` is the same software family with no JIT (and so no `mprotect`). `surfaceless_probe_device_sw` opens no DRM node and loads it under `LIBGL_ALWAYS_SOFTWARE=1`, so this runs before the `/sys` question is settled. Build the `softpipe` gallium driver, `libEGL`/`libGLESv2` and `libglapi` as DSOs, surfaceless-only (`-Dplatforms=`, `-Dgallium-drivers=softpipe`). | In a guest with `LIBGL_ALWAYS_SOFTWARE=1`: `eglGetDisplay(EGL_DEFAULT_DISPLAY)` + `eglInitialize` + `eglQueryString` return a real EGL, and the `libgallium_dri.so` `PT_TLS` block measures ≤ 2048 bytes (`readelf -l`), which is what the loader's surplus TLS slot allows |
+| **3c-1** | **The software rasteriser first — `softpipe`, not llvmpipe.** Mesa builds llvmpipe only with LLVM (`-Dllvm=enabled`), and an LLVM port is a much larger project than Mesa; `softpipe` is the same software family with no JIT (and so no `mprotect`). `surfaceless_probe_device_sw` opens no DRM node and loads it under `LIBGL_ALWAYS_SOFTWARE=1`, so this runs with no DRM node at all. Build the `softpipe` gallium driver, `libEGL`/`libGLESv2` and `libglapi` as DSOs, surfaceless-only (`-Dplatforms=`, `-Dgallium-drivers=softpipe`). | In a guest with `LIBGL_ALWAYS_SOFTWARE=1`: `eglGetDisplay(EGL_DEFAULT_DISPLAY)` + `eglInitialize` + `eglQueryString` return a real EGL, and the `libgallium_dri.so` `PT_TLS` block measures ≤ 2048 bytes (`readelf -l`), which is what the loader's surplus TLS slot allows |
 | **3c-2** | **Landed on all three arches** (`just test-gltriangle-<arch>`). The triangle over `softpipe`: the client makes a pbuffer, draws a GLES2 triangle, `glReadPixels`, and checks a red centroid against a black corner. | The triangle reads back red-on-black in QEMU with no DRM node opened (the `/dev/fb` present path is 3d's, not this one) |
-| **3c-3** | **virgl**: `libdrm` (D6 — a dependency, not a reimplementation), Mesa's `virgl` gallium driver, and the DRM device question — `/dev/dri/renderD128` plus either a minimal `/sys` `device/subsystem` node in `devman` or the recorded `drmParseSubsystemType` patch. **Build half landed (3c-3a):** `-Dgallium-drivers=softpipe,virgl` builds cleanly (`just build-mesa x86 --build`, 1004/1004) once `tools/c-include` grew `<sys/uio.h>`, the `msghdr`/`cmsghdr`/`CMSG_*`/`SCM_RIGHTS`/`PF_UNIX` surface and `sendmsg`/`recvmsg`, and `minix-libc` grew `readv`/`writev`/`sendmsg`/`recvmsg`. **Open:** the DRM device question below, then the runtime triangle under `-device virtio-gpu-gl-pci`. | The same triangle runs through virgl (`-device virtio-gpu-gl-pci`), differing from 3c-2 only in which gallium driver Mesa loads |
+| **3c-3** | **virgl**: `libdrm` (D6 — a dependency, not a reimplementation), Mesa's `virgl` gallium driver, and the DRM device question — `/dev/dri/renderD128` plus libdrm's device discovery, settled as libdrm's OpenBSD/DragonFly branch reading the identity from the driver (`DRM_IOCTL_GET_PCIINFO`, §5 row 24). **Build half landed (3c-3a):** `-Dgallium-drivers=softpipe,virgl` builds cleanly (`just build-mesa x86 --build`, 1004/1004) once `tools/c-include` grew `<sys/uio.h>`, the `msghdr`/`cmsghdr`/`CMSG_*`/`SCM_RIGHTS`/`PF_UNIX` surface and `sendmsg`/`recvmsg`, and `minix-libc` grew `readv`/`writev`/`sendmsg`/`recvmsg`. **Open:** the runtime triangle under `-device virtio-gpu-gl-pci`. | The same triangle runs through virgl (`-device virtio-gpu-gl-pci`), differing from 3c-2 only in which gallium driver Mesa loads |
 
 softpipe is first deliberately: §6.10's measurement is that the software branch
 reaches a triangle with no DRM device at all, so the first on-screen GL frame is
@@ -840,8 +841,25 @@ gained `readv`/`writev`/`sendmsg`/`recvmsg`, mirroring the reference's `vectorio
 `NWIOSUDSCTRL`/`NWIOGUDSCTRL`). One deviation: the port's uds has no peer-address
 ioctl (the reference's `NWIOGUDSPADDR`), so a `recvmsg` that asks for the peer's name
 answers `ENOSYS` rather than fill a buffer nobody wrote (vtest passes
-`msg_name = NULL`). The **runtime** half of 3c-3 — the DRM device question and the
-triangle under `virtio-gpu-gl-pci` — remains open.
+`msg_name = NULL`).
+
+**The DRM device question is settled: libdrm is built as its OpenBSD/DragonFly branch,
+and the render node answers the ioctl.** Mesa's EGL device list and the loader's driver
+pick both go through `drmGetDevices2`/`drmGetDevice2`, and libdrm chooses its
+device-discovery strategy by a *compile-time platform macro* (`#ifdef __linux__` sysfs,
+`#elif` the BSDs, `#else` `#warning` + `-EINVAL`) — a strategy with no minix branch. A
+fake `/sys` would not help on its own, because the Linux branches are not compiled; the
+port would have to *claim* Linux — whose `drm.h` branch wants
+`<linux/types.h>`/`<asm/ioctl.h>` it has not got — and then fabricate a device-specific
+`/sys`. Instead libdrm is built as its OpenBSD/DragonFly branch
+(`-Dc_args=-D__DragonFly__` in `build-mesa.py`), the one whose
+`drmParsePciBusInfo`/`drmParsePciDeviceInfo` read the identity from the *driver*
+(`DRM_IOCTL_GET_PCIINFO`) rather than sysfs — exactly the move the port already makes for
+Mesa with `-D__managarm__`. The render node answers that ioctl with the virtio-gpu ids
+(`1af4:1050`, which Mesa's loader maps to `virtio_gpu`), and the node's major moves from
+25 to 145 to match that branch's `DRM_MAJOR` (recorded in §5 row 24). No libdrm patch,
+so nothing to refresh on a pin bump. The **runtime** half of 3c-3 — staging
+`virtio_gpu_dri.so` and the triangle under `-device virtio-gpu-gl-pci` — remains open.
 
 **A prerequisite the phase did not name: Mesa is C++.** Its `meson.build` opens
 `project('mesa', ['c', 'cpp'], …)` and calls `meson.get_compiler('cpp')`, so a
@@ -862,17 +880,17 @@ Android`), and DRI looks up `libdrm` — so D6 is 3c-0/3c-1 work. A host `system
 refused; naming `linux` requires it and it is satisfied through pkg-config. (2) A
 minix C target defines neither `__linux__` nor `__unix__` (only `__ELF__`), so
 libdrm's `drm.h` takes its "one of the BSDs" branch and wants `sys/ioccom.h`,
-and `xf86drm.c` wants `libgen.h` (which `tools/c-include` lacks). Either the C
-toolchain defines `__linux__`/`__unix__` for minix — the port's libc is
-Linux/POSIX-shaped, which is why bash and the coreutils port — or libdrm/Mesa are
-patched, a deviation to record either way. (3) **The grind is real and starts in
+and `xf86drm.c` wants `libgen.h` (which `tools/c-include` lacks). The resolution is the
+one the port took throughout: compile each library against an upstream platform branch it
+already supports — `-D__managarm__` for Mesa, `-D__DragonFly__` for libdrm (§5 row 24) —
+rather than patch either. (3) **The grind is real and starts in
 libdrm.** With `sys/ioccom.h`, `libgen.h` and the `major`/`minor`/`IOC_*`
 additions in `tools/c-include` in place, libdrm compiles until it needs libc
 functions the port has not got — `asprintf` (its `vasprintf` exists),
 `open_memstream` and a path-`chown` — which is §8's "one function at a time".
-libdrm also *self-reports* the `/sys` gap at compile time: it emits
+libdrm also *self-reports* its device-discovery branches: it emitted
 `#warning "Missing implementation of drmParseSubsystemType"` (and the bus/dev
-variants), which is D6's patch-or-`/sys` decision made visible.
+variants) until the `-D__DragonFly__` build took the driver-ioctl branch.
 
 **Landed so far (3c-0/3c-1).** `tools/build-mesa.py` builds and installs libdrm
 and configures Mesa against it; `asprintf`, `open_memstream` and a path `chown`
@@ -975,16 +993,18 @@ that a 3c failure can be attributed to one side or the other:
   `drmGetDevices2` + `available_nodes & (1 << DRM_NODE_RENDER)`, and
   `surfaceless_probe_device` requires `_EGL_DEVICE_DRM`; with no `/sys` the only device
   in that list is the always-present *software* one, so `dri2_initialize_surfaceless`
-  fails with `EGL_NOT_INITIALIZED` ("DRI2: failed to load driver"). The fix is either a
-  minimal `/sys` in `devman` (a readable `device/subsystem` link whose target names the
-  bus — `/pci` on x86, `/virtio` elsewhere) or a small `drmParseSubsystemType` patch when
-  libdrm is ported. D6 makes libdrm a dependency rather than something to reimplement; a
-  patch is not a reimplementation, but it is a deviation to record either way.
+  fails with `EGL_NOT_INITIALIZED` ("DRI2: failed to load driver"). **Settled** (§5 row 24):
+  libdrm is built as its OpenBSD/DragonFly branch, whose discovery reads the identity from
+  the *driver* (`DRM_IOCTL_GET_PCIINFO`, answered by the render node) rather than from sysfs
+  — a driver ioctl instead of a fabricated `/sys`, and nothing to patch. A fake `/sys` was
+  the alternative, but it cannot work on its own: the Linux branches are not compiled, so
+  the port would first have to claim `__linux__`, whose `drm.h` branch wants
+  `<linux/types.h>`/`<asm/ioctl.h>` it has not got.
 - **llvmpipe escapes `/sys` entirely — and only under `ForceSoftware`.**
   `surfaceless_probe_device_sw` runs when `LIBGL_ALWAYS_SOFTWARE=1`, opens *no* DRM
   device (`fd_render_gpu = -1`) and loads `swrast`. So the llvmpipe branch is not merely
-  the CI fallback: it is the only GL branch that runs before the `/sys` question is
-  settled, which makes it 3c's first milestone rather than its cross-check.
+  the CI fallback: it is the only GL branch that runs with no DRM node at all, which is
+  what made it 3c's first milestone rather than its cross-check.
 - **Build EGL surfaceless-only to begin with.** Without `HAVE_WAYLAND_PLATFORM`,
   `dri2_initialize_surfaceless` drops `loader_get_device_name_for_fd` and
   `loader_get_user_preferred_fd` — and with the latter, `drmGetDevice2` and
@@ -1317,7 +1337,7 @@ alone gives it a window but hands it keycodes it cannot turn into text.
 | **0** | AF_UNIX server + `socketpair` + `sendmsg`/`recvmsg` + `SCM_RIGHTS`/`SO_PEERCRED`; native `poll`/`epoll`/`eventfd`/`timerfd`; `memfd_create` + `ftruncate` + anonymous shared frames; `mprotect`; `select` timeouts. **Landed:** sockets + fd passing (`test-uds-x86`), memfd (`test-memfd-x86`), `mprotect`, `select`/native `poll` with real deadlines (`test-select-x86`), `eventfd` (`test-eventfd-x86`), `timerfd` (`test-timerfd-x86`), `epoll` (`test-epoll-x86`). **Open:** none. | Two processes connect over the socket and **pass an fd**; a third `epoll_wait`s on it. Host + QEMU test |
 | **1** | In-house Wayland server, scoped in **§6.11**. **Landed:** 1a — the wire/interface crate and the registry + `sync` handshake over `/dev/uds` (`test-wayland-x86`); 1b — the `wl_shm` present path: `/sbin/wlserver` (boot proc 20) maps `/dev/fb`, `/bin/wlclient` draws into a memfd pool and commits a surface, and the frame is read back from `/dev/fb` (`test-wlshm-x86`); 1c — input: `wl_seat` keyboard/pointer, focus and `enter`, and a key routed from the device to a client (`test-wlkey-x86`), over an input-server ring that keeps a cursor per consumer and a terminal readiness path that reports instead of pushing (`KNOWN_ISSUES` 36, `test-pty-x86`). **Open:** none. | A `wl_shm` client renders through the server to `/dev/fb`, driven by a QEMU smoke scenario (same shape as `tools/smoke/`); a **ported stock** client later, on the same protocol |
 | **2** | `xdg_shell`, decorations, `layer_shell`, popups, damage tracking, cursor, keymaps, multi-output — scoped in **§6.12**. **Landed:** 2a — the seat's keymap, compiled into `wlserver` and served over an fd (`test-wlkey-x86`); 2b — `xdg_shell`: `xdg_wm_base`/`xdg_surface`/`xdg_toplevel`, `configure`/`ack_configure`, `ping`/`pong`, and a toplevel presented at the configured size (`test-wlx-x86`); 2c — several clients at once and per-surface focus, with input routed to the focused connection (`test-wlfocus-x86`); 2d — damage tracking, so only the damaged rectangle is recomposited, and the pointer's cursor image (`test-wlxd-x86`); 2e — popups, `zwlr_layer_shell_v1` and client-side decorations (`test-wlxe-x86`). **Open:** multi-output. | A real toolkit client runs a window with chrome and input |
-| **3** | GL rendering, scoped in **§6.10** — virgl over `virtio-gpu` first: 3D transport, a `virtgpu` render node, Mesa + `libdrm` as DSOs; llvmpipe kept as the fallback. **Landed:** 3a — the 3D transport and virgl negotiation (`test-gpu3d-x86`, `test-gpu3d-nogl-x86`); 3b — the `/dev/dri/renderD128` node: GEM, contexts, blobs, transfers, submits, `WAIT` and `mmap` (`test-drmmap-x86`, `test-drmgl-x86`); 3c's build half — Mesa builds with the `virgl` gallium driver and the C socket cmsg surface is in `minix-libc` (3c-3a). **Open:** 3c's runtime gate (EGL surfaceless triangle under virgl + the `/sys` device question) and 3d (dmabuf/zero-readback present). | The compositor renders GL content |
+| **3** | GL rendering, scoped in **§6.10** — virgl over `virtio-gpu` first: 3D transport, a `virtgpu` render node, Mesa + `libdrm` as DSOs; llvmpipe kept as the fallback. **Landed:** 3a — the 3D transport and virgl negotiation (`test-gpu3d-x86`, `test-gpu3d-nogl-x86`); 3b — the `/dev/dri/renderD128` node: GEM, contexts, blobs, transfers, submits, `WAIT` and `mmap` (`test-drmmap-x86`, `test-drmgl-x86`); 3c's build half — Mesa builds with the `virgl` gallium driver and the C socket cmsg surface is in `minix-libc` (3c-3a). **Open:** 3c's runtime gate (EGL surfaceless triangle under virgl) and 3d (dmabuf/zero-readback present). | The compositor renders GL content |
 | **4** | smithay port; `cosmic-comp` against our backends; `cosmic-session` + D-Bus | `cosmic-comp` on screen; a `libcosmic` app connects |
 | **5** | Portals, fonts, the `libcosmic` suite | A usable session |
 
@@ -1349,14 +1369,12 @@ alone gives it a window but hands it keycodes it cannot turn into text.
 - **Phase 3 — fences are the silent-failure surface.** Mesa relies on implicit
   fencing for buffer reuse; a fence that returns too early is corruption, not an
   error. Test with a loop, not a single frame.
-- **Phase 3 — `/dev/dri` through `devman`, and `/sys` beside it.** libdrm scans the
-  directory with `opendir`, so our VTreeFS must present it with clone-style nodes and
-  permissions that admit a render node — and that is only half of what
-  `drmGetDevices2` needs: the bus type comes from
-  `/sys/dev/char/<maj>:<min>/device/subsystem`, whose absence fails `drmGetDevice2`
-  outright, empties Mesa's EGL device list and makes the surfaceless hardware path
-  answer `EGL_NOT_INITIALIZED` (§6.10). Small either way, but it is the difference
-  between "Mesa finds the device" and "Mesa finds nothing and says so once".
+- **Phase 3 — `/dev/dri` must be enumerable, and the node must answer `GET_PCIINFO`.**
+  libdrm scans the directory with `opendir`, so the render node has to be present with
+  permissions that admit it (it is — the image carries `/dev/dri/renderD128`), and the
+  bus/device identity comes from the *driver* (`DRM_IOCTL_GET_PCIINFO`, §5 row 24), not a
+  `/sys` the port has not got. Small either way, but it is the difference between "Mesa
+  finds the device" and "Mesa finds nothing and says so once".
 - **Phase 3 — don't gate the boot path.** A guest whose device offers no
   `VIRTIO_GPU_F_VIRGL`, or whose host has no GL, must still boot to the shell and the
   window server.

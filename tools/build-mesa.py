@@ -124,9 +124,20 @@ MESON_CPU = {
 # libdrm: no test programs, no per-driver backends (the port has the render node
 # from 3b; the backends are for real GPUs it is not driving). `tests` is a
 # boolean; the drivers are features, which is why the spellings differ.
+#
+# `-Dc_args=-D__DragonFly__`: libdrm has no `detect_os.h`-style OS hook — its
+# device discovery is chosen by a platform macro (`#ifdef __linux__` sysfs,
+# `#elif` the BSDs, `#else` "not implemented") — and there is no minix branch.
+# Its OpenBSD/DragonFly branch is the one that reads the PCI identity from the
+# *driver* (`DRM_IOCTL_GET_PCIINFO`) instead of sysfs, so libdrm is built as that
+# branch and the render node answers the ioctl (`.notes/wayland.md` §5 row 24).
+# Mesa is not built this way: it has `DETECT_OS_MANAGARM` and stays
+# `-D__managarm__`. Both still take libdrm's BSD `_IOC` path, which keys on the
+# absence of `__linux__`, so headers stay consistent between them.
 DRM_OPTIONS = (
     "--buildtype=release",
     "-Dtests=false",
+    "-Dc_args=-D__DragonFly__",
     "-Dintel=disabled",
     "-Dradeon=disabled",
     "-Damdgpu=disabled",

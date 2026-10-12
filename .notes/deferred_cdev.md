@@ -90,7 +90,7 @@ Land them one at a time; each is independently gated.
       check the largest `/dev/ip` reply stays inside it. Its internal
       `dl_read_frames` poll no longer holds VFS once deferred, which is the
       point.
-- [ ] **`fb` — major `FB_MAJOR` (19) and the DRM render node `DRM_MAJOR` (25).**
+- [ ] **`fb` — major `FB_MAJOR` (19) and the DRM render node `DRM_MAJOR` (145).**
       Both served by `fb.rs`. IOCTL is the live path (`FBIOFLUSH`, the DRM
       ioctls behind `handle_drm_request`); non-datagram READ/WRITE too, though
       the wserver's frame writes are datagram and already synchronous. Establish

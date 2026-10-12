@@ -49,7 +49,12 @@ pub const INPUT_MAJOR: u32 = 20;
 /// process is the one holding the `virtio-gpu` device. Moving it to a server of its own
 /// is then a change to one `map_driver` call, which matters because it will have to move
 /// when the blocking operations arrive — a GL submit must not block the display's loop.
-pub const DRM_MAJOR: u32 = 25;
+///
+/// 145 is not a free choice: libdrm validates a node by comparing its major against its
+/// own `DRM_MAJOR`, and it has no minix branch, so it is built as its OpenBSD/DragonFly
+/// branch (`.notes/wayland.md` §5 row 24). That branch's `DRM_MAJOR` is 145, and
+/// `drmNodeIsDRM` refuses any other, so the render node must carry it to be found.
+pub const DRM_MAJOR: u32 = 145;
 /// Character-device major for the net server's /dev/ip (dmap key).
 pub const NET_MAJOR: u32 = 14;
 /// Character-device major for the UNIX-domain socket server's /dev/uds.

@@ -26,6 +26,13 @@ use core::cell::UnsafeCell;
 /// Virtio device ID for the GPU (`.refs/minix-3.3.0` virtio spec).
 pub const VIRTIO_GPU_DEVICE_ID: u16 = 0x0010;
 
+/// The PCI vendor every virtio device presents: Red Hat / virtio.
+const VIRTIO_PCI_VENDOR_ID: u16 = 0x1af4;
+/// The modern `virtio-gpu-pci` PCI device id, `0x1040 + VIRTIO_GPU_DEVICE_ID`. Mesa's
+/// `include/pci_ids/virtio_gpu_pci_ids.h` lists this and the legacy `0x0010`, and names the
+/// `virtio_gpu` DRI driver for either, so this is the pair its loader needs to see.
+const VIRTIO_GPU_PCI_DEVICE_ID: u16 = 0x1050;
+
 /// 2D pixel format: B8G8R8X8_UNORM. QEMU maps the virtio-gpu formats to
 /// the PIXMAN_BE_* (big-endian) variants, whose memory order on an LE host
 /// is the reversed component order: B8G8R8X8 -> BE_b8g8r8x8 reads memory
@@ -1349,6 +1356,23 @@ impl drm::RenderNode for DrmNode {
         }
     }
 
+    /// `DRM_IOCTL_GET_PCIINFO`: the PCI identity libdrm on OpenBSD/DragonFly reads to name the
+    /// DRI driver to load. The node has no PCI bus on the mmio arches, but the identity is the
+    /// same virtio-gpu one everywhere, and that is the pair Mesa's loader maps to `virtio_gpu`.
+    fn pci_info(&self) -> drm::PciInfo {
+        drm::PciInfo {
+            domain: 0,
+            bus: 0,
+            dev: 0,
+            func: 0,
+            vendor_id: VIRTIO_PCI_VENDOR_ID,
+            device_id: VIRTIO_GPU_PCI_DEVICE_ID,
+            subvendor_id: VIRTIO_PCI_VENDOR_ID,
+            subdevice_id: VIRTIO_GPU_PCI_DEVICE_ID,
+            revision_id: 0,
+        }
+    }
+
     fn get_cap(&mut self, capability: u64) -> Result<u64, i32> {
         // A render node has neither: dumb buffers belong to the mode-setting path, and
         // PRIME is dma-buf sharing, which this port does not have yet.
@@ -1442,8 +1466,12 @@ impl drm::RenderNode for DrmNode {
                 request.bind,
             )
         } else {
-            self.dev
-                .resource_create_2d(object.res_handle, request.format, request.width, request.height)
+            self.dev.resource_create_2d(
+                object.res_handle,
+                request.format,
+                request.width,
+                request.height,
+            )
         };
         if host.is_err() {
             // Nothing to unref: the host refused the resource itself, so the slot is all this
@@ -1623,7 +1651,13 @@ impl drm::RenderNode for DrmNode {
             }
             return self
                 .dev
-                .transfer_2d(request.resource_id, request.x, request.y, request.w, request.h)
+                .transfer_2d(
+                    request.resource_id,
+                    request.x,
+                    request.y,
+                    request.w,
+                    request.h,
+                )
                 .map_err(|_| drm::EINVAL);
         }
         let ctx = self.ensure_context()?;
@@ -2605,18 +2639,41 @@ mod tests {
             CMD_RESOURCE_CREATE_BLOB
         );
         assert_eq!(u32::from_le_bytes(b[24..28].try_into().unwrap()), 7);
-        assert_eq!(u32::from_le_bytes(b[28..32].try_into().unwrap()), 1, "blob_mem");
-        assert_eq!(u32::from_le_bytes(b[32..36].try_into().unwrap()), 1, "blob_flags");
-        assert_eq!(u32::from_le_bytes(b[36..40].try_into().unwrap()), 1, "nr_entries");
-        assert_eq!(u64::from_le_bytes(b[40..48].try_into().unwrap()), 3, "blob_id");
+        assert_eq!(
+            u32::from_le_bytes(b[28..32].try_into().unwrap()),
+            1,
+            "blob_mem"
+        );
+        assert_eq!(
+            u32::from_le_bytes(b[32..36].try_into().unwrap()),
+            1,
+            "blob_flags"
+        );
+        assert_eq!(
+            u32::from_le_bytes(b[36..40].try_into().unwrap()),
+            1,
+            "nr_entries"
+        );
+        assert_eq!(
+            u64::from_le_bytes(b[40..48].try_into().unwrap()),
+            3,
+            "blob_id"
+        );
         assert_eq!(
             u64::from_le_bytes(b[48..56].try_into().unwrap()),
             0x4000,
             "size"
         );
-        assert_eq!(u64::from_le_bytes(b[56..64].try_into().unwrap()), 0x1234_5000);
+        assert_eq!(
+            u64::from_le_bytes(b[56..64].try_into().unwrap()),
+            0x1234_5000
+        );
         assert_eq!(u32::from_le_bytes(b[64..68].try_into().unwrap()), 0x4000);
-        assert_eq!(u32::from_le_bytes(b[68..72].try_into().unwrap()), 0, "padding");
+        assert_eq!(
+            u32::from_le_bytes(b[68..72].try_into().unwrap()),
+            0,
+            "padding"
+        );
     }
 
     /// `create_blob`'s answers *before* any device command, so they are the node's own: the feature
@@ -2667,7 +2724,11 @@ mod tests {
 
         // A flag bit the ABI does not define, and the one that needs a UUID command.
         for flags in [0x8, drm::VIRTGPU_BLOB_FLAG_USE_CROSS_DEVICE] {
-            assert_eq!(node.create_blob(guest(flags)), Err(drm::EINVAL), "{flags:#x}");
+            assert_eq!(
+                node.create_blob(guest(flags)),
+                Err(drm::EINVAL),
+                "{flags:#x}"
+            );
         }
 
         // The two fields that name another object's memory, which a guest blob must leave zero.
