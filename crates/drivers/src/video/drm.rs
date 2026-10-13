@@ -447,9 +447,11 @@ impl Transfer3d {
 }
 
 /// The most objects one node may hold at once. A node's backing is a fixed arena, so this
-/// count is fixed with it: four slots, each large enough for a full 1024×768 output at four
-/// bytes a pixel (`crates/servers/src/fb.rs`'s `GEM_OBJECT_LEN`).
-pub const MAX_OBJECTS: usize = 4;
+/// count is fixed with it: eight slots, each large enough for a full 1024×768 output at four
+/// bytes a pixel (`crates/servers/src/fb.rs`'s `GEM_OBJECT_LEN`). Composition raises it from
+/// four (`.notes/wayland.md` §6.10, 3d-b-5): a compositor holds a canvas and, per surface, the
+/// surface's object and the image it imports from that object, so two surfaces need six.
+pub const MAX_OBJECTS: usize = 8;
 
 /// `struct drm_virtgpu_resource_create`, as [`dispatch`] decoded it.
 ///

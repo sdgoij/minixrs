@@ -1177,7 +1177,7 @@ and a plane layout, and is what smithay's `gbm` renderer binds in Phase 4.
 | **3d-b-2** | **Landed** (`just test-drmprime-x86`). **`PRIME` on the render node** — `HANDLE_TO_FD`/`FD_TO_HANDLE` over the object table, and `DRM_CAP_PRIME` reporting import|export. The ABI's descriptor is VFS's, so the two ioctls are intercepted in VFS (`vfs::dmabuf`): it asks the node for the object's *export token* (the same page-granular name the object answers `mmap` with), wraps that in an anonymous descriptor (`DMABUF_DEV`), and resolves a descriptor back to its token for an import. What an exportable object is backed by is settled here: the object's own arena slot, named by the token — no dma-buf side buffer, no copy. | A hand-written probe (`/bin/drmprime`, not Mesa) exports an object to a descriptor, checks the descriptor's own kind and device with `fstat`, imports it back, and reads the bytes through the returned handle; the node refuses a handle it does not hold (`ENOENT`), a descriptor that is not a dma-buf (`EINVAL`), and a descriptor whose object has been closed (`ENOENT`) |
 | **3d-b-3** | **Landed** (`just test-gbmtest-x86`). **`libgbm`** — built (`-Dgbm=enabled`, `-Dgbm-backends-path=/lib`) with the `dri_gbm.so` backend staged at `/lib/dri_gbm.so`, so `gbm_create_device` finds the node's driver and a BO it makes exports to a dma-buf. Enabling GBM adds a `libgbm.so.1` `DT_NEEDED` to `libEGL`, so every Mesa-client gate carries it now. | `gbm_bo_create`/`gbm_bo_get_fd` round-trip a BO through the node (`/bin/gbmtest` prints `dev=1 bo=1 w=64 h=64 import=0`) |
 | **3d-b-4** | **`zwp_linux_dmabuf_v1`** in `crates/wayland`, the server and the client — the client hands over a dma-buf, the compositor imports it and scans it out on the same device. **Landed (3d-b-4a–c):** the protocol tables, the server side, the client methods, the compositor's import-and-scan-out, and the client and gate (`just test-wldmabuf-x86`). **Open:** 4d. | The virgl triangle reaches a `virtio-gpu` output by scan-out, with no `TRANSFER` and no memcpy |
-| **3d-b-5** | **GPU composition** — the compositor composes several dma-buf surfaces on the render node. | Two surfaces composite on the GPU and the scan-out shows the result |
+| **3d-b-5** | **GPU composition** — the compositor composes several dma-buf surfaces on the render node. **Designed below** (*3d-b-5 — GPU composition*); the mechanism's first probe is `tools/compose_probe.c` (**3d-b-5a**, in progress: the surfaces compose, the target's pages are not yet filled). | Two surfaces composite on the GPU and the scan-out shows the result |
 
 **3d-b-4's own stages.** The handoff protocol is one interface, but the work splits along the same seams as 3c and 3d-b before it:
 
@@ -1201,6 +1201,72 @@ x86_64 where physical 0 *is* RAM). Faulting the pool in before the handoff fixed
 form is that a process must have resolved its own pages before asking another to present them.
 `VM_GETPHYS`'s 32-bit, one-page-per-call shape is a known limit (`KNOWN_ISSUES` 41) worked around
 here, not retired.
+
+#### 3d-b-5 — GPU composition (a helper, on the render node)
+
+3d-b-1..4 present a *frame*: one client's buffer is either scanned out whole or blitted
+into the fb server's buffer. Composing **several** surfaces is a different job — the
+compositor must produce a new frame out of its surfaces — and doing that without a CPU
+readback means drawing it on the render node. The gate is two surfaces reaching the
+display as one frame.
+
+`wlserver` has no *scene*: `present()` handles one commit at a time and accumulates by
+blitting into the fb server's buffer, so nothing in it says "surface B is over surface
+A". Composition needs that state, and where it lives decides the design. Three shapes
+were weighed: a canvas held inside a helper (no state in `wlserver`, but every frame
+becomes a composition and a departed surface can never be removed), a stateless helper
+with `wlserver` holding a surface list, and a hybrid (the second plus a fast-path guard).
+
+**D14 — the GPU compositor is a separate process, and it is stateless.** `wlserver` is a
+static `/sbin` server and §6.7 keeps Track A free of Mesa, so a renderer that uses Mesa
+has to be a *dynamic* process — a loader and the Mesa DSOs in the image — which a boot
+server is not. The renderer is therefore a helper, reached over a socket, that takes a
+surface list and a target size, draws them, and returns the target, keeping nothing
+between requests. This is the split the tree already uses: a Mesa-capable client process
+beside a pure-Rust server.
+
+**D15 — `wlserver` keeps the minimal surface list.** With a stateless helper, `wlserver`
+is what remembers which surfaces exist and where — a list of (buffer fd, geometry, dst
+rect) it hands the helper each frame. That is the smallest change that keeps 3d-b-1's
+zero-copy present (a lone full-output, cursor-free surface is still scanned out whole, no
+helper) and still lets a multi-surface frame be recomposited properly.
+
+**The handoff.** A UNIX socket with `SCM_RIGHTS` — the project's idiom, and `wlserver`
+already passes descriptors (`vfs/scm.rs`). One frame is `begin <w> <h>`, then a `surface
+<w> <h> <stride> <format> <dst_x> <dst_y>` per surface with its plane fd by `SCM_RIGHTS`,
+then `end`, whose reply is the **target's** plane fd by `SCM_RIGHTS`. The helper
+`glFinish`es before answering, so a frame the compositor scans out is one the GPU finished
+(D12's fence is the later refinement).
+
+**Scan-out is 3d-b-4's, unchanged.** The helper's target is an object on the render node;
+`wlserver` imports its descriptor on that node and hands the frames to the fb server
+(`FBIO_SCANOUT_SRC`) — the `present_dmabuf` path, so the target *is* the scanout.
+
+**The helper is a boot process**, bound to its socket before `wlserver` needs it and
+reached lazily on the first compose (the shape of its lazy render-node open). It is
+dynamic, so the loader and the Mesa DSOs must be in the system image — which the GL gates
+already carry.
+
+**Staged, each with a gate**
+
+| Stage | Deliverable | Gate |
+|---|---|---|
+| **3d-b-5a** | **The mechanism, proven by a probe.** A dma-buf imported as a *sampler* texture and drawn into a full-output canvas on the render node — several surfaces into one target — and then brought into the target's *own* pages so the fb server can scan them. `tools/compose_probe.c`. | The probe reads the canvas back with both surfaces present and the background cleared |
+| **3d-b-5b** | **`/bin/wlcompose`** — the stateless helper: its socket, the frame protocol, the render of a surface list, the target fd returned. | A test peer sends two surface descriptors and the returned target holds both |
+| **3d-b-5c** | **`wlserver`'s surface list and the handoff.** A commit joins the list; a frame with more than one surface goes to the helper, a lone full-output surface stays on the scan-out fast path. | 3d-b-1..4's gates stay green (the fast path is untouched) and a two-surface frame is composed |
+| **3d-b-5d** | **The gate.** | Two `zwp_linux_dmabuf_v1` clients commit a background and an overlay; a host screendump shows both |
+
+**The dependency that decides all of it.** The target the helper returns must be
+*scannable*: the fb server scans the object's **guest** pages, and a GPU render lives in
+the host texture until a transfer — the split 4d's client already works around (§5 row
+26). 4d's resolve-and-transfer recipe covers one cleared or triangled buffer;
+`tools/compose_probe.c` shows the composed canvas's pages still black under it
+(`glA=00ff00ff glB=ff0000ff` through GL, `mapA=mapB=00000000` on the pages). Until that is
+solved, 3d-b-5b has nothing to return, so **3d-b-5a comes first and its transfer is the
+gate**, not the socket. The object table is the other limit: two surfaces and a canvas
+need six objects where the node had four (`drivers::video::drm::MAX_OBJECTS`, raised to
+eight with the first probe), so the compositor either keeps the larger table or
+`GEM_CLOSE`s surfaces it stops drawing.
 
 ### 6.11 Phase 1 — the in-house Wayland server
 
