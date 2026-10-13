@@ -43,6 +43,11 @@ toolchain. `.notes/wayland.md` §6.10 is the design; these are the recipes and t
   protocol half plus `tools/wlgl_render.c` for the GL half. It is the tree's first
   *dynamically linked Rust* program, and the link is the interesting part (see the
   trap below).
+- `just wldmabufgl-x86` — `tools/build-wldmabufgl.py` builds `/bin/wldmabufgl`, the
+  3d-b-4d client: the same shape as `/bin/wlgl`, but the GL half
+  (`tools/wldmabufgl_render.c`) renders into a GBM object on the render node (through
+  an `EGLImage` over the object's descriptor) and returns its dma-buf instead of
+  reading a framebuffer back.
 
 ## Traps that cost a session
 
@@ -145,6 +150,18 @@ frame back from `/dev/fb`, asserting `GL_RENDERER=virgl` too. Like 3c-3 it needs
 GL-capable dev host and is not a CI gate. It shares `/dev/fb`'s `mmap` path with
 `/bin/wlclient`, so a break there fails both gates with a black framebuffer.
 
+`just test-wldmabufgl-x86` is the 3d-b-4d gate: `/bin/wldmabufgl` renders the triangle
+into a GBM object on the render node, exports it, and commits it as a
+`zwp_linux_dmabuf_v1` buffer, which the fb server scans out of the client's own object
+(a host screendump shows it; there is no `/dev/fb` read). The QEMU line is a 2D
+`virtio-gpu-pci` first and a GL device second (the D11 role selection), so it needs a
+GL-capable dev host and is not a CI gate. It is also the one gate whose client copies
+once (`.notes/wayland.md` §5 row 26): this host's virgl renders into a host-side
+texture, so the client resolves and transfers the render into the object before
+committing — `tools/egl_bo_probe.c` is the measurement. Its input is paced and
+echo-checked (`tools/wldmabufgl_probe.py`), because a GL display drops console bytes
+mid-line, and the whole-frame screenshot path is a QMP `screendump`.
+
 ## Validating a change
 
 ```
@@ -154,6 +171,7 @@ just fetch-mesa <arch>               # or the pinned DSOs, without building
 just test-gltriangle-<arch>          # boots the triangle through surfaceless EGL
 just test-gltriangle-virgl-x86       # the 3c-3 gate: the same triangle on virgl (GL dev host)
 just test-wlgl-x86                   # the 3d-a gate: the triangle through wlserver to /dev/fb (GL dev host)
+just test-wldmabufgl-x86             # the 3d-b-4d gate: the GL render scanned out of the client's own buffer (GL dev host)
 just check                           # host clippy + header contract + physmap
 ```
 
