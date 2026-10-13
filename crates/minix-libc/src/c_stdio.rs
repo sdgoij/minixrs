@@ -888,6 +888,27 @@ unsafe fn parse_number(p: &mut *const c_char) -> i32 {
     v.min(MAX_FIELD)
 }
 
+/// Apply a `*` width taken from an `int` argument. A negative value means
+/// left-justified in a field that wide, not a zero-width field (C11 7.21.6.1p5).
+fn star_width(spec: &mut Spec, w: i32) {
+    if w < 0 {
+        spec.left = true;
+        spec.width = w.saturating_neg().min(MAX_FIELD);
+    } else {
+        spec.width = w.min(MAX_FIELD);
+    }
+}
+
+/// Apply a `*` precision taken from an `int` argument. A negative value is as if
+/// the precision were omitted, not zero (C11 7.21.6.1p5).
+fn star_prec(spec: &mut Spec, pr: i32) {
+    spec.prec = if pr < 0 {
+        None
+    } else {
+        Some(pr.min(MAX_FIELD))
+    };
+}
+
 #[cfg(target_os = "minix")]
 /// Read a vararg integer for the conversion's length modifier, applying the
 /// narrowing `hh`/`h` ask for.
@@ -965,10 +986,24 @@ unsafe fn vformat(fmt: *const c_char, args: &mut VaList<'_>, mut emit: Emit<'_>)
             }
             p = unsafe { p.add(1) };
         }
-        spec.width = unsafe { parse_number(&mut p) };
+        // A `*` takes the width from an `int` argument instead. Without this the
+        // `*` is left in the format and every later argument reads one slot too
+        // early — `"%.*s/%s%s.so"` called `strlen` on the precision itself.
+        if (unsafe { *p } as u8) == b'*' {
+            p = unsafe { p.add(1) };
+            star_width(&mut spec, unsafe { args.next_arg::<c_int>() });
+        } else {
+            spec.width = unsafe { parse_number(&mut p) };
+        }
         if (unsafe { *p } as u8) == b'.' {
             p = unsafe { p.add(1) };
-            spec.prec = Some(unsafe { parse_number(&mut p) });
+            // The precision may also come from an `int` argument.
+            if (unsafe { *p } as u8) == b'*' {
+                p = unsafe { p.add(1) };
+                star_prec(&mut spec, unsafe { args.next_arg::<c_int>() });
+            } else {
+                spec.prec = Some(unsafe { parse_number(&mut p) });
+            }
         }
         let len = unsafe { parse_length(&mut p) };
         let conv = unsafe { *p } as u8;
@@ -2791,6 +2826,28 @@ mod tests {
         let (out, n) = fmt_int(7, 10, b"0123456789", &spec("-", 5, None));
         assert_eq!(out, b"7    ");
         assert_eq!(n, 5);
+    }
+
+    #[test]
+    fn star_width_negative_left_justifies() {
+        // C11 7.21.6.1p5: a negative `*` width is a `-` flag and the magnitude.
+        let mut s = Spec::new();
+        star_width(&mut s, 5);
+        assert_eq!((s.width, s.left), (5, false));
+        let mut s = Spec::new();
+        star_width(&mut s, -5);
+        assert_eq!((s.width, s.left), (5, true));
+    }
+
+    #[test]
+    fn star_precision_negative_is_omitted() {
+        // C11 7.21.6.1p5: a negative `*` precision is as if it were absent.
+        let mut s = Spec::new();
+        star_prec(&mut s, 3);
+        assert_eq!(s.prec, Some(3));
+        let mut s = Spec::new();
+        star_prec(&mut s, -3);
+        assert_eq!(s.prec, None);
     }
 
     #[test]
