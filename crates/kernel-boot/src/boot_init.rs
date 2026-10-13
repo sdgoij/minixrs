@@ -700,13 +700,18 @@ pub unsafe fn enqueue_and_start(cfg: &BootProcessConfig, first_proc: *mut Proc) 
 /// QEMU/firmware assign the BAR addresses at boot, so they cannot be known
 /// at compile time — discover them via PCI config space.
 ///
-/// Returns `false` if the device was not found or a mapping failed.
+/// Returns `false` if no device matched or a mapping failed.
+///
+/// Every matching device is mapped, not only the first: a process may drive more than one — the
+/// fb server holds the display and the render node as separate `virtio-gpu` devices when the host
+/// offers GL on a device of its own.
 #[cfg(target_arch = "x86_64")]
 unsafe fn map_virtio_driver_bars(pt_phys: u64, flags: u64, subsystem_id: u16) -> bool {
     const VIRTIO_PCI_VENDOR: u16 = 0x1AF4;
 
     use arch_x86_64::hal::{pci_cfg_read8, pci_cfg_read16, pci_cfg_read32, pci_cfg_write32};
 
+    let mut mapped_any = false;
     for dev in 0..32u8 {
         for func in 0..8u8 {
             let vendor = unsafe { pci_cfg_read16(0, dev, func, 0x00) };
@@ -785,10 +790,10 @@ unsafe fn map_virtio_driver_bars(pt_phys: u64, flags: u64, subsystem_id: u16) ->
                     }
                 }
             }
-            return true;
+            mapped_any = true;
         }
     }
-    false
+    mapped_any
 }
 
 /// Create a per-process page table for the init process.

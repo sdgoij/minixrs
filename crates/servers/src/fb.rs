@@ -499,28 +499,37 @@ pub fn fb_server_main() {
             let _ = arch.flush();
         }
 
-        // The render device is a separate object from the output (§6.10 D3), which
-        // on x86 means probing past the bochs scanout for a virtio-gpu device. A
-        // plain x86 boot has none, and that is reported rather than ignored: the
-        // gate asserts the "none" line as well as the capset one (D7/D8).
-        //
-        // Skipped when the virtio-gpu *is* the output backend (riscv/aarch64, and
-        // any x86 boot with no bochs): that backend already holds the device's
-        // queues, and a second probe would reprogram them out from under it — the
-        // queue rings are one set of statics per process.
+        // The render device is a separate object from the output (§6.10 D3), and which device each
+        // role gets is decided by *capability*, not by the order QEMU enumerates them (3d-b): the
+        // display took a device without GL, and the node is a GL device if the machine has one the
+        // display could not use (a GL device cannot scan out where the host has no blobs). Only when
+        // the display device is also the node — it is the only GL device (D11), or nothing has GL
+        // (D7) — does the node borrow the output backend's device rather than probe a second one,
+        // because probing again would reprogram the rings out from under the output (the queue rings
+        // are one set per slot per process). A plain x86 boot has no virtio-gpu at all, and that is
+        // reported rather than ignored: the gate asserts the "none" line as well as the capset one
+        // (D7/D8).
         #[cfg(target_arch = "x86_64")]
         {
             let backend = unsafe { &mut *core::ptr::addr_of_mut!(FB_BACKEND) };
             let mut node = match backend {
-                // The virtio-gpu *is* the output (D11): the client's render resource and the
-                // scanout are one device, so the node borrows the output backend's device.
-                // Probing again would reprogram the rings out from under the output backend —
-                // the queue statics are one set per process.
-                FbBackend::VirtioGpu(arch) => Some(unsafe {
-                    drivers::video::virtio_gpu::DrmNode::on_output_device(
-                        arch as *mut VirtioGpuArch,
-                    )
-                }),
+                // A virtio-gpu output: the node's device is the one `init` picked by capability.
+                // With no such device the node is the output backend's own device, borrowed so the
+                // output's rings are not reprogrammed under it.
+                FbBackend::VirtioGpu(arch) => {
+                    let probed = arch.node_skip().and_then(|skip| {
+                        let (gpu, node) = drivers::video::virtio_gpu::probe_render_node_in(skip, 1);
+                        if node.is_some() {
+                            report_gpu3d(&gpu);
+                        }
+                        node
+                    });
+                    Some(probed.unwrap_or_else(|| unsafe {
+                        drivers::video::virtio_gpu::DrmNode::on_output_device(
+                            arch as *mut VirtioGpuArch,
+                        )
+                    }))
+                }
                 // The output is `bochs` (D3), so the render device is a device of its own and
                 // the node probes for it. `None` means this machine has no `virtio-gpu` device,
                 // and then `/dev/dri/renderD128` refuses to open rather than answering for a

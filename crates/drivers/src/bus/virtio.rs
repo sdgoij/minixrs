@@ -213,6 +213,9 @@ pub struct VirtioDevice {
     pub irq: u8,
     pub msi: bool,
     pub initialized: bool,
+    /// Which slot this device's vring and token storage occupies. Set by the probe that built
+    /// it; two devices in one process must not share a slot.
+    pub slot: usize,
 }
 
 /// A virtqueue with vring management.
@@ -385,47 +388,78 @@ const RING_USED_SIZE: usize = 4 + QUEUE_NUM as usize * 8 + 2;
 /// Total vring size.
 const RING_SIZE: usize = RING_USED_OFF + RING_USED_SIZE;
 
+/// How many virtio devices one process may drive at once.
+///
+/// A device's vring and token storage is keyed by this slot and its queue index, so a process
+/// holds one device per slot. Two because a driver may need the display and a render node as
+/// separate `virtio-gpu` devices: a GL device is one a host cannot scan out (its `SET_SCANOUT`
+/// wants an EGL image of the resource), so the display is a plain 2D device and the GL one is
+/// only a node.
+pub const MAX_VIRTIO_SLOTS: usize = 2;
+
+/// The index into the per-device storage arrays for one device's queue.
+fn storage_index(slot: usize, qidx: usize) -> usize {
+    slot * MAX_QUEUES + qidx
+}
+
 #[repr(align(4096))]
-struct Q0RingCell(UnsafeCell<[u8; RING_SIZE]>);
-unsafe impl Sync for Q0RingCell {}
-impl Q0RingCell {
+struct RingCell(UnsafeCell<[u8; RING_SIZE]>);
+unsafe impl Sync for RingCell {}
+impl RingCell {
     const fn new() -> Self {
         Self(UnsafeCell::new([0u8; RING_SIZE]))
     }
-    fn get(&self) -> *mut [u8; RING_SIZE] {
-        self.0.get()
-    }
 }
 
-static Q0_RING: Q0RingCell = Q0RingCell::new();
-/// Second queue's ring storage (TX queue for virtio-net).
-static Q1_RING: Q0RingCell = Q0RingCell::new();
-struct Q0DataCell(UnsafeCell<[usize; QUEUE_NUM as usize]>);
-unsafe impl Sync for Q0DataCell {}
-impl Q0DataCell {
+/// One arena slot's stride: `RING_SIZE` rounded up to the page, so every `(slot, queue)`'s ring
+/// starts page-aligned the way the single-ring storage each did on its own.
+const RING_STRIDE: usize = (RING_SIZE + RING_ALIGN - 1) & !(RING_ALIGN - 1);
+
+/// Every `(slot, queue)`'s vring, back to back in one page-aligned block. Indices come from
+/// `VirtioDevice::slot`, which `virtio_probe_slot` bounds-checks, and from a queue index
+/// `virtio_alloc_queue` bounds-checks, so `at` cannot be out of range.
+#[repr(align(4096))]
+struct VringArena(UnsafeCell<[u8; RING_STRIDE * MAX_VIRTIO_SLOTS * MAX_QUEUES]>);
+unsafe impl Sync for VringArena {}
+impl VringArena {
     const fn new() -> Self {
-        Self(UnsafeCell::new([0; QUEUE_NUM as usize]))
+        Self(UnsafeCell::new(
+            [0u8; RING_STRIDE * MAX_VIRTIO_SLOTS * MAX_QUEUES],
+        ))
     }
-    fn get(&self) -> *mut [usize; QUEUE_NUM as usize] {
-        self.0.get()
+    fn at(&self, slot: usize, qidx: usize) -> *mut u8 {
+        debug_assert!(slot < MAX_VIRTIO_SLOTS && qidx < MAX_QUEUES);
+        // SAFETY: `storage_index` of in-range indices names a slice of the arena.
+        unsafe { (self.0.get() as *mut u8).add(storage_index(slot, qidx) * RING_STRIDE) }
     }
 }
 
-/// Token storage for the queue — maps descriptor-chain head to the
-/// opaque data token given via `virtio_to_queue`.
-static Q0_DATA: Q0DataCell = Q0DataCell::new();
-/// Token storage for queue 1 (TX).
-static Q1_DATA: Q0DataCell = Q0DataCell::new();
+static VRINGS: VringArena = VringArena::new();
+
+/// The token store — descriptor-chain head to the opaque data token given via `virtio_to_queue` —
+/// one per `(slot, queue)`, laid out the same way.
+struct TokenArena(UnsafeCell<[usize; QUEUE_NUM as usize * MAX_VIRTIO_SLOTS * MAX_QUEUES]>);
+unsafe impl Sync for TokenArena {}
+impl TokenArena {
+    const fn new() -> Self {
+        Self(UnsafeCell::new(
+            [0; QUEUE_NUM as usize * MAX_VIRTIO_SLOTS * MAX_QUEUES],
+        ))
+    }
+    fn at(&self, slot: usize, qidx: usize) -> *mut usize {
+        debug_assert!(slot < MAX_VIRTIO_SLOTS && qidx < MAX_QUEUES);
+        // SAFETY: `storage_index` of in-range indices names a run of `QUEUE_NUM` slots.
+        unsafe { (self.0.get() as *mut usize).add(storage_index(slot, qidx) * QUEUE_NUM as usize) }
+    }
+}
+
+static TOKENS: TokenArena = TokenArena::new();
 
 /// Build an uninitialized queue slot for `qidx`, pointing its vring at
 /// that queue's ring storage. `init_vring` repopulates the vring during
 /// `alloc_queue`, so the initial contents are placeholders.
-fn queue_placeholder(qidx: usize) -> VirtioQueue {
-    let ring = if qidx == 0 {
-        Q0_RING.get() as usize
-    } else {
-        Q1_RING.get() as usize
-    };
+fn queue_placeholder(slot: usize, qidx: usize) -> VirtioQueue {
+    let ring = VRINGS.at(slot, qidx) as usize;
     VirtioQueue {
         vring: Vring {
             num: 0,
@@ -697,11 +731,7 @@ fn init_vring(dev: &mut VirtioDevice, qidx: usize, num: u16) -> u64 {
     // storage. We hold `&mut VirtioDevice` guaranteeing exclusive
     // access. Static storage is accessed via raw pointers.
     unsafe {
-        let ring = if qidx == 0 {
-            Q0_RING.get() as usize
-        } else {
-            Q1_RING.get() as usize
-        };
+        let ring = VRINGS.at(dev.slot, qidx) as usize;
         let descs: &'static mut [VringDesc] =
             core::slice::from_raw_parts_mut(ring as *mut VringDesc, num as usize);
         let avail: &'static mut VringAvail = &mut *((ring + RING_AVAIL_OFF) as *mut VringAvail);
@@ -720,11 +750,8 @@ fn init_vring(dev: &mut VirtioDevice, qidx: usize, num: u16) -> u64 {
         q.paddr = (ring as u64).wrapping_add(phys_delta() as u64);
 
         // Clear token store.
-        let data: &mut [usize; QUEUE_NUM as usize] = if qidx == 0 {
-            &mut *Q0_DATA.get()
-        } else {
-            &mut *Q1_DATA.get()
-        };
+        let data: &mut [usize; QUEUE_NUM as usize] =
+            &mut *(TOKENS.at(dev.slot, qidx) as *mut [usize; QUEUE_NUM as usize]);
         for slot in data.iter_mut() {
             *slot = 0;
         }
@@ -919,6 +946,7 @@ pub fn virtio_to_queue(
     if num_bufs == 0 {
         return Err(VirtioError);
     }
+    let slot = dev.slot;
 
     // All queue operations in a single borrow scope to avoid aliasing.
     let need_kick = {
@@ -944,12 +972,7 @@ pub fn virtio_to_queue(
 
         // Store the data token.
         unsafe {
-            let cell = if qidx == 0 {
-                Q0_DATA.get()
-            } else {
-                Q1_DATA.get()
-            };
-            (*cell)[head as usize] = data;
+            *TOKENS.at(slot, qidx).add(head as usize) = data;
         }
 
         // Memory barrier: host must see descriptor writes before
@@ -987,6 +1010,7 @@ pub fn virtio_from_queue(dev: &mut VirtioDevice, qidx: usize) -> Option<(usize, 
     if qidx >= dev.num_queues {
         return None;
     }
+    let slot = dev.slot;
 
     // Ensure we see the host's writes.
     unsafe {
@@ -1043,13 +1067,9 @@ pub fn virtio_from_queue(dev: &mut VirtioDevice, qidx: usize) -> Option<(usize, 
 
         // Retrieve the data token.
         unsafe {
-            let cell = if qidx == 0 {
-                Q0_DATA.get()
-            } else {
-                Q1_DATA.get()
-            };
-            let tok = (*cell)[idx as usize];
-            (*cell)[idx as usize] = 0;
+            let cell = TOKENS.at(slot, qidx);
+            let tok = *cell.add(idx as usize);
+            *cell.add(idx as usize) = 0;
             Some((tok, used_len))
         }
     }
@@ -1102,9 +1122,27 @@ pub fn virtio_probe(
     features: &'static [VirtioFeature],
     skip: u16,
 ) -> Result<VirtioDevice, VirtioError> {
+    virtio_probe_slot(subdevid, name, features, skip, 0)
+}
+
+/// [`virtio_probe`] for the device that will occupy `slot` — how one process drives two devices.
+///
+/// The slot names the vring and token storage the device's queues use, and that storage is one set
+/// per slot per process, so two devices in one process must be probed into distinct slots.
+/// `skip` still selects the Nth *matching* device, whatever slot it lands in.
+pub fn virtio_probe_slot(
+    subdevid: u16,
+    name: &'static str,
+    features: &'static [VirtioFeature],
+    skip: u16,
+    slot: usize,
+) -> Result<VirtioDevice, VirtioError> {
+    if slot >= MAX_VIRTIO_SLOTS {
+        return Err(VirtioError);
+    }
     match current_transport() {
-        VirtioTransport::Pci => pci_probe(subdevid, name, features, skip),
-        VirtioTransport::Mmio => mmio_probe(subdevid, name, features, skip),
+        VirtioTransport::Pci => pci_probe(subdevid, name, features, skip, slot),
+        VirtioTransport::Mmio => mmio_probe(subdevid, name, features, skip, slot),
     }
 }
 
@@ -1129,6 +1167,7 @@ fn pci_probe(
     name: &'static str,
     features: &'static [VirtioFeature],
     skip: u16,
+    slot: usize,
 ) -> Result<VirtioDevice, VirtioError> {
     let mut found_skip = skip;
 
@@ -1269,11 +1308,12 @@ fn pci_probe(
                 name,
                 features,
                 host_features: 0,
-                queues: [queue_placeholder(0), queue_placeholder(1)],
+                queues: [queue_placeholder(slot, 0), queue_placeholder(slot, 1)],
                 num_queues: 0,
                 irq,
                 msi: false,
                 initialized: false,
+                slot,
             };
 
             // Reset, then ACK → DRIVER → negotiate → FEATURES_OK. The
@@ -1322,6 +1362,7 @@ fn mmio_probe(
     name: &'static str,
     features: &'static [VirtioFeature],
     skip: u16,
+    slot: usize,
 ) -> Result<VirtioDevice, VirtioError> {
     let mut found_skip = skip;
     for n in 0..VIRTIO_MMIO_NUM_TRANSPORTS {
@@ -1354,11 +1395,12 @@ fn mmio_probe(
                 name,
                 features,
                 host_features: 0,
-                queues: [queue_placeholder(0), queue_placeholder(1)],
+                queues: [queue_placeholder(slot, 0), queue_placeholder(slot, 1)],
                 num_queues: 0,
                 irq: 0,
                 msi: false,
                 initialized: false,
+                slot,
             };
 
             // Reset, then ACK → DRIVER → negotiate → FEATURES_OK.
@@ -1447,12 +1489,13 @@ mod tests {
         let used: &'static mut VringUsed = unsafe { &mut *(used as *mut VringUsed) };
 
         // Use dummy init values; vring_init will overwrite them.
-        let dummy = unsafe { &mut *((Q0_RING.get() as usize + RING_AVAIL_OFF) as *mut VringAvail) };
+        let dummy =
+            unsafe { &mut *((VRINGS.at(0, 0) as usize + RING_AVAIL_OFF) as *mut VringAvail) };
         let mut vr = Vring {
             num: 0,
             desc: &mut [], // vring_init overwrites this
             avail: dummy,  // vring_init overwrites this
-            used: unsafe { &mut *((Q0_RING.get() as usize + RING_USED_OFF) as *mut VringUsed) },
+            used: unsafe { &mut *((VRINGS.at(0, 0) as usize + RING_USED_OFF) as *mut VringUsed) },
         };
         vring_init(&mut vr, num, descs, avail, used);
         vr
@@ -1750,8 +1793,10 @@ mod tests {
         let mut v = Vring {
             num: 0,
             desc: &mut [],
-            avail: unsafe { &mut *((Q0_RING.get() as usize + RING_AVAIL_OFF) as *mut VringAvail) },
-            used: unsafe { &mut *((Q0_RING.get() as usize + RING_USED_OFF) as *mut VringUsed) },
+            avail: unsafe {
+                &mut *((VRINGS.at(0, 0) as usize + RING_AVAIL_OFF) as *mut VringAvail)
+            },
+            used: unsafe { &mut *((VRINGS.at(0, 0) as usize + RING_USED_OFF) as *mut VringUsed) },
         };
         vring_init(&mut v, 16, descs, avail, used);
 
@@ -1965,11 +2010,12 @@ mod tests {
             name: "test",
             features: &[],
             host_features: 1u64 << 28,
-            queues: [queue_placeholder(0), queue_placeholder(1)],
+            queues: [queue_placeholder(0, 0), queue_placeholder(0, 1)],
             num_queues: 0,
             irq: 0,
             msi: false,
             initialized: true,
+            slot: 0,
         };
 
         assert!(virtio_host_supports(&dev, 28));
@@ -1993,11 +2039,12 @@ mod tests {
             name: "test",
             features: &[],
             host_features: 0,
-            queues: [queue_placeholder(0), queue_placeholder(1)],
+            queues: [queue_placeholder(0, 0), queue_placeholder(0, 1)],
             num_queues: 0,
             irq: 0,
             msi: false,
             initialized: true,
+            slot: 0,
         };
         assert_eq!(virtio_hostmem_region(&dev), None);
 
@@ -2009,6 +2056,33 @@ mod tests {
         assert_eq!(virtio_hostmem_region(&dev), None);
         dev.shm = Some((2, 0xF000_0000, 16 << 20));
         assert_eq!(virtio_hostmem_region(&dev), None);
+    }
+
+    /// The vring and token storage is one set per `(slot, queue)`, so two devices in one process
+    /// cannot land on each other's rings. The index is the device's slot times the queue count
+    /// plus its queue index, and a slot past the storage is refused rather than aliased.
+    #[test]
+    fn test_storage_is_one_set_per_slot_and_queue() {
+        assert_eq!(storage_index(0, 0), 0);
+        assert_eq!(storage_index(0, 1), 1);
+        assert_eq!(storage_index(1, 0), MAX_QUEUES);
+        assert_eq!(storage_index(1, 1), MAX_QUEUES + 1);
+
+        let ring = |slot, qidx| VRINGS.at(slot, qidx) as usize;
+        let token = |slot, qidx| TOKENS.at(slot, qidx) as usize;
+        for (slot, qidx) in [(0usize, 0usize), (0, 1), (1, 0), (1, 1)] {
+            for other in [(0usize, 0usize), (0, 1), (1, 0), (1, 1)] {
+                if (slot, qidx) != other {
+                    // Each pair owns its own ring and its own token store.
+                    assert_ne!(ring(slot, qidx), ring(other.0, other.1));
+                    assert_ne!(token(slot, qidx), token(other.0, other.1));
+                }
+            }
+        }
+
+        // A slot with no storage is rejected, which is what keeps a driver from aliasing another
+        // device's rings by asking for a slot past the end.
+        assert!(virtio_probe_slot(0, "test", &[], 0, MAX_VIRTIO_SLOTS).is_err());
     }
 
     /// A feature the driver wants is acknowledged only when the device offered it.
@@ -2042,11 +2116,12 @@ mod tests {
             name: "test",
             features: &FEATURES,
             host_features: 1u64 << 0,
-            queues: [queue_placeholder(0), queue_placeholder(1)],
+            queues: [queue_placeholder(0, 0), queue_placeholder(0, 1)],
             num_queues: 0,
             irq: 0,
             msi: false,
             initialized: true,
+            slot: 0,
         };
 
         // Only virgl was offered, so only virgl is acknowledged.
@@ -2129,11 +2204,12 @@ mod tests {
             name: "test",
             features: &[],
             host_features: 0,
-            queues: [queue_placeholder(0), queue_placeholder(1)],
+            queues: [queue_placeholder(0, 0), queue_placeholder(0, 1)],
             num_queues,
             irq: 0,
             msi: false,
             initialized: true,
+            slot: 0,
         }
     }
 
@@ -2179,8 +2255,8 @@ mod tests {
         assert_eq!(q1.vring.avail.idx, 1);
         // Tokens landed in separate data cells.
         unsafe {
-            assert_eq!((*Q0_DATA.get())[0], 11);
-            assert_eq!((*Q1_DATA.get())[0], 22);
+            assert_eq!(*TOKENS.at(0, 0), 11);
+            assert_eq!(*TOKENS.at(0, 1), 22);
         }
 
         // A completed chain returns both its token and the number of

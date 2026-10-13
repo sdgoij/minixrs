@@ -725,6 +725,10 @@ pub struct VirtioGpuArch {
     /// Whether the scanout is a host blob rather than a classic resource — the only scanout a
     /// GL device offers. Decided in `init` from what the device carries.
     scanout_blob: bool,
+    /// The `skip` of the device `init` chose as the render *node*, when it is not the output
+    /// device (§6.10 3d-b). `None` means the output device is also the node — D11 when it has
+    /// GL, D7 when no device does — and then the node borrows it rather than probing again.
+    node_skip: Option<u16>,
 }
 
 /// Build `RESOURCE_ATTACH_BACKING` with one entry per range into `out`, returning its length, or
@@ -761,6 +765,7 @@ impl VirtioGpuArch {
             ext_resource: false,
             blob_va: 0,
             scanout_blob: false,
+            node_skip: None,
         }
     }
 
@@ -773,6 +778,13 @@ impl VirtioGpuArch {
     /// scanout a GL device offers. Reported in the boot line so a gate can tell the two apart.
     pub fn scanout_is_blob(&self) -> bool {
         self.scanout_blob
+    }
+
+    /// The `skip` of the device `init` chose as the render *node*, when it is not the output
+    /// device (§6.10 3d-b). `None` means the output device is also the node — D11 when it has GL,
+    /// D7 when no device does — and the node borrows that device rather than probing a second one.
+    pub fn node_skip(&self) -> Option<u16> {
+        self.node_skip
     }
 
     /// Submit one command: `cmd` is copied into the command slot, the
@@ -2104,14 +2116,90 @@ impl drm::RenderNode for DrmNode {
     }
 }
 
+/// The matching `virtio-gpu` devices the role pick considers: one display and, at most, one render
+/// node. Bounded so a host whose `skip` never runs out cannot make the probe spin.
+pub const MAX_GPU_DEVICES: u16 = 2;
+
+/// Split devices into the display and node roles by *capability*, not by the order QEMU enumerates
+/// them (§6.10 3d-b). `virgl[i]` is device `i`'s VIRGL support.
+///
+/// The display takes the first device *without* VIRGL: classic scanout is the only scanout a host
+/// with no GL (Windows' ANGLE) can do, and a GL device's only scanout is a host blob. When every
+/// device has GL the first is the display and its scanout is a blob (RISC-V/AArch64's one device).
+/// The node is the first device *with* VIRGL that is not the display; `None` means the display is
+/// itself the node — because it is the only GL device (D11) or because nothing has GL (D7).
+fn assign_roles(virgl: &[bool]) -> Option<(u16, Option<u16>)> {
+    if virgl.is_empty() {
+        return None;
+    }
+    let display = virgl.iter().position(|&v| !v).unwrap_or(0) as u16;
+    let node = if virgl[display as usize] {
+        None
+    } else {
+        virgl
+            .iter()
+            .enumerate()
+            .find(|&(i, &v)| v && i != display as usize)
+            .map(|(i, _)| i as u16)
+    };
+    Some((display, node))
+}
+
+/// The node's `skip` when nothing else holds a `virtio-gpu` (the output is `bochs`, or there is no
+/// output device at all): the first device with VIRGL, or the first device at all when none has it,
+/// whose node then reports no GL (D7).
+fn pick_node_skip(virgl: &[bool]) -> Option<u16> {
+    if virgl.is_empty() {
+        return None;
+    }
+    Some(virgl.iter().position(|&v| v).unwrap_or(0) as u16)
+}
+
+/// Probe up to [`MAX_GPU_DEVICES`] matching `virtio-gpu` devices and report each one's VIRGL
+/// support and how many there were. The devices are dropped: a caller that keeps one re-probes it,
+/// which is harmless before its queues are set up.
+fn probe_virgl_flags(name: &'static str) -> ([bool; MAX_GPU_DEVICES as usize], usize) {
+    let mut virgl = [false; MAX_GPU_DEVICES as usize];
+    let mut count = 0usize;
+    while count < MAX_GPU_DEVICES as usize {
+        let Ok(dev) = virtio::virtio_probe(VIRTIO_GPU_DEVICE_ID, name, GPU_FEATURES, count as u16)
+        else {
+            break;
+        };
+        virgl[count] = virtio::virtio_host_supports(&dev, VIRTIO_GPU_F_VIRGL);
+        count += 1;
+    }
+    (virgl, count)
+}
+
+/// Probe the machine's `virtio-gpu` devices, pick the display by capability, and report the node's
+/// `skip` (`None` when the display device is the node too). The display keeps its device, probed in
+/// the transport's slot 0; the node re-probes its own in a later slot, so the two never share a slot
+/// (the vring storage is one set per slot).
+fn probe_roles() -> Result<(VirtioDevice, Option<u16>), DriverError> {
+    let (virgl, count) = probe_virgl_flags("virtio-gpu");
+    let (display, node) = assign_roles(&virgl[..count]).ok_or(DriverError::NotFound)?;
+    let dev = virtio::virtio_probe(VIRTIO_GPU_DEVICE_ID, "virtio-gpu", GPU_FEATURES, display)
+        .map_err(|_| DriverError::NotFound)?;
+    Ok((dev, node))
+}
+
 /// Negotiate the render node and take it (§6.10, stage 3b): the features, the control
 /// queues, and the capsets the host offers.
 ///
 /// `out` receives what the negotiation learned whether or not a node comes back, because
-/// "there is no 3D here" is itself an answer a caller has to be able to report (D7).
-fn open_render_node(out: &mut Gpu3d) -> Option<DrmNode> {
-    let Ok(mut dev) = virtio::virtio_probe(VIRTIO_GPU_DEVICE_ID, "virtio-gpu-3d", GPU_FEATURES, 0)
-    else {
+/// "there is no 3D here" is itself an answer a caller has to be able to report (D7). `skip`
+/// selects which matching device becomes the node — 1 when the display already holds the first
+/// one — and `slot` names the vring storage its queues use, which must differ from a display
+/// device's (the transport's storage is one set per slot per process).
+fn open_render_node(out: &mut Gpu3d, skip: u16, slot: usize) -> Option<DrmNode> {
+    let Ok(mut dev) = virtio::virtio_probe_slot(
+        VIRTIO_GPU_DEVICE_ID,
+        "virtio-gpu-3d",
+        GPU_FEATURES,
+        skip,
+        slot,
+    ) else {
         return None;
     };
     out.device = true;
@@ -2196,8 +2284,23 @@ fn open_render_node(out: &mut Gpu3d) -> Option<DrmNode> {
 /// negotiation happens once, here, and the caller keeps what this returns — a device is
 /// driven by one holder, and the DRM ABI (§6.10, 3b) is the thing that answers from it.
 pub fn probe_render_node() -> (Gpu3d, Option<DrmNode>) {
+    // Nothing else holds a matching device here (the output is `bochs`, or there is none), so the
+    // node may take the first device with GL, in slot 0 — but it must still find it when that is
+    // not the first device, so the pick is by capability like the fb output's (§6.10 3d-b).
+    let (virgl, count) = probe_virgl_flags("virtio-gpu-3d");
+    match pick_node_skip(&virgl[..count]) {
+        Some(skip) => probe_render_node_in(skip, 0),
+        None => (Gpu3d::default(), None),
+    }
+}
+
+/// [`probe_render_node`] for a process whose display holds a *different* `virtio-gpu` device:
+/// `skip` picks which matching device becomes the node (1 when the display took the first), and
+/// `slot` names the vring storage its queues use. Two devices in one process must occupy
+/// different slots, because the transport's vring storage is one set per slot.
+pub fn probe_render_node_in(skip: u16, slot: usize) -> (Gpu3d, Option<DrmNode>) {
     let mut out = Gpu3d::default();
-    let Some(mut node) = open_render_node(&mut out) else {
+    let Some(mut node) = open_render_node(&mut out, skip, slot) else {
         return (out, None);
     };
     // Without VIRGL there is nothing to fetch or create — the device answers those with
@@ -2241,17 +2344,21 @@ impl FbArch for VirtioGpuArch {
             return Err(DriverError::InvalidArgument);
         }
 
-        // The same features the render node asks for: when the virtio-gpu *is* the output, the
-        // render node is served from this device (D11), so the display must negotiate VIRGL/blob
-        // for the node to answer 3D at all. A host that offers neither (a plain 2D virtio-gpu)
-        // simply does not negotiate them, and the node reports no GL, as before.
-        let mut dev = virtio::virtio_probe(VIRTIO_GPU_DEVICE_ID, "virtio-gpu", GPU_FEATURES, 0)
-            .map_err(|_| DriverError::NotFound)?;
+        // The device is picked by capability, not by whichever QEMU enumerates first (§6.10
+        // 3d-b): a device *without* GL is the display, because classic scanout is the only scanout
+        // a host with no GL (Windows' ANGLE) can do, and a GL device's only scanout is a host blob.
+        // A GL device that is not the display becomes the render node instead. The same features
+        // the render node asks for are negotiated here, because when the virtio-gpu *is* the output
+        // the node is served from this device (D11), so the display must negotiate VIRGL/blob for
+        // the node to answer 3D at all. A plain 2D virtio-gpu simply does not negotiate them, and
+        // the node reports no GL, as before.
+        let (mut dev, node_skip) = probe_roles()?;
         let _ = setup_queues(&mut dev)?;
         let virgl = virtio::virtio_host_supports(&dev, VIRTIO_GPU_F_VIRGL);
         let blob = virtio::virtio_host_supports(&dev, VIRTIO_GPU_F_RESOURCE_BLOB);
         let window = virtio::virtio_hostmem_region(&dev);
         self.vdev = Some(dev);
+        self.node_skip = node_skip;
 
         // A GL device never turns a 2D resource into an EGL image, so its classic `SET_SCANOUT`
         // is refused — its only scanout is a host blob, which the shared-memory window carries.
@@ -2457,6 +2564,36 @@ mod tests {
         assert_eq!(BLOB_MEM_HOST3D, 0x0002);
         assert_eq!(BLOB_FLAG_USE_MAPPABLE, 0x0001);
         assert_eq!(FB_SIZE, 1024 * 768 * 4);
+    }
+
+    #[test]
+    fn assign_roles_picks_the_display_by_capability_not_order() {
+        // A device without GL is the display whatever order it comes in, and the first GL device
+        // that is not the display is the node — so a `[2D, GL]` line and a `[GL, 2D]` line pick
+        // the same pair (§6.10 3d-b).
+        assert_eq!(assign_roles(&[false, true]), Some((0, Some(1))));
+        assert_eq!(assign_roles(&[true, false]), Some((1, Some(0))));
+    }
+
+    #[test]
+    fn assign_roles_borrows_when_the_display_is_the_node() {
+        // One device, GL or not, is both roles: `None` tells the fb server to borrow the output
+        // device (D11 / D7). Two GL devices leave the second as the node too.
+        assert_eq!(assign_roles(&[false]), Some((0, None)));
+        assert_eq!(assign_roles(&[true]), Some((0, None)));
+        assert_eq!(assign_roles(&[false, false]), Some((0, None)));
+        assert_eq!(assign_roles(&[true, true]), Some((0, None)));
+        assert_eq!(assign_roles(&[]), None);
+    }
+
+    #[test]
+    fn pick_node_skip_finds_the_first_gl_device() {
+        // With no virtio-gpu output the node takes the first GL device, wherever it is, and falls
+        // back to the first device — whose node reports no GL (D7) — when none has it.
+        assert_eq!(pick_node_skip(&[false, true]), Some(1));
+        assert_eq!(pick_node_skip(&[true, false]), Some(0));
+        assert_eq!(pick_node_skip(&[false]), Some(0));
+        assert_eq!(pick_node_skip(&[]), None);
     }
 
     #[test]
