@@ -447,8 +447,9 @@ impl Transfer3d {
 }
 
 /// The most objects one node may hold at once. A node's backing is a fixed arena, so this
-/// count is fixed with it.
-pub const MAX_OBJECTS: usize = 8;
+/// count is fixed with it: four slots, each large enough for a full 1024×768 output at four
+/// bytes a pixel (`crates/servers/src/fb.rs`'s `GEM_OBJECT_LEN`).
+pub const MAX_OBJECTS: usize = 4;
 
 /// `struct drm_virtgpu_resource_create`, as [`dispatch`] decoded it.
 ///
@@ -518,19 +519,22 @@ pub struct ResourceInfo {
 /// never share a token and offset 0 never names one. The table holds no *addresses*: which
 /// memory a slot names is the node's, which is what keeps this testable without a device.
 ///
-/// Handles and resource ids are both `slot + 1`. The ABI has two ids because Linux's GEM
-/// handles are per open file and its resource ids per device; this node is one allocator, so
-/// numbering them alike is the honest simplification, not an accident. A client treats both
-/// as opaque, and only the resource id ever reaches the host.
+/// Handles and resource ids are both `slot + 1`, offset by [`GemTable::set_res_base`]. The ABI
+/// has two ids because Linux's GEM handles are per open file and its resource ids per device;
+/// this node is one allocator, so numbering them alike is the honest simplification, not an
+/// accident. A client treats both as opaque, and only the resource id ever reaches the host.
 ///
 /// Numbering from 1 is safe only while the *output* path and the node are separate driver
-/// instances, which is what `fb.rs` arranges: it probes for a render node only when `virtio-gpu`
-/// is not already the display backend. The display's own resource is id 1 (`virtio_gpu.rs`'s
-/// `RESOURCE_ID`), so a node sharing that instance would have to number its objects above the
-/// ids the display holds.
+/// instances. When the node shares the display's device (`fb.rs` serves the render node from a
+/// `virtio-gpu` output backend, D11), the display already holds resource ids (`virtio_gpu.rs`'s
+/// `RESOURCE_ID` and `EXT_SCANOUT_RESOURCE_ID`) and the host refuses a duplicate — so such a
+/// node numbers its objects above them with `set_res_base`.
 #[derive(Debug, Clone, Copy)]
 pub struct GemTable {
     max_len: u32,
+    /// What the slots' resource ids are offset by, so a node on a shared device can number above
+    /// the display's own resources.
+    res_base: u32,
     /// What is in each slot, or `None` for a free one.
     objects: [Option<Slot>; MAX_OBJECTS],
 }
@@ -548,8 +552,15 @@ impl GemTable {
     pub const fn new(max_len: u32) -> Self {
         Self {
             max_len,
+            res_base: 0,
             objects: [None; MAX_OBJECTS],
         }
+    }
+
+    /// Number resources from `base + 1` rather than 1 — a node sharing the display's device must
+    /// number above the resources the display holds, or the host refuses a duplicate id.
+    pub const fn set_res_base(&mut self, base: u32) {
+        self.res_base = base;
     }
 
     /// The object in `slot`, if it is in use.
@@ -618,7 +629,7 @@ impl GemTable {
         let id = slot as u32 + 1;
         Ok(CreatedObject {
             handle: id,
-            res_handle: id,
+            res_handle: self.res_base + id,
             size: len,
         })
     }

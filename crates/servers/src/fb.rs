@@ -103,15 +103,16 @@ fn scanout_refused(why: &[u8]) {
 /// blob the *client* supplies (3b-4), whose size is the client's business and not a
 /// constant here.
 ///
-/// 8 slots of 1 MiB: a 1024×256 RGBA surface, or many small objects, which is what a first
-/// GL triangle and a compositor's buffers need. A full-screen surface waits for blobs.
+/// 4 slots of 4 MiB: a 1024×768 full output at four bytes a pixel, which is what the dma-buf
+/// scan-out handoff needs (3d-b-4c), or several small objects. A larger surface needs the
+/// client-supplied blobs of 3b-4.
 ///
 /// x86-only, like the probe that fills it: it is the arch where the render device is a
 /// device of its own rather than the one already presenting (D3), so it is the only one with
-/// a node to back — and 8 MiB of `.bss` is not something another arch should carry for
+/// a node to back — and 16 MiB of `.bss` is not something another arch should carry for
 /// nothing.
 #[cfg(target_arch = "x86_64")]
-const GEM_OBJECT_LEN: u32 = 1024 * 1024;
+const GEM_OBJECT_LEN: u32 = 4 * 1024 * 1024;
 
 /// One slot per object the node's table can hold, so the two cannot drift apart.
 #[cfg(target_arch = "x86_64")]

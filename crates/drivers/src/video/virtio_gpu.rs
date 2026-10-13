@@ -1340,6 +1340,10 @@ pub struct DrmNode {
     context_resources: u32,
     /// The objects this node has handed out.
     gems: drm::GemTable,
+    /// The resource-id base the objects are numbered from (`GemTable::set_res_base`): 0 when the
+    /// node's device is its own, the display's highest resource id when the node shares the
+    /// display's device.
+    res_base: u32,
     /// Image VA of slot 0 of the backing the objects come from. Slot `i` is at
     /// `gem_arena + i * slot_len`; the server that owns the memory names it here, so the
     /// node owns the layout and the server owns the bytes.
@@ -1368,6 +1372,9 @@ impl DrmNode {
             virgl: false,
             blob: false,
             has_context_init: false,
+            // The output backend holds resources 1 and 2 on this device, so the node numbers
+            // above them.
+            res_base: EXT_SCANOUT_RESOURCE_ID,
             context: None,
             context_resources: 0,
             gems: drm::GemTable::new(0),
@@ -1383,6 +1390,7 @@ impl DrmNode {
     pub fn set_gem_arena(&mut self, va: u64, slot_len: u32) {
         self.gem_arena = va;
         self.gems = drm::GemTable::new(slot_len);
+        self.gems.set_res_base(self.res_base);
     }
 
     /// The image VA of slot `slot` of the backing. Which memory a slot names is this node's
@@ -1916,6 +1924,7 @@ fn open_render_node(out: &mut Gpu3d) -> Option<DrmNode> {
         virgl: out.virgl,
         blob: out.blob,
         has_context_init: out.context_init,
+        res_base: 0,
         context: None,
         context_resources: 0,
         gems: drm::GemTable::new(0),
@@ -2712,6 +2721,7 @@ mod tests {
             virgl,
             blob,
             has_context_init: context_init,
+            res_base: 0,
             context: None,
             context_resources: 0,
             gems: drm::GemTable::new(0),
