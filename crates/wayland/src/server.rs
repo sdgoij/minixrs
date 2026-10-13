@@ -171,6 +171,10 @@ pub struct Outcome {
     /// A `zwp_linux_buffer_params_v1.add` named an fd index the caller resolves with
     /// `recv_fds` and remembers for that params object (3d-b-4).
     pub new_plane: Option<u32>,
+    /// A linux-dmabuf `create`/`create_immed` made this `wl_buffer` from the params object
+    /// whose plane fd the caller is holding: `(params, buffer)`. The caller moves the fd
+    /// from the params to the buffer, which is what the commit will name (3d-b-4).
+    pub new_dmabuf: Option<(u32, u32)>,
 }
 
 /// A dispatch failure that ends the connection, as opposed to a protocol error
@@ -739,13 +743,14 @@ impl Server {
             }
             (Kind::LinuxBufferParams, protocol::linux_buffer_params_req::CREATE) => {
                 let id = self.next_id();
-                let args_width = iarg(n, &args, 0)?;
-                let args_height = iarg(n, &args, 1)?;
-                let args_format = arg(n, &args, 2)?;
-                if self.dmabuf_buffer(object_id, id, args_width, args_height, args_format, out)? {
+                let width = iarg(n, &args, 0)?;
+                let height = iarg(n, &args, 1)?;
+                let format = arg(n, &args, 2)?;
+                if self.dmabuf_buffer(object_id, id, width, height, format, out)? {
                     out.event(object_id, protocol::linux_buffer_params_ev::CREATED, |w| {
                         w.new_id(id)
                     })?;
+                    outcome.new_dmabuf = Some((object_id, id));
                 }
                 Ok(())
             }
@@ -754,7 +759,9 @@ impl Server {
                 let width = iarg(n, &args, 1)?;
                 let height = iarg(n, &args, 2)?;
                 let format = arg(n, &args, 3)?;
-                self.dmabuf_buffer(object_id, id, width, height, format, out)?;
+                if self.dmabuf_buffer(object_id, id, width, height, format, out)? {
+                    outcome.new_dmabuf = Some((object_id, id));
+                }
                 Ok(())
             }
             // 1c (input) and later; a client that reaches them is answered the

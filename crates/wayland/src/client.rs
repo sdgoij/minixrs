@@ -467,6 +467,70 @@ impl Client {
         Ok(id)
     }
 
+    /// `zwp_linux_dmabuf_v1.create_params`. Returns the params object's id (3d-b-4).
+    pub fn create_params(
+        &mut self,
+        dmabuf: u32,
+        out: &mut DispatchBuf<'_>,
+    ) -> Result<u32, WireError> {
+        let id = self.alloc(Kind::LinuxBufferParams)?;
+        out.event(dmabuf, protocol::linux_dmabuf_req::CREATE_PARAMS, |w| {
+            w.new_id(id)
+        })?;
+        Ok(id)
+    }
+
+    /// `zwp_linux_buffer_params_v1.add`. `fd_index` refers to a descriptor sent with this
+    /// message by `SCM_RIGHTS`, not to one the caller already holds; the 64-bit layout
+    /// modifier is split across the protocol's two `uint` fields (3d-b-4).
+    #[allow(clippy::too_many_arguments)]
+    pub fn params_add(
+        &self,
+        params: u32,
+        fd_index: u32,
+        plane_idx: u32,
+        offset: u32,
+        stride: u32,
+        modifier: u64,
+        out: &mut DispatchBuf<'_>,
+    ) -> Result<(), WireError> {
+        out.event(params, protocol::linux_buffer_params_req::ADD, |w| {
+            w.fd(fd_index)?;
+            w.uint(plane_idx)?;
+            w.uint(offset)?;
+            w.uint(stride)?;
+            w.uint((modifier >> 32) as u32)?;
+            w.uint(modifier as u32)
+        })
+    }
+
+    /// `zwp_linux_buffer_params_v1.create_immed`. Returns the `wl_buffer` id (3d-b-4).
+    /// `create_immed` is used rather than `create` because the id is then known here, with no
+    /// `created` event to decode.
+    pub fn params_create_immed(
+        &mut self,
+        params: u32,
+        width: i32,
+        height: i32,
+        format: u32,
+        flags: u32,
+        out: &mut DispatchBuf<'_>,
+    ) -> Result<u32, WireError> {
+        let id = self.alloc(Kind::Buffer)?;
+        out.event(
+            params,
+            protocol::linux_buffer_params_req::CREATE_IMMED,
+            |w| {
+                w.new_id(id)?;
+                w.int(width)?;
+                w.int(height)?;
+                w.uint(format)?;
+                w.uint(flags)
+            },
+        )?;
+        Ok(id)
+    }
+
     /// `wl_surface.attach`. `buffer` of 0 detaches.
     pub fn attach(
         &self,
@@ -813,6 +877,91 @@ mod tests {
             assert_eq!(h.opcode, protocol::buffer_ev::RELEASE);
             assert_eq!(argc, 0);
         }
+    }
+
+    /// 3d-b-4: a dma-buf plane the client hands over becomes a `wl_buffer`, and the commit
+    /// then carries the plane rather than a `wl_shm` pool.
+    #[test]
+    fn a_dmabuf_plane_round_trips_through_both_halves() {
+        let mut server = Server::new(64, 64);
+        let mut client = Client::new();
+        let mut w = Wire::new();
+        let mut events = [0u8; 8192];
+
+        let registry = w.build(|o| client.get_registry(o));
+        let en = to_server(&mut server, w.bytes(), &mut events);
+        let mut dmabuf_name = None;
+        let mut comp_name = None;
+        {
+            let mut mb = MessageBuffer::new();
+            mb.push(&events[..en]).unwrap();
+            while let Some(msg) = mb.next().unwrap() {
+                let h = Header::parse(msg).unwrap();
+                let mut args = [Arg::Uint(0); MAX_ARGS];
+                client.decode(msg, &mut args).unwrap();
+                match args[1].as_str().unwrap() {
+                    b"zwp_linux_dmabuf_v1" => dmabuf_name = Some(args[0].as_uint().unwrap()),
+                    b"wl_compositor" => comp_name = Some(args[0].as_uint().unwrap()),
+                    _ => {}
+                }
+                mb.consume(h.size as usize);
+            }
+        }
+        let dmabuf_name = dmabuf_name.expect("the dmabuf global");
+        let comp_name = comp_name.expect("the compositor global");
+
+        let compositor = w.build(|o| {
+            client.bind(
+                registry,
+                comp_name,
+                b"wl_compositor",
+                1,
+                Kind::Compositor,
+                o,
+            )
+        });
+        to_server(&mut server, w.bytes(), &mut events);
+        let dmabuf = w.build(|o| {
+            client.bind(
+                registry,
+                dmabuf_name,
+                b"zwp_linux_dmabuf_v1",
+                3,
+                Kind::LinuxDmabuf,
+                o,
+            )
+        });
+        to_server(&mut server, w.bytes(), &mut events);
+        assert_eq!(server.kind(dmabuf), Some(Kind::LinuxDmabuf));
+
+        let surface = w.build(|o| client.create_surface(compositor, o));
+        to_server(&mut server, w.bytes(), &mut events);
+
+        // One plane: a descriptor at fd index 0, offset 0, stride 256, linear.
+        let params = w.build(|o| client.create_params(dmabuf, o));
+        to_server(&mut server, w.bytes(), &mut events);
+        w.build(|o| client.params_add(params, 0, 0, 0, 256, protocol::DRM_FORMAT_MOD_LINEAR, o));
+        to_server(&mut server, w.bytes(), &mut events);
+        let buffer = w.build(|o| {
+            client.params_create_immed(params, 64, 64, protocol::DRM_FORMAT_XRGB8888, 0, o)
+        });
+        to_server(&mut server, w.bytes(), &mut events);
+        assert_eq!(server.kind(buffer), Some(Kind::Buffer));
+
+        w.build(|o| client.attach(surface, buffer, 0, 0, o));
+        to_server(&mut server, w.bytes(), &mut events);
+        w.build(|o| client.commit(surface, o));
+        to_server(&mut server, w.bytes(), &mut events);
+
+        let commit = server
+            .take_commit()
+            .expect("the surface committed a buffer");
+        assert!(commit.dmabuf);
+        assert_eq!(commit.buffer, buffer);
+        assert_eq!((commit.width, commit.height, commit.stride), (64, 64, 256));
+        assert_eq!(commit.format, protocol::DRM_FORMAT_XRGB8888);
+        assert_eq!(commit.fd_index, 0);
+        assert_eq!(commit.modifier, protocol::DRM_FORMAT_MOD_LINEAR);
     }
 
     #[test]

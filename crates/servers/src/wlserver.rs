@@ -100,6 +100,20 @@ mod imp {
                 .map(|i| self.fds[i])
         }
 
+        /// Remove and return the fd held for `id` (3d-b-4: a params set's plane fd moves to
+        /// the buffer its `create` names). A missing id answers `None`.
+        fn take(&mut self, id: u32) -> Option<i32> {
+            let i = self.ids[..self.n].iter().position(|&p| p == id)?;
+            let fd = self.fds[i];
+            // Swap-remove; the order of the table is not meaningful.
+            self.ids[i] = self.ids[self.n - 1];
+            self.fds[i] = self.fds[self.n - 1];
+            self.ids[self.n - 1] = 0;
+            self.fds[self.n - 1] = -1;
+            self.n -= 1;
+            Some(fd)
+        }
+
         /// Close every pool fd. Called when a client's connection ends, so a
         /// client that goes away does not leak its pools.
         fn close_all(&mut self) {
@@ -227,6 +241,87 @@ mod imp {
         }
     }
 
+    /// The render node a client's dma-buf is imported on (`.notes/wayland.md` §6.10, 3d-b-4).
+    const NODE_PATH: &[u8] = b"/dev/dri/renderD128";
+
+    /// `struct drm_prime_handle`: `u32 handle`, `u32 flags`, `s32 fd`.
+    #[repr(C)]
+    struct PrimeHandle {
+        handle: u32,
+        flags: u32,
+        fd: i32,
+    }
+
+    /// `struct drm_virtgpu_map`: `u64 offset`, `u32 handle`, `u32 pad`.
+    #[repr(C)]
+    struct VirtgpuMap {
+        offset: u64,
+        handle: u32,
+        pad: u32,
+    }
+
+    /// Open the render node, or `-1`. Called the first time a dma-buf commit arrives, never
+    /// at boot: a boot process's VFS call queues behind the shell's console read, but by then
+    /// the shell is parked in `wait` and VFS is free (the `load_keymap` timing).
+    fn open_node() -> i32 {
+        match unsafe { fs::open(NODE_PATH, fs::O_RDWR, 0) } {
+            Ok(fd) => fd,
+            Err(_) => {
+                report(b"wlserver: no render node at /dev/dri/renderD128\n");
+                -1
+            }
+        }
+    }
+
+    /// `DRM_IOCTL_PRIME_FD_TO_HANDLE`: the handle naming the object behind the client's
+    /// descriptor. The node has one handle space, so this is the object the client exported.
+    fn node_import(node: i32, prime_fd: i32) -> Option<u32> {
+        let mut arg = PrimeHandle {
+            handle: 0,
+            flags: 0,
+            fd: prime_fd,
+        };
+        match unsafe {
+            fs::ioctl(
+                node,
+                drivers::video::drm::DRM_IOCTL_PRIME_FD_TO_HANDLE,
+                core::ptr::addr_of_mut!(arg) as *mut u8,
+            )
+        } {
+            Ok(_) => Some(arg.handle),
+            Err(_) => None,
+        }
+    }
+
+    /// `DRM_IOCTL_VIRTGPU_MAP`: the object's `mmap` offset (its page-granular token).
+    fn node_map_offset(node: i32, handle: u32) -> Option<u64> {
+        let mut arg = VirtgpuMap {
+            offset: 0,
+            handle,
+            pad: 0,
+        };
+        match unsafe {
+            fs::ioctl(
+                node,
+                drivers::video::drm::DRM_IOCTL_VIRTGPU_MAP,
+                core::ptr::addr_of_mut!(arg) as *mut u8,
+            )
+        } {
+            Ok(_) => Some(arg.offset),
+            Err(_) => None,
+        }
+    }
+
+    /// The `wl_shm` format code a dma-buf's DRM fourcc corresponds to, for the blit fallback.
+    /// Both are 32-bit little-endian, so the channel order matches and only the code differs.
+    fn dmabuf_shm_format(drm: u32) -> u32 {
+        if drm == wayland::protocol::DRM_FORMAT_ARGB8888 {
+            wayland::protocol::WL_SHM_FORMAT_ARGB8888
+        } else {
+            wayland::protocol::WL_SHM_FORMAT_XRGB8888
+        }
+    }
+
     /// Composite a commit onto the display and present it.
     ///
     /// Only the commit's damage is recomposited (2d): a client that names a small
@@ -239,10 +334,21 @@ mod imp {
     fn present(
         fb: *mut u8,
         pools: &Pools,
+        dmabufs: &Pools,
+        node: i32,
         c: &Commit,
         ptr: (i32, i32),
         cursor: Option<CursorImage>,
     ) {
+        if c.dmabuf {
+            if present_dmabuf(fb, dmabufs, node, c) {
+                if let Some(cur) = cursor {
+                    blit_cursor(fb, pools, &cur, ptr);
+                }
+                fb_flush();
+            }
+            return;
+        }
         let Some(fd) = pools.fd_of(c.pool) else {
             report(b"wlserver: commit for a pool with no fd\n");
             return;
@@ -324,6 +430,86 @@ mod imp {
             blit_cursor(fb, pools, &cur, ptr);
         }
         fb_flush();
+    }
+
+    /// Present a linux-dmabuf commit: import the plane's descriptor on the render node, map
+    /// the object, and hand its frames to the fb server as the scanout — the 3d-b-1 path with
+    /// a dma-buf's frames (`.notes/wayland.md` §6.10, 3d-b-4). The frames are the guest memory
+    /// the client's GL wrote, so a full-output plane is presented without a copy.
+    ///
+    /// Anything but a full-output plane is read through the mapping and blitted, the `wl_shm`
+    /// fallback and the only honest answer for a partial frame. Returns whether the frame
+    /// reached the display.
+    fn present_dmabuf(fb: *mut u8, dmabufs: &Pools, node: i32, c: &Commit) -> bool {
+        if node < 0 {
+            report(b"wlserver: a dmabuf commit with no render node\n");
+            return false;
+        }
+        let Some(prime_fd) = dmabufs.fd_of(c.buffer) else {
+            report(b"wlserver: dmabuf commit for a buffer with no fd\n");
+            return false;
+        };
+        let Some(handle) = node_import(node, prime_fd) else {
+            report(b"wlserver: PRIME_FD_TO_HANDLE failed\n");
+            return false;
+        };
+        let Some(offset) = node_map_offset(node, handle) else {
+            report(b"wlserver: VIRTGPU_MAP failed\n");
+            return false;
+        };
+        // A linear plane's stride is its row, and the port advertises linear only, so the
+        // image is `stride * height` of the object's memory.
+        let len = (c.stride.max(0) as usize).saturating_mul(c.height.max(0) as usize);
+        if len == 0 {
+            return false;
+        }
+        let src = unsafe {
+            vmem::mmap(
+                core::ptr::null_mut(),
+                len,
+                vmem::PROT_READ,
+                vmem::MAP_SHARED,
+                node,
+                offset as i64,
+            )
+        };
+        if src == vmem::MAP_FAILED {
+            report(b"wlserver: mmap of a dmabuf object failed\n");
+            return false;
+        }
+        // Fault the frames into this process's table before the fb server resolves them for us
+        // (the 3d-b-1 trap): a mapping nobody has touched has no frames to give.
+        let mut touch = 0usize;
+        while touch < len {
+            let _ = unsafe { core::ptr::read_volatile(src.add(touch)) };
+            touch += 4096;
+        }
+        let full = c.width == XRES as i32 && c.height == YRES as i32 && c.stride == PITCH as i32;
+        if full && fb_scanout(src as u64, len as u64) == 0 {
+            let _ = unsafe { vmem::munmap(src, len) };
+            return true;
+        }
+        let _ = fb_scanout(0, 0);
+        let buf = shm::Buffer {
+            offset: 0,
+            width: c.width,
+            height: c.height,
+            stride: c.stride,
+            format: dmabuf_shm_format(c.format),
+            pool_size: len as i32,
+        };
+        let bytes = unsafe { core::slice::from_raw_parts(src, len) };
+        let dst = Destination {
+            x: 0,
+            y: 0,
+            width: XRES as i32,
+            height: YRES as i32,
+        };
+        if shm::blit(bytes, &buf, dst, |x, y, px| put_px(fb, x, y, px)).is_err() {
+            report(b"wlserver: dmabuf blit rejected\n");
+        }
+        let _ = unsafe { vmem::munmap(src, len) };
+        true
     }
 
     /// Write one pixel into the framebuffer.
@@ -555,6 +741,13 @@ mod imp {
         conn: i32,
         server: Server,
         pools: Pools,
+        /// 3d-b-4: a dma-buf's plane fd, by the `wl_buffer` its params `create` names.
+        dmabufs: Pools,
+        /// 3d-b-4: a plane fd a `zwp_linux_buffer_params_v1.add` named, held by the params
+        /// object until its `create` moves it to a buffer.
+        planes: Pools,
+        /// The render node fd, opened lazily on the first dma-buf commit (`-1` = not yet).
+        node: i32,
         inbuf: MessageBuffer,
         chunk: [u8; 512],
         out: [u8; 8192],
@@ -568,6 +761,9 @@ mod imp {
                 conn,
                 server,
                 pools: Pools::new(),
+                dmabufs: Pools::new(),
+                planes: Pools::new(),
+                node: -1,
                 inbuf: MessageBuffer::new(),
                 chunk: [0u8; 512],
                 out: [0u8; 8192],
@@ -630,9 +826,25 @@ mod imp {
                     c.pools.add(pool, fds[0]);
                 }
             }
+            // A linux-dmabuf `add` also names an fd index; the params object holds it until
+            // its `create` names the buffer the fd will back (3d-b-4).
+            if let Some(params) = outcome.new_plane {
+                let mut fds = [-1i32; 1];
+                if let Ok(1) = uds::recv_fds(c.conn, &mut fds) {
+                    c.planes.add(params, fds[0]);
+                }
+            }
+            if let Some((params, buffer)) = outcome.new_dmabuf {
+                if let Some(fd) = c.planes.take(params) {
+                    c.dmabufs.add(buffer, fd);
+                }
+            }
             if let Some(commit) = c.server.take_commit() {
                 let cursor = c.server.cursor();
-                present(fb, &c.pools, &commit, ptr, cursor);
+                if commit.dmabuf && c.node < 0 {
+                    c.node = open_node();
+                }
+                present(fb, &c.pools, &c.dmabufs, c.node, &commit, ptr, cursor);
                 let _ = c.server.release_buffer(commit.buffer, &mut reply);
             }
             c.inbuf.consume(h.size as usize);
@@ -739,6 +951,11 @@ mod imp {
                     && !pump(c, fb, keymap, istate.ptr)
                 {
                     c.pools.close_all();
+                    c.dmabufs.close_all();
+                    c.planes.close_all();
+                    if c.node >= 0 {
+                        let _ = uds::close_fd(c.node);
+                    }
                     let _ = uds::close_fd(c.conn);
                     ended = true;
                 }
