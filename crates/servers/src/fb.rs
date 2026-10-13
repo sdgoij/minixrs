@@ -503,22 +503,35 @@ pub fn fb_server_main() {
         // queue rings are one set of statics per process.
         #[cfg(target_arch = "x86_64")]
         {
-            let backend = unsafe { &*core::ptr::addr_of!(FB_BACKEND) };
-            if !matches!(backend, FbBackend::VirtioGpu(_)) {
-                let (gpu, mut node) = drivers::video::virtio_gpu::probe_render_node();
-                report_gpu3d(&gpu);
-                // The objects the node hands out live in this server's arena, so it is
-                // named here rather than inside the node: the node owns the layout, this
-                // process owns the bytes (and the VA→PA translation a mapping needs).
-                if let Some(node) = node.as_mut() {
-                    node.set_gem_arena(GEM_ARENA.get(), GEM_OBJECT_LEN);
+            let backend = unsafe { &mut *core::ptr::addr_of_mut!(FB_BACKEND) };
+            let mut node = match backend {
+                // The virtio-gpu *is* the output (D11): the client's render resource and the
+                // scanout are one device, so the node borrows the output backend's device.
+                // Probing again would reprogram the rings out from under the output backend —
+                // the queue statics are one set per process.
+                FbBackend::VirtioGpu(arch) => {
+                    Some(drivers::video::virtio_gpu::DrmNode::on_output_device(
+                        arch as *mut VirtioGpuArch,
+                    ))
                 }
-                // The node is kept for the DRM render node's clients. `None` means this
-                // machine has no `virtio-gpu` device, and then `/dev/dri/renderD128`
-                // refuses to open rather than answering for a device that is not there.
-                unsafe {
-                    *core::ptr::addr_of_mut!(RENDER_NODE) = node;
+                // The output is `bochs` (D3), so the render device is a device of its own and
+                // the node probes for it. `None` means this machine has no `virtio-gpu` device,
+                // and then `/dev/dri/renderD128` refuses to open rather than answering for a
+                // device that is not there.
+                _ => {
+                    let (gpu, node) = drivers::video::virtio_gpu::probe_render_node();
+                    report_gpu3d(&gpu);
+                    node
                 }
+            };
+            // The objects the node hands out live in this server's arena, so it is named here
+            // rather than inside the node: the node owns the layout, this process owns the
+            // bytes (and the VA→PA translation a mapping needs).
+            if let Some(node) = node.as_mut() {
+                node.set_gem_arena(GEM_ARENA.get(), GEM_OBJECT_LEN);
+            }
+            unsafe {
+                *core::ptr::addr_of_mut!(RENDER_NODE) = node;
             }
         }
 

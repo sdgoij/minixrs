@@ -1290,8 +1290,38 @@ const MAX_CAPSETS: usize = 8;
 /// It *owns* the device rather than borrowing it: a virtio device is driven by one process
 /// at a time, so whoever holds this is the only thing that may talk to it, and that is
 /// also why [`probe_render_node`] hands it on rather than dropping it.
+/// Where a [`DrmNode`]'s device comes from.
+///
+/// On an x86 boot whose output is `bochs`, the node probes the virtio-gpu itself and owns it
+/// (D3). When the virtio-gpu *is* the output (D11 — the client's render resource and the
+/// scanout are one device), the fb server's output backend already holds the device's queues,
+/// so the node borrows that device rather than probing again and reprogramming the rings out
+/// from under the output backend.
+// Thyere size difference is the point: one variant *is* the device and the other is a pointer to
+// it. Boxing the large one is not available without `alloc`.
+#[allow(clippy::large_enum_variant)]
+enum Device {
+    Owned(VirtioGpuArch),
+    /// The fb server's output device, live and already owning the device's queues. A raw
+    /// pointer, not a `&mut`: the output backend reaches the same device through its own
+    /// static, so neither side holds a borrow the other could invalidate.
+    Borrowed(*mut VirtioGpuArch),
+}
+
+impl Device {
+    fn arch(&mut self) -> &mut VirtioGpuArch {
+        match self {
+            Device::Owned(a) => a,
+            // SAFETY: the pointer is the fb server's output backend (a static), which outlives
+            // every use of this node, and the server is single-threaded, so no other borrow is
+            // live at the same moment.
+            Device::Borrowed(a) => unsafe { &mut **a },
+        }
+    }
+}
+
 pub struct DrmNode {
-    dev: VirtioGpuArch,
+    dev: Device,
     /// What `GET_CAPSET_INFO` said, index after index, until one answered with id 0.
     capsets: [CapsetInfo; MAX_CAPSETS],
     count: usize,
@@ -1317,6 +1347,34 @@ pub struct DrmNode {
 }
 
 impl DrmNode {
+    /// The device this node drives, whichever way it came by it.
+    fn dev(&mut self) -> &mut VirtioGpuArch {
+        self.dev.arch()
+    }
+
+    /// A node over the fb server's *output* device, which already holds the virtio-gpu's
+    /// queues (D11 — the client's render resource and the scanout are one device). No probe
+    /// and no queue setup: the device is live, and negotiating it again would reprogram the
+    /// rings out from under the output backend.
+    ///
+    /// The output backend negotiated no 3D features (a 2D display needs none), so this node
+    /// reports no GL and serves the 2D path — an object, its memory, its dma-buf export — which
+    /// is what the scan-out handoff needs.
+    pub fn on_output_device(dev: *mut VirtioGpuArch) -> Self {
+        Self {
+            dev: Device::Borrowed(dev),
+            capsets: [CapsetInfo::default(); MAX_CAPSETS],
+            count: 0,
+            virgl: false,
+            blob: false,
+            has_context_init: false,
+            context: None,
+            context_resources: 0,
+            gems: drm::GemTable::new(0),
+            gem_arena: 0,
+        }
+    }
+
     /// Hand the node the backing its objects come from: the image VA of slot 0, and how
     /// many bytes one slot holds. The *server* owns the memory (it is the one that can name
     /// a guest-physical address and hand a client a mapping of it), so the node is told
@@ -1358,7 +1416,7 @@ impl DrmNode {
         let Some(ctx_id) = self.context else {
             return;
         };
-        if self.dev.ctx_destroy(ctx_id).is_ok() {
+        if self.dev().ctx_destroy(ctx_id).is_ok() {
             self.context = None;
             // The table went with the context, so the objects have to be attached again if a
             // client asks for another one.
@@ -1386,7 +1444,7 @@ impl DrmNode {
     /// `minixrs` for the debug name: Linux names a context after the calling *task*, and a
     /// process on this port has no comm to be named by.
     fn create_context(&mut self, flags: u32) -> Result<(), i32> {
-        self.dev
+        self.dev()
             .ctx_create(CONTEXT_ID, flags, b"minixrs")
             .map_err(|_| drm::EINVAL)?;
         self.context = Some(CONTEXT_ID);
@@ -1405,7 +1463,7 @@ impl DrmNode {
             return Err(drm::ENOENT);
         };
         if self.context_resources & (1 << slot) == 0 {
-            self.dev
+            self.dev()
                 .ctx_attach_resource(ctx_id, handle)
                 .map_err(|_| drm::EINVAL)?;
             self.context_resources |= 1 << slot;
@@ -1523,7 +1581,7 @@ impl drm::RenderNode for DrmNode {
         if version > info.max_version {
             return Err(drm::EINVAL);
         }
-        self.dev
+        self.dev()
             .fetch_capset(capset_id, version, out)
             .map(|n| n as usize)
             .map_err(|_| drm::EINVAL)
@@ -1562,7 +1620,7 @@ impl drm::RenderNode for DrmNode {
             .wrapping_add(virtio::virtio_phys_delta() as u64);
 
         let host = if self.virgl {
-            self.dev.resource_create_3d(
+            self.dev().resource_create_3d(
                 object.res_handle,
                 request.target,
                 request.width,
@@ -1571,7 +1629,7 @@ impl drm::RenderNode for DrmNode {
                 request.bind,
             )
         } else {
-            self.dev.resource_create_2d(
+            self.dev().resource_create_2d(
                 object.res_handle,
                 request.format,
                 request.width,
@@ -1587,14 +1645,14 @@ impl drm::RenderNode for DrmNode {
             return Err(drm::EINVAL);
         }
         if self
-            .dev
+            .dev()
             .attach_backing(object.res_handle, pa, object.size)
             .is_err()
         {
             // The resource exists now. The slot is released only once the host has released
             // the resource, so a refused unref keeps the two together: the create fails, and
             // the next one cannot reuse an id the device never gave back.
-            if self.dev.resource_unref(object.res_handle).is_ok() {
+            if self.dev().resource_unref(object.res_handle).is_ok() {
                 self.gems.remove(object.handle);
             }
             return Err(drm::EINVAL);
@@ -1643,7 +1701,7 @@ impl drm::RenderNode for DrmNode {
         let pa = self
             .slot_va((object.handle - 1) as usize)
             .wrapping_add(virtio::virtio_phys_delta() as u64);
-        let created = self.dev.resource_create_blob_guest(
+        let created = self.dev().resource_create_blob_guest(
             object.res_handle,
             request.blob_mem,
             request.blob_flags,
@@ -1687,7 +1745,7 @@ impl drm::RenderNode for DrmNode {
         // Unref first, and keep the slot on a refusal: the slot names memory the host still
         // holds a resource for, so releasing it early would let the next create reuse a
         // resource id the device never gave back.
-        if self.dev.resource_unref(handle).is_err() {
+        if self.dev().resource_unref(handle).is_err() {
             return Err(drm::EINVAL);
         }
         // The context's table must not be left believing it holds a slot that is about to be a
@@ -1755,7 +1813,7 @@ impl drm::RenderNode for DrmNode {
                 return Err(drm::ENOSYS);
             }
             return self
-                .dev
+                .dev()
                 .transfer_2d(
                     request.resource_id,
                     request.x,
@@ -1770,7 +1828,7 @@ impl drm::RenderNode for DrmNode {
         // before the transfer names it — the same ordering a submit needs, and for the same
         // silent reason.
         self.attach_to_context(ctx, request.resource_id)?;
-        self.dev
+        self.dev()
             .transfer_3d(to_host, ctx, request)
             .map_err(|_| drm::EINVAL)
     }
@@ -1786,7 +1844,7 @@ impl drm::RenderNode for DrmNode {
         for handle in handles {
             self.attach_to_context(ctx, *handle)?;
         }
-        self.dev.submit_3d(ctx, command).map_err(|_| drm::EINVAL)
+        self.dev().submit_3d(ctx, command).map_err(|_| drm::EINVAL)
     }
 
     fn wait(&mut self, handle: u32, _nowait: bool) -> Result<(), i32> {
@@ -1852,7 +1910,7 @@ fn open_render_node(out: &mut Gpu3d) -> Option<DrmNode> {
     out.queues = queues;
 
     let mut node = DrmNode {
-        dev: VirtioGpuArch::new(),
+        dev: Device::Owned(VirtioGpuArch::new()),
         capsets: [CapsetInfo::default(); MAX_CAPSETS],
         count: 0,
         virgl: out.virgl,
@@ -1863,7 +1921,7 @@ fn open_render_node(out: &mut Gpu3d) -> Option<DrmNode> {
         gems: drm::GemTable::new(0),
         gem_arena: 0,
     };
-    node.dev.vdev = Some(dev);
+    node.dev().vdev = Some(dev);
     // A device with no GL still has a *node*: a DRM render node whose driver has no 3D
     // answers `VERSION`, answers `GETPARAM` with `3D_FEATURES` 0, and refuses `GET_CAPS`
     // with `ENOSYS` — which is what a client is meant to find there (D7's degrade, seen
@@ -1875,7 +1933,8 @@ fn open_render_node(out: &mut Gpu3d) -> Option<DrmNode> {
     // The host lists its capsets by index and answers past the last one with a zero id
     // instead of an error, so this walks until then — bounded, in case a host never does.
     while node.count < MAX_CAPSETS {
-        match node.dev.capset_info(node.count as u32) {
+        let index = node.count as u32;
+        match node.dev().capset_info(index) {
             Ok(info) if info.id != 0 => {
                 node.capsets[node.count] = info;
                 node.count += 1;
@@ -1885,7 +1944,7 @@ fn open_render_node(out: &mut Gpu3d) -> Option<DrmNode> {
                 // Only worth reporting when nothing was learnt: one refused query after a
                 // good first one is a host saying "that is all", badly.
                 if node.count == 0 {
-                    out.capset_rtype = node.dev.last_response;
+                    out.capset_rtype = node.dev().last_response;
                 }
                 break;
             }
@@ -1929,21 +1988,21 @@ pub fn probe_render_node() -> (Gpu3d, Option<DrmNode>) {
     }
     // The blob for the capset the report names: what the host renders with is only useful
     // with its contents.
-    if let Ok(len) = node.dev.capset_blob(out.capset) {
+    if let Ok(len) = node.dev().capset_blob(out.capset) {
         out.capset_len = len;
     }
     // Create is the evidence and destroy keeps the host from holding a context the port
     // will never use, so the flag means both halves worked.
-    let created = node.dev.ctx_create(CONTEXT_ID, 0, b"minixrs").is_ok();
+    let created = node.dev().ctx_create(CONTEXT_ID, 0, b"minixrs").is_ok();
     if created {
         // The bytes, not the response types: see `Gpu3d::xfer_matched` and
         // `Gpu3d::submit_matched`.
-        if let Ok((xfer, submit)) = node.dev.round_trip(CONTEXT_ID) {
+        if let Ok((xfer, submit)) = node.dev().round_trip(CONTEXT_ID) {
             out.xfer_matched = xfer;
             out.submit_matched = submit;
         }
     }
-    out.ctx = created && node.dev.ctx_destroy(CONTEXT_ID).is_ok();
+    out.ctx = created && node.dev().ctx_destroy(CONTEXT_ID).is_ok();
     (out, Some(node))
 }
 
@@ -2647,7 +2706,7 @@ mod tests {
     /// is usable — and this is how they are reached without one.
     fn drm_node(capsets: &[CapsetInfo], virgl: bool, blob: bool, context_init: bool) -> DrmNode {
         let mut node = DrmNode {
-            dev: VirtioGpuArch::new(),
+            dev: Device::Owned(VirtioGpuArch::new()),
             capsets: [CapsetInfo::default(); MAX_CAPSETS],
             count: capsets.len(),
             virgl,
