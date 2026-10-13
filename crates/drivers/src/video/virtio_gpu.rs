@@ -919,6 +919,16 @@ impl VirtioGpuArch {
     /// the attached guest buffer into the host scanout image, then
     /// RESOURCE_FLUSH makes the change visible.
     fn flush_inner(&mut self) -> Result<(), DriverError> {
+        self.present_resource(RESOURCE_ID)
+    }
+
+    /// `TRANSFER_TO_HOST_2D` of the whole output for `resource_id`, then `RESOURCE_FLUSH`. A
+    /// resource whose scanout backing is guest memory needs the transfer for the host's scanout
+    /// image to hold the guest's pages: `RESOURCE_FLUSH` alone only asks the host to re-read, and
+    /// a resource id the host has scanned out before keeps the image it already had, so a
+    /// *re-point* of the scanout at a new buffer shows the previous one until a transfer copies
+    /// the new backing in.
+    fn present_resource(&mut self, resource_id: u32) -> Result<(), DriverError> {
         let rect = Rect {
             x: 0,
             y: 0,
@@ -929,14 +939,14 @@ impl VirtioGpuArch {
             hdr: CtrlHdr::new(CMD_TRANSFER_TO_HOST_2D),
             r: rect,
             offset: 0,
-            resource_id: RESOURCE_ID,
+            resource_id,
             padding: 0,
         };
         self.send_cmd(struct_bytes(&transfer))?;
         let cmd = ResourceFlush {
             hdr: CtrlHdr::new(CMD_RESOURCE_FLUSH),
             r: rect,
-            resource_id: RESOURCE_ID,
+            resource_id,
             padding: 0,
         };
         self.send_cmd(struct_bytes(&cmd))
@@ -1075,8 +1085,9 @@ impl VirtioGpuArch {
         self.send_cmd(struct_bytes(&cmd))
     }
 
-    /// `RESOURCE_FLUSH` of `resource_id` alone: a resource whose contents *are* guest memory needs
-    /// no transfer, only a nudge for the host to re-read the scanout from it.
+    /// `RESOURCE_FLUSH` of `resource_id` alone: a nudge for the host to re-read a resource whose
+    /// contents it already holds. Not enough for a *re-pointed* guest-backed scanout — that needs
+    /// [`VirtioGpuArch::present_resource`]'s transfer — only for a host resource such as the blob.
     fn flush_resource(&mut self, resource_id: u32) -> Result<(), DriverError> {
         let cmd = ResourceFlush {
             hdr: CtrlHdr::new(CMD_RESOURCE_FLUSH),
@@ -2527,9 +2538,9 @@ impl FbArch for VirtioGpuArch {
             // The scanout is a host blob: push the framebuffer into it and let the host re-read.
             self.flush_blob()
         } else if self.scanout_resource == EXT_SCANOUT_RESOURCE_ID {
-            // The scanout is the client's own memory: only the host's re-read is owed, and a
-            // TRANSFER would copy guest memory onto itself.
-            self.flush_resource(EXT_SCANOUT_RESOURCE_ID)
+            // The scanout is the client's own memory: the host reads it as a 2D resource, so the
+            // present is a transfer of that resource plus its flush.
+            self.present_resource(EXT_SCANOUT_RESOURCE_ID)
         } else {
             self.flush_inner()
         }
@@ -2563,7 +2574,7 @@ impl FbArch for VirtioGpuArch {
         self.set_scanout_resource(EXT_SCANOUT_RESOURCE_ID)?;
         self.ext_resource = true;
         self.scanout_resource = EXT_SCANOUT_RESOURCE_ID;
-        self.flush_resource(EXT_SCANOUT_RESOURCE_ID)
+        self.present_resource(EXT_SCANOUT_RESOURCE_ID)
     }
 
     /// Point the output back at the driver's own buffer and drop the external resource.

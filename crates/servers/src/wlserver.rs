@@ -322,6 +322,314 @@ mod imp {
         }
     }
 
+    /// Wait until `fd` is readable, up to `timeout_ms`. The sockets are non-blocking and VFS is
+    /// single-threaded, so this polls in short slices: a long block would hold VFS's one worker
+    /// and starve the helper, whose GL transfers are themselves VFS requests (the shape
+    /// `crates/userland/src/wlcompose.rs` uses for the same reason).
+    fn wait_readable(fd: i32, timeout_ms: i32) -> bool {
+        let mut waited = 0;
+        loop {
+            let mut pf = [PollFd {
+                fd,
+                events: POLLIN,
+                revents: 0,
+            }];
+            if matches!(fs::poll(&mut pf, 25), Ok(n) if n > 0) && pf[0].revents & POLLIN != 0 {
+                return true;
+            }
+            waited += 25;
+            if waited >= timeout_ms {
+                return false;
+            }
+        }
+    }
+
+    fn push(out: &mut [u8], at: &mut usize, bytes: &[u8]) {
+        out[*at..*at + bytes.len()].copy_from_slice(bytes);
+        *at += bytes.len();
+    }
+
+    fn push_dec(out: &mut [u8], at: &mut usize, mut v: u32) {
+        let mut tmp = [0u8; 10];
+        let mut i = tmp.len();
+        loop {
+            i -= 1;
+            tmp[i] = b'0' + (v % 10) as u8;
+            v /= 10;
+            if v == 0 {
+                break;
+            }
+        }
+        push(out, at, &tmp[i..]);
+    }
+
+    /// Most surfaces the compositor's scene holds — its window list, bounded like the helper's
+    /// own array (`crates/userland/src/wlcompose.rs`'s `MAX_SURFACES`).
+    const MAX_SCENE: usize = 8;
+
+    /// One surface in the scene: the plane the helper samples, its geometry, and where its
+    /// top-left lands. Held per (connection slot, surface) so a client's entries go with it.
+    #[derive(Clone, Copy)]
+    struct SceneEntry {
+        slot: usize,
+        surface: u32,
+        fd: i32,
+        width: i32,
+        height: i32,
+        stride: i32,
+        format: u32,
+        x: i32,
+        y: i32,
+    }
+
+    /// The compositor's surface list (`.notes/wayland.md` §6.10, 3d-b-5c). `wlserver` has no
+    /// other scene: a commit lands here, and the list is what the helper is asked to compose.
+    /// Every surface is placed at the output's origin — the port has no placement model yet (2e
+    /// accepts anchors and geometry and ignores them), and 3d-b-5's gate needs none.
+    struct Scene {
+        entries: [Option<SceneEntry>; MAX_SCENE],
+        n: usize,
+    }
+
+    impl Scene {
+        fn new() -> Self {
+            Self {
+                entries: [None; MAX_SCENE],
+                n: 0,
+            }
+        }
+
+        /// How many surfaces the scene holds. More than one is what asks for composition.
+        fn len(&self) -> usize {
+            self.n
+        }
+
+        /// Add the entry for a surface, or replace the one already there. An existing surface
+        /// keeps its place, so the order the helper draws in is the order surfaces first
+        /// committed — the later a surface appeared, the higher it is.
+        fn put(&mut self, e: SceneEntry) {
+            for i in 0..self.n {
+                if let Some(x) = self.entries[i]
+                    && x.slot == e.slot
+                    && x.surface == e.surface
+                {
+                    self.entries[i] = Some(e);
+                    return;
+                }
+            }
+            if self.n < MAX_SCENE {
+                self.entries[self.n] = Some(e);
+                self.n += 1;
+            }
+        }
+
+        /// Drop every surface belonging to `slot`, so a client that goes away takes its windows
+        /// with it.
+        fn drop_slot(&mut self, slot: usize) {
+            let mut w = 0;
+            for i in 0..self.n {
+                if self.entries[i].is_some_and(|x| x.slot == slot) {
+                    continue;
+                }
+                self.entries[w] = self.entries[i];
+                w += 1;
+            }
+            for i in w..self.n {
+                self.entries[i] = None;
+            }
+            self.n = w;
+        }
+
+        fn iter(&self) -> impl Iterator<Item = &SceneEntry> {
+            self.entries[..self.n].iter().filter_map(|e| e.as_ref())
+        }
+    }
+
+    /// The socket `/bin/wlcompose serve` binds (`.notes/wayland.md` §6.10, 3d-b-5).
+    const COMPOSER_PATH: &[u8] = b"/run/wlcompose";
+
+    /// The stateless GPU-composition helper, reached over its own socket (D14). It is started by
+    /// the session and not the boot image: a boot process is loaded from the initramfs and a
+    /// missing one aborts the boot, and the helper is x86-only and dynamic (§5's row). So
+    /// `wlserver` connects lazily on the first multi-surface frame, and with nothing listening it
+    /// presents each commit the way it always did.
+    struct Composer {
+        /// The helper's socket (`-1` = not connected yet).
+        conn: i32,
+        /// The render node fd the composed frame is imported on (`-1` = not yet).
+        node: i32,
+    }
+
+    impl Composer {
+        fn new() -> Self {
+            Self { conn: -1, node: -1 }
+        }
+
+        /// Compose the scene on the GPU and present the frame. `false` when the helper is not
+        /// running or the frame did not arrive, which is the caller's cue to fall back to the
+        /// per-commit present (D7: the GPU path degrades, it does not gate).
+        fn compose_and_present(&mut self, scene: &Scene, fb: *mut u8) -> bool {
+            if scene.len() < 2 {
+                return false;
+            }
+            if self.conn < 0 {
+                let Ok(fd) = uds::socket() else {
+                    return false;
+                };
+                if uds::connect(fd, COMPOSER_PATH).is_err() {
+                    let _ = uds::close_fd(fd);
+                    return false;
+                }
+                self.conn = fd;
+            }
+            // The greeting: the helper sends it on accept, and a descriptor sent before that is
+            // keyed to a connection it has not taken yet.
+            if !wait_readable(self.conn, 30_000) {
+                return false;
+            }
+            let mut hello = [0u8; 8];
+            let _ = uds::recv(self.conn, &mut hello);
+
+            if !self.send_frame(scene) {
+                return false;
+            }
+            // The reply is the frame's descriptor as control data plus an `ok` line. The data is
+            // read first: the control is keyed to the receiving socket, so it is lifted after the
+            // message that carries it (the order `pump` uses for a client's plane).
+            let mut ack = [0u8; 40];
+            if !wait_readable(self.conn, 30_000)
+                || !matches!(uds::recv(self.conn, &mut ack), Ok(n) if n > 0)
+            {
+                return false;
+            }
+            let mut fds = [-1i32; 1];
+            if !matches!(uds::recv_fds(self.conn, &mut fds), Ok(1)) || fds[0] < 0 {
+                return false;
+            }
+            let len = PITCH * YRES;
+            let ok = self.present_frame(fds[0], len, fb);
+            let _ = uds::close_fd(fds[0]);
+            if ok {
+                let mut line = [0u8; 48];
+                let mut at = 0usize;
+                push(&mut line, &mut at, b"wlserver: composed ");
+                push_dec(&mut line, &mut at, scene.len() as u32);
+                push(&mut line, &mut at, b" surfaces\n");
+                report(&line[..at]);
+            }
+            ok
+        }
+
+        /// Ask the helper to draw the scene into one frame: `begin`, then one `surface` per entry
+        /// with its plane fd by `SCM_RIGHTS`, then `end` (§6.10's handoff).
+        fn send_frame(&mut self, scene: &Scene) -> bool {
+            let mut line = [0u8; 64];
+            let mut at = 0usize;
+            push(&mut line, &mut at, b"begin ");
+            push_dec(&mut line, &mut at, XRES as u32);
+            push(&mut line, &mut at, b" ");
+            push_dec(&mut line, &mut at, YRES as u32);
+            push(&mut line, &mut at, b"\n");
+            if uds::send(self.conn, &line[..at]).is_err() {
+                return false;
+            }
+            for e in scene.iter() {
+                if uds::send_fds(self.conn, &[e.fd]).is_err() {
+                    return false;
+                }
+                let mut line = [0u8; 96];
+                let mut at = 0usize;
+                push(&mut line, &mut at, b"surface ");
+                push_dec(&mut line, &mut at, e.width.max(0) as u32);
+                push(&mut line, &mut at, b" ");
+                push_dec(&mut line, &mut at, e.height.max(0) as u32);
+                push(&mut line, &mut at, b" ");
+                push_dec(&mut line, &mut at, e.stride.max(0) as u32);
+                push(&mut line, &mut at, b" ");
+                push_dec(&mut line, &mut at, e.format);
+                push(&mut line, &mut at, b" ");
+                push_dec(&mut line, &mut at, e.x.max(0) as u32);
+                push(&mut line, &mut at, b" ");
+                push_dec(&mut line, &mut at, e.y.max(0) as u32);
+                push(&mut line, &mut at, b"\n");
+                if uds::send(self.conn, &line[..at]).is_err() {
+                    return false;
+                }
+            }
+            uds::send(self.conn, b"end\n").is_ok()
+        }
+
+        /// Import the helper's frame on the render node and hand its frames to the fb server
+        /// (`FBIO_SCANOUT_SRC`) — 3d-b-1's present with the composed frame. A backend that cannot
+        /// re-back its scanout gets the frame blitted instead, the same fallback `present` uses.
+        fn present_frame(&mut self, prime_fd: i32, len: usize, fb: *mut u8) -> bool {
+            if self.node < 0 {
+                self.node = open_node();
+            }
+            if self.node < 0 {
+                return false;
+            }
+            let Some(handle) = node_import(self.node, prime_fd) else {
+                return false;
+            };
+            let Some(offset) = node_map_offset(self.node, handle) else {
+                return false;
+            };
+            let src = unsafe {
+                vmem::mmap(
+                    core::ptr::null_mut(),
+                    len,
+                    vmem::PROT_READ,
+                    vmem::MAP_SHARED,
+                    self.node,
+                    offset as i64,
+                )
+            };
+            if src == vmem::MAP_FAILED {
+                return false;
+            }
+            // Fault the frame's pages into this process's table before the fb server resolves
+            // them for us (the 3d-b-1 trap).
+            let mut touch = 0usize;
+            while touch < len {
+                let _ = unsafe { core::ptr::read_volatile(src.add(touch)) };
+                touch += 4096;
+            }
+            // The fb server remembers the last scanout source by (endpoint, va, len) and skips a
+            // re-point it believes is the same buffer — so revert first, or a mapping that reused
+            // the freed va and len of the frame just presented would keep its frames. This frame
+            // is a *different* object every recomposition, so the re-point is the whole point.
+            let _ = fb_scanout(0, 0);
+            let mut ok = fb_scanout(src as u64, len as u64) == 0;
+            if !ok {
+                // The scanout could not be re-pointed: paint the frame into the server's own
+                // buffer, the copy the fast path would have made anyway.
+                let _ = fb_scanout(0, 0);
+                let buf = shm::Buffer {
+                    offset: 0,
+                    width: XRES as i32,
+                    height: YRES as i32,
+                    stride: PITCH as i32,
+                    format: wayland::protocol::WL_SHM_FORMAT_XRGB8888,
+                    pool_size: len as i32,
+                };
+                let bytes = unsafe { core::slice::from_raw_parts(src, len) };
+                let dst = Destination {
+                    x: 0,
+                    y: 0,
+                    width: XRES as i32,
+                    height: YRES as i32,
+                };
+                ok = shm::blit(bytes, &buf, dst, |x, y, px| put_px(fb, x, y, px)).is_ok();
+                if ok {
+                    fb_flush();
+                }
+            }
+            let _ = unsafe { vmem::munmap(src, len) };
+            ok
+        }
+    }
+
     /// Composite a commit onto the display and present it.
     ///
     /// Only the commit's damage is recomposited (2d): a client that names a small
@@ -780,7 +1088,15 @@ mod imp {
 
     /// Read and answer what one client has sent. `false` means the connection ended
     /// and the caller should drop it.
-    fn pump(c: &mut Client, fb: *mut u8, keymap: Option<(i32, u32)>, ptr: (i32, i32)) -> bool {
+    fn pump(
+        c: &mut Client,
+        slot: usize,
+        fb: *mut u8,
+        keymap: Option<(i32, u32)>,
+        ptr: (i32, i32),
+        scene: &mut Scene,
+        composer: &mut Composer,
+    ) -> bool {
         let n = match uds::recv(c.conn, &mut c.chunk) {
             Ok(0) => return false,
             Ok(n) => n as usize,
@@ -844,7 +1160,26 @@ mod imp {
                 if commit.dmabuf && c.node < 0 {
                     c.node = open_node();
                 }
-                present(fb, &c.pools, &c.dmabufs, c.node, &commit, ptr, cursor);
+                // 3d-b-5c: a dma-buf commit joins the scene. More than one surface is a frame the
+                // helper composes; a lone surface keeps the per-commit present (the fast path).
+                if commit.dmabuf
+                    && let Some(fd) = c.dmabufs.fd_of(commit.buffer)
+                {
+                    scene.put(SceneEntry {
+                        slot,
+                        surface: commit.surface,
+                        fd,
+                        width: commit.width,
+                        height: commit.height,
+                        stride: commit.stride,
+                        format: commit.format,
+                        x: 0,
+                        y: 0,
+                    });
+                }
+                if !composer.compose_and_present(scene, fb) {
+                    present(fb, &c.pools, &c.dmabufs, c.node, &commit, ptr, cursor);
+                }
                 let _ = c.server.release_buffer(commit.buffer, &mut reply);
             }
             c.inbuf.consume(h.size as usize);
@@ -895,6 +1230,9 @@ mod imp {
         // Which connection's surface input goes to. Between connections this is the
         // loop's to arbitrate; within one, a surface's first commit sets it.
         let mut focus: Option<(usize, u32)> = None;
+        // The window list the GPU-composition helper draws, and the helper itself (§6.10, 3d-b-5c).
+        let mut scene = Scene::new();
+        let mut composer = Composer::new();
         loop {
             // Poll the listener and every live client at once, so one client that is
             // slow or idle does not stop the others (2c).
@@ -948,7 +1286,7 @@ mod imp {
                 let slot = slots[i];
                 let mut ended = false;
                 if let Some(c) = clients[slot].as_mut()
-                    && !pump(c, fb, keymap, istate.ptr)
+                    && !pump(c, slot, fb, keymap, istate.ptr, &mut scene, &mut composer)
                 {
                     c.pools.close_all();
                     c.dmabufs.close_all();
@@ -963,6 +1301,9 @@ mod imp {
                     if focus.is_some_and(|(s, _)| s == slot) {
                         focus = None;
                     }
+                    // A departed client's windows go with it, or the helper would keep drawing a
+                    // plane whose descriptor is gone.
+                    scene.drop_slot(slot);
                     clients[slot] = None;
                 }
             }

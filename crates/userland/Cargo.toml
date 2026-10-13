@@ -400,5 +400,13 @@ name = "wldmabuf"
 path = "src/bin/wldmabuf.rs"
 test = false
 
+# wlscene is the 3d-b-5c two-surface linux-dmabuf client: a full-output background and a smaller
+# overlay committed on one connection, so the compositor's scene holds two surfaces to compose on
+# the GPU. Driven by `just test-wlscene-x86`.
+[[bin]]
+name = "wlscene"
+path = "src/bin/wlscene.rs"
+test = false
+
 [lints]
 workspace = true

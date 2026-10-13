@@ -37,6 +37,10 @@ pub mod drmprime;
 /// render node, exported to a dma-buf and committed as a `zwp_linux_dmabuf_v1` buffer.
 pub mod wldmabuf;
 
+/// The two-surface linux-dmabuf client — `/bin/wlscene` (§6.10, 3d-b-5c): a background and an
+/// overlay committed on one connection, so the compositor's scene has two surfaces to compose.
+pub mod wlscene;
+
 /// The compositor's GPU-composition helper — `/bin/wlcompose` (§6.10, 3d-b-5b): it composes
 /// several dma-buf surfaces on the render node and reads the frame back once.
 pub mod wlcompose;

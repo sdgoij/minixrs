@@ -163,6 +163,10 @@ pub const BOOT_BINS: &[(&str, &str)] = &[
     // node, exported to a dma-buf and committed as a `zwp_linux_dmabuf_v1` buffer, which the
     // compositor scans out. Driven by `just test-wldmabuf-x86`.
     ("/bin/wldmabuf", "wldmabuf"),
+    // `/bin/wlscene` is the 3d-b-5c two-surface linux-dmabuf client: a full-output background and
+    // a smaller overlay on one connection, so the compositor's scene holds two surfaces and asks
+    // the GPU-composition helper to draw them into one frame. Driven by `just test-wlscene-x86`.
+    ("/bin/wlscene", "wlscene"),
     // `/bin/wterm` is the terminal window client (M3): a pty with /bin/sh
     // on the slave, its output rendered (VT subset) into a wserver window.
     ("/bin/wterm", "wterm"),
