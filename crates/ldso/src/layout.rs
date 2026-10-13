@@ -156,7 +156,14 @@ pub const TLS_SLOTS: usize = 8;
 /// A module whose `PT_TLS` needs more than this cannot be loaded at run time — it can still be
 /// a *startup* dependency, which is placed at its real size — and the loader refuses it rather
 /// than placing it over its neighbour.
-pub const TLS_SURPLUS_SLOT: u64 = 2048;
+///
+/// 8 KiB, not the 2 KiB the first `dlopen`'d Mesa drivers needed: Mesa's `u_debug.c` exports
+/// `debug_dump_flags` with a `static thread_local char output[4096]`, and because the symbol is
+/// global it survives `--gc-sections`, so a DSO that statically carries `libmesa_util` — the
+/// GBM backend `dri_gbm.so`, and `libgbm` — brings 4 KiB of TLS, more than the old surplus
+/// held. The extra bytes are bought for every surplus slot in every thread's block, which is
+/// the cost of admitting a module the block was not originally sized for.
+pub const TLS_SURPLUS_SLOT: u64 = 8192;
 
 /// Where each module's storage starts, relative to the thread pointer.
 ///
