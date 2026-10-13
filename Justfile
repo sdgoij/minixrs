@@ -859,6 +859,18 @@ test-wlfull-x86: build-x86
     python tools/wlfull_probe.py qemu-system-x86_64 -nographic -monitor none -display none -vga none -device virtio-gpu-pci -m 256M -no-reboot -qmp tcp:127.0.0.1:4447,server=on,wait=off -kernel target/images/x86_64-pc-minix/minix-x86.elf -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0
     @echo "wlfull: a whole-output wl_shm frame was scanned out of the client's own buffer (x86_64)"
 
+# The 3d-b-4c gate: a linux-dmabuf client's render-node object is scanned out with no copy
+# (§6.10). The output is a virtio-gpu with no bochs-display, so the render node is served from
+# the output device itself (D11) — the client's render resource and the scanout are one device,
+# which is what lets the fb server re-point the scanout at it. A QMP screendump of the client's
+# colour and the fb server's `fb: scanout src` line are the evidence.
+test-wldmabuf-x86: build-x86
+    mkdir -p target/images/x86_64-pc-minix
+    cp target/trampoline.elf target/images/x86_64-pc-minix/minix-x86.elf
+    @just _assert-qemu-version qemu-system-x86_64
+    python tools/wldmabuf_probe.py qemu-system-x86_64 -nographic -monitor none -display none -vga none -device virtio-gpu-pci -m 256M -no-reboot -qmp tcp:127.0.0.1:4447,server=on,wait=off -kernel target/images/x86_64-pc-minix/minix-x86.elf -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0
+    @echo "wldmabuf: a render-node object was handed over as a linux-dmabuf buffer and scanned out with no copy (x86_64)"
+
 test-wlfull-riscv64: system-image-riscv64
     @just _assert-qemu-version qemu-system-riscv64
     python tools/wlfull_probe.py qemu-system-riscv64 -machine virt -m 256M -nographic -monitor none -display none -global virtio-mmio.force-legacy=off -drive if=none,id=disk0,file=target/images/riscv64gc-unknown-minix/disk.img,format=raw,cache=writethrough -device virtio-blk-device,drive=disk0 -netdev user,id=net0 -device virtio-net-device,netdev=net0 -device virtio-gpu-device -device virtio-keyboard-device -kernel target/images/riscv64gc-unknown-minix/minix-riscv64-boot.elf -qmp tcp:127.0.0.1:4447,server=on,wait=off

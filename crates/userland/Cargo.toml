@@ -392,5 +392,13 @@ name = "wlxe"
 path = "src/bin/wlxe.rs"
 test = false
 
+# wldmabuf is the 3d-b-4c linux-dmabuf client: a full-output object on the render node,
+# exported to a dma-buf and committed as a `zwp_linux_dmabuf_v1` buffer for the compositor
+# to scan out. Driven by `just test-wldmabuf-x86`.
+[[bin]]
+name = "wldmabuf"
+path = "src/bin/wldmabuf.rs"
+test = false
+
 [lints]
 workspace = true

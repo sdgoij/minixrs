@@ -33,6 +33,10 @@ pub mod drmmap;
 /// The DRM render node's PRIME handoff — `/bin/drmprime` (§6.10, 3d-b-2).
 pub mod drmprime;
 
+/// The linux-dmabuf client — `/bin/wldmabuf` (§6.10, 3d-b-4c): a full-output object on the
+/// render node, exported to a dma-buf and committed as a `zwp_linux_dmabuf_v1` buffer.
+pub mod wldmabuf;
+
 /// The DRM render node's rendering context — `/bin/drmctx` (§6.10, 3b-4).
 pub mod drmctx;
 

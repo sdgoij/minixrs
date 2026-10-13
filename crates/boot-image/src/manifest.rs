@@ -159,6 +159,10 @@ pub const BOOT_BINS: &[(&str, &str)] = &[
     // maps a layer-shell panel and an xdg_popup over a window, and checks both are
     // composited where they asked and no wider.
     ("/bin/wlxe", "wlxe"),
+    // `/bin/wldmabuf` is the 3d-b-4c linux-dmabuf client: a full-output object on the render
+    // node, exported to a dma-buf and committed as a `zwp_linux_dmabuf_v1` buffer, which the
+    // compositor scans out. Driven by `just test-wldmabuf-x86`.
+    ("/bin/wldmabuf", "wldmabuf"),
     // `/bin/wterm` is the terminal window client (M3): a pty with /bin/sh
     // on the slave, its output rendered (VT subset) into a wserver window.
     ("/bin/wterm", "wterm"),
