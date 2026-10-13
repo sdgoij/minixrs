@@ -773,7 +773,7 @@ test-gltriangle arch="x86" boot-timeout="180":
 
 test-gltriangle-x86 boot-timeout="180": gltriangle-x86 boot-image-x86
     @just _assert-qemu-version qemu-system-x86_64
-    M=target/mesa/x86; E="/lib/libdrm.so.2=$M/lib/libdrm.so.2;/lib/libEGL.so.1=$M/lib/libEGL.so.1;/lib/libexpat.so.1=$M/lib/libexpat.so.1;/lib/libgallium-25.3.6.so=$M/lib/libgallium-25.3.6.so;/lib/libGLESv2.so.2=$M/lib/libGLESv2.so.2;/lib/libz.so.1=$M/lib/libz.so.1;/lib/swrast_dri.so=$M/lib/swrast_dri.so;/bin/gltriangle=$M/bin/gltriangle"; MINIXFS_EXTRA="$E" MINIXFS_BLOCKS=16384 cargo run -q -p boot-image --bin mkminixfs --release -- x86_64
+    M=target/mesa/x86; E="/lib/libdrm.so.2=$M/lib/libdrm.so.2;/lib/libEGL.so.1=$M/lib/libEGL.so.1;/lib/libgbm.so.1=$M/lib/libgbm.so.1;/lib/libexpat.so.1=$M/lib/libexpat.so.1;/lib/libgallium-25.3.6.so=$M/lib/libgallium-25.3.6.so;/lib/libGLESv2.so.2=$M/lib/libGLESv2.so.2;/lib/libz.so.1=$M/lib/libz.so.1;/lib/swrast_dri.so=$M/lib/swrast_dri.so;/bin/gltriangle=$M/bin/gltriangle"; MINIXFS_EXTRA="$E" MINIXFS_BLOCKS=16384 cargo run -q -p boot-image --bin mkminixfs --release -- x86_64
     @just mkfs-x86
     FEED_SCENARIO=tools/smoke/gltriangle.tsv sh tools/smoke/feed.sh target/test-gltriangle-x86.log {{boot-timeout}} qemu-system-x86_64 -nographic -m 512M -no-reboot -vga none -device bochs-display,id=fb0 -kernel target/images/x86_64-pc-minix/minix-x86-boot.elf -drive if=none,id=disk0,file=target/images/x86_64-pc-minix/disk.img,format=raw,cache=writethrough -device virtio-blk-pci,disable-legacy=on,drive=disk0 -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0 -device virtio-tablet-pci,display=fb0
     @echo "gltriangle: the GLES2 triangle rendered through surfaceless EGL on softpipe (x86_64)"
@@ -789,7 +789,7 @@ test-gltriangle-x86 boot-timeout="180": gltriangle-x86 boot-image-x86
 # `gltriangle: pass`, which is a real readback.
 test-gltriangle-virgl-x86 boot-timeout="180": gltriangle-x86 boot-image-x86
     @just _assert-qemu-version qemu-system-x86_64
-    M=target/mesa/x86; E="/lib/libdrm.so.2=$M/lib/libdrm.so.2;/lib/libEGL.so.1=$M/lib/libEGL.so.1;/lib/libexpat.so.1=$M/lib/libexpat.so.1;/lib/libgallium-25.3.6.so=$M/lib/libgallium-25.3.6.so;/lib/libGLESv2.so.2=$M/lib/libGLESv2.so.2;/lib/libz.so.1=$M/lib/libz.so.1;/bin/gltriangle=$M/bin/gltriangle"; MINIXFS_EXTRA="$E" MINIXFS_BLOCKS=16384 cargo run -q -p boot-image --bin mkminixfs --release -- x86_64
+    M=target/mesa/x86; E="/lib/libdrm.so.2=$M/lib/libdrm.so.2;/lib/libEGL.so.1=$M/lib/libEGL.so.1;/lib/libgbm.so.1=$M/lib/libgbm.so.1;/lib/libexpat.so.1=$M/lib/libexpat.so.1;/lib/libgallium-25.3.6.so=$M/lib/libgallium-25.3.6.so;/lib/libGLESv2.so.2=$M/lib/libGLESv2.so.2;/lib/libz.so.1=$M/lib/libz.so.1;/bin/gltriangle=$M/bin/gltriangle"; MINIXFS_EXTRA="$E" MINIXFS_BLOCKS=16384 cargo run -q -p boot-image --bin mkminixfs --release -- x86_64
     @just mkfs-x86
     FEED_PACE=0.02 FEED_SCENARIO=tools/smoke/gltriangle.tsv sh tools/smoke/feed.sh target/test-gltriangle-virgl-x86.log {{boot-timeout}} qemu-system-x86_64 -display egl-headless -serial stdio -m 512M -no-reboot -vga none -device bochs-display,id=fb0 -kernel target/images/x86_64-pc-minix/minix-x86-boot.elf -drive if=none,id=disk0,file=target/images/x86_64-pc-minix/disk.img,format=raw,cache=writethrough -device virtio-blk-pci,disable-legacy=on,drive=disk0 -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0 -device virtio-tablet-pci,display=fb0 -device virtio-gpu-gl-pci,blob=on
     @just _assert-qemu-log target/test-gltriangle-virgl-x86.log "gltriangle: pass"
@@ -814,12 +814,34 @@ wlgl-x86: userland-x86 dynlib-x86
 # software fallback's. It is a dev-host gate like 3c-3 — headless CI has no GL.
 test-wlgl-x86 boot-timeout="60": wlgl-x86 boot-image-x86
     @just _assert-qemu-version qemu-system-x86_64
-    M=target/mesa/x86; E="/lib/libdrm.so.2=$M/lib/libdrm.so.2;/lib/libEGL.so.1=$M/lib/libEGL.so.1;/lib/libexpat.so.1=$M/lib/libexpat.so.1;/lib/libgallium-25.3.6.so=$M/lib/libgallium-25.3.6.so;/lib/libGLESv2.so.2=$M/lib/libGLESv2.so.2;/lib/libz.so.1=$M/lib/libz.so.1;/bin/wlgl=$M/bin/wlgl"; MINIXFS_EXTRA="$E" MINIXFS_BLOCKS=16384 cargo run -q -p boot-image --bin mkminixfs --release -- x86_64
+    M=target/mesa/x86; E="/lib/libdrm.so.2=$M/lib/libdrm.so.2;/lib/libEGL.so.1=$M/lib/libEGL.so.1;/lib/libgbm.so.1=$M/lib/libgbm.so.1;/lib/libexpat.so.1=$M/lib/libexpat.so.1;/lib/libgallium-25.3.6.so=$M/lib/libgallium-25.3.6.so;/lib/libGLESv2.so.2=$M/lib/libGLESv2.so.2;/lib/libz.so.1=$M/lib/libz.so.1;/bin/wlgl=$M/bin/wlgl"; MINIXFS_EXTRA="$E" MINIXFS_BLOCKS=16384 cargo run -q -p boot-image --bin mkminixfs --release -- x86_64
     @just mkfs-x86
     FEED_PACE=0.02 FEED_SCENARIO=tools/smoke/wlgl.tsv sh tools/smoke/feed.sh target/test-wlgl-x86.log {{boot-timeout}} qemu-system-x86_64 -display egl-headless -serial stdio -m 512M -no-reboot -vga none -device bochs-display,id=fb0 -kernel target/images/x86_64-pc-minix/minix-x86-boot.elf -drive if=none,id=disk0,file=target/images/x86_64-pc-minix/disk.img,format=raw,cache=writethrough -device virtio-blk-pci,disable-legacy=on,drive=disk0 -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0 -device virtio-tablet-pci,display=fb0 -device virtio-gpu-gl-pci,blob=on
     @just _assert-qemu-log target/test-wlgl-x86.log "wlgl: GL_RENDERER=virgl"
     @just _assert-qemu-log target/test-wlgl-x86.log "wlgl: PASS"
     @echo "wlgl: a GL surface rendered on the render node, committed through the compositor, and read back from /dev/fb (x86_64)"
+
+# gbmtest: build /bin/gbmtest, the GBM create/export probe (§6.10 stage 3d-b-3). It links
+# `libgbm` and `libdrm` and includes the GBM/libdrm headers from the source checkouts, so it
+# is built from `just build-mesa x86 --build` like the DSOs are.
+gbmtest-x86: userland-x86 dynlib-x86
+    python tools/build-mesa.py x86 --stage
+    @test -f target/mesa/x86/lib/libgbm.so.1 || (echo 'gbmtest: no libgbm — run `just build-mesa x86 --build` first' >&2; exit 1)
+    python tools/build-gbmtest.py x86
+    @echo "gbmtest: /bin/gbmtest built and the Mesa DSOs staged (x86_64)"
+
+# The 3d-b-3 gate: a GBM buffer object made on the render node, exported to a dma-buf by
+# `gbm_bo_get_fd`, and imported back by `drmPrimeFDToHandle` (`.notes/wayland.md` §6.10). It
+# is a dev-host gate like 3c-3 and 3d-a — GBM allocates through the node's DRI driver, which
+# needs a GL-capable host — so headless CI does not run it. `dri_gbm.so` is the backend
+# `libgbm` `dlopen`s, at `/lib/dri_gbm.so` (`gbm-backends-path`).
+test-gbmtest-x86 boot-timeout="120": gbmtest-x86 boot-image-x86
+    @just _assert-qemu-version qemu-system-x86_64
+    M=target/mesa/x86; E="/lib/libdrm.so.2=$M/lib/libdrm.so.2;/lib/libgbm.so.1=$M/lib/libgbm.so.1;/lib/libexpat.so.1=$M/lib/libexpat.so.1;/lib/libgallium-25.3.6.so=$M/lib/libgallium-25.3.6.so;/lib/libz.so.1=$M/lib/libz.so.1;/lib/dri_gbm.so=$M/lib/dri_gbm.so;/bin/gbmtest=$M/bin/gbmtest"; MINIXFS_EXTRA="$E" MINIXFS_BLOCKS=16384 cargo run -q -p boot-image --bin mkminixfs --release -- x86_64
+    @just mkfs-x86
+    FEED_PACE=0.02 FEED_SCENARIO=tools/smoke/gbmtest.tsv sh tools/smoke/feed.sh target/test-gbmtest-x86.log {{boot-timeout}} qemu-system-x86_64 -display egl-headless -serial stdio -m 512M -no-reboot -vga none -device bochs-display,id=fb0 -kernel target/images/x86_64-pc-minix/minix-x86-boot.elf -drive if=none,id=disk0,file=target/images/x86_64-pc-minix/disk.img,format=raw,cache=writethrough -device virtio-blk-pci,disable-legacy=on,drive=disk0 -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0 -device virtio-tablet-pci,display=fb0 -device virtio-gpu-gl-pci,blob=on
+    @just _assert-qemu-log target/test-gbmtest-x86.log "gbmtest: dev=1 bo=1 w=64 h=64 import=0"
+    @echo "gbmtest: a GBM buffer object created on the render node exported to a dma-buf and imported back (x86_64)"
 
 # The 3d-b gate: a whole-output `wl_shm` client is presented by re-pointing the scanout at its own
 # buffer, so the compositor copies nothing (§6.10). `/dev/fb` no longer holds the frame (the frame
@@ -849,14 +871,14 @@ test-wlfull-aarch64: system-image-aarch64
 
 test-gltriangle-riscv64 boot-timeout="180": gltriangle-riscv64 boot-image-riscv64
     @just _assert-qemu-version qemu-system-riscv64
-    M=target/mesa/riscv64; E="/lib/libdrm.so.2=$M/lib/libdrm.so.2;/lib/libEGL.so.1=$M/lib/libEGL.so.1;/lib/libexpat.so.1=$M/lib/libexpat.so.1;/lib/libgallium-25.3.6.so=$M/lib/libgallium-25.3.6.so;/lib/libGLESv2.so.2=$M/lib/libGLESv2.so.2;/lib/libz.so.1=$M/lib/libz.so.1;/lib/swrast_dri.so=$M/lib/swrast_dri.so;/bin/gltriangle=$M/bin/gltriangle"; MINIXFS_EXTRA="$E" MINIXFS_BLOCKS=16384 cargo run -q -p boot-image --bin mkminixfs --release -- riscv64
+    M=target/mesa/riscv64; E="/lib/libdrm.so.2=$M/lib/libdrm.so.2;/lib/libEGL.so.1=$M/lib/libEGL.so.1;/lib/libgbm.so.1=$M/lib/libgbm.so.1;/lib/libexpat.so.1=$M/lib/libexpat.so.1;/lib/libgallium-25.3.6.so=$M/lib/libgallium-25.3.6.so;/lib/libGLESv2.so.2=$M/lib/libGLESv2.so.2;/lib/libz.so.1=$M/lib/libz.so.1;/lib/swrast_dri.so=$M/lib/swrast_dri.so;/bin/gltriangle=$M/bin/gltriangle"; MINIXFS_EXTRA="$E" MINIXFS_BLOCKS=16384 cargo run -q -p boot-image --bin mkminixfs --release -- riscv64
     @just mkfs-riscv64
     FEED_SCENARIO=tools/smoke/gltriangle.tsv sh tools/smoke/feed.sh target/test-gltriangle-riscv64.log {{boot-timeout}} qemu-system-riscv64 -machine virt -m 512M -nographic -global virtio-mmio.force-legacy=off -drive if=none,id=disk0,file=target/images/riscv64gc-unknown-minix/disk.img,format=raw,cache=writethrough -device virtio-blk-device,drive=disk0 -netdev user,id=net0 -device virtio-net-device,netdev=net0 -device virtio-gpu-device -device virtio-keyboard-device -kernel target/images/riscv64gc-unknown-minix/minix-riscv64-boot.elf
     @echo "gltriangle: the GLES2 triangle rendered through surfaceless EGL on softpipe (riscv64)"
 
 test-gltriangle-aarch64 boot-timeout="180": gltriangle-aarch64 boot-image-aarch64
     @just _assert-qemu-version qemu-system-aarch64
-    M=target/mesa/aarch64; E="/lib/libdrm.so.2=$M/lib/libdrm.so.2;/lib/libEGL.so.1=$M/lib/libEGL.so.1;/lib/libexpat.so.1=$M/lib/libexpat.so.1;/lib/libgallium-25.3.6.so=$M/lib/libgallium-25.3.6.so;/lib/libGLESv2.so.2=$M/lib/libGLESv2.so.2;/lib/libz.so.1=$M/lib/libz.so.1;/lib/swrast_dri.so=$M/lib/swrast_dri.so;/bin/gltriangle=$M/bin/gltriangle"; MINIXFS_EXTRA="$E" MINIXFS_BLOCKS=16384 cargo run -q -p boot-image --bin mkminixfs --release -- aarch64
+    M=target/mesa/aarch64; E="/lib/libdrm.so.2=$M/lib/libdrm.so.2;/lib/libEGL.so.1=$M/lib/libEGL.so.1;/lib/libgbm.so.1=$M/lib/libgbm.so.1;/lib/libexpat.so.1=$M/lib/libexpat.so.1;/lib/libgallium-25.3.6.so=$M/lib/libgallium-25.3.6.so;/lib/libGLESv2.so.2=$M/lib/libGLESv2.so.2;/lib/libz.so.1=$M/lib/libz.so.1;/lib/swrast_dri.so=$M/lib/swrast_dri.so;/bin/gltriangle=$M/bin/gltriangle"; MINIXFS_EXTRA="$E" MINIXFS_BLOCKS=16384 cargo run -q -p boot-image --bin mkminixfs --release -- aarch64
     @just mkfs-aarch64
     FEED_SCENARIO=tools/smoke/gltriangle.tsv sh tools/smoke/feed.sh target/test-gltriangle-aarch64.log {{boot-timeout}} qemu-system-aarch64 -machine virt -cpu cortex-a57 -m 512M -nographic -no-reboot -global virtio-mmio.force-legacy=off -drive if=none,id=disk0,file=target/images/aarch64-unknown-minix/disk.img,format=raw,cache=writethrough -device virtio-blk-device,drive=disk0 -netdev user,id=net0 -device virtio-net-device,netdev=net0 -device virtio-gpu-device -device virtio-keyboard-device -kernel target/images/aarch64-unknown-minix/minix-aarch64-boot.elf
     @echo "gltriangle: the GLES2 triangle rendered through surfaceless EGL on softpipe (aarch64)"

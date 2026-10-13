@@ -15,7 +15,7 @@ toolchain. `.notes/wayland.md` §6.10 is the design; these are the recipes and t
   configures/builds Mesa through **meson in WSL**. The meson build trees are on
   WSL's *native* filesystem (`~/.cache/minixrs/mesa`) because meson rejects
   drvfs (`/mnt/c`) mtimes ("clock skew"); the cross file and logs live in
-  `target/mesa/x86/`. `--stage` (also run after a build) copies the seven DSOs
+  `target/mesa/x86/`. `--stage` (also run after a build) copies the nine DSOs
   into `target/mesa/x86/lib/` under their guest sonames, because the Windows
   `build-x86` cannot read WSL's native tree.
 - `just fetch-mesa <arch>` — installs the pinned DSOs (and the EGL/GLES2/KHR
@@ -25,7 +25,7 @@ toolchain. `.notes/wayland.md` §6.10 is the design; these are the recipes and t
 - **The pin is `tools/mesa_pin.py`.** It holds the Mesa and libdrm tags/commits;
   the release tag is derived from the commit pair, so an artifact can only match
   the pinned sources. `.github/workflows/mesa-release.yml` builds and publishes a
-  pin's seven DSOs per arch once, `ci.yml`'s `mesa-pin` job decides whether that
+  pin's nine DSOs per arch once, `ci.yml`'s `mesa-pin` job decides whether that
   is needed, and only a pin bump (or a `cc-dso-minix.py` change) triggers a
   rebuild — same shape as the stage1/toolchain-release pair.
 - `just libcxx <arch>` — builds libc++/libc++abi as one static `libstdc++.a`
@@ -122,7 +122,7 @@ toolchain. `.notes/wayland.md` §6.10 is the design; these are the recipes and t
 ## The runtime gate
 
 `just test-gltriangle-<arch>` boots the split pair with `/bin/gltriangle` and the
-seven Mesa DSOs in the *system* image (`MINIXFS_BLOCKS=16384`, ~64 MiB — the two
+nine Mesa DSOs in the *system* image (`MINIXFS_BLOCKS=16384`, ~64 MiB — the two
 copies of `libgallium` alone are ~33 MiB, one named by `libEGL`/`libGLESv2` in
 `DT_NEEDED` and one `dlopen`ed as `swrast_dri.so`) and drives
 `tools/smoke/gltriangle.tsv`, which wants the client's `gltriangle: pass` line.
@@ -131,7 +131,7 @@ centroid and a black corner. The split (`system-image-<arch>`) is what made it
 fit — the image ceiling is gone, so a root past the 16 MiB `RAMDISK_IMAGE_SIZE` is
 a system image, not a blocker. It needs `just libcxx <arch>` and `just build-mesa
 <arch> --build` first, and CI's `gltriangle` job runs it for every arch and
-publishes the seven DSOs as `mesa-<arch>`, which the release injects into the
+publishes the nine DSOs as `mesa-<arch>`, which the release injects into the
 system image it publishes.
 
 `just test-gltriangle-virgl-x86` is the 3c-3 gate: the same client on a GL device

@@ -149,8 +149,8 @@ DRM_OPTIONS = (
     "-Detnaviv=disabled",
 )
 
-# A minimal, stable Mesa option set: the software rasteriser, EGL, GLES2, no
-# window-system platforms (surfaceless), no LLVM, no GBM/glvnd. An unknown option
+# A minimal, stable Mesa option set: the software rasteriser, EGL, GLES2, GBM, no
+# window-system platforms (surfaceless), no LLVM, no glvnd. An unknown option
 # fails meson setup by name, which is the point of 3c-0's gate.
 #
 # `-D__managarm__`: Mesa's `detect_os.h` has no minix case, and every OS branch it
@@ -187,7 +187,8 @@ MESON_OPTIONS = (
     "-Dgles1=disabled",
     "-Dgles2=enabled",
     "-Dllvm=disabled",
-    "-Dgbm=disabled",
+    "-Dgbm=enabled",
+    "-Dgbm-backends-path=/lib",
     "-Dglvnd=disabled",
     "-Dshader-cache=disabled",
     "-Dlmsensors=disabled",
@@ -389,6 +390,11 @@ def stage_sources(arch: Arch) -> list[tuple[str, pathlib.Path]]:
     return [
         ("libEGL.so.1", build / "src" / "egl" / "libEGL.so.1.0.0"),
         ("libGLESv2.so.2", build / "src" / "mesa" / "glapi" / "es2api" / "libGLESv2.so.2.0.0"),
+        ("libgbm.so.1", build / "src" / "gbm" / "libgbm.so.1.0.0"),
+        # The GBM DRI backend, which `libgbm` `dlopen`s by name from
+        # `gbm-backends-path` (`/lib`) — the one file an EGL-only build does not
+        # have. It is a *backend module*, not a library a client links.
+        ("dri_gbm.so", build / "src" / "gbm" / "backends" / "dri" / "dri_gbm.so"),
         ("libgallium-25.3.6.so", gallium),
         ("swrast_dri.so", gallium),
         ("libdrm.so.2", drm_prefix(arch) / "lib" / "libdrm.so.2.129.0"),

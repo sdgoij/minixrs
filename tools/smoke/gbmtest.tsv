@@ -1,0 +1,21 @@
+# The `just test-gbmtest-x86` scenario: a GBM buffer object made on the render node and
+# exported to a dma-buf, then imported back through the node (`.notes/wayland.md` §6.10,
+# stage 3d-b-3). One step, because the proof is one program's whole session.
+#
+# The device is the GL one (`-device virtio-gpu-gl-pci,blob=on` under `-display
+# egl-headless`), the same gate shape as 3c-3 and 3d-a: GBM allocates through the DRI
+# driver the loader picks for the node, and on a device the host gave no GL there is no
+# `virtio_gpu` 3D driver for it to allocate with. `FEED_PACE` because a GL display backend
+# drops serial bytes mid-line (see `test-drmgl-x86`).
+#
+# The expected line is the session's verdict, so each field is a claim:
+#
+#   dev=1 bo=1              `gbm_create_device` and `gbm_bo_create` each returned an object
+#   w=64 h=64               the BO's geometry — 64×64 XRGB8888, the size asked for
+#   import=0                `drmPrimeFDToHandle` on the descriptor `gbm_bo_get_fd` returned
+#                           succeeded: the node accepted back the dma-buf it exported, so
+#                           the round trip is real and not a number the client kept to itself
+#
+# `stride`, `handle` and `fd` are values, not claims, so the expected line stops before them.
+
+/bin/gbmtest	gbmtest: dev=1 bo=1 w=64 h=64 import=0

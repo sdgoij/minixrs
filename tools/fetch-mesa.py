@@ -2,7 +2,7 @@
 """Install the prebuilt Mesa + libdrm shared objects for the pinned version.
 
 `just build-mesa <arch> --build` compiles Mesa, libdrm and the C++ runtime from
-source — tens of minutes and a meson host per arch. This downloads the same seven
+source — tens of minutes and a meson host per arch. This downloads the same nine
 DSOs, and the handful of headers the surfaceless client compiles against, from a
 release published in this repository instead (see
 `.github/workflows/mesa-release.yml`), tagged by the Mesa and libdrm commits

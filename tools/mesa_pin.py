@@ -29,17 +29,28 @@ DRM_GIT = "https://gitlab.freedesktop.org/mesa/drm.git"
 DRM_TAG = "libdrm-2.4.129"
 DRM_COMMIT = "a8e5e10a873f67f557dc70e5407af4553f35edd9"
 
+# A fingerprint of the *build configuration* — the option sets in
+# `tools/build-mesa.py` — and part of the release tag because the artifact is a
+# product of those options as much as of the pinned commits. Enabling GBM is the
+# reason this exists: it grows the DSO set from seven to nine and adds a
+# `libgbm.so.1` `DT_NEEDED` to `libEGL`, so an artifact built without it must not
+# be handed to a tree that expects the new set. A short, human-readable string;
+# bump it whenever an option in `tools/build-mesa.py` changes. (The commit halves
+# cannot do this job: the sources are unchanged when only an option moves.)
+BUILD_CONFIG = "gbm"
+
 
 def tag(rust_commit: str) -> str:
-    """The release tag for these pins: both commits and the toolchain pin.
+    """The release tag for these pins: both commits, the build config and the toolchain pin.
 
-    The Mesa and libdrm commits name the sources; the toolchain pin is there because
-    the DSOs are compiled by it and link the C++ runtime built from the fork's headers
-    and the port's libc. A fork bump can change the target ABI, so a DSO built before
-    it must not be handed out for the new one. The Mesa/libdrm halves are short (12 hex
-    each) because the tag is what a human reads and types.
+    The Mesa and libdrm commits name the sources; [`BUILD_CONFIG`] names the options those
+    sources are compiled with; the toolchain pin is there because the DSOs are compiled by it
+    and link the C++ runtime built from the fork's headers and the port's libc. A fork bump
+    can change the target ABI, so a DSO built before it must not be handed out for the new
+    one, and likewise a build-config change alters the artifact's contents. The Mesa/libdrm
+    halves are short (12 hex each) because the tag is what a human reads and types.
     """
-    return f"mesa-{MESA_COMMIT[:12]}-{DRM_COMMIT[:12]}-r{rust_commit[:12]}"
+    return f"mesa-{MESA_COMMIT[:12]}-{DRM_COMMIT[:12]}-r{rust_commit[:12]}-c{BUILD_CONFIG}"
 
 
 if __name__ == "__main__":
