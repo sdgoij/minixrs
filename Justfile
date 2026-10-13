@@ -871,6 +871,36 @@ test-wldmabuf-x86: build-x86
     python tools/wldmabuf_probe.py qemu-system-x86_64 -nographic -monitor none -display none -vga none -device virtio-gpu-pci -m 256M -no-reboot -qmp tcp:127.0.0.1:4447,server=on,wait=off -kernel target/images/x86_64-pc-minix/minix-x86.elf -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0
     @echo "wldmabuf: a render-node object was handed over as a linux-dmabuf buffer and scanned out with no copy (x86_64)"
 
+# wldmabufgl: build /bin/wldmabufgl, the 3d-b-4d GL present client (§6.10). Like /bin/wlgl it
+# is a dynamic image that renders with Mesa, but it draws into the buffer it commits instead
+# of reading the frame back: the render target is a GBM object on the render node, turned into
+# a GL texture through an `EGLImage` over the object's descriptor, exported, and committed as
+# a `zwp_linux_dmabuf_v1` buffer. The EGLImage route is the one Mesa's build here allows —
+# `-Dplatforms=` leaves no `EGL_PLATFORM_GBM_KHR` — and `tools/egl_bo_probe.c` is the
+# measurement that it works on the port.
+wldmabufgl-x86: userland-x86 dynlib-x86
+    python tools/build-mesa.py x86 --stage
+    @test -f target/mesa/x86/lib/libgbm.so.1 || (echo 'wldmabufgl: no libgbm — run `just build-mesa x86 --build` first' >&2; exit 1)
+    python tools/build-wldmabufgl.py x86
+    @echo "wldmabufgl: /bin/wldmabufgl built and the Mesa DSOs staged (x86_64)"
+
+# The 3d-b-4d gate: the GL client's render target *is* the dma-buf `wl_buffer`, which the
+# compositor scans out of the client's own object — no compositor copy. It is a dev-host gate
+# like 3c-3/3d-a/3d-b-3 — headless CI has no GL. The QEMU line puts a 2D `virtio-gpu-pci`
+# first and the GL device second: the client renders on the GL node and the fb server re-points
+# the 2D scanout at the client's object, so the screendump (which follows the first, 2D device)
+# shows the frame — a GL device *as* the output would need a host blob this host refuses (D11).
+# `-display egl-headless` is what a GL device needs. The one copy on this path is the client's,
+# not the compositor's: this host's virgl renders into a host-side texture, so the client
+# resolves it and transfers it into the object before committing (`.notes/wayland.md` §5, and
+# `tools/egl_bo_probe.c` is the measurement).
+test-wldmabufgl-x86 boot-timeout="120": wldmabufgl-x86 boot-image-x86
+    @just _assert-qemu-version qemu-system-x86_64
+    M=target/mesa/x86; E="/lib/libdrm.so.2=$M/lib/libdrm.so.2;/lib/libEGL.so.1=$M/lib/libEGL.so.1;/lib/libgbm.so.1=$M/lib/libgbm.so.1;/lib/libexpat.so.1=$M/lib/libexpat.so.1;/lib/libgallium-25.3.6.so=$M/lib/libgallium-25.3.6.so;/lib/libGLESv2.so.2=$M/lib/libGLESv2.so.2;/lib/libz.so.1=$M/lib/libz.so.1;/lib/dri_gbm.so=$M/lib/dri_gbm.so;/bin/wldmabufgl=$M/bin/wldmabufgl"; MINIXFS_EXTRA="$E" MINIXFS_BLOCKS=16384 cargo run -q -p boot-image --bin mkminixfs --release -- x86_64
+    @just mkfs-x86
+    python tools/wldmabufgl_probe.py qemu-system-x86_64 -display egl-headless -serial stdio -m 512M -no-reboot -vga none -device virtio-gpu-pci -kernel target/images/x86_64-pc-minix/minix-x86-boot.elf -drive if=none,id=disk0,file=target/images/x86_64-pc-minix/disk.img,format=raw,cache=writethrough -device virtio-blk-pci,disable-legacy=on,drive=disk0 -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0 -device virtio-gpu-gl-pci,blob=on -qmp tcp:127.0.0.1:4447,server=on,wait=off
+    @echo "wldmabufgl: the GL triangle's render target was the dma-buf wl_buffer, scanned out of the client's object with no compositor copy (x86_64)"
+
 test-wlfull-riscv64: system-image-riscv64
     @just _assert-qemu-version qemu-system-riscv64
     python tools/wlfull_probe.py qemu-system-riscv64 -machine virt -m 256M -nographic -monitor none -display none -global virtio-mmio.force-legacy=off -drive if=none,id=disk0,file=target/images/riscv64gc-unknown-minix/disk.img,format=raw,cache=writethrough -device virtio-blk-device,drive=disk0 -netdev user,id=net0 -device virtio-net-device,netdev=net0 -device virtio-gpu-device -device virtio-keyboard-device -kernel target/images/riscv64gc-unknown-minix/minix-riscv64-boot.elf -qmp tcp:127.0.0.1:4447,server=on,wait=off

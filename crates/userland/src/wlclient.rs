@@ -106,6 +106,10 @@ struct Globals {
     shm: u32,
     compositor: u32,
     seat: u32,
+    /// `zwp_linux_dmabuf_v1` — 0 if the server does not offer it (3d-b-4). Read by
+    /// `/bin/wldmabufgl`, which is a `cfg(minix)` client, so a host build sees it unread.
+    #[cfg_attr(not(target_os = "minix"), allow(dead_code))]
+    dmabuf: u32,
     /// `xdg_wm_base` — 0 if the server does not offer it (2b).
     wm_base: u32,
     /// `zwlr_layer_shell_v1` — 0 if the server does not offer it (2e).
@@ -124,10 +128,16 @@ fn find_globals(
     let mut shm = None;
     let mut compositor = None;
     let mut seat = None;
+    let mut dmabuf = None;
     let mut wm_base = None;
     let mut layer_shell = None;
     let mut decoration_manager = None;
-    while shm.is_none() || compositor.is_none() || seat.is_none() || wm_base.is_none() {
+    while shm.is_none()
+        || compositor.is_none()
+        || seat.is_none()
+        || dmabuf.is_none()
+        || wm_base.is_none()
+    {
         if !fill(conn, inbuf, chunk, 2000) {
             return Err(fail(6, b"wlclient: registry went quiet\n"));
         }
@@ -158,6 +168,8 @@ fn find_globals(
                     compositor = Some(name);
                 } else if interface == b"wl_seat" {
                     seat = Some(name);
+                } else if interface == b"zwp_linux_dmabuf_v1" {
+                    dmabuf = Some(name);
                 } else if interface == b"xdg_wm_base" {
                     wm_base = Some(name);
                 } else if interface == b"zwlr_layer_shell_v1" {
@@ -169,11 +181,12 @@ fn find_globals(
             inbuf.consume(h.size as usize);
         }
     }
-    // All four are set by the loop's exit condition.
+    // All are set by the loop's exit condition.
     Ok(Globals {
         shm: shm.unwrap_or(0),
         compositor: compositor.unwrap_or(0),
         seat: seat.unwrap_or(0),
+        dmabuf: dmabuf.unwrap_or(0),
         wm_base: wm_base.unwrap_or(0),
         layer_shell: layer_shell.unwrap_or(0),
         decoration_manager: decoration_manager.unwrap_or(0),
@@ -1950,4 +1963,123 @@ pub fn wl_gl(_args: &[&str]) -> i32 {
         }
         Err(code) => code,
     }
+}
+
+// The C half of `/bin/wldmabufgl`: draws the triangle into a GBM object on the render node
+// and returns its dma-buf descriptor and geometry (`tools/wldmabufgl_render.c`). Returns 0
+// on success. The whole GL/GBM half is minix-only, like `wlgl_render` above: a host build of
+// this crate has no such symbol.
+#[cfg(target_os = "minix")]
+unsafe extern "C" {
+    fn wldmabufgl_render(fd: *mut i32, w: *mut u32, h: *mut u32, stride: *mut u32) -> i32;
+}
+
+/// `/bin/wldmabufgl`: the `3d-b-4d` present path — the GL client's render target *is* the
+/// dma-buf `wl_buffer` it commits, so the frame reaches the display with no CPU readback.
+/// `/bin/wlgl` reads its rendered surface back with `glReadPixels`; this client instead
+/// renders into the buffer the compositor scans out (`tools/wldmabufgl_render.c`), exports
+/// it, and commits it as a `zwp_linux_dmabuf_v1` buffer.
+#[cfg(target_os = "minix")]
+pub fn wl_dmabuf_gl(_args: &[&str]) -> i32 {
+    match run_dmabuf_gl() {
+        Ok(()) => {
+            write_out(b"wldmabufgl: PASS\n");
+            0
+        }
+        Err(code) => code,
+    }
+}
+
+/// The whole session: GL renders the triangle into the buffer this client commits, then the
+/// descriptor travels to the compositor as a linux-dmabuf buffer and the buffer is released.
+#[cfg(target_os = "minix")]
+fn run_dmabuf_gl() -> Result<(), i32> {
+    // ---- the frame: the render target is a GBM object on the render node ----
+    let (mut prime_fd, mut width, mut height, mut stride) = (-1i32, 0u32, 0u32, 0u32);
+    let rc = unsafe { wldmabufgl_render(&mut prime_fd, &mut width, &mut height, &mut stride) };
+    if rc != 0 || prime_fd < 0 {
+        return Err(fail(40, b"wldmabufgl: the GL render/export failed\n"));
+    }
+    // The descriptor and the geometry are the evidence the render produced a real object, and
+    // the numbers the commit below must carry. A gate reads them, not a `/dev/fb` pixel: the
+    // frame is the object, so `/dev/fb` no longer holds it (3d-b).
+    write_out(b"wldmabufgl: fd=");
+    put_dec(prime_fd as u32);
+    write_out(b" w=");
+    put_dec(width);
+    write_out(b" h=");
+    put_dec(height);
+    write_out(b"\n");
+
+    // ---- the protocol ----
+    let conn = connect()?;
+    let mut client = Client::new();
+    let mut req = [0u8; 512];
+    let mut inbuf = MessageBuffer::new();
+    let mut chunk = [0u8; 512];
+
+    let registry = send_req(conn, &mut req, |q| client.get_registry(q))?;
+    let g = find_globals(conn, &client, &mut inbuf, &mut chunk)?;
+    if g.dmabuf == 0 {
+        return Err(fail(41, b"wldmabufgl: no zwp_linux_dmabuf_v1\n"));
+    }
+    let compositor = send_req(conn, &mut req, |q| {
+        client.bind(
+            registry,
+            g.compositor,
+            b"wl_compositor",
+            1,
+            Kind::Compositor,
+            q,
+        )
+    })?;
+    let dmabuf = send_req(conn, &mut req, |q| {
+        client.bind(
+            registry,
+            g.dmabuf,
+            b"zwp_linux_dmabuf_v1",
+            3,
+            Kind::LinuxDmabuf,
+            q,
+        )
+    })?;
+    let surface = send_req(conn, &mut req, |q| client.create_surface(compositor, q))?;
+    let params = send_req(conn, &mut req, |q| client.create_params(dmabuf, q))?;
+
+    // Drain everything above before the descriptor travels: the fd goes with `add` by
+    // SCM_RIGHTS, so the server must be reading that message when it arrives.
+    let callback = send_req(conn, &mut req, |q| client.sync(q))?;
+    await_callback(conn, &client, callback, &mut inbuf, &mut chunk)?;
+
+    // The plane fd travels with `add`; its index in the message's fd list is 0.
+    uds::send_fds(conn, &[prime_fd]).map_err(|_| fail(42, b"wldmabufgl: send_fds failed\n"))?;
+    send_req(conn, &mut req, |q| {
+        client.params_add(params, 0, 0, 0, stride, protocol::DRM_FORMAT_MOD_LINEAR, q)
+    })?;
+    let buffer = send_req(conn, &mut req, |q| {
+        client.params_create_immed(
+            params,
+            width as i32,
+            height as i32,
+            protocol::DRM_FORMAT_XRGB8888,
+            0,
+            q,
+        )
+    })?;
+
+    send_req(conn, &mut req, |q| client.attach(surface, buffer, 0, 0, q))?;
+    send_req(conn, &mut req, |q| {
+        client.damage(surface, 0, 0, width as i32, height as i32, q)
+    })?;
+    send_req(conn, &mut req, |q| client.commit(surface, q))?;
+
+    // The compositor releases the buffer once it has presented it, which is the signal that
+    // the commit was taken. There is nothing to read back: the frame *is* this object.
+    await_release(conn, &client, buffer, &mut inbuf, &mut chunk)?;
+
+    // The object has to outlive the commit, so the descriptor is not closed until after the
+    // release above — the last thing this client does with it.
+    let _ = uds::close_fd(prime_fd);
+    let _ = uds::close_fd(conn);
+    Ok(())
 }
