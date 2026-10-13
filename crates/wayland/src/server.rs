@@ -67,6 +67,17 @@ pub struct Obj {
     pub acked: bool,
     /// `xdg_surface`: the serial a client must ack.
     pub configure_serial: u32,
+    /// `zwp_linux_buffer_params_v1`: its (single) plane has been added (3d-b-4).
+    pub plane_added: bool,
+    /// `zwp_linux_buffer_params_v1`: `create`/`create_immed` has run; only `destroy` is
+    /// legal after (3d-b-4).
+    pub used: bool,
+    /// `zwp_linux_buffer_params_v1`/`wl_buffer`: the plane's layout modifier, `hi<<32|lo`
+    /// (3d-b-4).
+    pub modifier: u64,
+    /// `wl_buffer`: the pixels are a linux-dmabuf plane (`fd_index`) rather than a
+    /// `wl_shm` pool slice, so a [`Commit`] carries the plane and not a pool (3d-b-4).
+    pub dmabuf: bool,
 }
 
 impl Obj {
@@ -91,6 +102,10 @@ impl Obj {
             configured: false,
             acked: false,
             configure_serial: 0,
+            plane_added: false,
+            used: false,
+            modifier: 0,
+            dmabuf: false,
         }
     }
 }
@@ -114,6 +129,12 @@ pub struct Commit {
     /// The damage this commit carried, if the client named any. `None` means "take
     /// the whole buffer", which is what a client that never calls `damage` gets.
     pub damage: Option<crate::shm::Rect>,
+    /// The buffer is a linux-dmabuf plane: the pixels are the descriptor at `fd_index`
+    /// (with `offset`/`stride`/`modifier`), not a `wl_shm` pool. `pool`/`pool_size` are
+    /// then unused and [`Commit::buffer`] does not describe it (3d-b-4).
+    pub dmabuf: bool,
+    /// The plane's layout modifier (`hi<<32|lo`), meaningful only when `dmabuf`.
+    pub modifier: u64,
 }
 
 impl Commit {
@@ -147,6 +168,9 @@ pub struct Outcome {
     /// A `wl_shm.create_pool` created this pool object. Its `h` argument is an
     /// fd index the caller resolves with `recv_fds` and remembers for the pool.
     pub new_pool: Option<u32>,
+    /// A `zwp_linux_buffer_params_v1.add` named an fd index the caller resolves with
+    /// `recv_fds` and remembers for that params object (3d-b-4).
+    pub new_plane: Option<u32>,
 }
 
 /// A dispatch failure that ends the connection, as opposed to a protocol error
@@ -193,6 +217,9 @@ pub struct Server {
     cursor_hotspot: (i32, i32),
     /// The cursor image from that surface's latest commit.
     cursor: Option<CursorImage>,
+    /// The next id a server-named object gets, from the `0xff000000..` range the
+    /// protocol reserves for the server ([`Server::next_id`]).
+    next_id: u32,
 }
 
 impl Server {
@@ -216,6 +243,7 @@ impl Server {
             cursor_surface: 0,
             cursor_hotspot: (0, 0),
             cursor: None,
+            next_id: 0xff00_0000,
         }
     }
 
@@ -266,6 +294,14 @@ impl Server {
             }
             self.n -= 1;
         }
+    }
+
+    /// A fresh object id for an object the *server* names, from the `0xff000000..` range
+    /// the protocol reserves for it — the `wl_buffer` a linux-dmabuf `create` answers
+    /// with (`create_immed` lets the client name it, so only `create` needs this).
+    fn next_id(&mut self) -> u32 {
+        self.next_id = self.next_id.wrapping_add(1);
+        self.next_id
     }
 
     /// Dispatch one request. Returns the number of bytes written to `out` (the
@@ -328,7 +364,9 @@ impl Server {
             | (Kind::LayerShell, protocol::layer_shell_req::DESTROY)
             | (Kind::LayerSurface, protocol::layer_surface_req::DESTROY)
             | (Kind::DecorationManager, protocol::decoration_manager_req::DESTROY)
-            | (Kind::ToplevelDecoration, protocol::toplevel_decoration_req::DESTROY) => {
+            | (Kind::ToplevelDecoration, protocol::toplevel_decoration_req::DESTROY)
+            | (Kind::LinuxDmabuf, protocol::linux_dmabuf_req::DESTROY)
+            | (Kind::LinuxBufferParams, protocol::linux_buffer_params_req::DESTROY) => {
                 self.remove(object_id);
                 Ok(())
             }
@@ -646,6 +684,79 @@ impl Server {
             // it has already said so.
             (Kind::ToplevelDecoration, protocol::toplevel_decoration_req::SET_MODE)
             | (Kind::ToplevelDecoration, protocol::toplevel_decoration_req::UNSET_MODE) => Ok(()),
+            // linux-dmabuf (3d-b-4). `create_params` opens the temporary plane set; `add`
+            // records its one plane and tells the caller an fd is owed (the `h` argument
+            // is an index, and the descriptor travelled with this message).
+            (Kind::LinuxDmabuf, protocol::linux_dmabuf_req::CREATE_PARAMS) => {
+                self.add(arg(n, &args, 0)?, Kind::LinuxBufferParams)
+            }
+            (Kind::LinuxBufferParams, protocol::linux_buffer_params_req::ADD) => {
+                if self.obj(object_id).is_some_and(|o| o.used) {
+                    error(
+                        out,
+                        object_id,
+                        protocol::LINUX_BUFFER_PARAMS_ERROR_ALREADY_USED,
+                        b"already used",
+                    )?;
+                    return Ok(outcome);
+                }
+                // Only single-plane formats are advertised, so plane 0 is the only legal
+                // index and a second `add` is a client bug, not another plane.
+                if arg(n, &args, 1)? != 0 {
+                    error(
+                        out,
+                        object_id,
+                        protocol::LINUX_BUFFER_PARAMS_ERROR_PLANE_IDX,
+                        b"plane index out of bounds",
+                    )?;
+                    return Ok(outcome);
+                }
+                if self.obj(object_id).is_some_and(|o| o.plane_added) {
+                    error(
+                        out,
+                        object_id,
+                        protocol::LINUX_BUFFER_PARAMS_ERROR_PLANE_SET,
+                        b"plane already set",
+                    )?;
+                    return Ok(outcome);
+                }
+                // `add`'s plane_idx/offset/stride are `uint` in the signature, so they
+                // decode as `Arg::Uint`; only `create`'s width/height are signed.
+                let fd_index = arg(n, &args, 0)?;
+                let offset = arg(n, &args, 2)? as i32;
+                let stride = arg(n, &args, 3)? as i32;
+                let hi = arg(n, &args, 4)? as u64;
+                let lo = arg(n, &args, 5)? as u64;
+                if let Some(o) = self.obj_mut(object_id) {
+                    o.fd_index = fd_index;
+                    o.offset = offset;
+                    o.stride = stride;
+                    o.modifier = (hi << 32) | lo;
+                    o.plane_added = true;
+                }
+                outcome.new_plane = Some(object_id);
+                Ok(())
+            }
+            (Kind::LinuxBufferParams, protocol::linux_buffer_params_req::CREATE) => {
+                let id = self.next_id();
+                let args_width = iarg(n, &args, 0)?;
+                let args_height = iarg(n, &args, 1)?;
+                let args_format = arg(n, &args, 2)?;
+                if self.dmabuf_buffer(object_id, id, args_width, args_height, args_format, out)? {
+                    out.event(object_id, protocol::linux_buffer_params_ev::CREATED, |w| {
+                        w.new_id(id)
+                    })?;
+                }
+                Ok(())
+            }
+            (Kind::LinuxBufferParams, protocol::linux_buffer_params_req::CREATE_IMMED) => {
+                let id = arg(n, &args, 0)?;
+                let width = iarg(n, &args, 1)?;
+                let height = iarg(n, &args, 2)?;
+                let format = arg(n, &args, 3)?;
+                self.dmabuf_buffer(object_id, id, width, height, format, out)?;
+                Ok(())
+            }
             // 1c (input) and later; a client that reaches them is answered the
             // same way an unknown opcode is.
             _ => error(
@@ -662,6 +773,25 @@ impl Server {
     fn commit_of(&self, surface: u32) -> Option<Commit> {
         let s = self.obj(surface)?;
         let b = self.obj(s.attached)?;
+        if b.dmabuf {
+            // A linux-dmabuf plane has no pool: its pixels are the descriptor `b`
+            // recorded when its params set was created (3d-b-4).
+            return Some(Commit {
+                surface,
+                buffer: b.id,
+                pool: 0,
+                fd_index: b.fd_index,
+                offset: b.offset,
+                width: b.width,
+                height: b.height,
+                stride: b.stride,
+                format: b.format,
+                pool_size: 0,
+                damage: s.damage,
+                dmabuf: true,
+                modifier: b.modifier,
+            });
+        }
         let pool = self.obj(b.pool)?;
         Some(Commit {
             surface,
@@ -675,7 +805,87 @@ impl Server {
             format: b.format,
             pool_size: pool.pool_size,
             damage: s.damage,
+            dmabuf: false,
+            modifier: 0,
         })
+    }
+
+    /// Turn a params object's added plane into a `wl_buffer` (3d-b-4). Returns whether the
+    /// buffer was made; a protocol error is written to `out` and answers `false`, which is
+    /// what `create` needs in order not to send `created`.
+    ///
+    /// The plane's pixel format is advertised, not inferred: only the two formats
+    /// `initial_events` offers are accepted, so a client that ignored the `format` events
+    /// is told `invalid_format` rather than handed a buffer nothing can scan out.
+    fn dmabuf_buffer(
+        &mut self,
+        params: u32,
+        id: u32,
+        width: i32,
+        height: i32,
+        format: u32,
+        out: &mut DispatchBuf<'_>,
+    ) -> Result<bool, DispatchError> {
+        let Some(p) = self.obj(params).copied() else {
+            error(
+                out,
+                params,
+                protocol::WL_DISPLAY_ERROR_INVALID_OBJECT,
+                b"no such params",
+            )?;
+            return Ok(false);
+        };
+        if p.used {
+            error(
+                out,
+                params,
+                protocol::LINUX_BUFFER_PARAMS_ERROR_ALREADY_USED,
+                b"already used",
+            )?;
+            return Ok(false);
+        }
+        if !p.plane_added {
+            error(
+                out,
+                params,
+                protocol::LINUX_BUFFER_PARAMS_ERROR_INCOMPLETE,
+                b"no plane added",
+            )?;
+            return Ok(false);
+        }
+        if width <= 0 || height <= 0 {
+            error(
+                out,
+                params,
+                protocol::LINUX_BUFFER_PARAMS_ERROR_INVALID_DIMENSIONS,
+                b"invalid dimensions",
+            )?;
+            return Ok(false);
+        }
+        if format != protocol::DRM_FORMAT_ARGB8888 && format != protocol::DRM_FORMAT_XRGB8888 {
+            error(
+                out,
+                params,
+                protocol::LINUX_BUFFER_PARAMS_ERROR_INVALID_FORMAT,
+                b"unsupported format",
+            )?;
+            return Ok(false);
+        }
+        self.add_obj(Obj {
+            dmabuf: true,
+            fd_index: p.fd_index,
+            offset: p.offset,
+            stride: p.stride,
+            modifier: p.modifier,
+            width,
+            height,
+            format,
+            ..Obj::new(id, Kind::Buffer)
+        })?;
+        if let Some(o) = self.obj_mut(params) {
+            o.used = true;
+        }
+        Ok(true)
     }
 
     /// The cursor image a surface supplies, from its attached buffer.
@@ -1126,6 +1336,20 @@ impl Server {
                             | protocol::WL_SEAT_CAPABILITY_KEYBOARD,
                     )
                 })?;
+                Ok(())
+            }
+            // The formats and the one modifier this port can scan out: every render-node
+            // object is a linear image, so `DRM_FORMAT_MOD_LINEAR` is the only modifier
+            // offered and a client must not hand over a tiled buffer (3d-b-4).
+            Kind::LinuxDmabuf => {
+                for format in [protocol::DRM_FORMAT_ARGB8888, protocol::DRM_FORMAT_XRGB8888] {
+                    out.event(id, protocol::linux_dmabuf_ev::FORMAT, |w| w.uint(format))?;
+                    out.event(id, protocol::linux_dmabuf_ev::MODIFIER, |w| {
+                        w.uint(format)?;
+                        w.uint((protocol::DRM_FORMAT_MOD_LINEAR >> 32) as u32)?;
+                        w.uint(protocol::DRM_FORMAT_MOD_LINEAR as u32)
+                    })?;
+                }
                 Ok(())
             }
             _ => Ok(()),
@@ -2198,6 +2422,128 @@ mod tests {
         assert!(
             s.take_focus_request().is_none(),
             "a popup does not take focus"
+        );
+    }
+
+    /// linux-dmabuf (3d-b-4): a params set's plane becomes a `wl_buffer` on `create`, and
+    /// the surface commit then carries the plane — not a `wl_shm` pool — to the compositor.
+    #[test]
+    fn a_dmabuf_params_set_makes_a_buffer_that_commits() {
+        let mut s = Server::new(64, 64);
+        let (a, an) = req(DISPLAY_ID, protocol::display_req::GET_REGISTRY, |w| {
+            w.new_id(2)
+        });
+        // Bind `zwp_linux_dmabuf_v1` (global 8) to id 3 and `wl_compositor` (1) to id 4.
+        let (b, bn) = req(2, protocol::registry_req::BIND, |w| {
+            w.uint(8)?;
+            w.string(b"zwp_linux_dmabuf_v1")?;
+            w.uint(3)?;
+            w.new_id(3)
+        });
+        let (c, cn) = req(2, protocol::registry_req::BIND, |w| {
+            w.uint(1)?;
+            w.string(b"wl_compositor")?;
+            w.uint(1)?;
+            w.new_id(4)
+        });
+        let (d, dn) = req(4, protocol::compositor_req::CREATE_SURFACE, |w| w.new_id(5));
+        let (e, en) = req(3, protocol::linux_dmabuf_req::CREATE_PARAMS, |w| {
+            w.new_id(6)
+        });
+        // add(fd, plane 0, offset 0, stride 256, modifier LINEAR).
+        let (f, f_n) = req(6, protocol::linux_buffer_params_req::ADD, |w| {
+            w.fd(0)?;
+            w.uint(0)?;
+            w.uint(0)?;
+            w.uint(256)?;
+            w.uint(0)?;
+            w.uint(0)
+        });
+        let out = run_msgs(
+            &mut s,
+            &[&a[..an], &b[..bn], &c[..cn], &d[..dn], &e[..en], &f[..f_n]],
+        );
+        // The dmabuf global's initial events are the two formats, each with its modifier.
+        let base = protocol::GLOBALS.len();
+        let (e0, e0b) = event(&out, base);
+        assert_eq!(e0.object_id, 3);
+        assert_eq!(e0.opcode, protocol::linux_dmabuf_ev::FORMAT);
+        assert_eq!(
+            u32::from_le_bytes(e0b[0..4].try_into().unwrap()),
+            protocol::DRM_FORMAT_ARGB8888
+        );
+        let (e1, e1b) = event(&out, base + 1);
+        assert_eq!(e1.opcode, protocol::linux_dmabuf_ev::MODIFIER);
+        assert_eq!(
+            u32::from_le_bytes(e1b[0..4].try_into().unwrap()),
+            protocol::DRM_FORMAT_ARGB8888
+        );
+        assert_eq!(u32::from_le_bytes(e1b[4..8].try_into().unwrap()), 0);
+        assert_eq!(u32::from_le_bytes(e1b[8..12].try_into().unwrap()), 0);
+        assert_eq!(s.kind(6), Some(Kind::LinuxBufferParams));
+
+        // `create` names no buffer: the id arrives in the `created` event.
+        let (g, gn) = req(6, protocol::linux_buffer_params_req::CREATE, |w| {
+            w.int(64)?;
+            w.int(64)?;
+            w.uint(protocol::DRM_FORMAT_XRGB8888)?;
+            w.uint(0)
+        });
+        let out = run_msgs(&mut s, &[&g[..gn]]);
+        let (c0, c0b) = event(&out, 0);
+        assert_eq!(c0.object_id, 6, "created is on the params object");
+        assert_eq!(c0.opcode, protocol::linux_buffer_params_ev::CREATED);
+        let buffer = u32::from_le_bytes(c0b[0..4].try_into().unwrap());
+        assert_eq!(s.kind(buffer), Some(Kind::Buffer));
+
+        // Attach and commit: the commit carries the plane, not a pool.
+        let (h, h_n) = req(5, protocol::surface_req::ATTACH, |w| {
+            w.object(buffer)?;
+            w.int(0)?;
+            w.int(0)
+        });
+        let (i, i_n) = req(5, protocol::surface_req::COMMIT, |_w| Ok(()));
+        run_msgs(&mut s, &[&h[..h_n], &i[..i_n]]);
+        let commit = s.take_commit().expect("a dmabuf commit");
+        assert!(commit.dmabuf);
+        assert_eq!(commit.buffer, buffer);
+        assert_eq!((commit.width, commit.height, commit.stride), (64, 64, 256));
+        assert_eq!(commit.format, protocol::DRM_FORMAT_XRGB8888);
+        assert_eq!(commit.fd_index, 0);
+        assert_eq!(commit.modifier, 0);
+    }
+
+    /// A params set with no plane is refused, not handed a buffer (3d-b-4).
+    #[test]
+    fn a_dmabuf_create_without_a_plane_is_incomplete() {
+        let mut s = Server::new(64, 64);
+        let (a, an) = req(DISPLAY_ID, protocol::display_req::GET_REGISTRY, |w| {
+            w.new_id(2)
+        });
+        let (b, bn) = req(2, protocol::registry_req::BIND, |w| {
+            w.uint(8)?;
+            w.string(b"zwp_linux_dmabuf_v1")?;
+            w.uint(3)?;
+            w.new_id(3)
+        });
+        let (c, cn) = req(3, protocol::linux_dmabuf_req::CREATE_PARAMS, |w| {
+            w.new_id(4)
+        });
+        let (d, dn) = req(4, protocol::linux_buffer_params_req::CREATE, |w| {
+            w.int(8)?;
+            w.int(8)?;
+            w.uint(protocol::DRM_FORMAT_ARGB8888)?;
+            w.uint(0)
+        });
+        let out = run_msgs(&mut s, &[&a[..an], &b[..bn], &c[..cn], &d[..dn]]);
+        // The global list, then the dmabuf's four initial events, then the error.
+        let (h, body) = event(&out, protocol::GLOBALS.len() + 4);
+        assert_eq!(h.object_id, DISPLAY_ID);
+        assert_eq!(h.opcode, protocol::display_ev::ERROR);
+        assert_eq!(u32::from_le_bytes(body[0..4].try_into().unwrap()), 4);
+        assert_eq!(
+            u32::from_le_bytes(body[4..8].try_into().unwrap()),
+            protocol::LINUX_BUFFER_PARAMS_ERROR_INCOMPLETE
         );
     }
 }
