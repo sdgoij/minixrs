@@ -228,6 +228,28 @@ pub static TOPLEVEL_DECORATION: Interface = Interface {
     events: &["u"],
 };
 
+/// `zwp_linux_dmabuf_v1` (`.notes/wayland.md` §6.10, stage 3d-b-4): the dmabuf factory.
+/// This port speaks version 3, so the supported (format, modifier) pairs arrive as the
+/// `format` and `modifier` events and the version-4 feedback objects do not exist. The
+/// two feedback requests are still listed so the opcodes a later version uses are not
+/// shifted underneath a client that reads them.
+pub static LINUX_DMABUF: Interface = Interface {
+    name: "zwp_linux_dmabuf_v1",
+    version: 3,
+    requests: &["", "n", "n", "no"],
+    events: &["u", "uuu"],
+};
+
+/// `zwp_linux_buffer_params_v1`: the temporary set of planes a `wl_buffer` is made
+/// from. `create` names no buffer — it arrives as the `created` event; `create_immed`
+/// names it up front.
+pub static LINUX_BUFFER_PARAMS: Interface = Interface {
+    name: "zwp_linux_buffer_params_v1",
+    version: 3,
+    requests: &["", "huuuuu", "iiuu", "niiuu", "a"],
+    events: &["n", ""],
+};
+
 /// Every interface this crate knows, by protocol name.
 pub static ALL: &[&Interface] = &[
     &DISPLAY,
@@ -252,6 +274,8 @@ pub static ALL: &[&Interface] = &[
     &LAYER_SURFACE,
     &DECORATION_MANAGER,
     &TOPLEVEL_DECORATION,
+    &LINUX_DMABUF,
+    &LINUX_BUFFER_PARAMS,
 ];
 
 /// The interface with this protocol name, or `None`.
@@ -293,6 +317,8 @@ pub enum Kind {
     LayerSurface,
     DecorationManager,
     ToplevelDecoration,
+    LinuxDmabuf,
+    LinuxBufferParams,
 }
 
 impl Kind {
@@ -321,6 +347,8 @@ impl Kind {
             Kind::LayerSurface => &LAYER_SURFACE,
             Kind::DecorationManager => &DECORATION_MANAGER,
             Kind::ToplevelDecoration => &TOPLEVEL_DECORATION,
+            Kind::LinuxDmabuf => &LINUX_DMABUF,
+            Kind::LinuxBufferParams => &LINUX_BUFFER_PARAMS,
         }
     }
 
@@ -346,6 +374,8 @@ impl Kind {
             b"zwlr_layer_surface_v1" => Kind::LayerSurface,
             b"zxdg_decoration_manager_v1" => Kind::DecorationManager,
             b"zxdg_toplevel_decoration_v1" => Kind::ToplevelDecoration,
+            b"zwp_linux_dmabuf_v1" => Kind::LinuxDmabuf,
+            b"zwp_linux_buffer_params_v1" => Kind::LinuxBufferParams,
             _ => return None,
         })
     }
@@ -388,6 +418,11 @@ pub static GLOBALS: &[Global] = &[
         name: 7,
         interface: "zxdg_decoration_manager_v1",
         version: 1,
+    },
+    Global {
+        name: 8,
+        interface: "zwp_linux_dmabuf_v1",
+        version: 3,
     },
 ];
 
@@ -511,6 +546,27 @@ pub mod toplevel_decoration_req {
     pub const SET_MODE: u16 = 1;
     pub const UNSET_MODE: u16 = 2;
 }
+pub mod linux_dmabuf_req {
+    pub const DESTROY: u16 = 0;
+    pub const CREATE_PARAMS: u16 = 1;
+    pub const GET_DEFAULT_FEEDBACK: u16 = 2;
+    pub const GET_SURFACE_FEEDBACK: u16 = 3;
+}
+pub mod linux_dmabuf_ev {
+    pub const FORMAT: u16 = 0;
+    pub const MODIFIER: u16 = 1;
+}
+pub mod linux_buffer_params_req {
+    pub const DESTROY: u16 = 0;
+    pub const ADD: u16 = 1;
+    pub const CREATE: u16 = 2;
+    pub const CREATE_IMMED: u16 = 3;
+    pub const SET_SAMPLING_DEVICE: u16 = 4;
+}
+pub mod linux_buffer_params_ev {
+    pub const CREATED: u16 = 0;
+    pub const FAILED: u16 = 1;
+}
 
 // Event opcodes.
 pub mod display_ev {
@@ -591,6 +647,29 @@ pub const WL_SHM_FORMAT_XRGB8888: u32 = 1;
 pub const WL_SHM_ERROR_INVALID_FORMAT: u32 = 0;
 pub const WL_SHM_ERROR_INVALID_STRIDE: u32 = 1;
 pub const WL_SHM_ERROR_INVALID_FD: u32 = 2;
+/// `zwp_linux_buffer_params_v1.error`.
+pub const LINUX_BUFFER_PARAMS_ERROR_ALREADY_USED: u32 = 0;
+pub const LINUX_BUFFER_PARAMS_ERROR_PLANE_IDX: u32 = 1;
+pub const LINUX_BUFFER_PARAMS_ERROR_PLANE_SET: u32 = 2;
+pub const LINUX_BUFFER_PARAMS_ERROR_INCOMPLETE: u32 = 3;
+pub const LINUX_BUFFER_PARAMS_ERROR_INVALID_FORMAT: u32 = 4;
+pub const LINUX_BUFFER_PARAMS_ERROR_INVALID_DIMENSIONS: u32 = 5;
+pub const LINUX_BUFFER_PARAMS_ERROR_OUT_OF_BOUNDS: u32 = 6;
+pub const LINUX_BUFFER_PARAMS_ERROR_INVALID_WL_BUFFER: u32 = 7;
+/// `zwp_linux_buffer_params_v1.flags`.
+pub const LINUX_BUFFER_PARAMS_FLAGS_Y_INVERT: u32 = 1;
+pub const LINUX_BUFFER_PARAMS_FLAGS_INTERLACED: u32 = 2;
+pub const LINUX_BUFFER_PARAMS_FLAGS_BOTTOM_FIRST: u32 = 4;
+/// The `DRM_FORMAT_*` fourcc codes this port advertises a plane in. A render-node
+/// object is guest memory laid out one row after another, so the only modifier below
+/// is linear.
+pub const DRM_FORMAT_ARGB8888: u32 = 0x3432_5241;
+pub const DRM_FORMAT_XRGB8888: u32 = 0x3432_5258;
+pub const DRM_FORMAT_MOD_LINEAR: u64 = 0;
+/// `DRM_FORMAT_MOD_INVALID` (all bits set): "the format's effective modifier comes from
+/// the dmabuf". Advertised beside [`DRM_FORMAT_MOD_LINEAR`] for implicit-modifier
+/// clients.
+pub const DRM_FORMAT_MOD_INVALID: u64 = (1 << 56) - 1;
 /// `wl_seat.capability`.
 pub const WL_SEAT_CAPABILITY_POINTER: u32 = 1;
 pub const WL_SEAT_CAPABILITY_KEYBOARD: u32 = 2;
@@ -745,8 +824,8 @@ mod tests {
 
     #[test]
     fn globals_are_the_factories_a_client_binds() {
-        assert_eq!(GLOBALS.len(), 7);
-        let names: [&str; 7] = [
+        assert_eq!(GLOBALS.len(), 8);
+        let names: [&str; 8] = [
             GLOBALS[0].interface,
             GLOBALS[1].interface,
             GLOBALS[2].interface,
@@ -754,6 +833,7 @@ mod tests {
             GLOBALS[4].interface,
             GLOBALS[5].interface,
             GLOBALS[6].interface,
+            GLOBALS[7].interface,
         ];
         assert_eq!(
             names,
@@ -764,7 +844,8 @@ mod tests {
                 "wl_seat",
                 "xdg_wm_base",
                 "zwlr_layer_shell_v1",
-                "zxdg_decoration_manager_v1"
+                "zxdg_decoration_manager_v1",
+                "zwp_linux_dmabuf_v1"
             ]
         );
         // Every advertised interface must exist in the table.
@@ -829,6 +910,49 @@ mod tests {
         assert_eq!(
             TOPLEVEL_DECORATION.event(toplevel_decoration_ev::CONFIGURE),
             Some("u")
+        );
+    }
+
+    #[test]
+    fn linux_dmabuf_interface_shapes() {
+        // `create` names no id — the `wl_buffer` arrives as the `created` event — while
+        // `create_immed` names it up front, which is the whole difference in the two
+        // signatures.
+        assert_eq!(LINUX_DMABUF.request(linux_dmabuf_req::DESTROY), Some(""));
+        assert_eq!(
+            LINUX_DMABUF.request(linux_dmabuf_req::CREATE_PARAMS),
+            Some("n")
+        );
+        assert_eq!(LINUX_DMABUF.event(linux_dmabuf_ev::FORMAT), Some("u"));
+        assert_eq!(LINUX_DMABUF.event(linux_dmabuf_ev::MODIFIER), Some("uuu"));
+        assert_eq!(
+            LINUX_BUFFER_PARAMS.request(linux_buffer_params_req::ADD),
+            Some("huuuuu")
+        );
+        assert_eq!(
+            LINUX_BUFFER_PARAMS.request(linux_buffer_params_req::CREATE),
+            Some("iiuu")
+        );
+        assert_eq!(
+            LINUX_BUFFER_PARAMS.request(linux_buffer_params_req::CREATE_IMMED),
+            Some("niiuu")
+        );
+        assert_eq!(
+            LINUX_BUFFER_PARAMS.event(linux_buffer_params_ev::CREATED),
+            Some("n")
+        );
+        assert_eq!(
+            LINUX_BUFFER_PARAMS.event(linux_buffer_params_ev::FAILED),
+            Some("")
+        );
+        // The DRM fourcc values are 'AR24'/'XR24' read little-endian.
+        assert_eq!(DRM_FORMAT_ARGB8888, u32::from_le_bytes(*b"AR24"));
+        assert_eq!(DRM_FORMAT_XRGB8888, u32::from_le_bytes(*b"XR24"));
+        assert_eq!(DRM_FORMAT_MOD_LINEAR, 0);
+        assert_eq!(DRM_FORMAT_MOD_INVALID, (1 << 56) - 1);
+        assert_eq!(
+            Kind::from_name(b"zwp_linux_dmabuf_v1"),
+            Some(Kind::LinuxDmabuf)
         );
     }
 }
