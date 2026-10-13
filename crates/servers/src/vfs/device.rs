@@ -392,6 +392,11 @@ pub unsafe fn cdev_open(dev: u32, flags: i32, reply_flags: *mut u32) -> i32 {
 ///
 /// Sends a `CDEV_CLOSE` message to the device driver.
 ///
+/// `owner` is the closing client's endpoint, and it travels in the message's `user` field so a
+/// driver that keys per-open state — the render node's contexts — knows whose file closed. It
+/// comes from the fproc whose descriptor is going, not from the caller: on the exit path VFS
+/// closes a dead process's descriptors while the current fproc is PM's.
+///
 /// C source: `minix/servers/vfs/device.c` — `cdev_close()` (line 495)
 ///
 /// # Safety
@@ -402,9 +407,9 @@ pub unsafe fn cdev_open(dev: u32, flags: i32, reply_flags: *mut u32) -> i32 {
 ///
 /// Wire IPC send/recv to the character driver endpoint.  The underlying
 /// `cdev_opcl()` helper mirrors cdev_open's flow with `CDEV_CLOSE`.
-pub unsafe fn cdev_close(dev: u32) -> i32 {
+pub unsafe fn cdev_close(owner: i32, dev: u32) -> i32 {
     // A local socket's in-flight descriptors are dropped with it; see `scm`.
-    crate::vfs::scm::release_device(dev);
+    crate::vfs::scm::release_device(owner, dev);
     let dp = dmap::get_dmap_by_major((dev >> 16) as i32);
     if dp.is_null() {
         return ENXIO;
@@ -413,7 +418,7 @@ pub unsafe fn cdev_close(dev: u32) -> i32 {
     if drv_e < 0 {
         return ENXIO;
     }
-    let mut msg = build_open_close_msg(CDEV_CLOSE, dev, 0, 0);
+    let mut msg = build_open_close_msg(CDEV_CLOSE, dev, 0, owner);
     unsafe { request::fs_sendrec(drv_e, &mut msg) }
 }
 

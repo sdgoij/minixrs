@@ -103,14 +103,14 @@ fn scanout_refused(why: &[u8]) {
 /// blob the *client* supplies (3b-4), whose size is the client's business and not a
 /// constant here.
 ///
-/// 4 slots of 4 MiB: a 1024×768 full output at four bytes a pixel, which is what the dma-buf
+/// One slot of 4 MiB: a 1024×768 full output at four bytes a pixel, which is what the dma-buf
 /// scan-out handoff needs (3d-b-4c), or several small objects. A larger surface needs the
-/// client-supplied blobs of 3b-4.
+/// client-supplied blobs of 3b-4. There is one slot per `MAX_OBJECTS`, so the arena's size is
+/// `MAX_OBJECTS` × 4 MiB and a client that runs out hears `ENOSPC` from the node.
 ///
 /// x86-only, like the probe that fills it: it is the arch where the render device is a
 /// device of its own rather than the one already presenting (D3), so it is the only one with
-/// a node to back — and 16 MiB of `.bss` is not something another arch should carry for
-/// nothing.
+/// a node to back.
 #[cfg(target_arch = "x86_64")]
 const GEM_OBJECT_LEN: u32 = 4 * 1024 * 1024;
 
@@ -1002,10 +1002,12 @@ unsafe fn handle_drm_request(
         CDEV_CLOSE => {
             // A context belongs to the client that made it, and this is where it goes back: on
             // Linux the file closing destroys it, and a node that kept it would refuse the next
-            // client's context with `EEXIST`.
+            // client's context with `EEXIST`. VFS names the closing client in m2_i3 — the same
+            // endpoint that made the context, since the node keys it there rather than to a file.
+            let owner = unsafe { msg.m_payload.m2.m2i3 };
             let node = unsafe { &mut *core::ptr::addr_of_mut!(RENDER_NODE) };
             if let Some(node) = node {
-                node.release_context();
+                node.close_context(owner);
             }
             0
         }
@@ -1074,7 +1076,7 @@ fn drm_ioctl(request: u32, granter: i32, grant: u32, user: i32) -> i32 {
         return -6; // ENXIO: no render node on this machine
     };
     let mut buffers = DrmUser { ep: user };
-    let r = drm::dispatch(node, &mut buffers, request, arg);
+    let r = drm::dispatch(node, &mut buffers, request, arg, user);
 
     // The granter of a VFS-made magic grant is VFS, not the client: the kernel reads the
     // grant entry out of the *named* endpoint's table, and the client has no table. Passing

@@ -251,8 +251,9 @@ fn recv_control(dev: u32, user_ep: i32, va: u64) -> i32 {
 /// Drop descriptors still in flight for a socket that is closing.
 ///
 /// Called for every character-device close; only local sockets own a set. The
-/// reference does this in `uds_clear_fds`.
-pub fn release_device(dev: u32) {
+/// reference does this in `uds_clear_fds`. `owner` is the closing endpoint, passed
+/// on when one of the dropped descriptors is itself a character device.
+pub fn release_device(owner: i32, dev: u32) {
     if (dev >> 16) != UDS_MAJOR {
         return;
     }
@@ -267,7 +268,7 @@ pub fn release_device(dev: u32) {
     sets[i] = PendingSet::empty();
     for &idx in &fds[..len] {
         if idx >= 0 {
-            unsafe { crate::vfs::filedes::close_filp(idx) };
+            unsafe { crate::vfs::filedes::close_filp(owner, idx) };
         }
     }
 }

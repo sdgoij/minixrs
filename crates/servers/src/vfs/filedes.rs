@@ -157,6 +157,11 @@ pub unsafe fn alloc_filp() -> i32 {
 /// Close a filp by index. Decrements the reference count and frees the
 /// slot if it reaches zero.
 ///
+/// `owner` is the endpoint whose descriptor is going, passed on to a character driver on the
+/// close message so a driver that keys per-open state (the render node's contexts) can release
+/// it. It is the caller's, not `current_fp()`'s, because the exit path closes a dead process's
+/// descriptors while the current fproc is PM's.
+///
 /// The caller is responsible for clearing the specific fd table entry;
 /// this function must NOT touch the fproc's other fd slots, because a
 /// filp can be referenced by several fds in the same process (via dup2)
@@ -165,7 +170,7 @@ pub unsafe fn alloc_filp() -> i32 {
 /// # Safety
 ///
 /// Requires exclusive access to the global filp table and vnode table.
-pub unsafe fn close_filp(filp_idx: i32) -> i32 {
+pub unsafe fn close_filp(owner: i32, filp_idx: i32) -> i32 {
     if filp_idx < 0 || (filp_idx as usize) >= NR_FILPS {
         return EBADF;
     }
@@ -186,7 +191,7 @@ pub unsafe fn close_filp(filp_idx: i32) -> i32 {
         let vp = f.filp_vno;
         if f.filp_dev != 0 && !vp.is_null() && ((*vp).v_mode & S_IFMT) == S_IFCHR {
             unsafe {
-                crate::vfs::device::cdev_close(f.filp_dev);
+                crate::vfs::device::cdev_close(owner, f.filp_dev);
             }
         }
         // Release the vnode reference the filp held (C close_filp: the
@@ -229,12 +234,12 @@ mod tests {
             fp.fp_filp[0] = idx;
             fp.fp_filp[1] = idx;
 
-            assert_eq!(close_filp(idx), OK);
+            assert_eq!(close_filp(0, idx), OK);
             assert_eq!(fp.fp_filp[0], idx, "fd 0 alias must survive");
             assert_eq!(fp.fp_filp[1], idx, "fd 1 alias must survive");
             assert_eq!((*filp_arr.add(idx as usize)).filp_count, 1);
 
-            assert_eq!(close_filp(idx), OK);
+            assert_eq!(close_filp(0, idx), OK);
             assert_eq!((*filp_arr.add(idx as usize)).filp_count, 0);
         }
     }

@@ -110,7 +110,7 @@ pub fn close_fd(rfp: &mut Fproc, fd_nr: i32) -> i32 {
     // owning FS server), which also frees the PFS pipe inode/buffer when
     // the last end closes.
 
-    unsafe { crate::vfs::filedes::close_filp(filp_idx) }
+    unsafe { crate::vfs::filedes::close_filp(rfp.fp_endpoint, filp_idx) }
 }
 
 #[cfg(test)]

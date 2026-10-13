@@ -372,20 +372,25 @@ pub trait RenderNode {
     /// "already closed".
     fn close_object(&mut self, handle: u32) -> Result<(), i32>;
 
-    /// `DRM_IOCTL_VIRTGPU_CONTEXT_INIT`: make the one rendering context a client may have, from
+    /// `DRM_IOCTL_VIRTGPU_CONTEXT_INIT`: make the one rendering context `owner` may have, from
     /// the `drm_virtgpu_context_set_param` array [`dispatch`] read on its behalf. A second call
-    /// is `EEXIST`, a device with no GL or no context support is `EINVAL`, and so is a parameter
-    /// this node cannot honour.
-    fn context_init(&mut self, params: &[ContextParam]) -> Result<(), i32>;
+    /// for the same `owner` is `EEXIST`, a device with no GL or no context support is `EINVAL`,
+    /// and so is a parameter this node cannot honour.
+    ///
+    /// `owner` is the calling client's endpoint, which the node keys the context to. Linux keys
+    /// it to the open file; an endpoint is what this port's server sees instead, so two clients
+    /// on one node hold two contexts rather than sharing one.
+    fn context_init(&mut self, owner: i32, params: &[ContextParam]) -> Result<(), i32>;
 
     /// `DRM_IOCTL_VIRTGPU_TRANSFER_TO_HOST` / `TRANSFER_FROM_HOST`: move a box of an object's
-    /// contents between the guest's pages and the host's copy of the resource.
-    fn transfer(&mut self, to_host: bool, request: &Transfer3d) -> Result<(), i32>;
+    /// contents between the guest's pages and the host's copy of the resource, through `owner`'s
+    /// context.
+    fn transfer(&mut self, owner: i32, to_host: bool, request: &Transfer3d) -> Result<(), i32>;
 
-    /// `DRM_IOCTL_VIRTGPU_EXECBUFFER`: hand a context a virgl command buffer, with the objects it
-    /// names made visible to it. `handles` are GEM handles; a node that does not hold one is
-    /// `ENOENT`, and one whose device has no 3D is `ENOSYS`.
-    fn submit(&mut self, command: &[u8], handles: &[u32]) -> Result<(), i32>;
+    /// `DRM_IOCTL_VIRTGPU_EXECBUFFER`: hand `owner`'s context a virgl command buffer, with the
+    /// objects it names made visible to it. `handles` are GEM handles; a node that does not hold
+    /// one is `ENOENT`, and one whose device has no 3D is `ENOSYS`.
+    fn submit(&mut self, owner: i32, command: &[u8], handles: &[u32]) -> Result<(), i32>;
 
     /// `DRM_IOCTL_VIRTGPU_WAIT`: wait for an object's work to finish, or with `nowait` report
     /// whether it has. An unknown handle is `ENOENT`.
@@ -446,12 +451,13 @@ impl Transfer3d {
     }
 }
 
-/// The most objects one node may hold at once. A node's backing is a fixed arena, so this
-/// count is fixed with it: eight slots, each large enough for a full 1024×768 output at four
-/// bytes a pixel (`crates/servers/src/fb.rs`'s `GEM_OBJECT_LEN`). Composition raises it from
-/// four (`.notes/wayland.md` §6.10, 3d-b-5): a compositor holds a canvas and, per surface, the
-/// surface's object and the image it imports from that object, so two surfaces need six.
-pub const MAX_OBJECTS: usize = 8;
+/// The most objects one node may hold at once. A node's backing is a fixed arena with one slot
+/// per entry (`crates/servers/src/fb.rs`'s `GEM_OBJECT_LEN`), so this count is fixed with it.
+///
+/// Sized so that several GL clients compose at once: the driver of each holds a surface, the
+/// image it imports from a peer's surface, and a readback staging buffer, so one client is
+/// several objects and a peer-plus-compositor pair is more (§6.10 3d-b-5).
+pub const MAX_OBJECTS: usize = 16;
 
 /// `struct drm_virtgpu_resource_create`, as [`dispatch`] decoded it.
 ///
@@ -784,13 +790,15 @@ fn fits(arg: &[u8], request: u32) -> bool {
 
 /// Answer one ioctl. `request` is the number as the client sent it and `arg` is the
 /// argument struct, already copied in; whatever `dispatch` writes into `arg` is what the
-/// caller's ioctl sees afterwards. The return is the ioctl's result — 0 or a negative
+/// caller's ioctl sees afterwards. `owner` is the calling client's endpoint, which the
+/// context requests key their context to. The return is the ioctl's result — 0 or a negative
 /// errno, as a driver replies.
 pub fn dispatch(
     node: &mut impl RenderNode,
     users: &mut impl UserBuffers,
     request: u32,
     arg: &mut [u8],
+    owner: i32,
 ) -> i32 {
     match request {
         DRM_IOCTL_VERSION => {
@@ -1014,7 +1022,7 @@ pub fn dispatch(
                 p.param = rd_u64(&raw, i * 16);
                 p.value = rd_u64(&raw, i * 16 + 8);
             }
-            match node.context_init(&params[..count]) {
+            match node.context_init(owner, &params[..count]) {
                 Ok(()) => 0,
                 Err(e) => e,
             }
@@ -1036,7 +1044,11 @@ pub fn dispatch(
                 stride: rd_u32(arg, 36),
                 layer_stride: rd_u32(arg, 40),
             };
-            match node.transfer(request == DRM_IOCTL_VIRTGPU_TRANSFER_TO_HOST, &transfer) {
+            match node.transfer(
+                owner,
+                request == DRM_IOCTL_VIRTGPU_TRANSFER_TO_HOST,
+                &transfer,
+            ) {
                 Ok(()) => 0,
                 Err(e) => e,
             }
@@ -1096,7 +1108,7 @@ pub fn dispatch(
                     *h = rd_u32(&raw, i * 4);
                 }
             }
-            match node.submit(&words[..size], &handles[..count]) {
+            match node.submit(owner, &words[..size], &handles[..count]) {
                 Ok(()) => 0,
                 Err(e) => e,
             }
@@ -1161,6 +1173,18 @@ mod tests {
     const NAME: &str = "virtio_gpu";
     const DATE: &str = "20260101";
     const DESC: &str = "minixrs virtio-gpu render node";
+
+    /// The encoding tests drive `dispatch` with one owner: `FakeNode` ignores it, and which
+    /// context a request lands in is the device's business, not the wire format's. A test that
+    /// cares about the owner calls `super::dispatch` with the one it means.
+    fn dispatch(
+        node: &mut impl RenderNode,
+        users: &mut impl UserBuffers,
+        request: u32,
+        arg: &mut [u8],
+    ) -> i32 {
+        super::dispatch(node, users, request, arg, 0)
+    }
 
     // `FakeNode`'s one object: handle 7 / resource 9 / offset 0x7000, so what each request
     // writes back is pinned without a device. A re-create is refused, as the real node does.
@@ -1281,7 +1305,7 @@ mod tests {
         /// this method's business and the test's subject. Capset 2 rather than 1 because the
         /// knob's own id and capset 1's are the same number: a swapped pair would then be
         /// indistinguishable from a correct one.
-        fn context_init(&mut self, params: &[ContextParam]) -> Result<(), i32> {
+        fn context_init(&mut self, _owner: i32, params: &[ContextParam]) -> Result<(), i32> {
             let capset = |p: &ContextParam| {
                 p.param == VIRTGPU_CONTEXT_PARAM_CAPSET_ID
                     && p.value == VIRTGPU_DRM_CAPSET_VIRGL2 as u64
@@ -1298,7 +1322,12 @@ mod tests {
         /// The whole of object 7 as a 64×64×1 box — the shape the transfer tests build, so a
         /// field read from the wrong offset is an error here rather than a transfer of the wrong
         /// region.
-        fn transfer(&mut self, _to_host: bool, request: &Transfer3d) -> Result<(), i32> {
+        fn transfer(
+            &mut self,
+            _owner: i32,
+            _to_host: bool,
+            request: &Transfer3d,
+        ) -> Result<(), i32> {
             if request.resource_id != OBJECT
                 || request.x != 0
                 || request.w != 64
@@ -1311,7 +1340,7 @@ mod tests {
         }
 
         /// Eight bytes of command naming object 7 — the shape the submit tests build.
-        fn submit(&mut self, command: &[u8], handles: &[u32]) -> Result<(), i32> {
+        fn submit(&mut self, _owner: i32, command: &[u8], handles: &[u32]) -> Result<(), i32> {
             if command.len() != 8 || handles != [OBJECT] {
                 return Err(EINVAL);
             }

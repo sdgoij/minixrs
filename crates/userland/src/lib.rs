@@ -37,6 +37,10 @@ pub mod drmprime;
 /// render node, exported to a dma-buf and committed as a `zwp_linux_dmabuf_v1` buffer.
 pub mod wldmabuf;
 
+/// The compositor's GPU-composition helper — `/bin/wlcompose` (§6.10, 3d-b-5b): it composes
+/// several dma-buf surfaces on the render node and reads the frame back once.
+pub mod wlcompose;
+
 /// The DRM render node's rendering context — `/bin/drmctx` (§6.10, 3b-4).
 pub mod drmctx;
 

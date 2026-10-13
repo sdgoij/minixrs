@@ -221,6 +221,47 @@ const CONTEXT_ID: u32 = 1;
 /// coexist on the one device, as they do under Linux's `virtio_gpu`.
 const BLOB_CONTEXT_ID: u32 = 2;
 
+/// Most clients that may hold a render context at once. Linux keys a context to the *open file*
+/// and destroys it when that file closes; this node sees no files, so it keys each context to the
+/// caller's endpoint, which the fb server names on every DRM request and again when the file
+/// closes.
+const MAX_CONTEXTS: usize = 4;
+
+/// One client's render context.
+#[derive(Clone, Copy)]
+struct ClientContext {
+    /// The caller's endpoint. Only meaningful while `in_use`.
+    owner: i32,
+    /// The id the host knows the context by ([`context_id_for`]).
+    id: u32,
+    /// Which objects are in this context's table, one bit per GEM slot. A duplicate
+    /// `CTX_ATTACH_RESOURCE` is not the same request as the first, and the table goes away with
+    /// the context, so the bits are cleared with it.
+    resources: u32,
+    in_use: bool,
+}
+
+impl ClientContext {
+    const fn empty() -> Self {
+        Self {
+            owner: 0,
+            id: 0,
+            resources: 0,
+            in_use: false,
+        }
+    }
+}
+
+/// The context id client slot `slot` uses. The first is [`CONTEXT_ID`]; the rest continue above
+/// [`BLOB_CONTEXT_ID`], so the display's blob context is never handed to a client.
+const fn context_id_for(slot: usize) -> u32 {
+    if slot == 0 {
+        CONTEXT_ID
+    } else {
+        BLOB_CONTEXT_ID + slot as u32
+    }
+}
+
 /// `VIRGL_CCMD_RESOURCE_INLINE_WRITE` — the simplest virgl command that makes the *host*
 /// put known bytes into a resource: no framebuffer, shader or bound state, just the
 /// resource, a box and the data. That is what makes it a good `SUBMIT_3D` probe.
@@ -1524,13 +1565,10 @@ pub struct DrmNode {
     /// The device offered `VIRTIO_GPU_F_CONTEXT_INIT`. Named for the feature, not for the
     /// request, so that `context_init` above it can be the ABI's name.
     has_context_init: bool,
-    /// The one context a client may have, once it has made one. The ABI ties this to the open
-    /// file on Linux; this node is one allocator, so it is the node's (§6.10 D3).
-    context: Option<u32>,
-    /// Which objects are in that context's table, one bit per slot. A duplicate
-    /// `CTX_ATTACH_RESOURCE` is not the same request as the first, and the table goes away with
-    /// the context, so the bits are cleared with it.
-    context_resources: u32,
+    /// Every client's render context, keyed by the caller's endpoint — a table because the
+    /// node is one allocator shared by every open of the device, not the per-open state Linux
+    /// keeps (§6.10 D3, §5 row 28).
+    contexts: [ClientContext; MAX_CONTEXTS],
     /// The objects this node has handed out.
     gems: drm::GemTable,
     /// The resource-id base the objects are numbered from (`GemTable::set_res_base`): 0 when the
@@ -1579,8 +1617,7 @@ impl DrmNode {
             virgl,
             blob,
             has_context_init: context_init,
-            context: None,
-            context_resources: 0,
+            contexts: [ClientContext::empty(); MAX_CONTEXTS],
             gems: drm::GemTable::new(0),
             gem_arena: 0,
             // The output backend holds resources 1 and 2 on this device, so the node numbers
@@ -1635,68 +1672,93 @@ impl DrmNode {
         Ok((self.slot_va(slot), len as u64))
     }
 
-    /// `CDEV_CLOSE`: give up the context the node holds.
+    /// `CDEV_CLOSE`: give up the context `owner` holds.
     ///
     /// Linux ties a context to the open file and destroys it when that file closes, so this is
-    /// where a client's context goes. This node has no per-open table (§6.10 D3's deviation),
-    /// so a close releases the one context it has; the day the node tracks opens, each close
-    /// releases its own. A host that refuses the destroy keeps the context, so closing again can
-    /// retry rather than leaving the host holding something this side has forgotten.
-    pub fn release_context(&mut self) {
-        let Some(ctx_id) = self.context else {
+    /// where a client's context goes. VFS names the closing client on the close message, which is
+    /// the same endpoint that made the context; a node that did not destroy it here would refuse
+    /// that client's next context with `EEXIST`, and one that destroyed another client's would
+    /// break a context still in use. A host that refuses the destroy keeps the context, so closing
+    /// again can retry rather than leaving the host holding something this side has forgotten.
+    pub fn close_context(&mut self, owner: i32) {
+        let Some(slot) = self
+            .contexts
+            .iter()
+            .position(|c| c.in_use && c.owner == owner)
+        else {
             return;
         };
+        let ctx_id = self.contexts[slot].id;
         if self.dev().ctx_destroy(ctx_id).is_ok() {
-            self.context = None;
-            // The table went with the context, so the objects have to be attached again if a
+            // The table went with the context, so the objects have to be attached again if this
             // client asks for another one.
-            self.context_resources = 0;
+            self.contexts[slot] = ClientContext::empty();
         }
     }
 
-    /// The context a transfer or a submit goes through, made if the client has not made one.
+    /// The slot and id of `owner`'s context, if it has one.
+    fn context_of(&self, owner: i32) -> Option<(usize, u32)> {
+        self.contexts
+            .iter()
+            .enumerate()
+            .find_map(|(slot, c)| (c.in_use && c.owner == owner).then_some((slot, c.id)))
+    }
+
+    /// The first slot no client holds.
+    fn free_slot(&self) -> Option<usize> {
+        self.contexts.iter().position(|c| !c.in_use)
+    }
+
+    /// The slot and id of the context a transfer or a submit goes through, made if `owner` has
+    /// none.
     ///
     /// Linux's `virtio_gpu_create_context` does exactly this, with no capset: a context that
     /// renders nothing still moves bytes and runs commands that name no capset, and a client that
     /// transferred before initialising one is not making an error.
-    fn ensure_context(&mut self) -> Result<u32, i32> {
-        match self.context {
-            Some(ctx) => Ok(ctx),
-            None => {
-                self.create_context(0)?;
-                Ok(CONTEXT_ID)
-            }
+    fn ensure_context(&mut self, owner: i32) -> Result<(usize, u32), i32> {
+        if let Some(found) = self.context_of(owner) {
+            return Ok(found);
         }
+        let slot = self.free_slot().ok_or(drm::ENOSPC)?;
+        self.create_context(slot, owner, 0)?;
+        Ok((slot, self.contexts[slot].id))
     }
 
-    /// Make the context, with the `context_init` flags a request carried.
+    /// Make `owner`'s context in `slot`, with the `context_init` flags a request carried.
     ///
     /// `minixrs` for the debug name: Linux names a context after the calling *task*, and a
     /// process on this port has no comm to be named by.
-    fn create_context(&mut self, flags: u32) -> Result<(), i32> {
+    fn create_context(&mut self, slot: usize, owner: i32, flags: u32) -> Result<(), i32> {
+        let id = context_id_for(slot);
         self.dev()
-            .ctx_create(CONTEXT_ID, flags, b"minixrs")
+            .ctx_create(id, flags, b"minixrs")
             .map_err(|_| drm::EINVAL)?;
-        self.context = Some(CONTEXT_ID);
+        self.contexts[slot] = ClientContext {
+            owner,
+            id,
+            resources: 0,
+            in_use: true,
+        };
         Ok(())
     }
 
-    /// Put `handle`'s resource in the context's table, and remember that it is there.
+    /// Put `handle`'s resource in the table of the context in `slot`, and remember that it is
+    /// there.
     ///
     /// Every transfer and every command names its objects *through* the context, and a resource
     /// the context does not hold is refused by the host with an error that never reaches this
     /// side (`ctx_attach_resource`'s note) — so a missed attach shows as bytes that did not move,
     /// not as a failed call. Attached once, because a duplicate attach is not the same request as
     /// the first one.
-    fn attach_to_context(&mut self, ctx_id: u32, handle: u32) -> Result<(), i32> {
-        let Some((slot, _)) = self.gems.lookup(handle) else {
+    fn attach_to_context(&mut self, slot: usize, ctx_id: u32, handle: u32) -> Result<(), i32> {
+        let Some((object, _)) = self.gems.lookup(handle) else {
             return Err(drm::ENOENT);
         };
-        if self.context_resources & (1 << slot) == 0 {
+        if self.contexts[slot].resources & (1 << object) == 0 {
             self.dev()
                 .ctx_attach_resource(ctx_id, handle)
                 .map_err(|_| drm::EINVAL)?;
-            self.context_resources |= 1 << slot;
+            self.contexts[slot].resources |= 1 << object;
         }
         Ok(())
     }
@@ -1979,16 +2041,20 @@ impl drm::RenderNode for DrmNode {
         if self.dev().resource_unref(handle).is_err() {
             return Err(drm::EINVAL);
         }
-        // The context's table must not be left believing it holds a slot that is about to be a
-        // different object: slot `i` is reused by the next create, and a stale bit would skip the
-        // attach that object needs.
-        if let Some((slot, _)) = self.gems.remove(handle) {
-            self.context_resources &= !(1 << slot);
+        // Every context's table must not be left believing it holds a slot that is about to be
+        // a different object: slot `i` is reused by the next create, and a stale bit would skip
+        // the attach that object needs. One object is one slot, so the bit is cleared wherever
+        // it is set — in practice only in the one context that attached it, and clearing all is
+        // what keeps a context made later from inheriting it.
+        if let Some((object, _)) = self.gems.remove(handle) {
+            for ctx in &mut self.contexts {
+                ctx.resources &= !(1 << object);
+            }
         }
         Ok(())
     }
 
-    fn context_init(&mut self, params: &[drm::ContextParam]) -> Result<(), i32> {
+    fn context_init(&mut self, owner: i32, params: &[drm::ContextParam]) -> Result<(), i32> {
         // Both the feature and GL: a device without `VIRTIO_GPU_F_CONTEXT_INIT` has no context
         // command, and one without GL has no capset for a context to render with.
         if !self.has_context_init || !self.virgl {
@@ -1996,7 +2062,7 @@ impl drm::RenderNode for DrmNode {
         }
         // One context per client, and a second is `EEXIST` rather than a new one — Linux ties it
         // to the open file and refuses the second attempt on the same file.
-        if self.context.is_some() {
+        if self.context_of(owner).is_some() {
             return Err(drm::EEXIST);
         }
         let mut flags = 0u32;
@@ -2027,10 +2093,16 @@ impl drm::RenderNode for DrmNode {
                 _ => return Err(drm::EINVAL),
             }
         }
-        self.create_context(flags)
+        let slot = self.free_slot().ok_or(drm::ENOSPC)?;
+        self.create_context(slot, owner, flags)
     }
 
-    fn transfer(&mut self, to_host: bool, request: &drm::Transfer3d) -> Result<(), i32> {
+    fn transfer(
+        &mut self,
+        owner: i32,
+        to_host: bool,
+        request: &drm::Transfer3d,
+    ) -> Result<(), i32> {
         // The ABI names the object by its GEM handle; the host knows it by the resource id the
         // same slot carries, which is why they are numbered alike.
         if self.gems.lookup(request.resource_id).is_none() {
@@ -2054,26 +2126,26 @@ impl drm::RenderNode for DrmNode {
                 )
                 .map_err(|_| drm::EINVAL);
         }
-        let ctx = self.ensure_context()?;
+        let (slot, ctx) = self.ensure_context(owner)?;
         // A 3D transfer is read *through* the context, so the object has to be in its table
         // before the transfer names it — the same ordering a submit needs, and for the same
         // silent reason.
-        self.attach_to_context(ctx, request.resource_id)?;
+        self.attach_to_context(slot, ctx, request.resource_id)?;
         self.dev()
             .transfer_3d(to_host, ctx, request)
             .map_err(|_| drm::EINVAL)
     }
 
-    fn submit(&mut self, command: &[u8], handles: &[u32]) -> Result<(), i32> {
+    fn submit(&mut self, owner: i32, command: &[u8], handles: &[u32]) -> Result<(), i32> {
         // A submit is a virgl command buffer, so without GL there is no renderer to hand it to.
         // `ENOSYS` for the same reason the 3D transfer is: the request is well formed and this
         // device cannot do it.
         if !self.virgl {
             return Err(drm::ENOSYS);
         }
-        let ctx = self.ensure_context()?;
+        let (slot, ctx) = self.ensure_context(owner)?;
         for handle in handles {
-            self.attach_to_context(ctx, *handle)?;
+            self.attach_to_context(slot, ctx, *handle)?;
         }
         self.dev().submit_3d(ctx, command).map_err(|_| drm::EINVAL)
     }
@@ -2224,8 +2296,7 @@ fn open_render_node(out: &mut Gpu3d, skip: u16, slot: usize) -> Option<DrmNode> 
         blob: out.blob,
         has_context_init: out.context_init,
         res_base: 0,
-        context: None,
-        context_resources: 0,
+        contexts: [ClientContext::empty(); MAX_CONTEXTS],
         gems: drm::GemTable::new(0),
         gem_arena: 0,
     };
@@ -3165,8 +3236,7 @@ mod tests {
             blob,
             has_context_init: context_init,
             res_base: 0,
-            context: None,
-            context_resources: 0,
+            contexts: [ClientContext::empty(); MAX_CONTEXTS],
             gems: drm::GemTable::new(0),
             gem_arena: 0,
         };
@@ -3334,14 +3404,17 @@ mod tests {
             param: drm::VIRTGPU_CONTEXT_PARAM_CAPSET_ID,
             value: 1,
         }];
+        // The endpoint these calls act as: the node keys a context to it, so the `EEXIST` below
+        // needs the same one twice.
+        const CLIENT: i32 = 0x4001;
 
         // No `VIRTIO_GPU_F_CONTEXT_INIT`: the device has no context command at all.
         let mut node = drm_node(&capsets, true, false, false);
-        assert_eq!(node.context_init(&capset), Err(drm::EINVAL));
+        assert_eq!(node.context_init(CLIENT, &capset), Err(drm::EINVAL));
 
         // The feature, but no GL: there is no capset for a context to render with.
         let mut node = drm_node(&capsets, false, false, true);
-        assert_eq!(node.context_init(&capset), Err(drm::EINVAL));
+        assert_eq!(node.context_init(CLIENT, &capset), Err(drm::EINVAL));
 
         // Both features, so the knobs are what is left: a capset the device does not have, more
         // command rings than this node serves, the ring-poll mask (this port delivers no ring
@@ -3370,15 +3443,24 @@ mod tests {
                 value: 0,
             },
         ] {
-            assert_eq!(node.context_init(&[bad]), Err(drm::EINVAL), "{bad:?}");
+            assert_eq!(
+                node.context_init(CLIENT, &[bad]),
+                Err(drm::EINVAL),
+                "{bad:?}"
+            );
         }
 
         // The one context a client may have: a second request is `EEXIST`, and that is said
         // before the knobs are looked at — a client that already has one hears *that*.
         let mut taken = drm_node(&capsets, true, false, true);
-        taken.context = Some(CONTEXT_ID);
-        assert_eq!(taken.context_init(&capset), Err(drm::EEXIST));
-        assert_eq!(taken.context_init(&[]), Err(drm::EEXIST));
+        taken.contexts[0] = ClientContext {
+            owner: CLIENT,
+            id: CONTEXT_ID,
+            resources: 0,
+            in_use: true,
+        };
+        assert_eq!(taken.context_init(CLIENT, &capset), Err(drm::EEXIST));
+        assert_eq!(taken.context_init(CLIENT, &[]), Err(drm::EEXIST));
     }
 
     /// `RESOURCE_CREATE_BLOB` is the one create that carries its own backing: a 40-byte body and
