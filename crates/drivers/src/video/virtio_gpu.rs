@@ -66,6 +66,21 @@ const CMD_RESOURCE_UNREF: u32 = 0x0102;
 /// memory entries follow the command body, so a blob is never followed by an
 /// `ATTACH_BACKING` the way a 2D resource is.
 const CMD_RESOURCE_CREATE_BLOB: u32 = 0x010c;
+/// `SET_SCANOUT_BLOB` — the scanout command for a scanout that is a host blob. A GL
+/// device has no classic scanout: it never turns a 2D resource into an EGL image, so
+/// `SET_SCANOUT` is refused there and this is the only command that works.
+const CMD_SET_SCANOUT_BLOB: u32 = 0x010d;
+/// `RESOURCE_MAP_BLOB` — map a host blob into the guest's shared-memory window. It is a
+/// member of the 3D command block (0x0208), not of the 2D one.
+const CMD_RESOURCE_MAP_BLOB: u32 = 0x0208;
+/// `VIRTIO_GPU_RESP_OK_MAP_INFO` — the answer to `RESOURCE_MAP_BLOB`.
+const RESP_OK_MAP_INFO: u32 = 0x1106;
+
+/// `VIRTIO_GPU_BLOB_MEM_HOST3D` and `VIRTIO_GPU_BLOB_FLAG_USE_MAPPABLE`: a blob whose
+/// memory is the host's, in the window the guest maps. A scanout blob has to be this
+/// kind — a guest blob names guest pages, which the host has no descriptor to scan out.
+const BLOB_MEM_HOST3D: u32 = 0x0002;
+const BLOB_FLAG_USE_MAPPABLE: u32 = 0x0001;
 
 /// `VIRTIO_GPU_F_*` feature bits. `VIRGL` is the one a host may not have: without
 /// it the device offers no capset and no context, and 3D commands come back as
@@ -197,6 +212,14 @@ const VIRGL_BIND_TEXTURE: u32 = (1 << 1) | (1 << 3);
 /// The node serves a single context (§6.10 D3), and the boot probe uses the same id for its
 /// transient one — it destroys what it made, so the id is free by the time a client asks for it.
 const CONTEXT_ID: u32 = 1;
+
+/// The context the display's scanout blob is made in.
+///
+/// A host blob is a *context* object — `virgl_renderer_resource_create_blob` looks the context
+/// up and refuses the blob without one — so the display needs a context of its own. It is not
+/// [`CONTEXT_ID`], which the render node creates for whatever client asks it for; the two
+/// coexist on the one device, as they do under Linux's `virtio_gpu`.
+const BLOB_CONTEXT_ID: u32 = 2;
 
 /// `VIRGL_CCMD_RESOURCE_INLINE_WRITE` — the simplest virgl command that makes the *host*
 /// put known bytes into a resource: no framebuffer, shader or bound state, just the
@@ -348,6 +371,37 @@ struct SetScanout {
     r: Rect,
     scanout_id: u32,
     resource_id: u32,
+}
+
+/// `struct virtio_gpu_set_scanout_blob` — 96 bytes: the header, the rect and the scanout
+/// and resource ids, then the resource's format and geometry and the strides and offsets of
+/// its four planes. A host blob is one linear plane, so only the first stride and offset
+/// carry anything.
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+struct SetScanoutBlob {
+    hdr: CtrlHdr,
+    r: Rect,
+    scanout_id: u32,
+    resource_id: u32,
+    width: u32,
+    height: u32,
+    format: u32,
+    padding: u32,
+    strides: [u32; 4],
+    offsets: [u32; 4],
+}
+
+/// `struct virtio_gpu_resource_map_blob` — 40 bytes. `offset` is where in the device's
+/// shared-memory window the guest wants the blob mapped; the host answers with the cache
+/// kind for that mapping rather than with an address.
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+struct ResourceMapBlob {
+    hdr: CtrlHdr,
+    resource_id: u32,
+    padding: u32,
+    offset: u64,
 }
 
 /// `struct virtio_gpu_transfer_to_host_2d` — 56 bytes.
@@ -664,6 +718,13 @@ pub struct VirtioGpuArch {
     /// Whether `EXT_SCANOUT_RESOURCE_ID` exists and is backed. A resource is created with its
     /// backing, so a new source replaces it instead of re-attaching.
     ext_resource: bool,
+    /// Address of the host blob scanout 0 shows, in this process's shared-memory window, or 0
+    /// when the scanout is a classic resource. The window is identity-mapped, so this is both
+    /// the guest-physical and the virtual address of the blob's first byte.
+    blob_va: u64,
+    /// Whether the scanout is a host blob rather than a classic resource — the only scanout a
+    /// GL device offers. Decided in `init` from what the device carries.
+    scanout_blob: bool,
 }
 
 /// Build `RESOURCE_ATTACH_BACKING` with one entry per range into `out`, returning its length, or
@@ -698,12 +759,20 @@ impl VirtioGpuArch {
             last_response: 0,
             scanout_resource: RESOURCE_ID,
             ext_resource: false,
+            blob_va: 0,
+            scanout_blob: false,
         }
     }
 
     /// Set the image VA of the server-owned framebuffer buffer.
     pub fn set_fb_va(&mut self, va: u64) {
         self.fb_va = va;
+    }
+
+    /// Whether the display came up on a host blob rather than a classic resource — the only
+    /// scanout a GL device offers. Reported in the boot line so a gate can tell the two apart.
+    pub fn scanout_is_blob(&self) -> bool {
+        self.scanout_blob
     }
 
     /// Submit one command: `cmd` is copied into the command slot, the
@@ -1002,6 +1071,118 @@ impl VirtioGpuArch {
             }],
         };
         self.send_cmd(struct_bytes(&cmd))
+    }
+
+    /// `RESOURCE_CREATE_BLOB` for a **host** blob: the host allocates the memory and names it
+    /// with a descriptor. No entries ride in the command — a host blob's memory is the host's,
+    /// not the guest's, which is the whole difference from
+    /// [`VirtioGpuArch::resource_create_blob_guest`] — and the object belongs to a *context*, so
+    /// the header names the one it is made in.
+    fn resource_create_blob_host(&mut self, resource_id: u32, len: u64) -> Result<(), DriverError> {
+        let mut cmd = ResourceCreateBlob {
+            hdr: CtrlHdr::new(CMD_RESOURCE_CREATE_BLOB),
+            resource_id,
+            blob_mem: BLOB_MEM_HOST3D,
+            blob_flags: BLOB_FLAG_USE_MAPPABLE,
+            nr_entries: 0,
+            blob_id: 0,
+            size: len,
+            entries: [MemEntry {
+                addr: 0,
+                length: 0,
+                padding: 0,
+            }],
+        };
+        cmd.hdr.ctx_id = BLOB_CONTEXT_ID;
+        self.send_cmd(struct_bytes(&cmd))
+    }
+
+    /// `RESOURCE_MAP_BLOB`: ask the host to put `resource_id`'s memory at `offset` in the
+    /// device's shared-memory window. The host answers `MAP_INFO`; the mapping's *address* is
+    /// the window's base plus this offset, which is what the caller already holds, so only the
+    /// success is read here.
+    fn resource_map_blob(&mut self, resource_id: u32, offset: u64) -> Result<(), DriverError> {
+        let mut cmd = ResourceMapBlob {
+            hdr: CtrlHdr::new(CMD_RESOURCE_MAP_BLOB),
+            resource_id,
+            padding: 0,
+            offset,
+        };
+        cmd.hdr.ctx_id = BLOB_CONTEXT_ID;
+        self.send_cmd_expect(struct_bytes(&cmd), RESP_OK_MAP_INFO)?;
+        Ok(())
+    }
+
+    /// `SET_SCANOUT_BLOB` at scanout 0, pointing it at a host blob. The blob is one linear
+    /// plane, so its stride is the row length and the other three planes are empty.
+    fn set_scanout_blob(
+        &mut self,
+        resource_id: u32,
+        format: u32,
+        stride: u32,
+    ) -> Result<(), DriverError> {
+        let mut cmd = SetScanoutBlob {
+            hdr: CtrlHdr::new(CMD_SET_SCANOUT_BLOB),
+            r: Rect {
+                x: 0,
+                y: 0,
+                width: XRES,
+                height: YRES,
+            },
+            scanout_id: 0,
+            resource_id,
+            width: XRES,
+            height: YRES,
+            format,
+            padding: 0,
+            strides: [stride, 0, 0, 0],
+            offsets: [0, 0, 0, 0],
+        };
+        cmd.hdr.ctx_id = BLOB_CONTEXT_ID;
+        self.send_cmd(struct_bytes(&cmd))
+    }
+
+    /// Push this process's framebuffer into the host blob and nudge the host to re-read it.
+    /// The blob's memory *is* the shared-memory window, so this copies into device memory the
+    /// host scans out — no `TRANSFER` command, because a transfer has no guest source to name
+    /// for a host blob.
+    fn flush_blob(&mut self) -> Result<(), DriverError> {
+        if self.blob_va == 0 {
+            return Err(DriverError::NotFound);
+        }
+        let n = FB_SIZE as usize;
+        // SAFETY: both buffers are `FB_SIZE` bytes at addresses this process may write — the
+        // server's own framebuffer, and the host-visible window the PCI BARs are mapped at.
+        unsafe {
+            core::ptr::copy_nonoverlapping(self.fb_va as *const u8, self.blob_va as *mut u8, n);
+            // The host reads the blob memory the copy above just filled, so it has to reach the
+            // device before the flush command does.
+            crate::hal::mfence();
+        }
+        self.flush_resource(RESOURCE_ID)
+    }
+
+    /// Bring up the display on a host blob: make the context the blob belongs to, create and map
+    /// a full-frame blob at offset 0 of the shared-memory window, and point scanout 0 at it.
+    /// `window` is the base of that window, which the blob's address is derived from.
+    fn init_blob_scanout(&mut self, window: u64) -> Result<(), DriverError> {
+        self.ctx_create(BLOB_CONTEXT_ID, 0, b"minixrs-fb")?;
+        self.resource_create_blob_host(RESOURCE_ID, FB_SIZE)?;
+        self.resource_map_blob(RESOURCE_ID, 0)?;
+        self.blob_va = window;
+        self.set_scanout_blob(RESOURCE_ID, VIRTIO_GPU_FORMAT_B8G8R8X8, XRES * 4)?;
+        self.scanout_blob = true;
+        self.flush_blob()?;
+
+        let fb_pa = self.fb_va.wrapping_add(virtio::virtio_phys_delta() as u64);
+        self.dev = FbDevice {
+            base: fb_pa,
+            size: FB_SIZE,
+        };
+        self.var = self.screen_info();
+        self.fix.line_length = XRES * 4;
+        self.initialized = true;
+        Ok(())
     }
 
     /// `RESOURCE_CREATE_2D`: a resource whose contents are guest pages — the shape a device
@@ -1589,11 +1770,12 @@ impl drm::RenderNode for DrmNode {
             drm::VIRTGPU_PARAM_3D_FEATURES => Ok(self.virgl as i32),
             drm::VIRTGPU_PARAM_CAPSET_QUERY_FIX => Ok(1),
             drm::VIRTGPU_PARAM_RESOURCE_BLOB => Ok(self.blob as i32),
-            // Host blobs are not mappable into the guest, and there is one virtio device, so
-            // nothing to share across devices. The first is not a missing feature on this side but
-            // a missing *window*: it is a PCI shared-memory capability the device grows only under
-            // `hostmem=`, which no recipe of ours sets, and which virtio-mmio cannot carry at all
-            // (`.notes/wayland.md` §6.10's host requirements).
+            // The node hands out guest blobs only, so a client is told there is no host-visible
+            // kind to map — even when the device has the shared-memory window
+            // (`VIRTIO_PCI_CAP_SHARED_MEMORY_CFG`, grown under the `hostmem=` a GL output needs).
+            // That window is the *display's*: the scanout blob is mapped into it by the driver,
+            // and the node's `create_blob` still refuses `HOST3D`. CROSS_DEVICE is 0 because there
+            // is one virtio device, so there is nothing to share across.
             drm::VIRTGPU_PARAM_HOST_VISIBLE | drm::VIRTGPU_PARAM_CROSS_DEVICE => Ok(0),
             drm::VIRTGPU_PARAM_CONTEXT_INIT => Ok(self.has_context_init as i32),
             drm::VIRTGPU_PARAM_SUPPORTED_CAPSET_IDS => Ok(self.capset_mask() as i32),
@@ -2066,7 +2248,21 @@ impl FbArch for VirtioGpuArch {
         let mut dev = virtio::virtio_probe(VIRTIO_GPU_DEVICE_ID, "virtio-gpu", GPU_FEATURES, 0)
             .map_err(|_| DriverError::NotFound)?;
         let _ = setup_queues(&mut dev)?;
+        let virgl = virtio::virtio_host_supports(&dev, VIRTIO_GPU_F_VIRGL);
+        let blob = virtio::virtio_host_supports(&dev, VIRTIO_GPU_F_RESOURCE_BLOB);
+        let window = virtio::virtio_hostmem_region(&dev);
         self.vdev = Some(dev);
+
+        // A GL device never turns a 2D resource into an EGL image, so its classic `SET_SCANOUT`
+        // is refused — its only scanout is a host blob, which the shared-memory window carries.
+        // A device that carries GL without both halves of that has no scanout at all, and saying
+        // so is better than a command the host is going to refuse.
+        if virgl {
+            return match (blob, window) {
+                (true, Some((base, _len))) => self.init_blob_scanout(base),
+                _ => Err(DriverError::Unsupported),
+            };
+        }
 
         let fb_pa = self.fb_va.wrapping_add(virtio::virtio_phys_delta() as u64);
 
@@ -2149,7 +2345,10 @@ impl FbArch for VirtioGpuArch {
     }
 
     fn flush(&mut self) -> Result<(), DriverError> {
-        if self.scanout_resource == EXT_SCANOUT_RESOURCE_ID {
+        if self.scanout_blob {
+            // The scanout is a host blob: push the framebuffer into it and let the host re-read.
+            self.flush_blob()
+        } else if self.scanout_resource == EXT_SCANOUT_RESOURCE_ID {
             // The scanout is the client's own memory: only the host's re-read is owed, and a
             // TRANSFER would copy guest memory onto itself.
             self.flush_resource(EXT_SCANOUT_RESOURCE_ID)
@@ -2165,6 +2364,12 @@ impl FbArch for VirtioGpuArch {
     fn set_scanout_source(&mut self, ranges: &[ScanRange]) -> Result<(), DriverError> {
         if !self.initialized {
             return Err(DriverError::NotFound);
+        }
+        // A host-blob scanout is the *host's* memory, not the caller's pages, so there is nothing
+        // to re-point at `ranges` and no command to back a blob with them. Presents on a GL output
+        // go through `/dev/fb` and are blitted; only a classic scanout can be re-pointed.
+        if self.scanout_blob {
+            return Err(DriverError::Unsupported);
         }
         if self.ext_resource {
             self.resource_unref(EXT_SCANOUT_RESOURCE_ID)?;
@@ -2225,6 +2430,8 @@ mod tests {
         assert_eq!(core::mem::size_of::<TransferHost3D>(), 72);
         assert_eq!(core::mem::size_of::<ResourceRef>(), 32);
         assert_eq!(core::mem::size_of::<CmdSubmit3D>(), 32);
+        assert_eq!(core::mem::size_of::<SetScanoutBlob>(), 96);
+        assert_eq!(core::mem::size_of::<ResourceMapBlob>(), 40);
     }
 
     #[test]
@@ -2243,6 +2450,12 @@ mod tests {
         assert_eq!(CMD_TRANSFER_FROM_HOST_3D, 0x0206);
         assert_eq!(CMD_SUBMIT_3D, 0x0207);
         assert_eq!(RESP_OK_NODATA, 0x1100);
+        assert_eq!(CMD_RESOURCE_CREATE_BLOB, 0x010c);
+        assert_eq!(CMD_SET_SCANOUT_BLOB, 0x010d);
+        assert_eq!(CMD_RESOURCE_MAP_BLOB, 0x0208);
+        assert_eq!(RESP_OK_MAP_INFO, 0x1106);
+        assert_eq!(BLOB_MEM_HOST3D, 0x0002);
+        assert_eq!(BLOB_FLAG_USE_MAPPABLE, 0x0001);
         assert_eq!(FB_SIZE, 1024 * 768 * 4);
     }
 
@@ -2390,6 +2603,66 @@ mod tests {
         assert_eq!(u32::from_le_bytes(b[36..40].try_into().unwrap()), 768); // r.height
         assert_eq!(u32::from_le_bytes(b[40..44].try_into().unwrap()), 1); // resource_id
         assert_eq!(u32::from_le_bytes(b[44..48].try_into().unwrap()), 0);
+    }
+
+    /// The two blob-scanout commands against the spec: `SET_SCANOUT_BLOB` carries the resource's
+    /// format and geometry and its four plane strides and offsets, and `RESOURCE_MAP_BLOB` names
+    /// the window offset it wants the blob at. A field at the wrong offset is a command the host
+    /// reads as a different request.
+    #[test]
+    fn blob_scanout_commands_layout() {
+        let mut ss = SetScanoutBlob {
+            hdr: CtrlHdr::new(CMD_SET_SCANOUT_BLOB),
+            r: Rect {
+                x: 0,
+                y: 0,
+                width: 1024,
+                height: 768,
+            },
+            scanout_id: 0,
+            resource_id: 1,
+            width: 1024,
+            height: 768,
+            format: VIRTIO_GPU_FORMAT_B8G8R8X8,
+            padding: 0,
+            strides: [4096, 0, 0, 0],
+            offsets: [0, 0, 0, 0],
+        };
+        ss.hdr.ctx_id = BLOB_CONTEXT_ID;
+        let b = struct_bytes(&ss);
+        assert_eq!(
+            u32::from_le_bytes(b[0..4].try_into().unwrap()),
+            CMD_SET_SCANOUT_BLOB
+        );
+        // scanout_id @40, resource_id @44, width @48, height @52, format @56, padding @60.
+        assert_eq!(u32::from_le_bytes(b[40..44].try_into().unwrap()), 0);
+        assert_eq!(u32::from_le_bytes(b[44..48].try_into().unwrap()), 1);
+        assert_eq!(u32::from_le_bytes(b[48..52].try_into().unwrap()), 1024);
+        assert_eq!(u32::from_le_bytes(b[52..56].try_into().unwrap()), 768);
+        assert_eq!(
+            u32::from_le_bytes(b[56..60].try_into().unwrap()),
+            VIRTIO_GPU_FORMAT_B8G8R8X8
+        );
+        // strides @64..80, offsets @80..96 — one plane, the rest empty.
+        assert_eq!(u32::from_le_bytes(b[64..68].try_into().unwrap()), 4096);
+        assert_eq!(u32::from_le_bytes(b[68..72].try_into().unwrap()), 0);
+        assert_eq!(u32::from_le_bytes(b[80..84].try_into().unwrap()), 0);
+        assert_eq!(u32::from_le_bytes(b[92..96].try_into().unwrap()), 0);
+
+        let map = ResourceMapBlob {
+            hdr: CtrlHdr::new(CMD_RESOURCE_MAP_BLOB),
+            resource_id: 1,
+            padding: 0,
+            offset: 0x40_0000,
+        };
+        let b = struct_bytes(&map);
+        assert_eq!(
+            u32::from_le_bytes(b[0..4].try_into().unwrap()),
+            CMD_RESOURCE_MAP_BLOB
+        );
+        assert_eq!(u32::from_le_bytes(b[24..28].try_into().unwrap()), 1); // resource_id
+        assert_eq!(u32::from_le_bytes(b[28..32].try_into().unwrap()), 0); // padding
+        assert_eq!(u64::from_le_bytes(b[32..40].try_into().unwrap()), 0x40_0000); // offset
     }
 
     #[test]

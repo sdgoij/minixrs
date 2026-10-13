@@ -271,7 +271,13 @@ fn backend_init() -> bool {
                     v.set_fb_va(FB_BUF.get());
                     match v.init(0) {
                         Ok(()) => {
-                            slog(b"fb: backend virtio-gpu\n");
+                            // A GL output has no classic scanout, so the display says which one it
+                            // came up on: a gate reads the blob line as proof the blob path ran.
+                            if v.scanout_is_blob() {
+                                slog(b"fb: backend virtio-gpu blob\n");
+                            } else {
+                                slog(b"fb: backend virtio-gpu\n");
+                            }
                             true
                         }
                         Err(e) => {

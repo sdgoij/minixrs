@@ -65,6 +65,10 @@ pub const VIRTIO_PCI_CAP_COMMON_CFG: u8 = 1;
 pub const VIRTIO_PCI_CAP_NOTIFY_CFG: u8 = 2;
 pub const VIRTIO_PCI_CAP_ISR_CFG: u8 = 3;
 pub const VIRTIO_PCI_CAP_DEVICE_CFG: u8 = 4;
+/// A device-specific shared-memory region. Its `virtio_pci_cap.id` names the
+/// region's kind, and the `length` field beyond the common 12 bytes is the
+/// region's length. Only a PCI transport can carry one; virtio-mmio cannot.
+pub const VIRTIO_PCI_CAP_SHARED_MEMORY_CFG: u8 = 8;
 /// PCI capability ID for vendor-specific capabilities.
 pub const VIRTIO_PCI_CAP_VNDR: u8 = 0x09;
 
@@ -194,6 +198,12 @@ pub struct VirtioDevice {
     pub isr: u64,
     /// Modern PCI: guest-physical address of the device config region.
     pub devcfg: u64,
+    /// The device's shared-memory region, if it has one: `(id, guest-physical
+    /// base, length)`. A `VIRTIO_PCI_CAP_SHARED_MEMORY_CFG` capability names it;
+    /// virtio-mmio cannot carry one, and a PCI device only grows it under a
+    /// driver option (virtio-gpu's `hostmem=`). The base is identity-mapped, like
+    /// the other PCI regions, so a driver reads and writes it directly.
+    pub shm: Option<(u8, u64, u64)>,
     pub name: &'static str,
     pub features: &'static [VirtioFeature],
     /// Bitmap of host-supported features (set during `exchange_features`).
@@ -587,6 +597,20 @@ fn vring_init(
 /// Check if the host supports a specific feature bit.
 pub fn virtio_host_supports(dev: &VirtioDevice, bit: u8) -> bool {
     (dev.host_features >> bit) & 1 != 0
+}
+
+/// The device's host-visible shared-memory window as `(base, length)`, or `None`
+/// when it has none.
+///
+/// The region is the device's own kind, named by `id`; virtio-gpu defines exactly
+/// one, `VIRTIO_GPU_SHM_ID_HOST_VISIBLE` (1), the window a host blob is mapped
+/// into. A device that offers some *other* kind has a window this driver does not
+/// know how to use, which is the same as having none.
+pub fn virtio_hostmem_region(dev: &VirtioDevice) -> Option<(u64, u64)> {
+    match dev.shm {
+        Some((1, base, len)) if len != 0 => Some((base, len)),
+        _ => None,
+    }
 }
 
 /// Exchange features between host and device.
@@ -1172,6 +1196,7 @@ fn pci_probe(
             let mut notify_off_mult = 0u32;
             let mut isr = 0u64;
             let mut devcfg = 0u64;
+            let mut shm: Option<(u8, u64, u64)> = None;
 
             // Walk the PCI capability list (pointer at config offset 0x34).
             let mut cap_ptr = unsafe { pci_cfg_read8(0, dev, func, 0x34) } as u32;
@@ -1180,13 +1205,16 @@ fn pci_probe(
                 let next = unsafe { pci_cfg_read8(0, dev, func, (cap_ptr + 1) as u8) } as u32;
                 let len = unsafe { pci_cfg_read8(0, dev, func, (cap_ptr + 2) as u8) };
                 if id == VIRTIO_PCI_CAP_VNDR && len >= 12 {
-                    // `virtio_pci_cap` layout: cfg_type@3, bar@4, padding@5..7,
-                    // offset@8..11 (LE32), length@12..15. The notify
-                    // capability extends it with notify_off_multiplier@16..19.
+                    // `virtio_pci_cap`: cfg_type@3, bar@4, id@5, padding@6..7,
+                    // offset@8..11 (LE32), length@12..15 (LE32). The `id` only
+                    // carries meaning for a shared-memory region.
                     let cfg_type = unsafe { pci_cfg_read8(0, dev, func, (cap_ptr + 3) as u8) };
                     let bar = unsafe { pci_cfg_read8(0, dev, func, (cap_ptr + 4) as u8) } as usize;
+                    let cap_id = unsafe { pci_cfg_read8(0, dev, func, (cap_ptr + 5) as u8) };
                     let offset =
                         unsafe { pci_cfg_read32(0, dev, func, (cap_ptr + 8) as u8) } as u64;
+                    let region_len =
+                        unsafe { pci_cfg_read32(0, dev, func, (cap_ptr + 12) as u8) } as u64;
                     let bar_pa = if bar < 6 {
                         let low = (bars[bar] & !0xF) as u64;
                         // 64-bit BARs span two config slots; the capability
@@ -1213,6 +1241,9 @@ fn pci_probe(
                         }
                         VIRTIO_PCI_CAP_ISR_CFG => isr = bar_pa + offset,
                         VIRTIO_PCI_CAP_DEVICE_CFG => devcfg = bar_pa + offset,
+                        VIRTIO_PCI_CAP_SHARED_MEMORY_CFG if len >= 16 && region_len != 0 => {
+                            shm = Some((cap_id, bar_pa + offset, region_len));
+                        }
                         _ => {}
                     }
                 }
@@ -1234,6 +1265,7 @@ fn pci_probe(
                 notify_off_mult,
                 isr,
                 devcfg,
+                shm,
                 name,
                 features,
                 host_features: 0,
@@ -1318,6 +1350,7 @@ fn mmio_probe(
                 notify_off_mult: 0,
                 isr: 0,
                 devcfg: 0,
+                shm: None,
                 name,
                 features,
                 host_features: 0,
@@ -1928,6 +1961,7 @@ mod tests {
             notify_off_mult: 0,
             isr: 0,
             devcfg: 0,
+            shm: None,
             name: "test",
             features: &[],
             host_features: 1u64 << 28,
@@ -1941,6 +1975,40 @@ mod tests {
         assert!(virtio_host_supports(&dev, 28));
         assert!(!virtio_host_supports(&dev, 29));
         assert!(!virtio_host_supports(&dev, 0));
+    }
+
+    /// The host-visible window is the `id` 1 shared-memory region and only that:
+    /// a device with none, or with a kind this driver does not know, answers
+    /// `None` rather than handing out a base it would misread.
+    #[test]
+    fn test_hostmem_region_is_the_host_visible_kind_alone() {
+        let mut dev = VirtioDevice {
+            transport: VirtioTransport::Pci,
+            base: 0,
+            notify: 0,
+            notify_off_mult: 0,
+            isr: 0,
+            devcfg: 0,
+            shm: None,
+            name: "test",
+            features: &[],
+            host_features: 0,
+            queues: [queue_placeholder(0), queue_placeholder(1)],
+            num_queues: 0,
+            irq: 0,
+            msi: false,
+            initialized: true,
+        };
+        assert_eq!(virtio_hostmem_region(&dev), None);
+
+        dev.shm = Some((1, 0xF000_0000, 16 << 20));
+        assert_eq!(virtio_hostmem_region(&dev), Some((0xF000_0000, 16 << 20)));
+
+        // A zero-length region is no region, and another `id` is not this kind.
+        dev.shm = Some((1, 0xF000_0000, 0));
+        assert_eq!(virtio_hostmem_region(&dev), None);
+        dev.shm = Some((2, 0xF000_0000, 16 << 20));
+        assert_eq!(virtio_hostmem_region(&dev), None);
     }
 
     /// A feature the driver wants is acknowledged only when the device offered it.
@@ -1970,6 +2038,7 @@ mod tests {
             notify_off_mult: 0,
             isr: 0,
             devcfg: 0,
+            shm: None,
             name: "test",
             features: &FEATURES,
             host_features: 1u64 << 0,
@@ -2056,6 +2125,7 @@ mod tests {
             notify_off_mult: 0,
             isr: 0,
             devcfg: 0,
+            shm: None,
             name: "test",
             features: &[],
             host_features: 0,
