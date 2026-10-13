@@ -510,11 +510,11 @@ pub fn fb_server_main() {
                 // scanout are one device, so the node borrows the output backend's device.
                 // Probing again would reprogram the rings out from under the output backend —
                 // the queue statics are one set per process.
-                FbBackend::VirtioGpu(arch) => {
-                    Some(drivers::video::virtio_gpu::DrmNode::on_output_device(
+                FbBackend::VirtioGpu(arch) => Some(unsafe {
+                    drivers::video::virtio_gpu::DrmNode::on_output_device(
                         arch as *mut VirtioGpuArch,
-                    ))
-                }
+                    )
+                }),
                 // The output is `bochs` (D3), so the render device is a device of its own and
                 // the node probes for it. `None` means this machine has no `virtio-gpu` device,
                 // and then `/dev/dri/renderD128` refuses to open rather than answering for a

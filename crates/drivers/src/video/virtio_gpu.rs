@@ -1361,25 +1361,54 @@ impl DrmNode {
     /// and no queue setup: the device is live, and negotiating it again would reprogram the
     /// rings out from under the output backend.
     ///
-    /// The output backend negotiated no 3D features (a 2D display needs none), so this node
-    /// reports no GL and serves the 2D path — an object, its memory, its dma-buf export — which
-    /// is what the scan-out handoff needs.
-    pub fn on_output_device(dev: *mut VirtioGpuArch) -> Self {
-        Self {
+    /// The features are the ones that device negotiated (the output backend invites
+    /// `VIRGL`/`BLOB`), so a GL session gets a GL node and a plain 2D output gets a 2D one; the
+    /// capsets are walked here so a GL client can fetch them.
+    /// # Safety
+    ///
+    /// `dev` must be the fb server's live output backend, a static that outlives the node.
+    pub unsafe fn on_output_device(dev: *mut VirtioGpuArch) -> Self {
+        // SAFETY: the pointer is the fb server's output backend, a static that outlives the
+        // node, and the server is single-threaded.
+        let arch = unsafe { &mut *dev };
+        let (virgl, blob, context_init) = match &arch.vdev {
+            Some(v) => (
+                virtio::virtio_host_supports(v, VIRTIO_GPU_F_VIRGL),
+                virtio::virtio_host_supports(v, VIRTIO_GPU_F_RESOURCE_BLOB),
+                virtio::virtio_host_supports(v, VIRTIO_GPU_F_CONTEXT_INIT),
+            ),
+            None => (false, false, false),
+        };
+        let mut node = Self {
             dev: Device::Borrowed(dev),
             capsets: [CapsetInfo::default(); MAX_CAPSETS],
             count: 0,
-            virgl: false,
-            blob: false,
-            has_context_init: false,
-            // The output backend holds resources 1 and 2 on this device, so the node numbers
-            // above them.
-            res_base: EXT_SCANOUT_RESOURCE_ID,
+            virgl,
+            blob,
+            has_context_init: context_init,
             context: None,
             context_resources: 0,
             gems: drm::GemTable::new(0),
             gem_arena: 0,
+            // The output backend holds resources 1 and 2 on this device, so the node numbers
+            // above them.
+            res_base: EXT_SCANOUT_RESOURCE_ID,
+        };
+        if virgl {
+            // The host lists its capsets by index and answers past the last one with a zero id
+            // instead of an error, so this walks until then — bounded, as in `open_render_node`.
+            while node.count < MAX_CAPSETS {
+                let index = node.count as u32;
+                match node.dev().capset_info(index) {
+                    Ok(info) if info.id != 0 => {
+                        node.capsets[node.count] = info;
+                        node.count += 1;
+                    }
+                    _ => break,
+                }
+            }
         }
+        node
     }
 
     /// Hand the node the backing its objects come from: the image VA of slot 0, and how
@@ -2030,7 +2059,11 @@ impl FbArch for VirtioGpuArch {
             return Err(DriverError::InvalidArgument);
         }
 
-        let mut dev = virtio::virtio_probe(VIRTIO_GPU_DEVICE_ID, "virtio-gpu", &[], 0)
+        // The same features the render node asks for: when the virtio-gpu *is* the output, the
+        // render node is served from this device (D11), so the display must negotiate VIRGL/blob
+        // for the node to answer 3D at all. A host that offers neither (a plain 2D virtio-gpu)
+        // simply does not negotiate them, and the node reports no GL, as before.
+        let mut dev = virtio::virtio_probe(VIRTIO_GPU_DEVICE_ID, "virtio-gpu", GPU_FEATURES, 0)
             .map_err(|_| DriverError::NotFound)?;
         let _ = setup_queues(&mut dev)?;
         self.vdev = Some(dev);
