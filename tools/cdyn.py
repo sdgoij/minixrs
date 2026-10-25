@@ -37,6 +37,7 @@ sys.path.insert(0, str(ROOT / "tools"))
 from ccarch import Arch, resolve_argv  # noqa: E402
 from ccflags import compile_flags  # noqa: E402
 from lld import find_lld  # noqa: E402
+from stage1 import find_stage1_rustc  # noqa: E402
 
 INTERP = "/libexec/ld.so"
 LIBC = "libc.so"
@@ -61,32 +62,6 @@ STUB = (
 def run(cmd: list[object], env: "dict | None" = None) -> int:
     print("running:", " ".join(str(c) for c in cmd))
     return subprocess.run([str(c) for c in cmd], env=env).returncode
-
-
-def find_stage1_rustc() -> "pathlib.Path | None":
-    """The fork's stage1 `rustc`, or None.
-
-    The same lookup `tools/build-dynlibc.py` and `tools/build-dynlink.py` do: the stage1
-    compiler is the one with the minix targets built in and a sysroot for them.
-
-    A tree can hold more than one stage1 — a checkout shared between Windows and WSL gets a
-    build per host — and only the one for *this* host runs here: the other is a foreign
-    binary, which on Linux WSL will happily execute through interop and then write Windows
-    paths into the dependency files. The name says which is which (`rustc.exe` is the
-    Windows build), so the host picks by that rather than by directory order.
-    """
-    build = ROOT / "rust" / "build"
-    if not build.is_dir():
-        return None
-    name = "rustc.exe" if os.name == "nt" else "rustc"
-    found = []
-    for bin_dir in sorted(build.glob("*/stage1/bin")):
-        exe = bin_dir / name
-        if exe.is_file():
-            found.append(exe)
-    if not found:
-        return None
-    return found[0]
 
 
 def link_program(

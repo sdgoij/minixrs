@@ -52,6 +52,7 @@ sys.path.insert(0, str(ROOT / "tools"))
 from ccarch import X86_64, Arch, resolve_argv  # noqa: E402
 from ccflags import compile_flags  # noqa: E402
 from lld import NO_RELRO, find_lld  # noqa: E402
+from stage1 import find_stage1_rustc  # noqa: E402
 
 import cdyn  # noqa: E402
 
@@ -76,24 +77,6 @@ ALIASES = (
     ("libdynpath.so", "/lib/libdyn2.so"),
     ("libdyndot.so", "/lib/./libdyn2.so"),
 )
-
-
-def find_stage1_rustc() -> "pathlib.Path | None":
-    build = ROOT / "rust" / "build"
-    if not build.is_dir():
-        return None
-    found = []
-    for bin_dir in sorted(build.glob("*/stage1/bin")):
-        for name in ("rustc.exe", "rustc"):
-            exe = bin_dir / name
-            if exe.is_file():
-                found.append(exe)
-    if not found:
-        return None
-    for exe in found:
-        if "windows-msvc" in str(exe):
-            return exe
-    return found[0]
 
 
 def run(cmd: list[object], env: "dict | None" = None) -> int:

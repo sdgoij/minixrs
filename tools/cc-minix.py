@@ -35,6 +35,7 @@ sys.path.insert(0, str(ROOT / "tools"))
 from ccarch import Arch, resolve_argv  # noqa: E402
 from ccflags import compile_flags, link_passthrough  # noqa: E402
 from lld import find_lld, host_triple  # noqa: E402
+from stage1 import find_stage1_rustc  # noqa: E402
 
 LD_SCRIPT = ROOT / "tools" / "minix-user.ld"
 
@@ -65,27 +66,6 @@ VERSION_PROBES = frozenset({
     "--version", "-v", "-V", "-qversion", "-dumpversion", "-dumpmachine", "--help",
 })
 COMPILE_ONLY = frozenset({"-c", "-E", "-S", "-M", "-MM", "-fsyntax-only"})
-
-
-def find_stage1_rustc() -> pathlib.Path | None:
-    """The stage1 rustc for *this* host.
-
-    Named by the host triple rather than globbed: the tree holds a stage1 per
-    host that ever built here (`rust/build/host` is the Windows one, and
-    `rust/build/x86_64-pc-windows-msvc` another), and a compiler for a different
-    host produces rlibs and binaries this one cannot link.
-    """
-    override = os.environ.get("MINIXRS_STAGE1_RUSTC")
-    if override:
-        return pathlib.Path(override)
-    host = host_triple()
-    if not host:
-        return None
-    for name in ("rustc", "rustc.exe"):
-        exe = ROOT / "rust" / "build" / host / "stage1" / "bin" / name
-        if exe.is_file():
-            return exe
-    return None
 
 
 def newest_libc_rlib(arch: Arch) -> pathlib.Path | None:

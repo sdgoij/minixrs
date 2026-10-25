@@ -37,6 +37,7 @@ import sys
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 
 from lld import find_lld
+from stage1 import find_stage1_rustc
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 SOURCE = ROOT / "tools" / "std-hello.rs"
@@ -55,30 +56,6 @@ TARGETS = {
     "riscv64gc-unknown-minix": "riscv64gc-unknown-minix",
     "aarch64-unknown-minix": "aarch64-unknown-minix",
 }
-
-
-def find_stage1_rustc() -> "pathlib.Path | None":
-    """Locate the fork's stage1 rustc under `rust/build/<host-triple>/stage1/`.
-
-    The host triple differs per build machine (x86_64-pc-windows-msvc here,
-    x86_64-unknown-linux-gnu on Linux, ...), so prefer the common
-    windows-msvc triple and fall back to any other stage1 found.
-    """
-    build = ROOT / "rust" / "build"
-    if not build.is_dir():
-        return None
-    found = []
-    for bin_dir in sorted(build.glob("*/stage1/bin")):
-        for name in ("rustc.exe", "rustc"):
-            exe = bin_dir / name
-            if exe.is_file():
-                found.append(exe)
-    if not found:
-        return None
-    for exe in found:
-        if "windows-msvc" in str(exe):
-            return exe
-    return found[0]
 
 
 def build(target: str, lld: pathlib.Path) -> int:

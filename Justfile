@@ -19,8 +19,10 @@
 
 # Path to the rust fork's stage1 rustc (built by `just bootstrap`); used as
 # the RUSTC for userland/server builds so the in-tree minix targets and
-# their std sysroot are used (no `-Zbuild-std`, no JSON specs).
-stage1-rustc := `ls rust/build/*/stage1/bin/rustc.exe rust/build/*/stage1/bin/rustc 2>/dev/null | head -1`
+# their std sysroot are used (no `-Zbuild-std`, no JSON specs). `tools/stage1.py`
+# owns the lookup, because a checkout shared between Windows and WSL holds one
+# stage1 per host and only this host's runs here — see its docstring.
+stage1-rustc := `python tools/stage1.py`
 
 # Path to an lld that can link the minix targets, resolved by `tools/lld.py`
 # (the toolchain's own when it has one, a system LLVM otherwise). The minix

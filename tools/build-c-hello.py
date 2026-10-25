@@ -42,6 +42,7 @@ sys.path.insert(0, str(ROOT / "tools"))
 from ccarch import ALL, Arch, resolve_argv  # noqa: E402
 from lld import find_lld  # noqa: E402
 from ccflags import compile_flags  # noqa: E402
+from stage1 import find_stage1_rustc  # noqa: E402
 
 # (source, output name)
 PROGRAMS = [
@@ -53,29 +54,6 @@ PROGRAMS = [
 # Scratch objects, per arch: two arches' objects in one directory would be
 # linked into each other's executable.
 WORK_ROOT = ROOT / "target" / "c-hello"
-
-
-def find_stage1_rustc() -> "pathlib.Path | None":
-    """Locate the fork's stage1 rustc under `rust/build/<host-triple>/stage1/`.
-
-    A checkout shared between Windows and WSL holds a stage1 per host; only the one for
-    *this* host runs here. Picking the other one is not a clean failure — on Linux the
-    Windows build executes through WSL interop and writes Windows paths into the
-    dependency files — so the host picks by the executable's name, which is what says
-    which one it is (`rustc.exe` is the Windows build).
-    """
-    build = ROOT / "rust" / "build"
-    if not build.is_dir():
-        return None
-    name = "rustc.exe" if os.name == "nt" else "rustc"
-    found = []
-    for bin_dir in sorted(build.glob("*/stage1/bin")):
-        exe = bin_dir / name
-        if exe.is_file():
-            found.append(exe)
-    if not found:
-        return None
-    return found[0]
 
 
 def run(cmd: list[object], env: "dict | None" = None) -> int:
