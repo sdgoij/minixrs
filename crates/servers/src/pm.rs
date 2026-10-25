@@ -980,6 +980,37 @@ pub unsafe fn exit_restart(slot: usize, dump_core: bool) {
     }
 }
 
+/// Finish an exit that `exit_proc` has just begun.
+///
+/// C runs the second half of an exit — `exit_restart` — when VFS answers the
+/// `VFS_PM_EXIT` request that `exit_proc` sent it. This port sends that request
+/// fire-and-forget (`AMF_NOREPLY`), so the answer never comes and every exit
+/// path has to run `exit_restart` itself, right after `exit_proc`.
+///
+/// That includes the last step: a slot whose parent was already told
+/// (`TOLD_PARENT`, set by `tell_parent` when the parent was blocked in
+/// waitpid) is done with, and not freeing it leaks one process slot per
+/// command a shell runs.
+///
+/// `exit_proc` refuses a PRIV_PROC — it signals it and returns without
+/// starting an exit — so a slot it did not mark EXITING is left alone.
+///
+/// # Safety
+///
+/// `slot` must be < `NR_PROCS`. The caller must ensure exclusive access to the
+/// process table.
+unsafe fn complete_exit(slot: usize) {
+    if slot >= NR_PROCS {
+        return;
+    }
+    let base = MPROC.as_ptr();
+    // Safety: `slot < NR_PROCS` checked above; the caller guarantees exclusion.
+    if unsafe { (*base.add(slot)).mp_flags } & EXITING == 0 {
+        return;
+    }
+    unsafe { exit_restart(slot, false) };
+}
+
 /// Compute waitpid exit status from exit code and signal.
 const fn w_exitcode(status: i32, sig: i32) -> i32 {
     (status << 8) | sig
@@ -2605,42 +2636,13 @@ pub unsafe fn handle_exit(caller_slot: usize, msg: &mut Message) -> i32 {
     let status = unsafe { msg.m_payload.m1.m1i1 };
     unsafe { exit_proc(caller_slot, status, false) };
 
-    // Notify VM to clean up the child's address space BEFORE SYS_CLEAR.
-    // In C MINIX, exit_proc calls vm_exit() which decrements PhysBlock
-    // refcounts so shared COW pages survive. If we skip this and go
-    // straight to SYS_CLEAR, release_address_space frees shared pages
-    // that are still in use by the parent. Matching C's vm_exit()
-    // (_taskcall, synchronous) so the notification is never dropped.
-    let child_ep = unsafe { (*MPROC.as_ptr().add(caller_slot)).mp_endpoint };
-    let mut vm_exit_msg = [0u8; 64];
-    vm_exit_msg[4..8].copy_from_slice(&(arch_common::com::VM_EXIT as i32).to_le_bytes());
-    // VM_EXIT handler reads endpoint from payload (m_source is PM).
-    vm_exit_msg[8..12].copy_from_slice(&child_ep.to_le_bytes());
-    let _ = unsafe {
-        minix_rt::syscall2(
-            minix_rt::SENDREC_CALL,
-            arch_common::com::VM_PROC_NR as u64,
-            vm_exit_msg.as_mut_ptr() as u64,
-        )
-    };
-
     // The waiting parent is replied to inside exit_proc (zombify →
     // check_parent → tell_parent). A second reply here races with the
     // parent's next SENDREC: the kernel can deliver it into the parent's
     // stale receive buffer (REPLY_PEND set, p_getfrom_e stale), corrupting
     // the parent's stack (observed: shell jumped to garbage after the
     // second sigtest run). Matching C, exit_proc is the single reply path.
-
-    // Matching C exit_proc / exit_restart: clean up kernel Proc entry
-    // via SYS_CLEAR (kernel call 2). Without this, the kernel still
-    // thinks the process is alive and blocked in RECEIVE/SENDREC.
-    let mut clear_msg = Message {
-        m_source: 0,
-        m_type: 0,
-        m_payload: unsafe { core::mem::zeroed() },
-    };
-    clear_msg.m_payload.m1.m1i1 = unsafe { (*MPROC.as_ptr().add(caller_slot)).mp_endpoint };
-    let _ = send_kernel_call(2, &mut clear_msg);
+    unsafe { complete_exit(caller_slot) };
 
     EDONTREPLY
 }
@@ -3397,6 +3399,7 @@ pub unsafe fn handle_trace(caller_slot: usize, msg: &mut Message) -> i32 {
                 child_mut.mp_exitstatus = (data & 0xFF) as i8;
             } else {
                 unsafe { exit_proc(child_slot, data as i32, false) };
+                unsafe { complete_exit(child_slot) };
             }
             EDONTREPLY // the exit path replies to the tracer later
         }
@@ -3965,6 +3968,7 @@ pub fn pm_dispatch(caller_slot: usize, msg: &mut Message) -> i32 {
             // Find the MProc slot for this endpoint.
             if let Some(slot) = unsafe { pm_isokendpt(endpt) } {
                 unsafe { exit_proc(slot, exit_status, false) };
+                unsafe { complete_exit(slot) };
 
                 // Check if any parent is waiting for this child (waitpid).
                 // The parent set mp_wpid in handle_waitpid when returning
@@ -4301,6 +4305,10 @@ pub fn pm_server_main() {
                     let b3 = (unsafe { kmsg.m_payload.m1.m1i2 } as u32) as u128;
                     let pending_bits: u128 = b0 | (b1 << 32) | (b2 << 64) | (b3 << 96);
 
+                    // A pure exit whose slot was found, completed once ENDKSIG has
+                    // used the endpoint.
+                    let mut exited: Option<usize> = None;
+
                     // Process kernel signals from the pending bitmask.
                     let is_exit = unsafe { process_ksig_reply(endpt, pending_bits) };
                     if is_exit {
@@ -4316,12 +4324,18 @@ pub fn pm_server_main() {
                             let base = MPROC.as_ptr();
                             let _pid = unsafe { (*base.add(slot)).mp_pid };
                             unsafe { exit_proc(slot, exit_status, false) };
+                            exited = Some(slot);
                         }
                     }
                     // Clear SIG_PENDING via SYS_ENDKSIG (kernel call 8),
                     // matching C's end_work() after get_work().
                     kmsg.m_payload.m1.m1i3 = endpt;
                     send_kernel_call(8, &mut kmsg);
+                    // Only now complete the exit: SYS_CLEAR inside it clears the
+                    // endpoint ENDKSIG still has to name.
+                    if let Some(slot) = exited {
+                        unsafe { complete_exit(slot) };
+                    }
                 }
                 continue;
             }
@@ -5906,6 +5920,94 @@ mod tests {
         unsafe {
             let base = MPROC.as_ptr();
             assert_eq!((*base.add(child)).mp_flags & IN_USE, 0);
+        }
+    }
+
+    /// A child that exits while its parent is blocked in waitpid is replied to
+    /// from `tell_parent`, which marks the slot TOLD_PARENT. Nothing is left to
+    /// reap it, so `complete_exit` — C's exit_restart, run right after exit_proc
+    /// because this port's VFS_PM_EXIT carries no reply — is what frees it.
+    /// Without that the slot stays IN_USE for the life of the session, and every
+    /// command a shell runs takes a fresh one.
+    #[test]
+    fn test_complete_exit_frees_a_slot_whose_parent_was_told() {
+        init_proc();
+        let parent = alloc_proc().unwrap();
+        let child = alloc_proc().unwrap();
+        unsafe {
+            let base = MPROC.as_ptr();
+            (*base.add(parent)).mp_flags |= IN_USE | WAITING;
+            (*base.add(parent)).mp_pid = 1;
+            (*base.add(parent)).mp_wpid = 2;
+            (*base.add(child)).mp_flags |= IN_USE;
+            (*base.add(child)).mp_pid = 2;
+            (*base.add(child)).mp_parent = parent as i32;
+        }
+
+        unsafe { exit_proc(child, 5, false) };
+        unsafe {
+            let base = MPROC.as_ptr();
+            assert_ne!((*base.add(child)).mp_flags & TOLD_PARENT, 0);
+            // Still in use: the exit was reported to the parent, not reaped.
+            assert_ne!((*base.add(child)).mp_flags & IN_USE, 0);
+        }
+
+        unsafe { complete_exit(child) };
+        unsafe {
+            let base = MPROC.as_ptr();
+            assert_eq!((*base.add(child)).mp_flags & IN_USE, 0);
+        }
+    }
+
+    /// The other half: a child that exits before its parent waits is a zombie,
+    /// and `complete_exit` must leave the slot alone so the parent's waitpid can
+    /// still collect the status.
+    #[test]
+    fn test_complete_exit_leaves_a_zombie_for_its_parent() {
+        init_proc();
+        let parent = alloc_proc().unwrap();
+        let child = alloc_proc().unwrap();
+        unsafe {
+            let base = MPROC.as_ptr();
+            (*base.add(parent)).mp_flags |= IN_USE;
+            (*base.add(parent)).mp_pid = 1;
+            (*base.add(child)).mp_flags |= IN_USE;
+            (*base.add(child)).mp_pid = 2;
+            (*base.add(child)).mp_parent = parent as i32;
+        }
+
+        unsafe { exit_proc(child, 5, false) };
+        unsafe { complete_exit(child) };
+        unsafe {
+            let base = MPROC.as_ptr();
+            assert_ne!((*base.add(child)).mp_flags & ZOMBIE, 0);
+            assert_ne!((*base.add(child)).mp_flags & IN_USE, 0);
+        }
+
+        let r = unsafe { do_waitpid(parent, -1, 0) };
+        assert_eq!(r, Ok((2, w_exitcode(5, 0), 0)));
+        unsafe {
+            let base = MPROC.as_ptr();
+            assert_eq!((*base.add(child)).mp_flags & IN_USE, 0);
+        }
+    }
+
+    /// `exit_proc` refuses a system process (it signals it instead), so nothing
+    /// marked EXITING: `complete_exit` must not tear its slot down.
+    #[test]
+    fn test_complete_exit_skips_a_process_that_did_not_exit() {
+        init_proc();
+        let slot = alloc_proc().unwrap();
+        unsafe {
+            let base = MPROC.as_ptr();
+            (*base.add(slot)).mp_flags |= IN_USE | PRIV_PROC;
+            (*base.add(slot)).mp_pid = 1;
+        }
+        unsafe { exit_proc(slot, 0, false) };
+        unsafe { complete_exit(slot) };
+        unsafe {
+            let base = MPROC.as_ptr();
+            assert_ne!((*base.add(slot)).mp_flags & IN_USE, 0);
         }
     }
 
