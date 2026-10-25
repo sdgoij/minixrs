@@ -1582,6 +1582,16 @@ build-mesa arch="x86" *args:
 fetch-mesa arch="x86" *args:
     python tools/fetch-mesa.py {{arch}} {{args}}
 
+# libxkbcommon, the C library smithay's `xkbcommon` binding links with. rustc emits a
+# crate's native link flags whether or not its symbols are reachable, so any binary in
+# smithay's graph needs `-lxkbcommon` — 4d cannot link a compositor without it
+# (`.notes/wayland.md` 6.13). `--build` configures and compiles it in WSL (meson's build
+# tree wants a native filesystem) and stages `libxkbcommon.so` (link time) and
+# `libxkbcommon.so.0` (the guest's `DT_NEEDED`) under `target/xkbcommon/<arch>/lib`; with
+# no flag it only stages.
+xkbcommon arch="x86" *args:
+    python tools/build-xkbcommon.py {{arch}} {{args}}
+
 # The dynamic-linking artifacts an *image* carries: the loader (`/libexec/ld.so`,
 # `crates/ldso` linked with its own script, `tools/minix-ldso.ld`), the shared C library
 # (`/lib/libc.so`) and a C program linked against it (`/bin/dynclib`). All three are in

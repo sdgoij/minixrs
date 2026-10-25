@@ -48,6 +48,14 @@ pub extern "C" fn llabs(x: c_longlong) -> c_longlong {
     x.abs()
 }
 
+/// `imaxabs(3)`: the absolute value of an `intmax_t`. The port's `stdint.h` spells
+/// `intmax_t` as `int64_t`, which is `long` here, so the C ABI is `c_long`'s.
+#[cfg(target_os = "minix")]
+#[unsafe(no_mangle)]
+pub extern "C" fn imaxabs(x: c_long) -> c_long {
+    x.abs()
+}
+
 #[cfg(target_os = "minix")]
 #[unsafe(no_mangle)]
 pub extern "C" fn div(x: c_int, y: c_int) -> DivT {

@@ -42,4 +42,7 @@
 #define PRIxMAX "lx"
 #define PRIXMAX "lX"
 
+/* C99: the absolute value of an `intmax_t` (`int64_t`, so `long` on LP64). */
+intmax_t imaxabs(intmax_t j);
+
 #endif
