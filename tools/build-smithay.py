@@ -148,6 +148,7 @@ def check_stage1_surface(rustc: pathlib.Path, triple: str) -> None:
     `unix` in `os`", which reads like a bug in the tree rather than a stale
     toolchain. A capability probe says what to do instead.
     """
+    sync_target_with_stage1(rustc)
     probe = CARGO_TARGET / "stage1-surface.rs"
     probe.parent.mkdir(parents=True, exist_ok=True)
     probe.write_text(SURFACE_PROBE, encoding="utf-8")
@@ -159,6 +160,35 @@ def check_stage1_surface(rustc: pathlib.Path, triple: str) -> None:
         die(f"the {triple} sysroot in this stage1 has no `std::os::minix`, so it "
             "predates this tree's std -- rebuild it (`just bootstrap`) or fetch "
             "the release (`just fetch-stage1`)")
+
+
+def sync_target_with_stage1(rustc: pathlib.Path) -> None:
+    """Clear the cargo artifacts when the stage1 changed underneath them.
+
+    Cargo invalidates a build by the compiler's version string, and every stage1
+    this tree installs reports the same one (`1.100.0-dev`, `commit-hash:
+    unknown` for a source build). Replacing the toolchain -- which `just
+    fetch-stage1` does on every new rust pin -- therefore leaves host artifacts
+    built against the previous sysroot, and the build fails with "found possibly
+    newer version of crate `std` which `cc` depends on" inside a build script.
+    The stamp is the release marker, or the rustc file itself for a source build.
+    """
+    stage1 = rustc.parent.parent
+    marker = stage1 / ".minixrs-fetched"
+    if marker.is_file():
+        stamp = marker.read_text(encoding="utf-8").strip()
+    else:
+        stat = rustc.stat()
+        stamp = f"source:{stat.st_mtime_ns}:{stat.st_size}"
+
+    stamp_file = CARGO_TARGET / ".stage1-stamp"
+    recorded = (stamp_file.read_text(encoding="utf-8").strip()
+                if stamp_file.is_file() else None)
+    if recorded != stamp and CARGO_TARGET.is_dir() and any(CARGO_TARGET.iterdir()):
+        print("stage1 changed since the last build -- clearing the cargo artifacts")
+        shutil.rmtree(CARGO_TARGET, ignore_errors=True)
+    CARGO_TARGET.mkdir(parents=True, exist_ok=True)
+    stamp_file.write_text(stamp, encoding="utf-8")
 
 
 def check_submodules() -> None:
