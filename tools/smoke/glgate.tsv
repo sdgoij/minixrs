@@ -1,0 +1,12 @@
+# Phase 4d-1's gate, driven by `just test-glgate-x86`.
+#
+# `/bin/glgate` takes smithay's GL path on the port: a surfaceless EGL display, an EGL
+# context, `GlesRenderer`, an offscreen `GlesTexture` target, a clear, and a read-back of the
+# cleared pixel — the shape 4d composes with (`.notes/wayland.md` 6.13, D17/D18). It prints
+# the GL renderer/vendor/version it found before the verdict, so a boot log says which driver
+# ran (`virgl` on the GL host this recipe needs) even though the gate itself asserts the pixel.
+#
+# The QEMU line carries no GL device on purpose: the software driver is the one whose context
+# is GLES 3 on every host, and `ExportMem` (the read-back) needs GLES 3. Measured on this host,
+# virgl offers an ES2 context, where every `copy_texture` fails `UnsupportedPixelFormat`.
+/bin/glgate	glgate: PASS clear=green

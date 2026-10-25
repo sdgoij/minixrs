@@ -1,0 +1,54 @@
+# 4d's gates. Its own workspace, like `tools/phase4-gate`: the root workspace must not read
+# this `[patch.crates-io]` table, or the forks would become a checkout requirement for every
+# build in the tree, and `[patch.crates-io]` is only legal at a workspace root anyway.
+#
+# `target/smithay` is the pinned checkout `tools/build-smithay.py` fetches, so this project
+# needs that script (or `tools/build-phase4-comp.py`, which runs it) before cargo can read
+# this manifest. The forks are submodules at the repo root.
+[workspace]
+
+[package]
+name = "phase4-comp"
+version = "0.0.0"
+edition = "2024"
+publish = false
+description = "Phase 4d's gates: smithay's renderer and compositor on the minix targets"
+
+[dependencies]
+smithay = { path = "../../target/smithay", default-features = false, features = [
+    "wayland_frontend",
+    # Surfaceless EGL plus the GLES renderer is 4d's render path (`.notes/wayland.md`
+    # 6.13, D17/D18). `use_system_lib` stays off: the compositor is its own server.
+    "backend_egl",
+    "renderer_gl",
+] }
+# Deliberately *not* `minix-libc`: its rlib is the static image's C library, where `dlopen`
+# answers "this program is statically linked". A dynamic image takes those symbols from
+# `libc.so` instead (the build script links it), which is the build whose `dlopen` forwards
+# to the loader.
+minix-rt = { path = "../../crates/minix-rt", default-features = false }
+# `rand` in smithay's graph reaches `getrandom`, whose 0.3 line takes its backend from a
+# `register_custom_getrandom!` in the binary (`--cfg getrandom_backend="custom"`).
+getrandom = "0.3"
+
+[patch.crates-io]
+errno = { path = "../../crates/errno" }
+libc = { path = "../../libc" }
+# `libloading` is what `backend_egl` loads EGL with; it gates its Unix half on `cfg(unix)`.
+libloading = { path = "../../rust_libloading" }
+rustix = { path = "../../rustix" }
+polling = { path = "../../polling" }
+calloop = { path = "../../calloop" }
+# The wayland-rs family is patched together: the protocol crates generate code against
+# the server API, so a half-patched family pairs two versions of it.
+wayland-sys = { path = "../../wayland-rs/wayland-sys" }
+wayland-scanner = { path = "../../wayland-rs/wayland-scanner" }
+wayland-backend = { path = "../../wayland-rs/wayland-backend" }
+wayland-server = { path = "../../wayland-rs/wayland-server" }
+wayland-protocols = { path = "../../wayland-rs/wayland-protocols" }
+wayland-protocols-wlr = { path = "../../wayland-rs/wayland-protocols-wlr" }
+wayland-protocols-misc = { path = "../../wayland-rs/wayland-protocols-misc" }
+
+[[bin]]
+name = "glgate"
+path = "src/bin/glgate.rs"

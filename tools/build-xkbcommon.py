@@ -84,7 +84,7 @@ MESON_CPU = {
 # compile needs (`CLOCK_PROCESS_CPUTIME_ID`, `mkdtemp`, `sqrtl`) are not in the port.
 MESON_OPTIONS = (
     "--buildtype=release",
-    "-Ddefault_library=shared",
+    "-Ddefault_library=both",
     "-Denable-tools=false",
     "-Denable-x11=false",
     "-Denable-wayland=false",
@@ -266,14 +266,20 @@ def configure(arch: Arch, meson: str, force: bool) -> None:
 
 
 def compile_library(arch: Arch, ninja: str) -> pathlib.Path:
-    """Build the shared object alone, so the test and bench programs stay unbuilt."""
+    """Build the library alone, so the test and bench programs stay unbuilt.
+
+    Both forms are built: the static archive is what a Rust binary links (see `stage`),
+    and the shared object is what a `dlopen` consumer would take.
+    """
     build = build_dir(arch)
     lib = build / library_name()
-    note(f"ninja {lib.name}")
-    if run([ninja, "-C", str(build), lib.name]) != 0:
+    archive = build / "libxkbcommon.a"
+    note(f"ninja {archive.name} {lib.name}")
+    if run([ninja, "-C", str(build), archive.name, lib.name]) != 0:
         die(f"build failed; the log is {build / 'meson-logs' / 'meson-log.txt'}")
-    if not lib.is_file():
-        die(f"{lib} was not produced")
+    for produced in (archive, lib):
+        if not produced.is_file():
+            die(f"{produced} was not produced")
     note("build ok")
     return lib
 
@@ -281,12 +287,10 @@ def compile_library(arch: Arch, ninja: str) -> pathlib.Path:
 # --------------------------------------------------------------------- staging
 
 def stage(arch: Arch) -> None:
-    """Copy the built library into `target/xkbcommon/<arch>/lib` under its two names.
+    """Copy the built library into `target/xkbcommon/<arch>/lib` under the names a link needs.
 
-    The build tree is on WSL's native filesystem, which the Windows `build-x86`
-    cannot read, so the file has to come back under `target/` for the image to
-    carry it. Both names are copies, not symlinks: one is what `-lxkbcommon`
-    resolves at link time and the other is the SONAME the guest's loader asks for.
+    The build tree is on WSL's native filesystem, which the Windows `build-x86` cannot read,
+    so the files have to come back under `target/` for the image to carry them.
     """
     build = build_dir(arch)
     versioned = build / library_name()
@@ -296,11 +300,17 @@ def stage(arch: Arch) -> None:
     dest = stage_dir(arch)
     dest.mkdir(parents=True, exist_ok=True)
     shutil.copyfile(versioned, dest / "libxkbcommon.so.0")
-    # The unversioned name is what the linker searches for; meson makes it a
-    # symlink into the versioned file in the build dir, so copy through it.
+    # The unversioned name is what a `-l:` link names; meson makes it a symlink into the
+    # versioned file in the build dir, so copy through it.
     dev = build / "libxkbcommon.so"
     shutil.copyfile(dev if dev.exists() else versioned, dest / "libxkbcommon.so")
-    note(f"staged libxkbcommon.so and libxkbcommon.so.0 to {dest}")
+    # The archive is what a Rust binary actually links. The `xkbcommon` crate emits
+    # `#[link(name = "xkbcommon")]`, and rustc places a crate's native libraries inside its
+    # `-Bstatic` window, so a shared object cannot satisfy it ("attempted static link of
+    # dynamic object") — and lld on a Windows host does not look for `.so` under a searched
+    # name either. A static archive is both the honest answer and one file less in an image.
+    shutil.copyfile(build / "libxkbcommon.a", dest / "libxkbcommon.a")
+    note(f"staged libxkbcommon.a and libxkbcommon.so* to {dest}")
 
 
 # ------------------------------------------------------------------------ main

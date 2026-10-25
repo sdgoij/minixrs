@@ -29,3 +29,7 @@
 	path = wayland-rs
 	url = git@github.com:sdgoij/wayland-rs.git
 	branch = feature/minixrs
+[submodule "rust_libloading"]
+	path = rust_libloading
+	url = git@github.com:sdgoij/rust_libloading.git
+	branch = feature/minixrs

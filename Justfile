@@ -1024,6 +1024,31 @@ test-wlgate-aarch64 boot-timeout="60": wlgate-aarch64
     FEED_PACE=0.02 FEED_SCENARIO=tools/smoke/wlgate.tsv sh tools/smoke/feed.sh target/test-wlgate-aarch64.log {{boot-timeout}} qemu-system-aarch64 -machine virt -cpu cortex-a57 -m 256M -nographic -no-reboot -global virtio-mmio.force-legacy=off -netdev user,id=net0 -device virtio-net-device,netdev=net0 -device virtio-gpu-device -device virtio-keyboard-device -kernel target/aarch64-unknown-minix/release/kernel-boot-aarch64
     @echo "wlgate: wayland-server served a stock client over the port's socket (aarch64)"
 
+# Phase 4d-1's gate (`.notes/wayland.md` 6.13): smithay's own GL path on the port -
+# a surfaceless EGL display, a GLES 3 context, `GlesRenderer`, an offscreen target, a clear and
+# the read-back. It is the renderer 4d composes with (D17/D18), and it is the tree's first
+# *dynamically linked* Rust binary that uses std: `GlesRenderer` loads EGL with `dlopen`, and a
+# static image has no loader. `libxkbcommon` is linked in (statically - see
+# `tools/build-xkbcommon.py`).
+#
+# No GL device on the QEMU line, on purpose: the *software* driver is the one whose context is
+# GLES 3 on every host (measured: this host's virgl offers ES2 only, so `ExportMem` - the
+# read-back D18 needs - fails there with `UnsupportedPixelFormat`). That also makes this a gate
+# a CI runner can boot, unlike 3c-3 and 3d-a.
+glgate-x86: dynlib-x86
+    python tools/build-xkbcommon.py x86 --build
+    python tools/build-phase4-comp.py x86
+    @test -f target/mesa/x86/lib/libEGL.so.1 || (echo 'glgate: no Mesa DSOs - run `just fetch-mesa x86` or `just build-mesa x86 --build` first' >&2; exit 1)
+    @echo "glgate: /bin/glgate built and linked against libc.so (x86_64)"
+
+test-glgate-x86 boot-timeout="60": glgate-x86 boot-image-x86
+    @just _assert-qemu-version qemu-system-x86_64
+    M=target/mesa/x86; E="/lib/libdrm.so.2=$M/lib/libdrm.so.2;/lib/libEGL.so.1=$M/lib/libEGL.so.1;/lib/libgbm.so.1=$M/lib/libgbm.so.1;/lib/libexpat.so.1=$M/lib/libexpat.so.1;/lib/libgallium-25.3.6.so=$M/lib/libgallium-25.3.6.so;/lib/libGLESv2.so.2=$M/lib/libGLESv2.so.2;/lib/libz.so.1=$M/lib/libz.so.1;/lib/dri_gbm.so=$M/lib/dri_gbm.so;/lib/swrast_dri.so=$M/lib/swrast_dri.so;/bin/glgate=target/x86_64-pc-minix/release/glgate"; MINIXFS_EXTRA="$E" MINIXFS_BLOCKS=16384 cargo run -q -p boot-image --bin mkminixfs --release -- x86_64
+    @just mkfs-x86
+    FEED_PACE=0.02 FEED_SCENARIO=tools/smoke/glgate.tsv sh tools/smoke/feed.sh target/test-glgate-x86.log {{boot-timeout}} qemu-system-x86_64 -nographic -m 512M -no-reboot -vga none -device bochs-display,id=fb0 -kernel target/images/x86_64-pc-minix/minix-x86-boot.elf -drive if=none,id=disk0,file=target/images/x86_64-pc-minix/disk.img,format=raw,cache=writethrough -device virtio-blk-pci,disable-legacy=on,drive=disk0 -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0 -device virtio-tablet-pci,display=fb0
+    @just _assert-qemu-log target/test-glgate-x86.log "glgate: PASS clear=green"
+    @echo "glgate: smithay's GlesRenderer ran on the port and read its clear back (x86_64)"
+
 test-gltriangle-riscv64 boot-timeout="180": gltriangle-riscv64 boot-image-riscv64
     @just _assert-qemu-version qemu-system-riscv64
     M=target/mesa/riscv64; E="/lib/libdrm.so.2=$M/lib/libdrm.so.2;/lib/libEGL.so.1=$M/lib/libEGL.so.1;/lib/libgbm.so.1=$M/lib/libgbm.so.1;/lib/libexpat.so.1=$M/lib/libexpat.so.1;/lib/libgallium-25.3.6.so=$M/lib/libgallium-25.3.6.so;/lib/libGLESv2.so.2=$M/lib/libGLESv2.so.2;/lib/libz.so.1=$M/lib/libz.so.1;/lib/swrast_dri.so=$M/lib/swrast_dri.so;/bin/gltriangle=$M/bin/gltriangle"; MINIXFS_EXTRA="$E" MINIXFS_BLOCKS=16384 cargo run -q -p boot-image --bin mkminixfs --release -- riscv64

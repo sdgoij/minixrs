@@ -1805,13 +1805,60 @@ arm plus the four `RTLD_*` values from the port's `dlfcn.h` (18 lines). Linking 
 then failed on exactly one thing: `unable to find library -lxkbcommon`. smithay's `xkbcommon`
 dependency is unconditional and rustc emits a crate's native link flags whether or not its
 symbols are reachable, so **4d needs `libxkbcommon` built for minix** before any compositor
-links — the §6.6 port item, brought forward.
+links — the §6.6 port item, brought forward and since landed.
+
+**4d-1, landed: smithay's GLES renderer runs on the port.** `/bin/glgate` takes a surfaceless
+EGL display, a **GLES 3** context and a pbuffer from a C bootstrap, wraps them with
+`EGLContext::from_raw`, and drives smithay's `GlesRenderer`: the capability query, `new`, an
+offscreen `Offscreen::<GlesTexture>` of 64×64 `Abgr8888`, `bind`/`render`/`clear` green/
+`finish`, then `copy_texture` + `map_texture`, which read back `r=0 g=255 b=0 a=255`
+(`just test-glgate-x86`). The log names the driver it passed on — `GL_VENDOR=Mesa
+GL_RENDERER=softpipe GL_VERSION=OpenGL ES 3.1 Mesa 25.3.6 (git-06f9e28304)`, capabilities
+`[Instancing, Renderbuffer, Blit, _10Bit, Fencing, ExportFence, Debug]` — which a bare `PASS`
+line would have hidden. Three facts about the context and one about the host decide that
+shape, and each was measured rather than assumed:
+
+- **smithay cannot make the context this needs.** Its configless `EGLContext::new` pins
+  `EGL_CONTEXT_CLIENT_VERSION = 2`; its config'd path asks a surfaceless display for
+  `WINDOW_BIT` configs (`NoAvailablePixelFormat`); its device-display path asks for
+  `STREAM_BIT_KHR` (`BadAttribute`) against a device list that here is not a DRM one. So the
+  context is created in C, with the surfaceless recipe `tools/gl_triangle.c` already proved —
+  `eglGetPlatformDisplayEXT` first and `EGL_PLATFORM` second, because the variable is read
+  once, too early in a process that has already `dlopen`ed EGL.
+- **`ExportMem` is a GLES 3 feature.** The read-back D18 needs is `glReadBuffer` plus
+  `PIXEL_PACK_BUFFER`, so the config filter must ask for `EGL_OPENGL_ES3_BIT` and the context
+  for client version 3; an ES2 context answers every `copy_texture` with
+  `UnsupportedPixelFormat`.
+- **`Abgr8888`, not `Argb8888`.** The latter maps to `GL_BGRA_EXT`, which virgl does not
+  expose; `Abgr8888` is `GL_RGBA`/`UNSIGNED_BYTE`, which is R,G,B,A in memory on a
+  little-endian machine — the order the gate asserts.
+- **This host's virgl offers ES2 only** (capabilities `[Instancing, Renderbuffer,
+  ExportFence, Debug]`), so the gate's QEMU line carries **no GL device** and the software
+  driver is what runs. That is not a fallback dressed as a pass: the gate asserts the pixel,
+  and it makes 4d-1 a gate a CI runner can boot, unlike 3c-3 and 3d-a. The accelerated path
+  stays measured by `test-gltriangle-virgl` and `test-wlgl`, which need a GL host.
+
+**The gate is the tree's first dynamically linked `std` binary, and two link facts follow.**
+`GlesRenderer` loads EGL with `libloading`, i.e. `dlopen`, and `minix-libc`'s rlib is the
+*static* image's C library, whose `dlopen` answers "this program is statically linked". So
+the binary keeps `minix-rt`'s `_start` but links `-Bdynamic` against `libc.so`,
+`libEGL.so.1` and `libGLESv2.so.2` (the last serves the `glGetString` the log prints), with
+`--dynamic-linker=/libexec/ld.so`. `libxkbcommon` is linked **statically**: the `xkbcommon`
+crate emits `-lxkbcommon` inside rustc's own `-Bstatic` window, so a shared object is refused
+("attempted static link of dynamic object"), and lld on a Windows host does not look for
+`.so` under a searched name either — so `tools/build-xkbcommon.py` builds
+`-Ddefault_library=both` and stages `libxkbcommon.a` beside the shared objects. One ordering
+fact is worth keeping: a crate's `-l` flags are emitted *before* `-C link-arg`s, so the
+search path that serves `-lxkbcommon` has to be a `-Z pre-link-arg`; `-Lnative` and
+`-C link-arg=-L` both arrive too late. The binary also registers `getrandom`'s custom
+backend (`--cfg getrandom_backend="custom"`), because smithay's `rand` reaches it and the
+port has no entropy source.
 
 Staged, each with a gate
 
 | Stage | Deliverable | Gate |
 |---|---|---|
-| **4d-1** | **The renderer on the port.** `libloading`'s fork as a submodule, `libxkbcommon` built and staged like `libdrm`/`libgbm`, and a binary that takes smithay's surfaceless `EGLDisplay` → `EGLContext` → `GlesRenderer` | The guest prints the GL renderer's name and clears a framebuffer whose pixel reads back |
+| **4d-1** | **The renderer on the port.** `libloading`'s fork as a submodule, `libxkbcommon` built and staged like `libdrm`/`libgbm`, and a binary that takes smithay's surfaceless `EGLDisplay` → `EGLContext` → `GlesRenderer`. **Landed:** `/bin/glgate` clears a 64×64 `Abgr8888` offscreen target through `GlesRenderer` and reads the pixel back exactly, on the software driver (`softpipe`, this host's virgl being ES2-only); `libxkbcommon` is staged both ways | The guest prints the GL renderer's name and clears a framebuffer whose pixel reads back — `just test-glgate-x86` |
 | **4d-2** | **The compositor.** `CompositorState`, `ShmGlobal` and an output, on its own socket; one stock `wl_shm` client commits a surface, smithay composes it into the offscreen target and 3d-b-1 scans the frame out | A host screendump shows the client's colour, and the client's `wl_buffer` is released |
 | **4d-3** | **Input.** The input server behind smithay's `InputBackend`, a `wl_seat` advertised and routed to the focused surface | A key reaches the client through smithay |
 | **4d-4** | **The software renderer** behind the same `Renderer` seam | 4d-2's gate with the software renderer selected |
@@ -1827,7 +1874,7 @@ Staged, each with a gate
 | **1** | In-house Wayland server, scoped in **§6.11**. **Landed:** 1a — the wire/interface crate and the registry + `sync` handshake over `/dev/uds` (`test-wayland-x86`); 1b — the `wl_shm` present path: `/sbin/wlserver` (boot proc 20) maps `/dev/fb`, `/bin/wlclient` draws into a memfd pool and commits a surface, and the frame is read back from `/dev/fb` (`test-wlshm-x86`); 1c — input: `wl_seat` keyboard/pointer, focus and `enter`, and a key routed from the device to a client (`test-wlkey-x86`), over an input-server ring that keeps a cursor per consumer and a terminal readiness path that reports instead of pushing (`KNOWN_ISSUES` 36, `test-pty-x86`). **Open:** none. | A `wl_shm` client renders through the server to `/dev/fb`, driven by a QEMU smoke scenario (same shape as `tools/smoke/`); a **ported stock** client later, on the same protocol |
 | **2** | `xdg_shell`, decorations, `layer_shell`, popups, damage tracking, cursor, keymaps, multi-output — scoped in **§6.12**. **Landed:** 2a — the seat's keymap, compiled into `wlserver` and served over an fd (`test-wlkey-x86`); 2b — `xdg_shell`: `xdg_wm_base`/`xdg_surface`/`xdg_toplevel`, `configure`/`ack_configure`, `ping`/`pong`, and a toplevel presented at the configured size (`test-wlx-x86`); 2c — several clients at once and per-surface focus, with input routed to the focused connection (`test-wlfocus-x86`); 2d — damage tracking, so only the damaged rectangle is recomposited, and the pointer's cursor image (`test-wlxd-x86`); 2e — popups, `zwlr_layer_shell_v1` and client-side decorations (`test-wlxe-x86`). **Open:** multi-output. | A real toolkit client runs a window with chrome and input |
 | **3** | GL rendering, scoped in **§6.10** — virgl over `virtio-gpu` first: 3D transport, a `virtgpu` render node, Mesa + `libdrm` as DSOs; llvmpipe kept as the fallback. **Landed:** 3a — the 3D transport and virgl negotiation (`test-gpu3d-x86`, `test-gpu3d-nogl-x86`); 3b — the `/dev/dri/renderD128` node: GEM, contexts, blobs, transfers, submits, `WAIT` and `mmap` (`test-drmmap-x86`, `test-drmgl-x86`); 3c's build half — Mesa builds with the `virgl` gallium driver and the C socket cmsg surface is in `minix-libc` (3c-3a). **Landed:** 3c-3 — the virgl triangle on the render node (`just test-gltriangle-virgl-x86`, `GL_RENDERER=virgl`); 3d-a — a GL surface through the in-house compositor (`just test-wlgl-x86`). **Landed:** 3d-b-1 — the scan-out present path, a whole-output `wl_shm` frame presented out of the client's own buffer with no CPU copy (`just test-wlfull-<arch>`, x86_64/riscv64/aarch64); 3d-b-2 — the node's PRIME handoff, an object exported to a dma-buf descriptor and imported back (`just test-drmprime-x86`, the descriptor VFS-owned in `vfs::dmabuf`); 3d-b-3 — `libgbm` built with the `dri_gbm.so` backend staged, a BO created on the node exported to a dma-buf and imported back (`just test-gbmtest-x86`); 3d-b-4 — `zwp_linux_dmabuf_v1` end to end, a client's object scanned out through the compositor (`just test-wldmabuf-x86`), and the GL client whose render target *is* that buffer (`just test-wldmabufgl-x86`, with the client-side transfer of §5 row 26); 3d-b-5 — GPU composition **landed**: its mechanism (5a) and cross-process handoff (5b, `just test-wlcompose-x86`) over the node's per-open context table (§5 row 28), and the compositor's surface list and end-to-end gate (5c/5d, `just test-wlscene-x86`) — two dma-buf surfaces composed on the render node and the frame scanned out as one. **Open:** none. | The compositor renders GL content |
-| **4** | smithay port; `cosmic-comp` against our backends; `cosmic-session` + D-Bus — scoped in **§6.13**. | `cosmic-comp` on screen; a `libcosmic` app connects |
+| **4** | smithay port; `cosmic-comp` against our backends; `cosmic-session` + D-Bus — scoped in **§6.13**. **Landed:** 4a — the patched OS crates and a calloop loop (`just test-calloop-<arch>`); 4b — `std`'s Unix names over the port and smithay's whole `check`; 4c — `wayland-server` serving a stock client (`just test-wlgate-<arch>`); 4d-1 — smithay's `GlesRenderer` clearing and reading back an offscreen target on the port (`just test-glgate-x86`). | `cosmic-comp` on screen; a `libcosmic` app connects |
 | **5** | Portals, fonts, the `libcosmic` suite | A usable session |
 
 ---
