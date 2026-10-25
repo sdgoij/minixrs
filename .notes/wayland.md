@@ -383,6 +383,8 @@ not now, record it.
 | 27 | GPU composition | the compositor composes on the GPU and presents the result with no readback (3d-b-5) | the helper draws the surface list with Mesa on the render node — the *composition* is on the GPU — then reads the frame back **once** (`glReadPixels`) into the buffer the compositor presents. The zero-copy route (draw into the object's own pages and scan *those* out) is the later refinement: on this host a drawn frame's pixels reach the object's pages through no reader that agrees with the node's `TRANSFER_FROM_HOST_3D` (the pages hold only the clear), while a `glReadPixels` of the same frame is exact and complete. `tools/compose_probe.c` measures both. Presenting the frame is 3d-b-1's re-point (`FBIO_SCANOUT_SRC`), and on this host a **re-point** needs a `TRANSFER_TO_HOST_2D` of the external scan-out resource: a flush nudge alone only makes the *first* source appear, while a second re-point leaves the host showing the image it already had for that resource id (`VirtioGpuArch::present_resource`) | **Deviate** (the composition is GPU-side; one readback remains, for a multi-surface frame — 3d-a's readback, generalised) |
 | 29 | the composition helper's lifetime | a compositor is one process, or its GPU helper is bound and booted with the session (3d-b-5's first draft: "bound to its socket before `wlserver` needs it") | the x86-only dynamic helper is **not** a boot process: a boot process is loaded from the initramfs and a missing one aborts the boot, so `wlserver` reaches it lazily over `/run/wlcompose` on the first multi-surface frame, and with nothing listening presents each commit the way it always did | **Deviate** (keeps the boot image arch-uniform; the session starts the helper) |
 | 28 | two virgl contexts on the node | a context is per open file, and any number of clients render concurrently | **Landed** (`just test-wlcompose-x86`; `drivers::video::virtio_gpu`). A context is keyed to the **client endpoint** (`ClientContext` slots; `close_context` on the client's `CDEV_CLOSE`) — the per-open identity this port's server sees where Linux keys to the file. `CONTEXT_INIT` makes a second client its own context on its own id, `ensure_context` does the same for a transfer or submit that named none, and a close destroys only that client's. VFS carries the *closing* endpoint on `CDEV_CLOSE` (the fproc whose descriptor is going, not the message sender — the exit path closes a dead process's fds from PM's slot). The helper and a rendering client now both drive the node, so cross-process GPU composition holds. | **Landed** (D3's single-context corollary removed) |
+| 30 | `getsockname` on a socket with no name | answered unconditionally, with a zeroed `sockaddr_un` for a socket that has none — `ioc_uds.c`'s `do_getsockname` says "libc depends on this behavior", because `accept` asks the *accepted* end for its name | the same | **Follow** (the port answered `EINVAL`, which failed every `accept()` whose caller looked the address up — measured in 4c's first run) |
+| 31 | socket `msg_flags`, and the peer's name | the uds libc refuses every flag (`sendmsg.c`/`recvmsg.c` answer `ENOSYS`) and `getpeername` reads `NWIOGUDSPADDR` | `send`/`recv`/`sendmsg`/`recvmsg` honour `MSG_DONTWAIT` (a socket never blocks), `MSG_NOSIGNAL` (no signal reaches userspace) and `MSG_CMSG_CLOEXEC` (applied to the descriptors a receive lifts out, *after* the body has moved rather than atomically); any other flag is `EOPNOTSUPP`. `NWIOGUDSPADDR` (`'u', 8`; the reference's is `'n', 71`) answers the peer's name, and `ENOTCONN` when there is no peer | **Deviate** (the reference refuses flags a Wayland client always passes: `wayland-backend` sends `DONTWAIT|NOSIGNAL` and receives `DONTWAIT|CMSG_CLOEXEC`) |
 
 ---
 
@@ -1722,6 +1724,31 @@ facade and the `libc` additions are what closed the gaps a fork of either would
 otherwise have covered. What is left for `xkbcommon` is the link, not the source: it
 still needs `-lxkbcommon`, so the C-library decision is unchanged.
 
+**4c, landed: the server runtime, and the socket surface under it.** `wayland-server` 0.31 runs on the port: `/bin/wlgate` creates a `Display` with a `wl_compositor` global, accepts a stock `wayland-client` over `/run/wlgate`, and the client's registry handshake, bind, `create_surface`, `commit` and `roundtrip` all reach the server's `GlobalDispatch`/`Dispatch` impls (`just test-wlgate-<arch>`, x86_64/riscv64/aarch64). wayland-rs needed nothing beyond 4b's two epoll gates; what stood in the way was the port's **socket surface**, in three places, and each failed in a way that named the wrong layer:
+
+- **`getsockname` on a socket with no name answered `EINVAL`** (register row 30). `accept`'s
+  address argument is filled by asking the *accepted* end for its name, and the reference's
+  `do_getsockname` answers unconditionally — its comment says "libc depends on this
+  behavior" — with a zeroed `sockaddr_un`. The driver refused that case, so the connection
+  was queued and handed over and then the wrapper's lookup failed the whole `accept()`.
+  `tools/phase4-gate`'s `udsprobe` walks the path one step at a time — `getsockname`, a fresh
+  socket, the accept ioctl, then `std`'s wrapper over a second connection — which is what
+  separated the driver from the wrapper: the raw steps succeeded while the wrapper failed.
+- **The C ABI refused every nonzero `msg_flags`** (register row 31). `wayland-backend` sends
+  with `MSG_DONTWAIT | MSG_NOSIGNAL` and receives with `MSG_DONTWAIT | MSG_CMSG_CLOEXEC`, so
+  `send` failed with `EOPNOTSUPP` (95) and `recvmsg` with `ENOSYS` (78). The port can honour
+  all three: a socket never blocks, no signal reaches userspace, and `MSG_CMSG_CLOEXEC` is
+  applied to the descriptors the receive lifts out — after the body has moved, which is not
+  the kernel's atomic set and is recorded as the deviation.
+- **The uds group had no `getpeername`.** `rustix::net::recvmsg` always offers `msg_name`
+  room, and the shim answered `ENOSYS` rather than fill it. `NWIOGUDSPADDR` now exists
+  (`'u', 8`) and answers the peer's name, so `recvmsg` fills the field the reference fills.
+
+The gate's scenario runs with `FEED_PACE`, because the guest's console drops bytes mid-line
+on some runs: `/bin/wlgate` arrived once as `# in/wlgate` plus `/b`, which *runs* as a shorter
+command rather than failing the send (`silent-failure-traps`). Byte-at-a-time typing with a
+whole-echo check turns that into a retype.
+
 **Decisions left open, to take when their stage arrives**
 
 - **`xkbcommon`** — a binding to a *C* library. Either build `libxkbcommon` for minix
@@ -1741,9 +1768,9 @@ still needs `-lxkbcommon`, so the C-library decision is unchanged.
 
 | Stage | Deliverable | Gate |
 |---|---|---|
-| **4a** | **The patched OS crates and the event loop.** `[patch.crates-io]` copies of `rustix`, `polling` and `calloop` (minix arms, `rustix` on its `libc` backend), on the `coreutils/` model. **Landed:** the four forks and their arms — including `rustix`'s own errno accessors in place of the `errno` crate — with `cargo check` green (measured above). **Open:** the gate itself, behind VFS `pipe2` and the `minix-rt` duplicate | A calloop program drives a timerfd, an eventfd and a pipe source and dispatches them; `just test-calloop-x86` |
+| **4a** | **The patched OS crates and the event loop.** `[patch.crates-io]` copies of `rustix`, `polling` and `calloop` (minix arms, `rustix` on its `libc` backend), on the `coreutils/` model. **Landed:** the four forks and their arms — including `rustix`'s own errno accessors in place of the `errno` crate — with `cargo check` green (measured above), and the gate itself: `calloop` drives a timer, a timerfd, an eventfd and a pipe through one loop, behind VFS's `pipe2` and the `minix-rt` duplicate fix | A calloop program drives a timerfd, an eventfd and a pipe source and dispatches them; `just test-calloop-<arch>` (x86_64, riscv64, aarch64) |
 | **4b** | **The `rustix` surface**, per feature group, as smithay's dependencies draw on it | a probe per group |
-| **4c** | **`wayland-server` (wayland-rs 0.31)** — the backend and the protocol tables | a `GlobalDispatch`/`Dispatch` round-trip with a stock client |
+| **4c** | **`wayland-server` (wayland-rs 0.31) — the backend and the protocol tables.** **Landed:** a `Display` with a `wl_compositor` global and the `GlobalDispatch`/`Dispatch` impls serves a stock `wayland-client` over `/dev/uds` — the registry handshake, the bind, `create_surface`, `commit` and the client's `roundtrip` all arrive — after three socket-surface faults were fixed (register rows 30/31) | A `GlobalDispatch`/`Dispatch` round-trip with a stock client — `just test-wlgate-<arch>` (x86_64, riscv64, aarch64) |
 | **4d** | **A smithay compositor on screen** — `wayland_frontend` plus our renderer and input backend, one unmodified `wl_shm` client | a smithay compositor shows a stock client |
 | **4e** | **smithay's GL renderer** over Mesa/virgl, with `gbm`/`drm` | GL content through smithay |
 | **4f** | **`cosmic-comp`** built against the ported smithay | `cosmic-comp` on screen |

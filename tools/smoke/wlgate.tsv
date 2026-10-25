@@ -1,0 +1,13 @@
+# Phase 4c's gate, driven by `just test-wlgate-<arch>`.
+#
+# `/bin/udsprobe` first: the socket primitives the backend stands on — `accept` through the
+# driver's own ioctls *and* through `std::os::minix::net::UnixListener`, plus the C ABI's `send`
+# with the flags wayland-backend passes (`MSG_DONTWAIT | MSG_NOSIGNAL`). Both of those failed
+# 4c's first run, and a step that fails here names which of them it was.
+#
+# `/bin/wlgate` then: wayland-server's runtime with a `wl_compositor` global, serving a stock
+# wayland-client over the same socket. The server logs the requests it dispatched, so a PASS
+# says the registry handshake, the bind, `create_surface`, `commit` and the client's
+# `roundtrip` all crossed the socket.
+/bin/udsprobe	udsprobe: PASS both accept paths served a connection
+/bin/wlgate	wlgate: PASS wayland-server served a stock client

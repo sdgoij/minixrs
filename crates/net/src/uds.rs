@@ -78,7 +78,11 @@ pub const SOCKADDR_UN_SIZE: usize = core::mem::size_of::<SockAddrUn>();
 pub const NWIOSUDSPAIR: u32 = ioc_encode(IOC_IN, b'u', 1, 4);
 /// `NWIOSUDSADDR` — `bind`: name this socket. Arg: a [`SockAddrUn`].
 pub const NWIOSUDSADDR: u32 = ioc_encode(IOC_IN, b'u', 2, SOCKADDR_UN_SIZE);
-/// `NWIOGUDSADDR` — `getsockname`: the socket's bound name. Arg: a [`SockAddrUn`].
+/// `NWIOGUDSADDR` — `getsockname`: the socket's own name. Arg: a [`SockAddrUn`].
+///
+/// Answered unconditionally: a socket with no name gets a zeroed address (family
+/// `AF_UNSPEC`, empty path) rather than an error, which is what `accept` relies on when it
+/// asks the accepted end for its address.
 pub const NWIOGUDSADDR: u32 = ioc_encode(IOC_OUT, b'u', 3, SOCKADDR_UN_SIZE);
 /// `NWIOSUDSBLOG` — `listen`: begin accepting, with an `i32` backlog.
 pub const NWIOSUDSBLOG: u32 = ioc_encode(IOC_IN, b'u', 4, 4);
@@ -87,6 +91,12 @@ pub const NWIOSUDSCONN: u32 = ioc_encode(IOC_IN, b'u', 5, SOCKADDR_UN_SIZE);
 /// `NWIOSUDSACCEPT` — `accept`: pop a queued connection onto this socket. Arg:
 /// the *listener's* [`SockAddrUn`], as the reference's `_uds_accept` passes.
 pub const NWIOSUDSACCEPT: u32 = ioc_encode(IOC_IN, b'u', 6, SOCKADDR_UN_SIZE);
+/// `NWIOGUDSPADDR` — `getpeername`: the *peer's* own name. Arg: a [`SockAddrUn`].
+///
+/// The reference's `do_getpeername` copies the peer's address, and answers `ENOTCONN` when
+/// the socket has no peer. Its ioctl number is `'n', 71`; this port renumbers the whole uds
+/// group, and 8 is the free number between the minor query and the peer's credentials.
+pub const NWIOGUDSPADDR: u32 = ioc_encode(IOC_OUT, b'u', 8, SOCKADDR_UN_SIZE);
 /// `NWIOGUDSMINOR` — this socket's own clone minor (`i32`). Not a reference
 /// ioctl: the reference's `socketpair.c` takes the peer's minor from
 /// `fstat(sv[1]).st_dev`, which names the *clone* only because MINIX's VFS
@@ -330,12 +340,20 @@ mod tests {
         assert_eq!(ioc_size(NWIOSUDSPAIR), 4);
         assert_eq!(ioc_size(NWIOSUDSBLOG), 4);
         // The address-carrying calls are all one sockaddr_un.
-        for req in [NWIOSUDSADDR, NWIOGUDSADDR, NWIOSUDSCONN, NWIOSUDSACCEPT] {
+        for req in [
+            NWIOSUDSADDR,
+            NWIOGUDSADDR,
+            NWIOGUDSPADDR,
+            NWIOSUDSCONN,
+            NWIOSUDSACCEPT,
+        ] {
             assert_eq!(ioc_size(req), SOCKADDR_UN_SIZE);
         }
-        // getsockname and the minor query are the only ones that return data.
+        // getsockname, getpeername and the minor query are the only ones that return data.
         assert!(ioc_is_out(NWIOGUDSADDR));
         assert!(!ioc_is_in(NWIOGUDSADDR));
+        assert!(ioc_is_out(NWIOGUDSPADDR));
+        assert!(!ioc_is_in(NWIOGUDSPADDR));
         assert!(ioc_is_out(NWIOGUDSMINOR));
         assert_eq!(ioc_size(NWIOGUDSMINOR), 4);
         assert!(ioc_is_in(NWIOSUDSADDR));

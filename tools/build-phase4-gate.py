@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
-"""Build the Phase 4a gate: `calloopgate`, a calloop event loop on the minix targets.
+"""Build the Phase 4 gates: `calloopgate` (4a), `wlgate` (4c) and the `udsprobe` diagnostic.
 
-The gate binary is a cargo project of its own (`tools/phase4-gate`), because it needs the
+The gate binaries are a cargo project of its own (`tools/phase4-gate`), because they need the
 forked OS crates and `[patch.crates-io]` is only legal at a workspace root — the same shape as
 `tools/build-smithay.py`, and for the same reason: the root workspace must not read that patch
 table, or the forks would become a checkout requirement for every build in the tree.
 
-Outputs: `target/<triple>/release/calloopgate`, where `MINIXFS_EXTRA` can name it.
+Outputs: `target/<triple>/release/{calloopgate,wlgate,udsprobe}`, where `MINIXFS_EXTRA` can name
+them.
 
 Usage: python tools/build-phase4-gate.py [all|x86|riscv64|aarch64|<triple>]
                                         (default: x86_64-pc-minix)
@@ -33,7 +34,8 @@ from lld import find_lld  # noqa: E402
 from stage1 import find_stage1_rustc  # noqa: E402
 
 PROJECT = ROOT / "tools" / "phase4-gate"
-BINARY = "calloopgate"
+# The gate binaries this script produces; each is copied to `target/<triple>/release/`.
+BINARIES = ("calloopgate", "wlgate", "udsprobe")
 # Per host: the host artifacts (build scripts, proc macros) are not interchangeable between a
 # Windows and a WSL build of the same checkout.
 CARGO_TARGET = ROOT / "target" / "phase4-gate"
@@ -58,20 +60,22 @@ def build(arch: Arch, rustc: pathlib.Path, lld: pathlib.Path) -> int:
         "--manifest-path", str(PROJECT / "Cargo.toml"),
         "--target", arch.triple,
         "--release",
-        "--bin", BINARY,
     ]
+    for b in BINARIES:
+        cmd += ["--bin", b]
     print("running:", " ".join(cmd))
     if subprocess.run(cmd, env=env).returncode != 0:
         return 1
 
-    built = CARGO_TARGET / arch.triple / "release" / BINARY
-    if not built.is_file():
-        print(f"error: {built} was not produced", file=sys.stderr)
-        return 1
-    dest = ROOT / "target" / arch.triple / "release" / BINARY
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copyfile(built, dest)
-    print(f"wrote {dest.relative_to(ROOT)}")
+    for b in BINARIES:
+        built = CARGO_TARGET / arch.triple / "release" / b
+        if not built.is_file():
+            print(f"error: {built} was not produced", file=sys.stderr)
+            return 1
+        dest = ROOT / "target" / arch.triple / "release" / b
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(built, dest)
+        print(f"wrote {dest.relative_to(ROOT)}")
     return 0
 
 

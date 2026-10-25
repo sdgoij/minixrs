@@ -990,6 +990,40 @@ test-calloop-aarch64 boot-timeout="60": calloop-aarch64
     FEED_SCENARIO=tools/smoke/calloop.tsv sh tools/smoke/feed.sh target/test-calloop-aarch64.log {{boot-timeout}} qemu-system-aarch64 -machine virt -cpu cortex-a57 -m 256M -nographic -no-reboot -global virtio-mmio.force-legacy=off -netdev user,id=net0 -device virtio-net-device,netdev=net0 -device virtio-gpu-device -device virtio-keyboard-device -kernel target/aarch64-unknown-minix/release/kernel-boot-aarch64
     @echo "calloop: a timer, a timerfd, an eventfd and a pipe dispatched through one event loop (aarch64)"
 
+# Phase 4c's gate (`.notes/wayland.md` 6.13): wayland-rs's *server runtime* — a `Display`, a
+# `GlobalDispatch` global and the request `Dispatch` impls — serving a stock `wayland-client`
+# over the port's `/dev/uds` socket. `udsprobe` rides in the same scenario: it walks the accept
+# path (the driver's ioctls, then `std`'s wrapper) and the C ABI's `send` flags one step at a
+# time, so a failure names the primitive instead of the server.
+wlgate-x86:
+    python tools/build-phase4-gate.py x86
+
+wlgate-riscv64:
+    python tools/build-phase4-gate.py riscv64
+
+wlgate-aarch64:
+    python tools/build-phase4-gate.py aarch64
+
+test-wlgate-x86 boot-timeout="40": wlgate-x86
+    MSYS2_ENV_CONV_EXCL=MINIXFS_EXTRA MINIXFS_EXTRA='/bin/wlgate=target/x86_64-pc-minix/release/wlgate;/bin/udsprobe=target/x86_64-pc-minix/release/udsprobe' just build-x86
+    mkdir -p target/images/x86_64-pc-minix
+    cp target/trampoline.elf target/images/x86_64-pc-minix/minix-x86.elf
+    @just _assert-qemu-version qemu-system-x86_64
+    FEED_PACE=0.02 FEED_SCENARIO=tools/smoke/wlgate.tsv sh tools/smoke/feed.sh target/test-wlgate-x86.log {{boot-timeout}} qemu-system-x86_64 -nographic -m 256M -no-reboot -vga none -device bochs-display,id=fb0 -kernel target/images/x86_64-pc-minix/minix-x86.elf -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0 -device virtio-tablet-pci,display=fb0
+    @echo "wlgate: wayland-server served a stock client over the port's socket (x86_64)"
+
+test-wlgate-riscv64 boot-timeout="60": wlgate-riscv64
+    MSYS2_ENV_CONV_EXCL=MINIXFS_EXTRA MINIXFS_EXTRA='/bin/wlgate=target/riscv64gc-unknown-minix/release/wlgate;/bin/udsprobe=target/riscv64gc-unknown-minix/release/udsprobe' just build-riscv64
+    @just _assert-qemu-version qemu-system-riscv64
+    FEED_PACE=0.02 FEED_SCENARIO=tools/smoke/wlgate.tsv sh tools/smoke/feed.sh target/test-wlgate-riscv64.log {{boot-timeout}} qemu-system-riscv64 -machine virt -m 256M -nographic -global virtio-mmio.force-legacy=off -netdev user,id=net0 -device virtio-net-device,netdev=net0 -device virtio-gpu-device -device virtio-keyboard-device -kernel target/riscv64gc-unknown-minix/release/kernel-boot-riscv64
+    @echo "wlgate: wayland-server served a stock client over the port's socket (riscv64)"
+
+test-wlgate-aarch64 boot-timeout="60": wlgate-aarch64
+    MSYS2_ENV_CONV_EXCL=MINIXFS_EXTRA MINIXFS_EXTRA='/bin/wlgate=target/aarch64-unknown-minix/release/wlgate;/bin/udsprobe=target/aarch64-unknown-minix/release/udsprobe' just build-aarch64
+    @just _assert-qemu-version qemu-system-aarch64
+    FEED_PACE=0.02 FEED_SCENARIO=tools/smoke/wlgate.tsv sh tools/smoke/feed.sh target/test-wlgate-aarch64.log {{boot-timeout}} qemu-system-aarch64 -machine virt -cpu cortex-a57 -m 256M -nographic -no-reboot -global virtio-mmio.force-legacy=off -netdev user,id=net0 -device virtio-net-device,netdev=net0 -device virtio-gpu-device -device virtio-keyboard-device -kernel target/aarch64-unknown-minix/release/kernel-boot-aarch64
+    @echo "wlgate: wayland-server served a stock client over the port's socket (aarch64)"
+
 test-gltriangle-riscv64 boot-timeout="180": gltriangle-riscv64 boot-image-riscv64
     @just _assert-qemu-version qemu-system-riscv64
     M=target/mesa/riscv64; E="/lib/libdrm.so.2=$M/lib/libdrm.so.2;/lib/libEGL.so.1=$M/lib/libEGL.so.1;/lib/libgbm.so.1=$M/lib/libgbm.so.1;/lib/libexpat.so.1=$M/lib/libexpat.so.1;/lib/libgallium-25.3.6.so=$M/lib/libgallium-25.3.6.so;/lib/libGLESv2.so.2=$M/lib/libGLESv2.so.2;/lib/libz.so.1=$M/lib/libz.so.1;/lib/swrast_dri.so=$M/lib/swrast_dri.so;/bin/gltriangle=$M/bin/gltriangle"; MINIXFS_EXTRA="$E" MINIXFS_BLOCKS=16384 cargo run -q -p boot-image --bin mkminixfs --release -- riscv64

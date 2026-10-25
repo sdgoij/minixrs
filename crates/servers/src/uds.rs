@@ -57,9 +57,9 @@ use arch_common::com::{
 };
 use arch_common::ipc::Message;
 use net::{
-    AF_UNIX, NWIOGUDSADDR, NWIOGUDSMINOR, NWIOGUDSPEERCRED, NWIOSUDSACCEPT, NWIOSUDSADDR,
-    NWIOSUDSBLOG, NWIOSUDSCONN, NWIOSUDSCTRL, NWIOSUDSPAIR, SOCKADDR_UN_SIZE, UDS_PATH_MAX,
-    UUCRED_SIZE,
+    AF_UNIX, NWIOGUDSADDR, NWIOGUDSMINOR, NWIOGUDSPADDR, NWIOGUDSPEERCRED, NWIOSUDSACCEPT,
+    NWIOSUDSADDR, NWIOSUDSBLOG, NWIOSUDSCONN, NWIOSUDSCTRL, NWIOSUDSPAIR, SOCKADDR_UN_SIZE,
+    UDS_PATH_MAX, UUCRED_SIZE,
 };
 
 /// The minor every `open("/dev/uds")` arrives as. As with `/dev/udp`'s minor 1,
@@ -788,13 +788,35 @@ unsafe fn do_ioctl(msg: &mut Message) -> i32 {
             let Some(i) = index_of(socks, minor) else {
                 return EBADF;
             };
-            if !socks[i].bound {
-                return EINVAL;
-            }
+            // Answered unconditionally, as the reference's `do_getsockname` does: a socket
+            // with no name gets a zeroed address, not an error. `libc` depends on it —
+            // `accept` asks the *accepted* end for its name, and an accepted end is not
+            // bound. Answering `EINVAL` there failed every `accept` whose caller looked the
+            // address up.
             let mut raw = [0u8; SOCKADDR_UN_SIZE];
-            raw[..2].copy_from_slice(&AF_UNIX.to_ne_bytes());
-            let n = socks[i].path_len;
-            raw[2..2 + n].copy_from_slice(&socks[i].path[..n]);
+            if socks[i].bound {
+                raw[..2].copy_from_slice(&AF_UNIX.to_ne_bytes());
+                let n = socks[i].path_len;
+                raw[2..2 + n].copy_from_slice(&socks[i].path[..n]);
+            }
+            safecopy_to_grant(granter, grant, &raw)
+        }
+        NWIOGUDSPADDR => {
+            let socks = unsafe { table() };
+            let Some(i) = index_of(socks, minor) else {
+                return EBADF;
+            };
+            let peer = socks[i].peer;
+            if peer < 0 || !socks[peer as usize].in_use {
+                return ENOTCONN;
+            }
+            let p = peer as usize;
+            let mut raw = [0u8; SOCKADDR_UN_SIZE];
+            if socks[p].bound {
+                raw[..2].copy_from_slice(&AF_UNIX.to_ne_bytes());
+                let n = socks[p].path_len;
+                raw[2..2 + n].copy_from_slice(&socks[p].path[..n]);
+            }
             safecopy_to_grant(granter, grant, &raw)
         }
         NWIOGUDSMINOR => {
