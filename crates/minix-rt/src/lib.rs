@@ -77,13 +77,18 @@ pub fn sigreturn_trampoline_addr() -> u64 {
 /// which makes PM restore the process's signal mask and invoke SYS_SIGRETURN
 /// to restore the interrupted register state. Never returns.
 ///
+/// Deliberately not `no_mangle`: nothing reaches it by name — PM is handed its
+/// address through `sigreturn_trampoline_addr`, and the kernel only ever uses
+/// the number — while a program that links the sysroot's `minix-rt` (through
+/// std) *and* a second copy (through `minix-libc`, whose `libc` backend rustix
+/// draws on) would otherwise define the symbol twice and fail to link.
+///
 /// # Safety
 ///
 /// Must only be entered via the return-address slot of a signal frame built
 /// by the kernel's do_sigsend; it clobbers the caller's registers.
 #[cfg(target_arch = "x86_64")]
 #[unsafe(naked)]
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn minix_sigreturn_trampoline() -> ! {
     core::arch::naked_asm!(
         // The handler returned via `ret`, popping the trampoline address
@@ -110,7 +115,6 @@ pub unsafe extern "C" fn minix_sigreturn_trampoline() -> ! {
 /// do_sigsend; it clobbers the caller's registers.
 #[cfg(target_arch = "riscv64")]
 #[unsafe(naked)]
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn minix_sigreturn_trampoline() -> ! {
     core::arch::naked_asm!(
         "ld     a0, 280(sp)", // scp from the frame
@@ -136,7 +140,6 @@ pub unsafe extern "C" fn minix_sigreturn_trampoline() -> ! {
 /// do_sigsend; it clobbers the caller's registers.
 #[cfg(target_arch = "aarch64")]
 #[unsafe(naked)]
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn minix_sigreturn_trampoline() -> ! {
     core::arch::naked_asm!(
         "ldr    x0, [sp, #312]", // scp from the frame
@@ -180,7 +183,6 @@ pub fn set_sigframe_ptr(addr: u64) {
 /// is not yet exercised on wasm32; this is the §6.3 contract implemented, not a
 /// placeholder.
 #[cfg(target_arch = "wasm32")]
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn minix_sigreturn_trampoline() -> ! {
     let scp = SIGFRAME_PTR.load(core::sync::atomic::Ordering::Relaxed);
     let mut msg = [0u8; 64];
