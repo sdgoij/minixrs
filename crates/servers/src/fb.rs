@@ -676,10 +676,11 @@ unsafe fn handle_cdev_request(
         }
         CDEV_IOCTL => {
             let request = unsafe { msg.m_payload.m2.m2i2 as u32 };
-            // FBIO_SCANOUT_SRC: the compositor sends this one straight here (it cannot afford a
-            // VFS round trip, §6.11), so its argument rides in the payload — m2l2 = the buffer's
-            // VA, m2l3 = its length — and the caller is the sender, not a grant's holder.
-            if request == FBIO_SCANOUT_SRC {
+            // FBIO_SCANOUT_SRC sent *directly* by a boot process (the compositor of 3d-b/4d): its
+            // argument rides in the payload (m2l2 = VA, m2l3 = length) and the caller is the
+            // sender. The same request through VFS is an ordinary arg-struct ioctl and is left to
+            // `do_ioctl`, which learns the real caller from m2_l1.
+            if request == FBIO_SCANOUT_SRC && who_e != arch_common::com::VFS_PROC_NR {
                 let src = FbScanoutSrc {
                     va: unsafe { msg.m_payload.m2.m2l2 } as u64,
                     len: unsafe { msg.m_payload.m2.m2l3 } as u64,
@@ -912,6 +913,7 @@ fn do_ioctl(minor: u32, request: u32, who_e: i32, grant: u32, user: i32) -> i32 
             core::mem::size_of::<drivers::video::fb::FbVarScreeninfo>(),
             false,
         ),
+        FBIO_SCANOUT_SRC => (core::mem::size_of::<FbScanoutSrc>(), false),
         FBIOFLUSH => (0, false),
         _ => return -25, // ENOTTY
     };
@@ -925,6 +927,21 @@ fn do_ioctl(minor: u32, request: u32, who_e: i32, grant: u32, user: i32) -> i32 
         if safecopy_from(who_e, grant, scratch, arg_size) != 0 {
             return -14; // EFAULT
         }
+    }
+
+    // The scan-out re-point travels as a normal ioctl when the caller is a user process: VFS is
+    // the sender, and the buffer's address space is the one named in m2_l1 (`user`). A boot
+    // process never reaches this arm (it sends the payload form above).
+    if request == FBIO_SCANOUT_SRC {
+        let size = core::mem::size_of::<FbScanoutSrc>();
+        if arg_size < size {
+            return -14; // EFAULT
+        }
+        let mut raw = [0u8; core::mem::size_of::<FbScanoutSrc>()];
+        raw.copy_from_slice(&scratch[..size]);
+        // SAFETY: `raw` is exactly the struct's size; the read is unaligned on purpose.
+        let src = unsafe { core::ptr::read_unaligned(raw.as_ptr() as *const FbScanoutSrc) };
+        return scanout_src(user, src);
     }
 
     let data = scratch;

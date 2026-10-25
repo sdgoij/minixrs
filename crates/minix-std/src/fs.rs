@@ -1388,8 +1388,9 @@ pub fn epoll_wait(epfd: i32, events: &mut [EpollEvent], timeout_ms: i32) -> Resu
 pub const FBIOFLUSH: u32 = 0x4604;
 
 /// Make the caller's buffer the scanout (FBIO_SCANOUT_SRC, `/dev/fb`); a zero length restores the
-/// driver's own buffer. Must match `drivers::video::fb::FBIO_SCANOUT_SRC`.
-pub const FBIO_SCANOUT_SRC: u32 = 0x4605;
+/// driver's own buffer. Must match `drivers::video::fb::FBIO_SCANOUT_SRC` — including its `_IOW`
+/// size and direction, which VFS needs to build the argument's grant.
+pub const FBIO_SCANOUT_SRC: u32 = 0x8010_4605;
 
 /// Perform an I/O control operation on a file descriptor.
 ///

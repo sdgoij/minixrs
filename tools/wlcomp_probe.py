@@ -1,0 +1,222 @@
+#!/usr/bin/env python3
+"""The 4d-2 gate: a stock `wl_shm` client through smithay's compositor to the scan-out.
+
+`/bin/wlcomp` binds `/run/wlcomp`, forks, and leaves a smithay compositor (`CompositorState` +
+`ShmState` + a `wl_output`) serving in the child (`.notes/wayland.md` 6.13, 4d-2). `/bin/wlshm`
+is a stock `wayland-client`: it creates one memfd with two 1024x768 `Xrgb8888` frames, commits
+them in turn, and waits for the first `wl_buffer.release`. The compositor draws each commit into
+an offscreen GLES target, reads the frame back (D18) and re-points the fb server's scan-out at
+it (`FBIO_SCANOUT_SRC`), so the frame *is* the compositor's buffer and the display shows what
+smithay composed.
+
+Evidence: the serial log's `fb: scanout src` line (the re-point was taken), the client's release
+line (the compositor held and returned the buffer), and a QMP screendump of the second frame's
+colour. The output is a `virtio-gpu-pci` with no bochs-display, because only a virtio-gpu can
+re-back its scanout (D11).
+"""
+import json
+import os
+import socket
+import subprocess
+import sys
+import threading
+import time
+
+SCREEN = "target/wlcomp.ppm"
+
+# The compositor returns to the shell as soon as its socket is bound; the client is typed next.
+SERVER_CMD = "/bin/wlcomp"
+CLIENT_CMD = "/bin/wlshm"
+
+lock = threading.Lock()
+out = bytearray()
+qemu = None
+
+
+def pump():
+    while True:
+        chunk = qemu.stdout.read1(65536)
+        if not chunk:
+            break
+        with lock:
+            out.extend(chunk)
+
+
+def qmp_cmd(s, obj):
+    s.sendall((json.dumps(obj) + "\n").encode())
+    data = b""
+    while True:
+        chunk = s.recv(65536)
+        data += chunk
+        try:
+            return json.loads(data.decode().splitlines()[-1])
+        except Exception:
+            if len(data) > (1 << 20):
+                return None
+
+
+def send_paced(cmd, per_byte_ms=20):
+    """Type `cmd` a byte at a time, slowly enough for this guest's console."""
+    for ch in cmd.encode() + b"\n":
+        qemu.stdin.write(bytes([ch]))
+        qemu.stdin.flush()
+        time.sleep(per_byte_ms / 1000.0)
+
+
+def wait_for(pred, timeout):
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        with lock:
+            if pred():
+                return True
+        time.sleep(0.05)
+    with lock:
+        return pred()
+
+
+def type_line_and_wait(cmd, want, fail_marker, timeout, attempts=3):
+    """Type `cmd` at the prompt and wait for `want`, retyping a line the guest never echoed.
+
+    The echo is what says whether the line arrived, because this console mangles bursts: a
+    line the guest never echoed whole is typed again; one that *was* echoed is the program's
+    own answer, and a `fail_marker` in it is reported rather than retried.
+    """
+    with lock:
+        anchor = len(out)
+    for _ in range(attempts):
+        send_paced(cmd)
+        wait_for(lambda: want in out or fail_marker in out[anchor:], timeout)
+        with lock:
+            seen = bytes(out[anchor:])
+        if want in seen:
+            return True
+        if fail_marker in seen:
+            return False
+        if cmd.encode() in seen:
+            return False
+        wait_for(lambda: b"# " in out[anchor:], 5)
+    return False
+
+
+def read_screendump():
+    """Read `SCREEN` once QEMU has finished writing it (the PPM header carries the size)."""
+    deadline = time.time() + 15
+    while time.time() < deadline:
+        try:
+            with open(SCREEN, "rb") as f:
+                data = f.read()
+        except OSError:
+            data = b""
+        parts = data.split(b"\n", 3)
+        if len(parts) == 4 and parts[0] == b"P6":
+            dims = parts[1].split()
+            if len(dims) == 2:
+                w, h = int(dims[0]), int(dims[1])
+                if len(parts[3]) >= w * h * 3:
+                    return w, h, parts[3]
+        time.sleep(0.05)
+    return None
+
+
+def screendump(s):
+    try:
+        os.unlink(SCREEN)
+    except OSError:
+        pass
+    r = qmp_cmd(s, {"execute": "screendump", "arguments": {"filename": SCREEN}})
+    if r is None or r.get("return") is None:
+        return None
+    return read_screendump()
+
+
+def pxat(screen, x, y):
+    w, h, px = screen
+    off = (y * w + x) * 3
+    return px[off:off + 3]
+
+
+def tail(n=1200):
+    with lock:
+        return bytes(out[-n:]).decode(errors="replace")
+
+
+def main():
+    global qemu
+    argv = sys.argv[1:]
+    if not argv:
+        print("usage: wlcomp_probe.py <qemu command...>", file=sys.stderr)
+        sys.exit(2)
+    qemu = subprocess.Popen(
+        argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+    )
+    threading.Thread(target=pump, daemon=True).start()
+
+    if not wait_for(lambda: b"# " in out, 240):
+        print("NO PROMPT", file=sys.stderr)
+        qemu.kill()
+        sys.exit(1)
+    time.sleep(1.0)
+
+    q = socket.create_connection(("127.0.0.1", 4447), timeout=5)
+    qmp_cmd(q, {"execute": "qmp_capabilities"})
+
+    # Baseline: the fb server's boot RGB pattern, so the display is known live before any commit.
+    base = screendump(q)
+    if base is None:
+        print("BASELINE SCREENDUMP FAILED", file=sys.stderr)
+        q.close()
+        qemu.kill()
+        sys.exit(1)
+    base_ok = (pxat(base, 0, 0) == bytes([255, 0, 0])
+               and pxat(base, 512, 100) == bytes([0, 255, 0])
+               and pxat(base, 1023, 767) == bytes([0, 0, 255]))
+    print("baseline rgb: %s" % base_ok, flush=True)
+    if not base_ok:
+        print("BASELINE RGB MISMATCH", file=sys.stderr)
+        q.close()
+        qemu.kill()
+        sys.exit(1)
+
+    if not type_line_and_wait(SERVER_CMD, b"wlcomp: ready on", b"wlcomp: FAIL", 60):
+        print("the compositor did not become ready; tail:\n%s" % tail(), file=sys.stderr)
+        q.close()
+        qemu.kill()
+        sys.exit(1)
+
+    if not type_line_and_wait(CLIENT_CMD, b"wlshm: PASS", b"wlshm: FAIL", 40):
+        print("the client did not pass; tail:\n%s" % tail(), file=sys.stderr)
+        q.close()
+        qemu.kill()
+        sys.exit(1)
+
+    with lock:
+        log = bytes(out)
+    took_scanout = b"fb: scanout src" in log and b"fb: scanout src refused" not in log
+    presented = b"wlcomp: presented" in log
+    released = b"wlshm: wl_buffer released" in log
+    for line in log.splitlines():
+        text = line.decode(errors="replace")
+        if text.startswith(("fb: scanout", "wlcomp:", "wlshm:")):
+            print("serial: %s" % text, flush=True)
+    print("scanout re-pointed=%s presented=%s buffer released=%s"
+          % (took_scanout, presented, released), flush=True)
+
+    time.sleep(0.5)
+    shot = screendump(q)
+    if shot is None:
+        print("FINAL SCREENDUMP FAILED", file=sys.stderr)
+        q.close()
+        qemu.kill()
+        sys.exit(1)
+    # Buffer B is Xrgb8888 0x00FF00FF: B=FF,G=00,R=FF -> RGB (255,0,255).
+    centre = pxat(shot, 512, 384) == bytes([255, 0, 255])
+    corner = pxat(shot, 0, 0) == bytes([255, 0, 255])
+    print("after commit: centre magenta=%s, corner magenta=%s" % (centre, corner), flush=True)
+
+    q.close()
+    qemu.kill()
+    sys.exit(0 if (took_scanout and presented and released and centre and corner) else 1)
+
+
+if __name__ == "__main__":
+    main()

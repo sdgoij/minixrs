@@ -19,10 +19,10 @@
 //! `dlopen` answers "this program is statically linked". `libxkbcommon` is linked
 //! statically, because a crate's native libraries land inside rustc's `-Bstatic` window.
 
-use core::ffi::c_void;
+#[path = "../gl.rs"]
+mod gl;
 
 use smithay::backend::allocator::Fourcc;
-use smithay::backend::egl::EGLContext;
 use smithay::backend::renderer::gles::{GlesRenderer, GlesTexture};
 use smithay::backend::renderer::{Bind, Color32F, ExportMem, Frame, Offscreen, Renderer};
 use smithay::utils::{Buffer, Physical, Rectangle, Size, Transform};
@@ -30,109 +30,24 @@ use smithay::utils::{Buffer, Physical, Rectangle, Size, Transform};
 /// The offscreen target's side, and the region read back.
 const SIDE: i32 = 64;
 
-/// The handles `egl_bootstrap.c` hands back.
-#[repr(C)]
-struct GlBootstrap {
-    display: *mut c_void,
-    config: *mut c_void,
-    context: *mut c_void,
-    surface: *mut c_void,
-    /// `eglGetError()` from the step that failed.
-    error: i32,
-    /// Whether `eglGetPlatformDisplayEXT` was found, and what each display path answered.
-    have_platform_display: i32,
-    platform_error: i32,
-    env_error: i32,
-    egl_major: i32,
-    egl_minor: i32,
-    /// `glGetString` of the context: the vendor, driver and GL version that ran.
-    gl_vendor: [core::ffi::c_char; 64],
-    gl_renderer: [core::ffi::c_char; 64],
-    gl_version: [core::ffi::c_char; 64],
-}
-
-unsafe extern "C" {
-    /// Creates the display, config, GLES 3 context and pbuffer, and makes the context current.
-    /// Returns 0, or a negative code naming the step that failed.
-    fn glgate_egl_bootstrap(out: *mut GlBootstrap, width: i32, height: i32) -> i32;
-}
-
 fn fail(message: &str) -> ! {
     println!("glgate: FAIL {message}");
     std::process::exit(1);
 }
 
-/// Reads one of the NUL-terminated strings `egl_bootstrap.c` copied out of `glGetString`.
-fn c_string(bytes: &[core::ffi::c_char; 64]) -> std::borrow::Cow<'_, str> {
-    // SAFETY: the C side NUL-terminates within the 64 bytes it was given.
-    unsafe { core::ffi::CStr::from_ptr(bytes.as_ptr()) }.to_string_lossy()
-}
-
 fn main() {
-    let mut bootstrap = GlBootstrap {
-        display: core::ptr::null_mut(),
-        config: core::ptr::null_mut(),
-        context: core::ptr::null_mut(),
-        surface: core::ptr::null_mut(),
-        error: 0,
-        have_platform_display: 0,
-        platform_error: 0,
-        env_error: 0,
-        egl_major: 0,
-        egl_minor: 0,
-        gl_vendor: [0; 64],
-        gl_renderer: [0; 64],
-        gl_version: [0; 64],
+    let (bootstrap, context) = match gl::create_context(SIDE, SIDE) {
+        Ok(pair) => pair,
+        Err(e) => fail(&e),
     };
-    // SAFETY: the struct is writable for the call's duration and every handle it returns stays
-    // valid for the process (nothing terminates the display or destroys the context).
-    let step = unsafe { glgate_egl_bootstrap(&mut bootstrap, SIDE, SIDE) };
-    if step != 0 {
-        println!(
-            "glgate: egl platform-extension={} platform-error=0x{:04x} env-error=0x{:04x}              version={}.{}",
-            if bootstrap.have_platform_display != 0 {
-                "found"
-            } else {
-                "missing"
-            },
-            bootstrap.platform_error,
-            bootstrap.env_error,
-            bootstrap.egl_major,
-            bootstrap.egl_minor
-        );
-        fail(&format!(
-            "EGL bootstrap failed at step {} (eglGetError 0x{:04x})",
-            -step, bootstrap.error
-        ));
-    }
     println!(
         "glgate: egl display, config, GLES 3 context and pbuffer ok (EGL {}.{})",
         bootstrap.egl_major, bootstrap.egl_minor
     );
-    // The driver that actually ran: a `PASS` on its own cannot tell virgl from llvmpipe.
-    println!(
-        "glgate: GL_VENDOR={} GL_RENDERER={} GL_VERSION={}",
-        c_string(&bootstrap.gl_vendor),
-        c_string(&bootstrap.gl_renderer),
-        c_string(&bootstrap.gl_version),
-    );
-
-    // The display is wrapped through the context below (`EGLContext::from_raw` registers it),
-    // so nothing else is taken from it here.
-    //
-    // SAFETY: the handles are the ones the bootstrap created, and it keeps them alive for the
-    // whole process; nothing else creates an EGL display with these parameters.
-    let context = match unsafe {
-        EGLContext::from_raw(bootstrap.display, bootstrap.config, bootstrap.context)
-    } {
-        Ok(context) => context,
-        Err(e) => fail(&format!("EGL context wrap failed: {e:?}")),
-    };
+    // The driver that actually ran: a `PASS` on its own cannot tell virgl from software.
+    println!("glgate: {}", gl::describe(&bootstrap));
     println!("glgate: smithay wrapped the display and the context");
 
-    // What the GL actually is. (`glGetString` is resolved by the C bootstrap while the
-    // context is current; smithay keeps its own entry points to itself, so a proc-address
-    // lookup taken from here answers null.)
     // SAFETY: the context is not current in any other thread.
     match unsafe { GlesRenderer::supported_capabilities(&context) } {
         Ok(capabilities) => println!("glgate: capabilities={capabilities:?}"),
@@ -199,52 +114,5 @@ fn main() {
         println!("glgate: PASS clear=green");
     } else {
         fail("the pixel read back is not the clear colour");
-    }
-}
-
-/// `getrandom`'s custom backend (`--cfg getrandom_backend="custom"`).
-///
-/// The port has no entropy source yet, and nothing on 4d's path needs cryptographic
-/// randomness: smithay's `rand` use is identifiers and cookies. A counter mixed with the
-/// stack address and the cycle counter is enough for that, and it is *not* enough for
-/// anything else — which is why it lives in a gate and not in a library.
-mod entropy {
-    use core::sync::atomic::{AtomicU64, Ordering};
-
-    static COUNTER: AtomicU64 = AtomicU64::new(0);
-
-    fn splitmix64(x: u64) -> u64 {
-        let mut z = x.wrapping_add(0x9E37_79B9_7F4A_7C15);
-        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
-        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
-        z ^ (z >> 31)
-    }
-
-    pub fn fill(dest: &mut [u8]) -> Result<(), getrandom::Error> {
-        let stack = core::ptr::addr_of!(dest) as u64;
-        let counter = COUNTER.fetch_add(1, Ordering::Relaxed);
-        #[cfg(target_arch = "x86_64")]
-        let cycles = unsafe { core::arch::x86_64::_rdtsc() };
-        #[cfg(not(target_arch = "x86_64"))]
-        let cycles = 0u64;
-        let mut next = splitmix64(stack ^ counter.rotate_left(32) ^ cycles);
-        for chunk in dest.chunks_mut(8) {
-            next = splitmix64(next);
-            for (i, byte) in chunk.iter_mut().enumerate() {
-                *byte = (next >> (i * 8)) as u8;
-            }
-        }
-        Ok(())
-    }
-
-    #[unsafe(no_mangle)]
-    pub unsafe extern "Rust" fn __getrandom_v03_custom(
-        dest: *mut u8,
-        len: usize,
-    ) -> Result<(), getrandom::Error> {
-        // SAFETY: the caller guarantees `dest` is writable for `len` bytes, which is the
-        // contract this symbol's cfg selects.
-        let dest = unsafe { core::slice::from_raw_parts_mut(dest, len) };
-        fill(dest)
     }
 }

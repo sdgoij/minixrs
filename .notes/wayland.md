@@ -1854,12 +1854,43 @@ search path that serves `-lxkbcommon` has to be a `-Z pre-link-arg`; `-Lnative` 
 backend (`--cfg getrandom_backend="custom"`), because smithay's `rand` reaches it and the
 port has no entropy source.
 
+**4d-2, landed: smithay composes a stock `wl_shm` client and the scan-out takes the frame.**
+`/bin/wlcomp` binds `/run/wlcomp`, forks and leaves the compositor serving in the child, so the
+shell's prompt returns and the gate can type `/bin/wlshm` next: a stock `wayland-client` that puts
+two whole-output `Xrgb8888` frames in one `memfd`, commits them in turn and waits for the first
+`wl_buffer.release`. smithay's `CompositorState` (`wl_compositor`), `ShmState` (`wl_shm`) and a
+`wl_output` serve it; the commit handler draws every committed surface into 4d-1's offscreen
+target, reads the frame back, packs it as `XRGB8888` (bottom row first to top row first, R and B
+swapped) and re-points the scan-out at that buffer. `just test-wlcomp-x86` is green: the log shows
+`fb: scanout src`, `wlcomp: presented 1 surface(s), scanout re-pointed` and `wlshm: wl_buffer
+released`, and a QMP screendump is the second frame's magenta. The driver is `softpipe`, as in
+4d-1.
+
+- **A user process cannot call the fb server.** The first present answered `-210`
+  (`ECALLDENIED`): `SENDREC_CALL` is gated by the caller's `s_ipc_to` (`kernel::priv::may_send_to`),
+  and a shell-spawned binary may reach PM and FS but not the fb server. The direct `CDEV_IOCTL`
+  path exists for boot processes (`wlserver`, §6.11) — and a compositor that renders with
+  `GlesRenderer` cannot be one, because it must be dynamically linked (EGL is `dlopen`ed) while
+  nothing the boot path execs carries `PT_INTERP`. So the ordinary VFS path is the one that had to
+  work.
+- **`FBIO_SCANOUT_SRC` is an ordinary ioctl now.** It travels as
+  `_IOW('F', 5, FbScanoutSrc)` (`0x80104605`): the size and direction are part of the number
+  because VFS builds its magic grant from them. VFS's `CDEV_IOCTL` names the real caller in
+  `m2_l1`, so the fb server resolves the range through *that* process's page table rather than
+  VFS's. The payload form (`m2l2`/`m2l3`, caller = sender) stays for a boot client that calls the
+  server directly, chosen by `who_e == VFS_PROC_NR`; `test-wlfull-x86` still passes, which is the
+  proof that the direct path did not change.
+- **A present reverts before re-pointing.** The fb server skips a re-point it believes repeats
+  (same endpoint, VA and length), and this buffer's *contents* change between commits, so each
+  frame is `FBIO_SCANOUT_SRC(0, 0)` followed by the real one — the reason 3d-b-5 recorded (D27)
+  for the helper's frame, now applied to a buffer that is reused.
+
 Staged, each with a gate
 
 | Stage | Deliverable | Gate |
 |---|---|---|
 | **4d-1** | **The renderer on the port.** `libloading`'s fork as a submodule, `libxkbcommon` built and staged like `libdrm`/`libgbm`, and a binary that takes smithay's surfaceless `EGLDisplay` → `EGLContext` → `GlesRenderer`. **Landed:** `/bin/glgate` clears a 64×64 `Abgr8888` offscreen target through `GlesRenderer` and reads the pixel back exactly, on the software driver (`softpipe`, this host's virgl being ES2-only); `libxkbcommon` is staged both ways | The guest prints the GL renderer's name and clears a framebuffer whose pixel reads back — `just test-glgate-x86` |
-| **4d-2** | **The compositor.** `CompositorState`, `ShmGlobal` and an output, on its own socket; one stock `wl_shm` client commits a surface, smithay composes it into the offscreen target and 3d-b-1 scans the frame out | A host screendump shows the client's colour, and the client's `wl_buffer` is released |
+| **4d-2** | **The compositor.** `CompositorState`, `ShmGlobal` and an output, on its own socket; one stock `wl_shm` client commits a surface, smithay composes it into the offscreen target and 3d-b-1 scans the frame out. **Landed:** `/bin/wlcomp` serves a stock `wayland-client` that commits two frames; the second is on the scan-out and the first's `wl_buffer` is released. A user process reaches the fb server through VFS, so `FBIO_SCANOUT_SRC` is now a sized `_IOW` ioctl | A host screendump shows the client's colour, and the client's `wl_buffer` is released — `just test-wlcomp-x86` |
 | **4d-3** | **Input.** The input server behind smithay's `InputBackend`, a `wl_seat` advertised and routed to the focused surface | A key reaches the client through smithay |
 | **4d-4** | **The software renderer** behind the same `Renderer` seam | 4d-2's gate with the software renderer selected |
 | **4d-5** | **`zwp_linux_dmabuf_v1` through smithay** (`DmabufGlobal` + `ImportDma`) | A dma-buf client's frame reaches the scan-out with no client-side transfer |
@@ -1874,7 +1905,7 @@ Staged, each with a gate
 | **1** | In-house Wayland server, scoped in **§6.11**. **Landed:** 1a — the wire/interface crate and the registry + `sync` handshake over `/dev/uds` (`test-wayland-x86`); 1b — the `wl_shm` present path: `/sbin/wlserver` (boot proc 20) maps `/dev/fb`, `/bin/wlclient` draws into a memfd pool and commits a surface, and the frame is read back from `/dev/fb` (`test-wlshm-x86`); 1c — input: `wl_seat` keyboard/pointer, focus and `enter`, and a key routed from the device to a client (`test-wlkey-x86`), over an input-server ring that keeps a cursor per consumer and a terminal readiness path that reports instead of pushing (`KNOWN_ISSUES` 36, `test-pty-x86`). **Open:** none. | A `wl_shm` client renders through the server to `/dev/fb`, driven by a QEMU smoke scenario (same shape as `tools/smoke/`); a **ported stock** client later, on the same protocol |
 | **2** | `xdg_shell`, decorations, `layer_shell`, popups, damage tracking, cursor, keymaps, multi-output — scoped in **§6.12**. **Landed:** 2a — the seat's keymap, compiled into `wlserver` and served over an fd (`test-wlkey-x86`); 2b — `xdg_shell`: `xdg_wm_base`/`xdg_surface`/`xdg_toplevel`, `configure`/`ack_configure`, `ping`/`pong`, and a toplevel presented at the configured size (`test-wlx-x86`); 2c — several clients at once and per-surface focus, with input routed to the focused connection (`test-wlfocus-x86`); 2d — damage tracking, so only the damaged rectangle is recomposited, and the pointer's cursor image (`test-wlxd-x86`); 2e — popups, `zwlr_layer_shell_v1` and client-side decorations (`test-wlxe-x86`). **Open:** multi-output. | A real toolkit client runs a window with chrome and input |
 | **3** | GL rendering, scoped in **§6.10** — virgl over `virtio-gpu` first: 3D transport, a `virtgpu` render node, Mesa + `libdrm` as DSOs; llvmpipe kept as the fallback. **Landed:** 3a — the 3D transport and virgl negotiation (`test-gpu3d-x86`, `test-gpu3d-nogl-x86`); 3b — the `/dev/dri/renderD128` node: GEM, contexts, blobs, transfers, submits, `WAIT` and `mmap` (`test-drmmap-x86`, `test-drmgl-x86`); 3c's build half — Mesa builds with the `virgl` gallium driver and the C socket cmsg surface is in `minix-libc` (3c-3a). **Landed:** 3c-3 — the virgl triangle on the render node (`just test-gltriangle-virgl-x86`, `GL_RENDERER=virgl`); 3d-a — a GL surface through the in-house compositor (`just test-wlgl-x86`). **Landed:** 3d-b-1 — the scan-out present path, a whole-output `wl_shm` frame presented out of the client's own buffer with no CPU copy (`just test-wlfull-<arch>`, x86_64/riscv64/aarch64); 3d-b-2 — the node's PRIME handoff, an object exported to a dma-buf descriptor and imported back (`just test-drmprime-x86`, the descriptor VFS-owned in `vfs::dmabuf`); 3d-b-3 — `libgbm` built with the `dri_gbm.so` backend staged, a BO created on the node exported to a dma-buf and imported back (`just test-gbmtest-x86`); 3d-b-4 — `zwp_linux_dmabuf_v1` end to end, a client's object scanned out through the compositor (`just test-wldmabuf-x86`), and the GL client whose render target *is* that buffer (`just test-wldmabufgl-x86`, with the client-side transfer of §5 row 26); 3d-b-5 — GPU composition **landed**: its mechanism (5a) and cross-process handoff (5b, `just test-wlcompose-x86`) over the node's per-open context table (§5 row 28), and the compositor's surface list and end-to-end gate (5c/5d, `just test-wlscene-x86`) — two dma-buf surfaces composed on the render node and the frame scanned out as one. **Open:** none. | The compositor renders GL content |
-| **4** | smithay port; `cosmic-comp` against our backends; `cosmic-session` + D-Bus — scoped in **§6.13**. **Landed:** 4a — the patched OS crates and a calloop loop (`just test-calloop-<arch>`); 4b — `std`'s Unix names over the port and smithay's whole `check`; 4c — `wayland-server` serving a stock client (`just test-wlgate-<arch>`); 4d-1 — smithay's `GlesRenderer` clearing and reading back an offscreen target on the port (`just test-glgate-x86`). | `cosmic-comp` on screen; a `libcosmic` app connects |
+| **4** | smithay port; `cosmic-comp` against our backends; `cosmic-session` + D-Bus — scoped in **§6.13**. **Landed:** 4a — the patched OS crates and a calloop loop (`just test-calloop-<arch>`); 4b — `std`'s Unix names over the port and smithay's whole `check`; 4c — `wayland-server` serving a stock client (`just test-wlgate-<arch>`); 4d-1 — smithay's `GlesRenderer` clearing and reading back an offscreen target on the port (`just test-glgate-x86`); 4d-2 — a stock `wl_shm` client composed by smithay and scanned out (`just test-wlcomp-x86`). | `cosmic-comp` on screen; a `libcosmic` app connects |
 | **5** | Portals, fonts, the `libcosmic` suite | A usable session |
 
 ---

@@ -280,6 +280,18 @@ name = "minix-rt"
 version = "0.1.0"
 
 [[package]]
+name = "minix-std"
+version = "0.1.0"
+dependencies = [
+ "minix-rt",
+ "net",
+]
+
+[[package]]
+name = "net"
+version = "0.1.0"
+
+[[package]]
 name = "num-traits"
 version = "0.2.19"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -298,9 +310,12 @@ checksum = "9f7c3e4beb33f85d45ae3e3a1792185706c8e16d043238c593331cc7cd313b50"
 name = "phase4-comp"
 version = "0.0.0"
 dependencies = [
+ "calloop",
  "getrandom 0.3.4",
  "minix-rt",
+ "minix-std",
  "smithay",
+ "wayland-client",
 ]
 
 [[package]]
@@ -612,6 +627,16 @@ dependencies = [
  "rustix",
  "smallvec",
  "wayland-sys",
+]
+
+[[package]]
+name = "wayland-client"
+version = "0.31.15"
+dependencies = [
+ "bitflags",
+ "rustix",
+ "wayland-backend",
+ "wayland-scanner",
 ]
 
 [[package]]

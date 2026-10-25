@@ -135,7 +135,11 @@ pub const FBIOFLUSH: u32 = 0x4604;
 /// Present the calling process's own buffer by making it the scanout. The argument is a
 /// [`FbScanoutSrc`]; a zero length restores the driver's own buffer. Served by the fb server, not
 /// the driver: resolving the caller's buffer needs a page table this driver has not got.
-pub const FBIO_SCANOUT_SRC: u32 = 0x4605;
+///
+/// `_IOW('F', 5, FbScanoutSrc)`: the size and direction are part of the number because the
+/// ordinary path is a `VFS_IOCTL`, and VFS builds its magic grant from them. A boot process that
+/// calls the fb server directly (the compositor of 3d-b/4d) uses the value as a plain tag.
+pub const FBIO_SCANOUT_SRC: u32 = 0x8010_4605;
 
 /// Argument of [`FBIO_SCANOUT_SRC`]: a buffer in the caller's address space, page-aligned.
 #[repr(C)]

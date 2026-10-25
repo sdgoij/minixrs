@@ -16,7 +16,7 @@ static image (there is no loader in the address space). So the link carries
 *statically* - a crate's native libraries land inside rustc's `-Bstatic` window.
 The entry point stays `minix-rt`'s `_start`, which is what sets up the runtime std expects.
 
-Outputs: `target/<triple>/release/glgate`, where `MINIXFS_EXTRA` can name it.
+Outputs: `target/<triple>/release/{glgate,wlcomp,wlshm}`, where `MINIXFS_EXTRA` can name them.
 
 Usage: python tools/build-phase4-comp.py [all|x86|riscv64|aarch64|<triple>]
                                         (default: x86_64-pc-minix)
@@ -45,7 +45,7 @@ from lld import find_lld  # noqa: E402
 from stage1 import find_stage1_rustc  # noqa: E402
 
 PROJECT = ROOT / "tools" / "phase4-comp"
-BINARY = "glgate"
+BINARIES = ("glgate", "wlcomp", "wlshm")
 SMITHAY = ROOT / "target" / "smithay"
 # The EGL bootstrap is C (see the file's own note): the context smithay needs cannot come from
 # smithay's constructors, and the port's surfaceless recipe is already written in C.
@@ -153,19 +153,20 @@ def build(arch: Arch, rustc: pathlib.Path, lld: pathlib.Path) -> int:
         "--manifest-path", str(PROJECT / "Cargo.toml"),
         "--target", arch.triple,
         "--release",
-        "--bin", BINARY,
     ]
-    if run(cmd, env=env) != 0:
-        return 1
+    for binary in BINARIES:
+        if run([*cmd, "--bin", binary], env=env) != 0:
+            return 1
 
-    built = CARGO_TARGET / arch.triple / "release" / BINARY
-    if not built.is_file():
-        print(f"error: {built} was not produced", file=sys.stderr)
-        return 1
-    dest = release / BINARY
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copyfile(built, dest)
-    print(f"wrote {dest.relative_to(ROOT)}")
+    for binary in BINARIES:
+        built = CARGO_TARGET / arch.triple / "release" / binary
+        if not built.is_file():
+            print(f"error: {built} was not produced", file=sys.stderr)
+            return 1
+        dest = release / binary
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(built, dest)
+        print(f"wrote {dest.relative_to(ROOT)}")
     return 0
 
 

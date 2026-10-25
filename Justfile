@@ -1049,6 +1049,31 @@ test-glgate-x86 boot-timeout="60": glgate-x86 boot-image-x86
     @just _assert-qemu-log target/test-glgate-x86.log "glgate: PASS clear=green"
     @echo "glgate: smithay's GlesRenderer ran on the port and read its clear back (x86_64)"
 
+# Phase 4d-2's gate (`.notes/wayland.md` 6.13): smithay's `CompositorState` and `ShmState` with a
+# `wl_output`, serving a stock `wayland-client` that commits two whole-output `wl_shm` frames. The
+# compositor draws into the offscreen GLES target 4d-1 proved, reads the frame back (D18) and
+# re-points the fb server's scanout at it (3d-b-1), so the display shows what smithay composed.
+#
+# The output is a `virtio-gpu-pci` and not a bochs display: only a virtio-gpu can re-back its
+# scanout (D11). The probe takes a QMP screendump (the client's second frame's colour) and reads
+# the serial log for `fb: scanout src`, the compositor's present line and the client's buffer
+# release, which is the compositor-side half of the gate.
+wlcomp-x86: dynlib-x86
+    python tools/build-xkbcommon.py x86 --build
+    python tools/build-phase4-comp.py x86
+    @test -f target/mesa/x86/lib/libEGL.so.1 || (echo 'wlcomp: no Mesa DSOs - run `just fetch-mesa x86` or `just build-mesa x86 --build` first' >&2; exit 1)
+    @echo "wlcomp: /bin/wlcomp and /bin/wlshm built and linked against libc.so (x86_64)"
+
+test-wlcomp arch="x86":
+    @just test-wlcomp-{{arch}}
+
+test-wlcomp-x86: wlcomp-x86 boot-image-x86
+    @just _assert-qemu-version qemu-system-x86_64
+    M=target/mesa/x86; E="/lib/libdrm.so.2=$M/lib/libdrm.so.2;/lib/libEGL.so.1=$M/lib/libEGL.so.1;/lib/libgbm.so.1=$M/lib/libgbm.so.1;/lib/libexpat.so.1=$M/lib/libexpat.so.1;/lib/libgallium-25.3.6.so=$M/lib/libgallium-25.3.6.so;/lib/libGLESv2.so.2=$M/lib/libGLESv2.so.2;/lib/libz.so.1=$M/lib/libz.so.1;/lib/dri_gbm.so=$M/lib/dri_gbm.so;/lib/swrast_dri.so=$M/lib/swrast_dri.so;/bin/wlcomp=target/x86_64-pc-minix/release/wlcomp;/bin/wlshm=target/x86_64-pc-minix/release/wlshm"; MINIXFS_EXTRA="$E" MINIXFS_BLOCKS=16384 cargo run -q -p boot-image --bin mkminixfs --release -- x86_64
+    @just mkfs-x86
+    python tools/wlcomp_probe.py qemu-system-x86_64 -nographic -m 512M -no-reboot -vga none -device virtio-gpu-pci -qmp tcp:127.0.0.1:4447,server=on,wait=off -kernel target/images/x86_64-pc-minix/minix-x86-boot.elf -drive if=none,id=disk0,file=target/images/x86_64-pc-minix/disk.img,format=raw,cache=writethrough -device virtio-blk-pci,disable-legacy=on,drive=disk0 -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0
+    @echo "wlcomp: smithay composed a stock wl_shm client onto the scan-out (x86_64)"
+
 test-gltriangle-riscv64 boot-timeout="180": gltriangle-riscv64 boot-image-riscv64
     @just _assert-qemu-version qemu-system-riscv64
     M=target/mesa/riscv64; E="/lib/libdrm.so.2=$M/lib/libdrm.so.2;/lib/libEGL.so.1=$M/lib/libEGL.so.1;/lib/libgbm.so.1=$M/lib/libgbm.so.1;/lib/libexpat.so.1=$M/lib/libexpat.so.1;/lib/libgallium-25.3.6.so=$M/lib/libgallium-25.3.6.so;/lib/libGLESv2.so.2=$M/lib/libGLESv2.so.2;/lib/libz.so.1=$M/lib/libz.so.1;/lib/swrast_dri.so=$M/lib/swrast_dri.so;/bin/gltriangle=$M/bin/gltriangle"; MINIXFS_EXTRA="$E" MINIXFS_BLOCKS=16384 cargo run -q -p boot-image --bin mkminixfs --release -- riscv64

@@ -27,9 +27,15 @@ smithay = { path = "../../target/smithay", default-features = false, features = 
 # `libc.so` instead (the build script links it), which is the build whose `dlopen` forwards
 # to the loader.
 minix-rt = { path = "../../crates/minix-rt", default-features = false }
+# The client's shm pool: `memfd_create`/`ftruncate` live in the port's syscall layer.
+minix-std = { path = "../../crates/minix-std" }
+# The gate's client half: a stock wayland-rs client, patched to the fork like the server.
+wayland-client = "0.31"
 # `rand` in smithay's graph reaches `getrandom`, whose 0.3 line takes its backend from a
 # `register_custom_getrandom!` in the binary (`--cfg getrandom_backend="custom"`).
 getrandom = "0.3"
+# The compositor's loop: the same calloop 4a proved, driving the display and the listening socket.
+calloop = "0.14.5"
 
 [patch.crates-io]
 errno = { path = "../../crates/errno" }
@@ -44,6 +50,7 @@ calloop = { path = "../../calloop" }
 wayland-sys = { path = "../../wayland-rs/wayland-sys" }
 wayland-scanner = { path = "../../wayland-rs/wayland-scanner" }
 wayland-backend = { path = "../../wayland-rs/wayland-backend" }
+wayland-client = { path = "../../wayland-rs/wayland-client" }
 wayland-server = { path = "../../wayland-rs/wayland-server" }
 wayland-protocols = { path = "../../wayland-rs/wayland-protocols" }
 wayland-protocols-wlr = { path = "../../wayland-rs/wayland-protocols-wlr" }
@@ -52,3 +59,11 @@ wayland-protocols-misc = { path = "../../wayland-rs/wayland-protocols-misc" }
 [[bin]]
 name = "glgate"
 path = "src/bin/glgate.rs"
+
+[[bin]]
+name = "wlcomp"
+path = "src/bin/wlcomp.rs"
+
+[[bin]]
+name = "wlshm"
+path = "src/bin/wlshm.rs"
