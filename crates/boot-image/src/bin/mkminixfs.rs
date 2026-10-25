@@ -51,7 +51,7 @@ fn main() -> ExitCode {
         // arch, but aarch64's multicall loses output (KNOWN_ISSUES aarch64 #9) and is
         // therefore opt-in there: set `MINIXFS_COREUTILS_AARCH64` to include it while
         // chasing the bug.
-        if matches!(dest, "/bin/helloc" | "/bin/ctest") && t.arch != "x86_64" {
+        if matches!(dest, "/bin/helloc" | "/bin/ctest" | "/bin/cabi") && t.arch != "x86_64" {
             continue;
         }
         if dest == "/bin/coreutils"

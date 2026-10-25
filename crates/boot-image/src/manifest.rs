@@ -53,7 +53,9 @@ pub const BOOT_BINS: &[(&str, &str)] = &[
     // `/bin/cabi` is the C libc-ABI probe: it builds a `struct sockaddr_in` from
     // `tools/c-include`, binds it and reads it back through `getsockname`, checks that
     // `pipe2(O_NONBLOCK)` reaches the open file description the pipe read consults, and maps
-    // anonymous memory. `just test-cabi <arch>` drives it. Same build path as helloc/ctest.
+    // anonymous memory. `just test-cabi <arch>` drives it. Same build path as helloc/ctest,
+    // and like them it is carried by the x86_64 images only (kernel build.rs skips it
+    // elsewhere); the probe's socket, pipe2 and mmap assertions are x86-gated too.
     ("/bin/cabi", "cabi"),
     // The dynamic-linking trio: the loader, the shared C library, and one C program
     // linked against it rather than against the `minix-libc` rlib. `just dynlib-<arch>`

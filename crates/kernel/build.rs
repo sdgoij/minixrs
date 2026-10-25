@@ -61,11 +61,12 @@ fn assemble(
     // top-level `just build <target>` recipes).
     let mut bins = Vec::new();
     for &(dest, bin_name) in manifest::BOOT_BINS {
-        // The C smoke-test binaries (helloc/ctest) are carried by the x86_64
+        // The C smoke-test binaries (helloc/ctest/cabi) are carried by the x86_64
         // images only. They *build* for every arch (`just build-c-hello <arch>`),
         // so this gate is about what an image carries rather than about what can
-        // be built.
-        if matches!(dest, "/bin/helloc" | "/bin/ctest") && t.arch != "x86_64" {
+        // be built: only the x86 recipes run `build-c-hello`, and the x86 images are
+        // the only ones these programs run on.
+        if matches!(dest, "/bin/helloc" | "/bin/ctest" | "/bin/cabi") && t.arch != "x86_64" {
             continue;
         }
         // The uutils multicall is embedded on x86_64 and riscv64. aarch64 *builds*
@@ -224,7 +225,7 @@ fn missing_binary_hint(dest: &str, t: &targets::BuildTarget) -> String {
         "/bin/hello" => format!(
             "the std smoke-test binary is built by `python tools/build-std-hello.py {arch}`"
         ),
-        "/bin/helloc" | "/bin/ctest" => {
+        "/bin/helloc" | "/bin/ctest" | "/bin/cabi" => {
             "the C smoke-test binaries are built by `python tools/build-c-hello.py \
              <arch>` — the images carry them on x86_64 only"
                 .to_string()
