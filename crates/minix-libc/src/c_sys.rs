@@ -14,6 +14,7 @@ use crate::c_time::TimeT;
 
 const EINVAL: i32 = 22;
 const ENOMEM: i32 = 12;
+const EFAULT: i32 = 14;
 /// C `errno.h` value, positive because this is what `fail` stores in `errno`.
 const ENOSYS: i32 = 78;
 
@@ -42,7 +43,10 @@ pub struct Rlimit {
 }
 
 const RLIM_INFINITY: c_ulong = c_ulong::MAX;
-const RLIMIT_LAST: c_int = 9; // RLIMIT_AS
+/// Highest resource number `getrlimit` accepts (`RLIMIT_RTTIME`). Minix
+/// enforces none of them; the numbers above 9 exist because `rustix`'s
+/// `Rlimit` table names them, in the header's numbering.
+const RLIMIT_LAST: c_int = 15;
 
 /// Get a resource limit. Minix enforces no per-process limits; report
 /// `RLIM_INFINITY` for every known resource.
@@ -294,8 +298,17 @@ pub unsafe extern "C" fn alphasort(a: *const *const Dirent, b: *const *const Dir
 // ---- sys/socket.h ----
 
 // The socket family (socket/bind/connect/listen/accept/shutdown/send/
-// recv/...) is implemented in lib.rs over minix_std::net; only
-// `setsockopt` is unsupported (the net server has no options yet).
+// recv/...) is implemented in lib.rs over minix_std::net; `setsockopt` is
+// unsupported (the net server stores no options) and `getsockopt` answers only
+// the one question the stack can: the socket's type.
+
+/// `SOL_SOCKET` as the port's header spells it (`sys/sys/socket.h`), not
+/// Linux's 1.
+#[cfg(target_os = "minix")]
+const SOL_SOCKET: c_int = 0xffff;
+/// `SO_TYPE`
+#[cfg(target_os = "minix")]
+const SO_TYPE: c_int = 3;
 
 #[cfg(target_os = "minix")]
 #[unsafe(no_mangle)]
@@ -306,6 +319,47 @@ pub unsafe extern "C" fn setsockopt(
     _optval: *const c_void,
     _optlen: c_ulong,
 ) -> c_int {
+    crate::fail(ENOSYS)
+}
+
+/// `getsockopt(2)`.
+///
+/// The net server keeps no socket options, so this answers exactly one:
+/// `SO_TYPE`, which is discoverable from the ioctls each socket family responds
+/// to (`NWIOGTCPCONF` for TCP, `NWIOGUDPOPT` for UDP). Everything else is
+/// `ENOSYS`, matching `setsockopt` — there is no value to report, and claiming
+/// `ENOPROTOOPT` would say the option is unknown rather than unimplemented.
+///
+/// # Safety
+///
+/// `optval` must be null or writable for `*optlen` bytes and `optlen` must be a
+/// valid pointer.
+#[cfg(target_os = "minix")]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn getsockopt(
+    fd: c_int,
+    level: c_int,
+    optname: c_int,
+    optval: *mut c_void,
+    optlen: *mut c_uint,
+) -> c_int {
+    if level == SOL_SOCKET && optname == SO_TYPE {
+        let kind = match minix_std::net::socket_type(fd) {
+            Ok(k) => k,
+            Err(e) => return crate::fail(e.0),
+        };
+        if optval.is_null() || optlen.is_null() {
+            return crate::fail(EFAULT);
+        }
+        if unsafe { *optlen } < 4 {
+            return crate::fail(EINVAL);
+        }
+        unsafe {
+            *(optval as *mut c_int) = kind;
+            *optlen = 4;
+        }
+        return 0;
+    }
     crate::fail(ENOSYS)
 }
 
@@ -983,6 +1037,37 @@ pub unsafe extern "C" fn madvise(_addr: *mut c_void, _length: usize, _advice: c_
     0
 }
 
+/// `posix_madvise(3)`: the same advice vocabulary as `madvise`, which the port
+/// accepts and ignores — there is no readahead to schedule and no page cache to
+/// drop, so every advice is already the case.
+#[cfg(target_os = "minix")]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn posix_madvise(
+    _addr: *mut c_void,
+    _length: usize,
+    _advice: c_int,
+) -> c_int {
+    0
+}
+
+/// `mlock(2)`: the port has no pageable backing store, so every mapped page is
+/// resident for as long as the mapping exists and there is nothing to pin.
+/// Success is therefore the honest answer; the deviation is that POSIX's
+/// `ENOMEM` for a range that is not mapped is not reported.
+#[cfg(target_os = "minix")]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mlock(_addr: *const c_void, _length: usize) -> c_int {
+    0
+}
+
+/// `munlock(2)`: see `mlock` — nothing was pinned, so there is nothing to
+/// release.
+#[cfg(target_os = "minix")]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn munlock(_addr: *const c_void, _length: usize) -> c_int {
+    0
+}
+
 /// POSIX shared-memory open. Minix uses System V shm (shmget/shmat); the
 /// POSIX name-based interface is not supported.
 #[cfg(target_os = "minix")]
@@ -1424,6 +1509,69 @@ pub unsafe extern "C" fn getegid() -> c_int {
 pub unsafe extern "C" fn getsid(pid: c_int) -> c_int {
     match minix_std::process::getsid(pid) {
         Ok(sid) => sid,
+        Err(e) => crate::fail(e.0),
+    }
+}
+
+/// `PRIO_PROCESS` — the only selector PM implements.
+const PRIO_PROCESS: c_int = 0;
+
+/// Process group id of `pid` (0 = self) (PM).
+#[cfg(target_os = "minix")]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn getpgid(pid: c_int) -> c_int {
+    match minix_std::process::getpgid(pid) {
+        Ok(pgid) => pgid,
+        Err(e) => crate::fail(e.0),
+    }
+}
+
+/// Caller's process group id (PM).
+#[cfg(target_os = "minix")]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn getpgrp() -> c_int {
+    match minix_std::process::getpgrp() {
+        Ok(pgid) => pgid,
+        Err(e) => crate::fail(e.0),
+    }
+}
+
+/// POSIX `getpriority`. A successful `-1` cannot be told from a failure by the
+/// return value alone; callers clear `errno` first, as POSIX requires. This
+/// does not touch `errno` on success.
+#[cfg(target_os = "minix")]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn getpriority(which: c_int, who: c_int) -> c_int {
+    match minix_std::process::getpriority(which, who) {
+        Ok(v) => v,
+        Err(e) => crate::fail(e.0),
+    }
+}
+
+/// POSIX `setpriority`.
+#[cfg(target_os = "minix")]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn setpriority(which: c_int, who: c_int, prio: c_int) -> c_int {
+    match minix_std::process::setpriority(which, who, prio) {
+        Ok(()) => 0,
+        Err(e) => crate::fail(e.0),
+    }
+}
+
+/// POSIX `nice`: raise the caller's nice value by `inc`, clamped to the
+/// `PRIO_MIN..=PRIO_MAX` range, and return the new value.
+#[cfg(target_os = "minix")]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nice(inc: c_int) -> c_int {
+    let current = match minix_std::process::getpriority(PRIO_PROCESS, 0) {
+        Ok(v) => v,
+        Err(e) => return crate::fail(e.0),
+    };
+    let new = current
+        .saturating_add(inc)
+        .clamp(minix_std::process::PRIO_MIN, minix_std::process::PRIO_MAX);
+    match minix_std::process::setpriority(PRIO_PROCESS, 0, new) {
+        Ok(()) => new,
         Err(e) => crate::fail(e.0),
     }
 }

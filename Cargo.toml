@@ -13,6 +13,17 @@ exclude = [
     # so cargo operations inside `rust/` (e.g. the bootstrap build) don't
     # resolve to this workspace.
     "rust",
+    # Likewise for the ecosystem forks: building or testing one on its own
+    # must not resolve to this workspace's graph.
+    "libc",
+    "rustix",
+    "polling",
+    "calloop",
+    # A `[patch.crates-io]` stand-in for the `errno` crate. It is ours rather
+    # than a fork, but it exists to be patched into a foreign graph: as a member
+    # it would shadow nothing (`[patch]` is the only way it is consumed) and
+    # would build the wrong thing into this workspace's lockfile.
+    "crates/errno",
 ]
 
 members = [

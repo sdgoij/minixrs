@@ -1060,6 +1060,32 @@ pub fn do_fcntl() -> i32 {
             }
             OK
         }
+        // `filp_flags` lives on the open file description, so a dup'd fd shares
+        // it. Only `O_NONBLOCK` and `O_APPEND` can be changed after the fact,
+        // and the access mode is reported, not set — C `misc.c`'s F_GETFL and
+        // F_SETFL. The pipe, tty and socket read paths consult the flag.
+        F_GETFL => unsafe {
+            let idx = filedes::get_filp(fd, fp);
+            if idx < 0 {
+                return idx;
+            }
+            let glob = vfs_global();
+            let filp_arr = core::ptr::addr_of!((*glob).filp) as *const Filp;
+            ((*filp_arr.add(idx as usize)).filp_flags & (O_NONBLOCK as u32 | O_APPEND | O_ACCMODE))
+                as i32
+        },
+        F_SETFL => unsafe {
+            let idx = filedes::get_filp(fd, fp);
+            if idx < 0 {
+                return idx;
+            }
+            let glob = vfs_global();
+            let filp_arr = core::ptr::addr_of_mut!((*glob).filp) as *mut Filp;
+            let filp = &mut *filp_arr.add(idx as usize);
+            let mask = O_NONBLOCK as u32 | O_APPEND;
+            filp.filp_flags = (filp.filp_flags & !mask) | (_arg as u32 & mask);
+            OK
+        },
         // File locking commands — delegate to lock_op.
         c if matches!(c, F_SETLK | F_SETLKW | F_GETLK) || c == F_UNLCK as i32 => unsafe {
             crate::vfs::lock::lock_op()

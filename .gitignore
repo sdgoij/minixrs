@@ -20,3 +20,8 @@ tools/wasm-browser/build/
 # `*.wasm` rule above, and the boot image — 16 MiB — is not ignored anywhere, so it goes in with
 # them.
 !docs/build/*.wasm
+
+# `crates/errno` is excluded from the workspace (it is a `[patch.crates-io]`
+# stand-in, built by whichever project patches it in), so a lockfile appears
+# only when cargo is run inside it for a one-off check.
+crates/errno/Cargo.lock

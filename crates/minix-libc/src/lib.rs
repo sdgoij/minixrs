@@ -721,6 +721,44 @@ pub unsafe extern "C" fn pipe(fds: *mut [c_int; 2]) -> c_int {
     }
 }
 
+/// `O_CLOEXEC` / `O_NONBLOCK` / `F_SETFD` / `F_SETFL` (`fcntl.h`), the flags
+/// `pipe2` and `accept4` apply to the descriptor they create.
+#[cfg(target_os = "minix")]
+const O_CLOEXEC: c_int = 0o200000;
+#[cfg(target_os = "minix")]
+const O_NONBLOCK: c_int = 0o4000;
+#[cfg(target_os = "minix")]
+const F_SETFD: c_int = 2;
+#[cfg(target_os = "minix")]
+const F_SETFL: c_int = 4;
+
+/// `pipe2(2)`: create a pipe and apply the flags to both ends.
+///
+/// The pipe is created first and the flags are then set with `fcntl`, because
+/// the port's pipe path reads its non-blocking behaviour from `filp_flags`
+/// (VFS `F_SETFL`) rather than from an open-time argument.
+///
+/// # Safety
+///
+/// `fds` must be null or point to two writable `c_int`s.
+#[cfg(target_os = "minix")]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn pipe2(fds: *mut [c_int; 2], flags: c_int) -> c_int {
+    if unsafe { pipe(fds) } != 0 {
+        return -1;
+    }
+    let created = unsafe { &*fds };
+    for fd in created {
+        if flags & O_CLOEXEC != 0 && fcntl(*fd, F_SETFD, 1) != 0 {
+            return -1;
+        }
+        if flags & O_NONBLOCK != 0 && fcntl(*fd, F_SETFL, O_NONBLOCK) != 0 {
+            return -1;
+        }
+    }
+    0
+}
+
 // Process lifecycle
 
 /// C `struct rusage` (`tools/c-include/sys/resource.h`), zero-filled by
@@ -795,6 +833,71 @@ pub unsafe extern "C" fn wait4(
         unsafe { core::ptr::write_bytes(usage as *mut u8, 0, size_of::<Rusage>()) };
     }
     unsafe { waitpid(pid, status, options) }
+}
+
+/// C `siginfo_t` (`tools/c-include/signal.h`).
+///
+/// The header's trailing union is 8-byte aligned because `si_addr` is a
+/// pointer, so its SIGCHLD member — the one `waitid` fills — starts at offset
+/// 16. The padding fields reproduce that layout.
+#[cfg(target_os = "minix")]
+#[repr(C, align(8))]
+struct Siginfo {
+    si_signo: c_int,
+    si_errno: c_int,
+    si_code: c_int,
+    _union_align: c_int,
+    si_pid: c_int,
+    si_uid: c_uint,
+    si_status: c_int,
+    _union_tail: c_int,
+}
+
+/// `SIGCHLD`
+#[cfg(target_os = "minix")]
+const SIGCHLD: c_int = 20;
+
+/// `waitid(2)`: wait for a child and describe it in `infop`.
+///
+/// The selection, the option checks and the status decoding live in
+/// `minix_std::process::waitid`; this fills the C struct from what it reports.
+///
+/// # Safety
+///
+/// `infop` must be null or point to a writable `siginfo_t`.
+#[cfg(target_os = "minix")]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn waitid(
+    idtype: c_int,
+    id: c_int,
+    infop: *mut c_void,
+    options: c_int,
+) -> c_int {
+    const EINVAL: c_int = 22;
+
+    if infop.is_null() {
+        return fail(EINVAL);
+    }
+    let siginfo = infop as *mut Siginfo;
+    // A `WNOHANG` miss leaves `si_signo` zero, and a C caller need not have
+    // cleared the struct, so clear it before waiting.
+    unsafe { core::ptr::write_bytes(siginfo, 0, 1) };
+
+    match minix_std::process::waitid(idtype, id, options) {
+        Ok(Some(info)) => {
+            unsafe {
+                (*siginfo).si_signo = SIGCHLD;
+                (*siginfo).si_code = info.code;
+                (*siginfo).si_pid = info.pid;
+                (*siginfo).si_uid = info.uid as c_uint;
+                (*siginfo).si_status = info.status;
+            }
+            0
+        }
+        // `WNOHANG` with no child ready: return 0 with `si_pid` left zero.
+        Ok(None) => 0,
+        Err(e) => fail(e.0),
+    }
 }
 
 #[cfg(target_os = "minix")]
@@ -1400,15 +1503,19 @@ pub unsafe extern "C" fn strsignal(sig: c_int) -> *mut c_char {
 
 // Sockets
 
-/// C `struct sockaddr_in` (reference `net/gen/socket.h`): length, family,
-/// network-order port and address, then padding. 16 bytes. The port/address
-/// fields are byte arrays so the network-order layout is endianness-explicit
-/// (layout-identical to the C `u16`/`u32` fields).
+/// C `struct sockaddr_in`: family, network-order port and address, then
+/// padding. 16 bytes. The port/address fields are byte arrays so the
+/// network-order layout is endianness-explicit (layout-identical to the C
+/// `u16`/`u32` fields).
+///
+/// The family comes first, as POSIX/`tools/c-include/sys/socket.h` declares it;
+/// MINIX's own header keeps a BSD `sin_len` byte ahead of it, which the port
+/// does not: nothing outside this decoder and the header builds these bytes, and
+/// one layout for both is simpler than two.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct SockAddrIn {
-    sin_len: u8,
-    sin_family: u8,
+    sin_family: u16,
     sin_port: [u8; 2], // network byte order
     sin_addr: [u8; 4], // network byte order
     sin_zero: [u8; 8],
@@ -1434,8 +1541,8 @@ unsafe fn decode_sockaddr_in(addr: *const u8, addrlen: u32) -> Result<([u8; 4], 
 }
 
 /// Fill a C `struct sockaddr_in` (reference getpeername semantics: family
-/// AF_INET, network-order port/address, sin_len = 16; copy at most
-/// `*addrlen` bytes and update it).
+/// AF_INET, network-order port/address; copy at most `*addrlen` bytes and update
+/// it).
 ///
 /// # Safety
 ///
@@ -1446,7 +1553,6 @@ unsafe fn encode_sockaddr_in(addr: *mut u8, addrlen: *mut u32, ip: [u8; 4], port
     }
     let len = unsafe { *addrlen }.min(16);
     let s = SockAddrIn {
-        sin_len: 16,
         sin_family: 2, // AF_INET
         sin_port: port.to_be_bytes(),
         sin_addr: ip,
@@ -1735,6 +1841,36 @@ pub unsafe extern "C" fn accept(sock: c_int, address: *mut c_void, address_len: 
         if let Ok((ip, port)) = minix_std::net::getpeername(newfd) {
             unsafe { encode_sockaddr_in(address as *mut u8, address_len, ip, port) };
         }
+    }
+    newfd
+}
+
+/// `accept4(2)`: accept a connection and apply the flags to the new descriptor.
+///
+/// The flags are set with `fcntl` after the accept, for the same reason `pipe2`
+/// does it: the port's read paths take their non-blocking behaviour from
+/// `filp_flags` (VFS `F_SETFL`), not from an open-time argument.
+///
+/// # Safety
+///
+/// `address`/`address_len` carry `accept`'s obligation.
+#[cfg(target_os = "minix")]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn accept4(
+    sock: c_int,
+    address: *mut c_void,
+    address_len: *mut u32,
+    flags: c_int,
+) -> c_int {
+    let newfd = unsafe { accept(sock, address, address_len) };
+    if newfd < 0 {
+        return newfd;
+    }
+    if flags & O_CLOEXEC != 0 && fcntl(newfd, F_SETFD, 1) != 0 {
+        return -1;
+    }
+    if flags & O_NONBLOCK != 0 && fcntl(newfd, F_SETFL, O_NONBLOCK) != 0 {
+        return -1;
     }
     newfd
 }
@@ -2156,9 +2292,9 @@ mod tests {
     // Host-runnable: the sockaddr_in byte math (network-order port/addr).
     #[test]
     fn sockaddr_in_decode_matches_c_network_order_layout() {
-        // sin_len=16, sin_family=AF_INET(2), sin_port=18080 (BE),
-        // sin_addr=10.0.2.2 (BE bytes), sin_zero.
-        let bytes: [u8; 16] = [16, 2, 0x46, 0xA0, 10, 0, 2, 2, 0, 0, 0, 0, 0, 0, 0, 0];
+        // sin_family=AF_INET(2) as a u16, sin_port=18080 (BE), sin_addr=10.0.2.2
+        // (BE bytes), sin_zero.
+        let bytes: [u8; 16] = [2, 0, 0x46, 0xA0, 10, 0, 2, 2, 0, 0, 0, 0, 0, 0, 0, 0];
         let (ip, port) = unsafe { decode_sockaddr_in(bytes.as_ptr(), 16) }.unwrap();
         assert_eq!(ip, [10, 0, 2, 2]);
         assert_eq!(port, 18080);
@@ -2174,7 +2310,7 @@ mod tests {
         // 20000 = 0x4E20.
         assert_eq!(
             bytes,
-            [16, 2, 0x4E, 0x20, 10, 0, 2, 2, 0, 0, 0, 0, 0, 0, 0, 0]
+            [2, 0, 0x4E, 0x20, 10, 0, 2, 2, 0, 0, 0, 0, 0, 0, 0, 0]
         );
         assert_eq!(len, 16);
     }
@@ -2200,7 +2336,7 @@ mod tests {
             encode_sockaddr_in(bytes.as_mut_ptr(), &mut len, [10, 0, 2, 2], 20000);
         }
         assert_eq!(len, 8); // truncated, like the reference getpeername
-        assert_eq!(&bytes[..4], &[16, 2, 0x4E, 0x20]);
+        assert_eq!(&bytes[..4], &[2, 0, 0x4E, 0x20]);
     }
 
     #[cfg(target_os = "minix")]

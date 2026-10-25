@@ -192,6 +192,14 @@ coreutils-aarch64:
 build target="x86":
     @just build-{{target}}
 
+# Type-check smithay's `wayland_frontend` tree for the minix targets.
+smithay target="all":
+    python tools/build-smithay.py {{target}}
+
+# The same, with `cargo build` (rlibs) instead of `cargo check`.
+smithay-build target="all":
+    python tools/build-smithay.py {{target}} --build
+
 # build-x86* embeds /bin/coreutils, so the multicall must be built and copied
 # into the shared target dir first.
 build-x86: userland-x86 coreutils-x86 dynlib-x86
@@ -1294,14 +1302,18 @@ test-arches:
     @just test-qemu x86
     @just test-boot x86
     @just test-fork x86
+    @just test-waitid x86
+    @just test-cabi x86
     @just test-winprobe x86
     @just test-qemu riscv64
     @just test-boot riscv64
     @just test-fork riscv64
+    @just test-waitid riscv64
     @just test-winprobe riscv64
     @just test-qemu aarch64
     @just test-boot aarch64
     @just test-fork aarch64
+    @just test-waitid aarch64
     @just test-winprobe aarch64
 
 # Fork isolation, per arch: `tools/smoke/fork.tsv` runs `/bin/forktest`, which forks and checks
@@ -1357,6 +1369,46 @@ test-fork-aarch64 boot-timeout="60": build-aarch64
     @just _assert-qemu-version qemu-system-aarch64
     FEED_SCENARIO=tools/smoke/fork.tsv sh tools/smoke/feed.sh target/test-fork-aarch64.log {{boot-timeout}} qemu-system-aarch64 -machine virt -cpu cortex-a57 -m 256M -nographic -no-reboot -global virtio-mmio.force-legacy=off -netdev user,id=net0 -device virtio-net-device,netdev=net0 -device virtio-gpu-device -device virtio-keyboard-device -kernel target/aarch64-unknown-minix/release/kernel-boot-aarch64
     @echo "fork: both directions of the copy held (aarch64)"
+
+# `waitid` decoding, per arch: `tools/smoke/waitid.tsv` runs `/bin/waittest`, which forks a
+# child that exits 42 and checks that `waitid` reports `CLD_EXITED` with `si_status == 42`, that
+# `P_ALL` names the child it took, and that `WSTOPPED`/`WNOWAIT`/an empty option set are
+# refused. The encoding is PM's and therefore arch-independent, but the gate runs per arch for
+# the same reason `test-fork` does: it forks, and an arch whose fork path is broken should fail
+# here rather than only in the gate that happens to run on it.
+test-waitid arch="x86" boot-timeout="40":
+    @just test-waitid-{{arch}} {{boot-timeout}}
+
+test-waitid-x86 boot-timeout="40": build-x86
+    mkdir -p target/images/x86_64-pc-minix
+    cp target/trampoline.elf target/images/x86_64-pc-minix/minix-x86.elf
+    @just _assert-qemu-version qemu-system-x86_64
+    FEED_SCENARIO=tools/smoke/waitid.tsv sh tools/smoke/feed.sh target/test-waitid-x86.log {{boot-timeout}} qemu-system-x86_64 -nographic -m 256M -no-reboot -vga none -device bochs-display,id=fb0 -kernel target/images/x86_64-pc-minix/minix-x86.elf -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0 -device virtio-tablet-pci,display=fb0
+    @echo "waitid: status decoded, P_ALL named the child, unsupported states refused (x86_64)"
+
+test-waitid-riscv64 boot-timeout="60": build-riscv64
+    @just _assert-qemu-version qemu-system-riscv64
+    FEED_SCENARIO=tools/smoke/waitid.tsv sh tools/smoke/feed.sh target/test-waitid-riscv64.log {{boot-timeout}} qemu-system-riscv64 -machine virt -m 256M -nographic -global virtio-mmio.force-legacy=off -netdev user,id=net0 -device virtio-net-device,netdev=net0 -device virtio-gpu-device -device virtio-keyboard-device -kernel target/riscv64gc-unknown-minix/release/kernel-boot-riscv64
+    @echo "waitid: status decoded, P_ALL named the child, unsupported states refused (riscv64)"
+
+test-waitid-aarch64 boot-timeout="60": build-aarch64
+    @just _assert-qemu-version qemu-system-aarch64
+    FEED_SCENARIO=tools/smoke/waitid.tsv sh tools/smoke/feed.sh target/test-waitid-aarch64.log {{boot-timeout}} qemu-system-aarch64 -machine virt -cpu cortex-a57 -m 256M -nographic -no-reboot -global virtio-mmio.force-legacy=off -netdev user,id=net0 -device virtio-net-device,netdev=net0 -device virtio-gpu-device -device virtio-keyboard-device -kernel target/aarch64-unknown-minix/release/kernel-boot-aarch64
+    @echo "waitid: status decoded, P_ALL named the child, unsupported states refused (aarch64)"
+
+# The C libc ABI, x86 only: `tools/build-c-hello.py` builds `/bin/cabi` for x86_64
+# alone. `tools/smoke/cabi.tsv` asserts the `sockaddr_in` round trip (the only place
+# the header's layout and `minix-libc`'s decoder meet), `pipe2(O_NONBLOCK)` reaching
+# the pipe's read path, and an anonymous `mmap`.
+test-cabi arch="x86" boot-timeout="40":
+    @just test-cabi-{{arch}} {{boot-timeout}}
+
+test-cabi-x86 boot-timeout="40": (build-c-hello "x86") build-x86
+    mkdir -p target/images/x86_64-pc-minix
+    cp target/trampoline.elf target/images/x86_64-pc-minix/minix-x86.elf
+    @just _assert-qemu-version qemu-system-x86_64
+    FEED_SCENARIO=tools/smoke/cabi.tsv sh tools/smoke/feed.sh target/test-cabi-x86.log {{boot-timeout}} qemu-system-x86_64 -nographic -m 256M -no-reboot -vga none -device bochs-display,id=fb0 -kernel target/images/x86_64-pc-minix/minix-x86.elf -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0 -device virtio-tablet-pci,display=fb0
+    @echo "cabi: the C socket, pipe2 and mmap ABIs held (x86_64)"
 
 test target="x86":
     @just test-{{target}}

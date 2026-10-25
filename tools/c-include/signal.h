@@ -58,13 +58,21 @@ typedef void (*sighandler_t)(int);
 #define SA_NODEFER 0x40000000
 #define SA_RESETHAND 0x80000000
 
-/* Minimal siginfo_t — the fields LLVM's signal handlers read. */
+/* Minimal siginfo_t — the fields LLVM's signal handlers read (si_signo,
+ * si_errno, si_code, si_addr) plus the SIGCHLD member waitid(2) fills. The
+ * union is 8-byte aligned because si_addr is a pointer, so the SIGCHLD member
+ * starts at offset 16; the Rust declarations in both minix-libc and the libc
+ * fork reproduce this layout. */
 typedef struct {
     int si_signo;
     int si_errno;
     int si_code;
     union {
-        int si_pid;
+        struct {
+            int si_pid;
+            unsigned int si_uid;
+            int si_status;
+        } _sigchld;
         void *si_addr;
     };
 } siginfo_t;

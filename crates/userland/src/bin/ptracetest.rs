@@ -92,12 +92,13 @@ pub unsafe fn main(_argc: i32, _argv: *const *const u8) -> i32 {
         fail(b"ptrace(CONTINUE) failed", 3);
     }
 
-    // 3. The child exited 7: waitpid reports the exit status.
+    // 3. The child exited 7: waitpid reports the w_exitcode-encoded status
+    // (exit code in the high byte, so a normal exit decodes as `7 << 8`).
     let (wpid, status) = match minix_std::process::waitpid(pid, 0) {
         Ok(w) => w,
         Err(_) => fail(b"waitpid (exit) failed", 4),
     };
-    if wpid != pid || status != CHILD_EXIT {
+    if wpid != pid || status != (CHILD_EXIT << 8) {
         let mut buf = [0u8; 96];
         let mut i = 0;
         push(&mut buf, &mut i, b"ptracetest: bad exit status ");

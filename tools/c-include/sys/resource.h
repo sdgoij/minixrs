@@ -1,5 +1,6 @@
 /* Minimal sys/resource.h for the minix OS — the subset LLVM's
- * Program.inc needs (rusage for wait4; getrusage is not implemented). */
+ * Program.inc needs (rusage for wait4; getrusage is not implemented) plus the
+ * resource numbers and priority selectors `rustix` names. */
 #ifndef _SYS_RESOURCE_H
 #define _SYS_RESOURCE_H
 
@@ -43,6 +44,19 @@ typedef unsigned long rlim_t;
 #define RLIMIT_NOFILE 7
 #define RLIMIT_MEMLOCK 8
 #define RLIMIT_AS 9
+#define RLIMIT_LOCKS 10
+#define RLIMIT_SIGPENDING 11
+#define RLIMIT_MSGQUEUE 12
+#define RLIMIT_NICE 13
+#define RLIMIT_RTPRIO 14
+#define RLIMIT_RTTIME 15
+
+/* Scheduling priority selectors (POSIX places these in sys/resource.h). */
+#define PRIO_PROCESS 0
+#define PRIO_PGRP 1
+#define PRIO_USER 2
+#define PRIO_MIN (-20)
+#define PRIO_MAX 20
 
 struct rlimit {
     rlim_t rlim_cur;
@@ -51,6 +65,8 @@ struct rlimit {
 
 int getrlimit(int resource, struct rlimit *rlp);
 int setrlimit(int resource, const struct rlimit *rlp);
+int getpriority(int which, int who);
+int setpriority(int which, int who, int prio);
 
 #ifdef __cplusplus
 }

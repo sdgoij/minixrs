@@ -1,0 +1,18 @@
+# The `waitid` scenario, driven by `just test-waitid <arch>`.
+#
+# `/bin/waittest` forks a child that exits 42 and asks `waitid(P_PID, ...)` about it. What the
+# gate pins is the *status encoding*: PM reports `w_exitcode(status, signal)`, so 42 is an exit
+# code and comes back as `si_code == CLD_EXITED` with `si_status == 42`. If PM ever sends the raw
+# byte again, `42 & 0x7f` is non-zero and the same status decodes as `CLD_KILLED` - a child
+# killed by signal 42 - so the probe fails instead of the log quietly showing a number.
+#
+# The same run then reaps a second child through `P_ALL` (which must name the child it took) and
+# checks that the states PM cannot report are refused: `WSTOPPED`/`WCONTINUED` have no encoding,
+# `WNOWAIT` cannot be honoured because a reported child has already been reaped, and POSIX
+# requires one of the state options. Those four requests are rejected while the request is
+# built, so no step can block on a child that will never change state.
+#
+# One step, and not four, for the same reason as `fork.tsv`: the summary line is printed only
+# after every phase passed, and each phase prints its own diagnostic when it fails, so a failed
+# run has no line for the step to match.
+/bin/waittest	waittest: all phases verified

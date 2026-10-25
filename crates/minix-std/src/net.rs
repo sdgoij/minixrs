@@ -85,7 +85,9 @@ pub const SHUT_RDWR: i32 = 2;
 ///
 /// Returns the file descriptor.
 pub fn socket(domain: i32, type_: i32, protocol: i32) -> Result<i32, MinixErr> {
-    let sock_type = type_ & !0xF;
+    // The socket type is the low nibble; `SOCK_CLOEXEC`/`SOCK_NONBLOCK` are
+    // ORed in above it and do not change which protocol the caller means.
+    let sock_type = type_ & 0xF;
     match (domain, sock_type, protocol) {
         (AF_INET, SOCK_DGRAM, IPPROTO_UDP | IPPROTO_IP) => udp_socket(),
         (AF_INET, SOCK_STREAM, IPPROTO_TCP | IPPROTO_IP) => tcp_socket(),
@@ -129,6 +131,21 @@ pub fn udp_socket() -> Result<i32, MinixErr> {
 fn raw_icmp_socket() -> Result<i32, MinixErr> {
     let fd = unsafe { open(b"/dev/ip", O_RDWR, 0) }?;
     Ok(fd)
+}
+
+/// The socket type, discovered the reference way: a TCP socket answers the
+/// `NWIOGTCPCONF` ioctl and a UDP one answers `NWIOGUDPOPT`. The raw ICMP
+/// descriptor answers neither, so it is not identifiable this way.
+pub fn socket_type(fd: i32) -> Result<i32, MinixErr> {
+    let mut probe = NwioTcpConf::default();
+    if unsafe { ioctl(fd, NWIOGTCPCONF, &mut probe as *mut NwioTcpConf as *mut u8) }.is_ok() {
+        return Ok(SOCK_STREAM);
+    }
+    let mut opt = NwioUdpOpt::default();
+    if unsafe { ioctl(fd, NWIOGUDPOPT, &mut opt as *mut NwioUdpOpt as *mut u8) }.is_ok() {
+        return Ok(SOCK_DGRAM);
+    }
+    Err(MinixErr::from_i32(crate::EPROTONOSUPPORT))
 }
 
 /// Bind a socket to `addr:port` (`addr` = `[0; 4]` for INADDR_ANY). The

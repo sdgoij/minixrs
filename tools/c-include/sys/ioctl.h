@@ -34,6 +34,10 @@ struct winsize {
 #define TIOCGWINSZ _IOR('t', 104, struct winsize)
 #define TIOCSWINSZ _IOW('t', 103, struct winsize)
 
+/* Become the controlling terminal. NetBSD's number, which `libc` declares for
+ * the consumers that name the request; the tty server does not act on it yet. */
+#define TIOCSCTTY _IO('t', 37)
+
 /* A pointer or an integer, depending on the request; the encoding says which. */
 int ioctl(int fd, unsigned long request, void *arg);
 

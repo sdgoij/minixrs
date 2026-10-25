@@ -295,6 +295,10 @@ pub const F_DUPFD: i32 = 0;
 pub const F_GETFD: i32 = 1;
 /// F_SETFD = 2 — set close-on-exec flag.
 pub const F_SETFD: i32 = 2;
+/// F_GETFL = 3 — get file status flags (`O_NONBLOCK`, `O_APPEND`, `O_ACCMODE`).
+pub const F_GETFL: i32 = 3;
+/// F_SETFL = 4 — set file status flags (only `O_NONBLOCK` and `O_APPEND`).
+pub const F_SETFL: i32 = 4;
 
 pub const OK: i32 = 0;
 pub const EPERM: i32 = -1;
@@ -364,6 +368,8 @@ pub const PIPE_BUF_SIZE: i32 = 7168;
 
 /// Open flag: non-blocking I/O.
 pub const O_NONBLOCK: i32 = 0o4000;
+/// Open flag mask for the access mode (read-only, write-only, read-write).
+pub const O_ACCMODE: u32 = 0o3;
 
 // fcntl lock commands
 pub const F_SETLK: i32 = 6;

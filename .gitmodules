@@ -9,3 +9,23 @@
 	path = coreutils
 	url = git@github.com:sdgoij/coreutils.git
 	branch = feature/platform-minixrs
+[submodule "libc"]
+	path = libc
+	url = git@github.com:sdgoij/libc.git
+	branch = feature/minixrs
+[submodule "rustix"]
+	path = rustix
+	url = git@github.com:sdgoij/rustix.git
+	branch = feature/minixrs
+[submodule "polling"]
+	path = polling
+	url = git@github.com:sdgoij/polling.git
+	branch = feature/minixrs
+[submodule "calloop"]
+	path = calloop
+	url = git@github.com:sdgoij/calloop.git
+	branch = feature/minixrs
+[submodule "wayland-rs"]
+	path = wayland-rs
+	url = git@github.com:sdgoij/wayland-rs.git
+	branch = feature/minixrs

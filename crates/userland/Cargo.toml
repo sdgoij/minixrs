@@ -226,6 +226,14 @@ name = "ptracetest"
 path = "src/bin/ptracetest.rs"
 test = false
 
+# waittest is the waitid smoke test: a child's exit status comes back decoded
+# (si_code CLD_EXITED, si_status the exit code), P_ALL reports which child it
+# took, and the states PM cannot report are refused. Embedded as /bin/waittest.
+[[bin]]
+name = "waittest"
+path = "src/bin/waittest.rs"
+test = false
+
 # unametest is the uname smoke test: fetches PM_SYSUNAME fields and
 # verifies sysname/nodename/machine (J6 follow-up). Embedded as
 # /bin/unametest.

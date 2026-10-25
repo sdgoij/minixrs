@@ -1572,6 +1572,183 @@ unblocked without the window-table work SSD needs.
 alone makes the keymap available but a toolkit still cannot map a window; 2b
 alone gives it a window but hands it keycodes it cannot turn into text.
 
+### 6.13 Phase 4 — smithay and `cosmic-comp`
+
+Phase 4 is Track B of §6.7: port **smithay** against our own backends, then
+`cosmic-comp`, then `cosmic-session` (+ D-Bus). It is the largest phase and the one
+this document had so far only named, so this section fixes its shape.
+
+**The work is the dependency tree, not smithay.** smithay 0.7.0's non-optional
+dependencies are `calloop ^0.14`, `rustix ^1.0.7` (features `event`, `fs`, `mm`,
+`net`, `pipe`, `process`, `shm`, `time`), `libc`, `errno`, `thiserror`, `tracing`,
+`rand`, `sha2`, `cgmath`, `cursor-icon`, `drm-fourcc`, `downcast-rs`, `appendlist`,
+`indexmap`, `smallvec`, `profiling` and `xkbcommon ^0.8`; `wayland-server`,
+`wayland-protocols*`, a renderer (`glow`/`pixman`), `drm`/`gbm`, `udev`, `libseat`,
+`winit` and `x11rb` are optional. `calloop` 0.14.5 in turn depends on `polling ^3`
+(its `epoll` reactor), `rustix` (features `event`/`fs`/`pipe`/`std`), `tracing` and
+`bitflags`; its opt-in `signals` feature adds `nix` (feature `signal`). So the port is
+an event loop, a syscall surface, the Wayland **server runtime** (wayland-rs, which
+smithay hardcodes — our in-house `crates/wayland` cannot substitute it), a C keymap
+library, a renderer, and then `cosmic-comp`'s own tree plus `zbus`.
+
+**What builds as-is, and what we patch.** `coreutils/` is the precedent, and its
+`feat_minix` note gives the rule: *minix is not `cfg(unix)`, so tools whose platform
+deps are gated behind `cfg(unix)` build as-is; tools with unconditional `rustix`/`libc`
+deps have them gated with `cfg(not(target_os = "minix"))` in their own Cargo.toml* — plus
+small fallbacks where the minix std lacks an API (uid/gid/tty, `getcwd`, `isatty`). So
+the pure-Rust part of smithay's tree (`tracing`, `thiserror`, `indexmap`, `smallvec`,
+`cgmath`, `sha2`, `rand`, `downcast-rs`, `appendlist`, `cursor-icon`, `drm-fourcc`,
+`bitflags`, `profiling`) compiles for `x86_64-pc-minix` as it stands, and the hosting
+mechanism is a separate cargo project on the `coreutils/` model rather than something new.
+
+What does *not* build is the OS-keyed few — `rustix`, `polling`, `nix`, `calloop`,
+`wayland-backend` — for two reasons at once: none of them has a `target_os = "minix"`
+arm, and the all-Unix ones (`calloop`, much of `nix`) compile to nothing while minix is
+outside `cfg(unix)`. The tree **forks those** — one branch each on `sdgoij/`, `feature/minixrs` — and adds each fork as a submodule at the repo root (`rustix/`, `polling/`, `calloop/`), the way `rust/` and `coreutils/` already work; `[patch.crates-io]` points at the submodule path, so the tree carries the *delta* on the fork rather than a vendored copy. The seam that keeps that bounded is that
+**`rustix` has two backends**: `linux_raw` (inline-asm syscalls, Linux-only, irrelevant
+here) and **`libc`** (it calls `libc::` functions). So a minix arm picks the `libc`
+backend, and the patch is *"add the arm and fill the libc functions it calls"*, not
+*"write our syscalls"*. The `libc` crate needs the same minix arm — and the two layers
+are distinct: the crates.io `libc` is the **declarations** (`extern`/constants/types)
+that rustix names, while the **implementations** are our own `crates/minix-libc`
+(shipped as `/lib/libc.so`). A linked library supplies *symbols* (link time); it cannot
+supply the `struct`/`const`/function items rustix type-checks at *compile* time, so a
+crate named `libc` must exist for the target whatever `libc.so` implements.
+
+**`libc` is forked, not replaced.** We forked it (`sdgoij/libc`, `feature/minixrs`) and carry it as a submodule at the repo root, like `rust/` and `coreutils/`. `[patch.crates-io]` substitutes by *name* in whatever project builds the Phase-4 tree, so upstream never enters the graph as a second copy. The fork's delta is a `src/minix/` module — the port's declarations, mirroring `tools/c-include/`, with the implementations in `crates/minix-libc` — selected by a `target_os = "minix"` arm ahead of libc's own `new`/`unix` trees. Its `Cargo.toml` version is pinned to `0.2.189` so the patch satisfies the `^0.2` that `rustix` and `std` require. The caveat stands: the declarations must agree with what `minix-libc` implements or the mismatch is silent — which is what `tools/check-c-headers.py` already polices for the C side.
+
+**The patch set, enumerated.** Beyond `libc` and `rustix`, the required path also
+patches `polling` (calloop's `epoll` reactor), `calloop` itself (all-Unix) and `errno`,
+and registers a `getrandom` custom backend. `errno` is a *direct* dependency of
+smithay (`wayland/shm/pool.rs` calls `errno::errno()`), not only one reached through
+`rustix` — this section's first draft had that wrong — and it picks its backend with
+`cfg_attr` over unix/windows/wasi/hermit, so the target graph needs a crate named
+`errno` whatever `rustix`'s libc backend does. The delta is `errno()`, `set_errno()`
+and a `strerror_r`-backed `Display`. The `coreutils/` precedent still covers
+`getrandom`, but 0.3 selects a custom backend with the `getrandom_backend="custom"`
+cfg rather than 0.2's `custom` feature. Enabled-gated additions are
+`nix` (calloop's `signals`), `wayland-backend`/`wayland-sys` (4c) and `libloading`
+(`cfg(unix)`-gated; needed only for a `glow`/`ash` dynamic load). The C-library
+bindings are a separate class: `xkbcommon` and, if that renderer is taken, `pixman` need
+the C library built for minix as Mesa already is; `gbm` has ours already. Everything
+else in smithay's required set is pure Rust and compiles unchanged.
+
+**4a, measured.** The dependency probe and the first patch set are new submodules at the repo root — `libc`, `rustix`, `polling`, `calloop`, all `sdgoij/` forks on `feature/minixrs`, as `rust/` and `coreutils/` already are. Run against `x86_64-pc-minix` with the fork's stage1 rustc, they settle several of the guesses above and redraw the shape of 4a:
+
+- crates.io `libc` **compiles for minix but defines nothing** (`pid_t`, `getpid` absent), so a `libc` that declares the port's C surface is required; the fork's `src/minix/` supplies it (declarations only, implementations in `crates/minix-libc`). It covers the names `calloop`'s feature set (`event`/`fs`/`pipe`) draws out of `rustix`, with `errno` and `pipe`/`poll` values in the header's numbering.
+- `errno` and `polling` fail for an unrecognised OS (`errno` through a missing `mod sys` rather than a `compile_error!`). `errno` needs no arm *for `rustix`*: that dependency uses nothing but the read/write accessors, which the libc backend supplies on minix. Smithay's own direct dependency is a separate matter — see the probe below. `polling` already owns the `poll` backend the minix arm selects, and its `rustix` dependency drops `process`/`time` on minix (those are the kqueue/pidfd paths), so the runtime surface stays small.
+- **`rustix` needs no arm in its `build.rs`**: it already selects the `libc` backend for any `os != "linux"`. The whole fd layer is fixed by one arm in `maybe_polyfill` pointing at `std::os::fd` (which the fork's std exposes for minix — `library/std/src/os/mod.rs` lists `target_os = "minix"` in the `pub mod fd` gate), plus a small `OsStrExt`/`OsStringExt` shim over `as_encoded_bytes`, an `ioctl` opcode arm, and a `clockid_t` that has to be 32-bit to match both `minix-libc` and `rustix`'s `repr(i32)` `ClockId`.
+- `calloop` is all-`cfg(unix)`; each fd import and insert/remove bound takes a `target_os = "minix"` arm. It does **not** get `EventLoop: AsFd` — the `poll` backend exposes no single fd, exactly as on VxWorks/Hermit/Fuchsia.
+
+**`target_family = "unix"` is parked, with the bill measured.** MINIX is a Unix, and `cfg(unix)` is only a declaration the fork never made (`families` is `TargetOptions`' default `cvs![]`). Declaring it is a two-line spec change — `families: cvs!["unix"]` in `base/minix.rs`, plus keeping the `minix` arms ahead of `unix` in `std/src/sys/pal/mod.rs` and `sys/pipe/mod.rs` because `cfg_select!` is first-match — and it does make `rustix`/`polling`/`calloop` compile unmodified. But it also turns on **std's own unix implementations**: `libc 0.2.189`'s `new`/`unix` trees start compiling for minix (there is no minix family, so `unistd` goes missing), and `std::os::unix`, `sys::thread/unix` and `sys/net/.../socket/unix` each activate against the *unix* PAL, which the minix PAL does not provide (`pal::conf`, `sys::stack_overflow`, `cvt`, ...). Measured, that is a libc port plus a std-PAL extension; the per-crate arms are the smaller path until a port is wanted for its own sake.
+
+`cargo check --target x86_64-pc-minix` is **green** (no warnings). This also settles the `target_family` question: minix does **not** join `cfg(unix)` — every delta above is a local arm, whereas joining `unix` would turn on the `libc` crate's whole Unix tree and the std-PAL obligation `coreutils/Cargo.toml`'s `feat_minix` note measures.
+
+**The 4a gate's remaining work is not declarations.** `cargo build` (the link) is red on two things:
+
+- **`pipe2` in `minix-libc`.** `calloop`'s ping source and `polling` both go through `rustix::pipe::pipe_with`, i.e. `pipe2(fds, O_CLOEXEC | O_NONBLOCK)`. VFS's `do_fcntl` implements `F_GETFD`/`F_SETFD` but not `F_SETFL`, so the non-blocking flag has to be a VFS-side flag on pipe creation rather than a `libc` `fcntl` dance — without it the ping read loop blocks after draining the pipe.
+- **The `minix-rt` duplicate.** A std minix binary links the sysroot's `minix-rt` (std's `public` dependency); `minix-libc` carries a second copy, and both export `minix_sigreturn_trampoline` as a global symbol. The tree already gates exactly this class of symbol on `feature = "rt"` (`minix-rt`'s `write` stub), which is the natural fix here too; the alternative the document names is the dynamic `/lib/libc.so` route of §5 row 13.
+
+**4a, measured against smithay 0.7.0.** `target/smithay-probe` is a throwaway cargo
+project that asks for `smithay = { path = "target/smithay", default-features = false,
+features = ["wayland_frontend"] }` and patches the forks by path; run with the stage1
+rustc it names the rest of the tree exactly.
+
+- **`xkbcommon` 0.8 is two imports and one type.** `std::os::unix::io::OwnedFd` becomes
+  `std::os::fd`, `OsStr::as_bytes` becomes `as_encoded_bytes`, and `libc::FILE` — used
+  only as `*mut FILE` — is now declared in the `libc` fork's `src/minix/stdio.rs`. The
+  crate has no build script; it links `-lxkbcommon`, so the C library stays the open
+  decision below.
+- **`wayland-sys` compiles with no features on, and still needs an arm.**
+  `wayland-backend` depends on it unconditionally (not behind `client`/`server`), and
+  `common.rs` imports `std::os::unix::io::RawFd` at module scope. One `std::os::fd`
+  arm is the whole delta.
+- **`wayland-backend` (46 sites) and `wayland-server` (7) are all-`cfg(unix)` at their
+  imports.** Most are `std::os::unix::io`, which maps to `std::os::fd` — already gated
+  for minix in std. The rest are `std::os::unix::net::{UnixStream, UnixListener}`,
+  which minix std does **not** provide: `sys/net/connection/minix.rs` covers
+  `/dev/tcp` and `/dev/udp` only. The fork's data path is `rustix::net::sendmsg`/
+  `recvmsg` over an `AsFd`, so the sockets are the only missing piece, and
+  `crates/minix-std/src/uds.rs` already has `/dev/uds` `socket`/`socketpair`/`bind`/
+  `listen`/`connect`/`accept` plus `SCM_RIGHTS`.
+- **`getrandom` 0.3 needs a cfg, not a feature.** Its manifest carries only `std` and
+  `wasm_js`; the custom backend is selected by `--cfg getrandom_backend="custom"`, and
+  a *binary* must then call `register_custom_getrandom!` (a library cannot).
+- **`errno` is in the graph because smithay names it**, not because `rustix` does.
+
+**4b, landed: the Unix names come from the OS, not from the crates.** `std::os::minix`
+now carries `net::{UnixStream, UnixListener, SocketAddr}` over
+`crates/minix-std/src/uds.rs` -- with `accept` returning the address the way the Unix
+API does -- plus `fs::{OpenOptionsExt, MetadataExt}` over PAL members that already
+existed and `ffi::{OsStrExt, OsStringExt}` over the encoded-bytes conversions. Declaring `target_family = "unix"` stays parked, so `std::os::unix` does not
+exist for the target and the same work added a **facade**: `std::os::unix::{io, net,
+fs, ffi, prelude}` alias those names onto the port's implementation without adding API of
+its own. That is what keeps the crates unmodified. `wayland-rs`'s whole delta is now the
+two epoll gates (24 lines in `common_poll.rs` and `handle.rs`; imports, scanner output
+and `accept` are untouched), and smithay needs nothing at all. The event loop required
+the port's epoll to be reachable from `rustix` -- it gates `epoll` for minix, with the
+kernel's packed 12-byte `Event`, and reuses the BSD `ioctl` platform -- and the `libc`
+fork declares `epoll_event`/`EPOLL_*`, `sigaction`/`raise`/`SA_*`, and `siginfo_t`'s
+pointer member at offset 16.
+
+**Measured, and reproducible from a script.** `tools/build-smithay.py` (or `just
+smithay`, `just smithay-build`) fetches smithay at the pinned `v0.7.0` commit
+`a166cf4c` into `target/smithay` and generates a workspace in `target/smithay-probe`
+whose `[patch.crates-io]` covers `libc`, `rustix`, `polling`, `calloop`, `errno` and
+`wayland-{sys,scanner,backend,server,protocols,protocols-wlr,protocols-misc}`;
+`cargo check` (and `cargo build`) for `wayland_frontend` is **green on x86_64,
+riscv64 and aarch64**. Two build-shaped notes: `getrandom` 0.3 needs
+`--cfg getrandom_backend="custom"` in the target's rustflags, and the `wayland-*`
+patches must cover the whole family -- patching only `wayland-server` leaves the
+registry's `wayland-protocols` generating against a different server API. Nothing
+links an executable yet, so `-lxkbcommon` is not pulled in.
+
+**The fork is based on the release line, not on master.** wayland-rs master and the
+line crates.io publishes diverged at `a3d7927d` ("chore: Release", 2026-03-30): master
+is 137 commits ahead and has moved `wayland_backend::server::ObjectData::request` /
+`destroyed` to `client_id: &ClientId`, `object_id: &ObjectId` and `Message` to
+`OwnedMessage`, while the maintenance commit `05196740` ("Bump versions for backport
+releases", 8 commits ahead) keeps the by-value signature as server 0.31.14, backend
+0.3.16, protocols 0.32.12. Smithay **0.7.0 and smithay master both still take
+`ClientId` by value**, so a master-based fork cannot link against either — faking the
+version string resolves the dependency and then fails to type-check. `feature/minixrs`
+therefore sits on `05196740`, and its own commit is API-independent (two `#[cfg]`
+gates), so moving it is a cherry-pick: onto the next 0.31.x release while smithay is
+where it is, and onto master once smithay adopts `&ClientId`/`OwnedMessage`.
+
+**Smithay and `xkbcommon` are unmodified, verified.** `cargo check` runs against a
+pristine `v0.7.0` checkout and the registry's `xkbcommon 0.8` (`git status` clean): the
+facade and the `libc` additions are what closed the gaps a fork of either would
+otherwise have covered. What is left for `xkbcommon` is the link, not the source: it
+still needs `-lxkbcommon`, so the C-library decision is unchanged.
+
+**Decisions left open, to take when their stage arrives**
+
+- **`xkbcommon`** — a binding to a *C* library. Either build `libxkbcommon` for minix
+  (the Mesa work already builds C against the port) or deviate to our own keymap
+  handling (the tree already ships an XKB text artifact and hand-rolled shift/ctrl).
+- **`signalfd`** — absent in **both** trees (§3.2). Needed only if a stage enables
+  `calloop`'s `signals` feature or a client uses `Signals`; the timerfd/eventfd/pipe
+  sources do not need it.
+- **The renderer and the backend** — §6.5 says the first smithay target uses a
+  *custom* renderer over the software output, because smithay ships no pure-Rust one.
+  Phase 3 changed the arithmetic: there is now Mesa/virgl on a render node and
+  `zwp_linux_dmabuf_v1`, so smithay's GL (`gles`) renderer is a live option, not just
+  `pixman` or a custom software one. The *backend* is ours either way — there is no
+  udev/KMS to hand smithay.
+
+**Staged, each with a gate**
+
+| Stage | Deliverable | Gate |
+|---|---|---|
+| **4a** | **The patched OS crates and the event loop.** `[patch.crates-io]` copies of `rustix`, `polling` and `calloop` (minix arms, `rustix` on its `libc` backend), on the `coreutils/` model. **Landed:** the four forks and their arms — including `rustix`'s own errno accessors in place of the `errno` crate — with `cargo check` green (measured above). **Open:** the gate itself, behind VFS `pipe2` and the `minix-rt` duplicate | A calloop program drives a timerfd, an eventfd and a pipe source and dispatches them; `just test-calloop-x86` |
+| **4b** | **The `rustix` surface**, per feature group, as smithay's dependencies draw on it | a probe per group |
+| **4c** | **`wayland-server` (wayland-rs 0.31)** — the backend and the protocol tables | a `GlobalDispatch`/`Dispatch` round-trip with a stock client |
+| **4d** | **A smithay compositor on screen** — `wayland_frontend` plus our renderer and input backend, one unmodified `wl_shm` client | a smithay compositor shows a stock client |
+| **4e** | **smithay's GL renderer** over Mesa/virgl, with `gbm`/`drm` | GL content through smithay |
+| **4f** | **`cosmic-comp`** built against the ported smithay | `cosmic-comp` on screen |
+| **4g** | **`cosmic-session` + D-Bus** (`zbus`) | a `libcosmic` app connects |
+
 ---
 
 ## 7. Phased plan
@@ -1582,7 +1759,7 @@ alone gives it a window but hands it keycodes it cannot turn into text.
 | **1** | In-house Wayland server, scoped in **§6.11**. **Landed:** 1a — the wire/interface crate and the registry + `sync` handshake over `/dev/uds` (`test-wayland-x86`); 1b — the `wl_shm` present path: `/sbin/wlserver` (boot proc 20) maps `/dev/fb`, `/bin/wlclient` draws into a memfd pool and commits a surface, and the frame is read back from `/dev/fb` (`test-wlshm-x86`); 1c — input: `wl_seat` keyboard/pointer, focus and `enter`, and a key routed from the device to a client (`test-wlkey-x86`), over an input-server ring that keeps a cursor per consumer and a terminal readiness path that reports instead of pushing (`KNOWN_ISSUES` 36, `test-pty-x86`). **Open:** none. | A `wl_shm` client renders through the server to `/dev/fb`, driven by a QEMU smoke scenario (same shape as `tools/smoke/`); a **ported stock** client later, on the same protocol |
 | **2** | `xdg_shell`, decorations, `layer_shell`, popups, damage tracking, cursor, keymaps, multi-output — scoped in **§6.12**. **Landed:** 2a — the seat's keymap, compiled into `wlserver` and served over an fd (`test-wlkey-x86`); 2b — `xdg_shell`: `xdg_wm_base`/`xdg_surface`/`xdg_toplevel`, `configure`/`ack_configure`, `ping`/`pong`, and a toplevel presented at the configured size (`test-wlx-x86`); 2c — several clients at once and per-surface focus, with input routed to the focused connection (`test-wlfocus-x86`); 2d — damage tracking, so only the damaged rectangle is recomposited, and the pointer's cursor image (`test-wlxd-x86`); 2e — popups, `zwlr_layer_shell_v1` and client-side decorations (`test-wlxe-x86`). **Open:** multi-output. | A real toolkit client runs a window with chrome and input |
 | **3** | GL rendering, scoped in **§6.10** — virgl over `virtio-gpu` first: 3D transport, a `virtgpu` render node, Mesa + `libdrm` as DSOs; llvmpipe kept as the fallback. **Landed:** 3a — the 3D transport and virgl negotiation (`test-gpu3d-x86`, `test-gpu3d-nogl-x86`); 3b — the `/dev/dri/renderD128` node: GEM, contexts, blobs, transfers, submits, `WAIT` and `mmap` (`test-drmmap-x86`, `test-drmgl-x86`); 3c's build half — Mesa builds with the `virgl` gallium driver and the C socket cmsg surface is in `minix-libc` (3c-3a). **Landed:** 3c-3 — the virgl triangle on the render node (`just test-gltriangle-virgl-x86`, `GL_RENDERER=virgl`); 3d-a — a GL surface through the in-house compositor (`just test-wlgl-x86`). **Landed:** 3d-b-1 — the scan-out present path, a whole-output `wl_shm` frame presented out of the client's own buffer with no CPU copy (`just test-wlfull-<arch>`, x86_64/riscv64/aarch64); 3d-b-2 — the node's PRIME handoff, an object exported to a dma-buf descriptor and imported back (`just test-drmprime-x86`, the descriptor VFS-owned in `vfs::dmabuf`); 3d-b-3 — `libgbm` built with the `dri_gbm.so` backend staged, a BO created on the node exported to a dma-buf and imported back (`just test-gbmtest-x86`); 3d-b-4 — `zwp_linux_dmabuf_v1` end to end, a client's object scanned out through the compositor (`just test-wldmabuf-x86`), and the GL client whose render target *is* that buffer (`just test-wldmabufgl-x86`, with the client-side transfer of §5 row 26); 3d-b-5 — GPU composition **landed**: its mechanism (5a) and cross-process handoff (5b, `just test-wlcompose-x86`) over the node's per-open context table (§5 row 28), and the compositor's surface list and end-to-end gate (5c/5d, `just test-wlscene-x86`) — two dma-buf surfaces composed on the render node and the frame scanned out as one. **Open:** none. | The compositor renders GL content |
-| **4** | smithay port; `cosmic-comp` against our backends; `cosmic-session` + D-Bus | `cosmic-comp` on screen; a `libcosmic` app connects |
+| **4** | smithay port; `cosmic-comp` against our backends; `cosmic-session` + D-Bus — scoped in **§6.13**. | `cosmic-comp` on screen; a `libcosmic` app connects |
 | **5** | Portals, fonts, the `libcosmic` suite | A usable session |
 
 ---

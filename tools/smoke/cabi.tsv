@@ -1,0 +1,22 @@
+# The C libc-ABI scenario, driven by `just test-cabi <arch>`.
+#
+# `/bin/cabi` is compiled against `tools/c-include` and linked against the port's
+# `minix-libc`, so it is the one program that meets both sides of these ABIs —
+# the Rust userland binaries go through `minix-std` and never touch the symbols
+# or the struct layouts the headers declare.
+#
+# Three phases, each a place where a header and an implementation can drift
+# apart with no compiler noticing:
+#
+#   1. `sockaddr_in` — built from the header, bound, read back through
+#      getsockname; the family and port must survive.
+#   2. `pipe2(O_NONBLOCK)` — the flag must reach the open file description the
+#      pipe's read path consults (VFS `F_SETFL`), so `F_GETFL` reports it and a
+#      read on the empty pipe answers EAGAIN instead of blocking.
+#   3. `mmap(MAP_ANONYMOUS)` — zero-filled, writable, and releasable.
+#
+# One step, asserting the last line: it is printed only after all three passed,
+# and each failure prints a diagnostic instead. A single invocation, because
+# phase 1 binds a fixed port — a second run in the same boot would race the
+# first one's socket.
+/bin/cabi	cabi: socket layout, pipe2 flags and anon mmap ok

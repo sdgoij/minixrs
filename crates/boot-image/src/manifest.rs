@@ -50,6 +50,11 @@ pub const BOOT_BINS: &[(&str, &str)] = &[
     // `/bin/ctest` is the second C smoke test: uses the full libc (errno,
     // malloc family, printf/stdio, strings). Same build path as helloc.
     ("/bin/ctest", "ctest"),
+    // `/bin/cabi` is the C libc-ABI probe: it builds a `struct sockaddr_in` from
+    // `tools/c-include`, binds it and reads it back through `getsockname`, checks that
+    // `pipe2(O_NONBLOCK)` reaches the open file description the pipe read consults, and maps
+    // anonymous memory. `just test-cabi <arch>` drives it. Same build path as helloc/ctest.
+    ("/bin/cabi", "cabi"),
     // The dynamic-linking trio: the loader, the shared C library, and one C program
     // linked against it rather than against the `minix-libc` rlib. `just dynlib-<arch>`
     // builds them — the loader from `crates/ldso` with `tools/minix-ldso.ld`, the other
@@ -245,6 +250,11 @@ pub const BOOT_BINS: &[(&str, &str)] = &[
     // the window with EL0-RW blocks aliasing the kernel's allocator. `just test-winprobe
     // <arch>` drives it and the summary line's `reachable=0` is the invariant.
     ("/bin/winprobe", "winprobe"),
+    // `/bin/waittest` checks that a child's wait status comes back decoded: a child that exits 42
+    // reports `si_code == CLD_EXITED` and `si_status == 42`, `P_ALL` says which child it took,
+    // and the states PM cannot report (`WSTOPPED`, `WNOWAIT`, no option at all) are refused.
+    // `just test-waitid <arch>` drives it.
+    ("/bin/waittest", "waittest"),
 ];
 
 /// Programs a **wasm32** image carries: destination path → module file name in the target's

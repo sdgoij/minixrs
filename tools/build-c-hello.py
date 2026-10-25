@@ -47,6 +47,7 @@ from ccflags import compile_flags  # noqa: E402
 PROGRAMS = [
     (ROOT / "tools" / "hello.c", "helloc"),
     (ROOT / "tools" / "ctest.c", "ctest"),
+    (ROOT / "tools" / "cabi.c", "cabi"),
 ]
 
 # Scratch objects, per arch: two arches' objects in one directory would be

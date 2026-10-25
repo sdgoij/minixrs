@@ -40,6 +40,9 @@ pub const PM_SETEUID: u32 = PM_BASE + 29;
 pub const PM_SETEGID: u32 = PM_BASE + 30;
 pub const PM_ISSETUGID: u32 = PM_BASE + 31;
 pub const PM_GETSID: u32 = PM_BASE + 32;
+pub const PM_GETPGRP: u32 = PM_BASE + 16;
+pub const PM_GETPRIORITY: u32 = PM_BASE + 26;
+pub const PM_SETPRIORITY: u32 = PM_BASE + 27;
 pub const PM_EXEC_NEW: u32 = PM_BASE + 43;
 
 /// Maximum supplemental groups (matches PM's `pm.rs NGROUPS_MAX`).
@@ -63,7 +66,14 @@ const OFF_PPID: usize = 12;
 //   raw[16..24] = group-array pointer at offset 24
 const OFF_ARG1: usize = 8;
 const OFF_ARG2: usize = 12;
+const OFF_ARG3: usize = 16;
 const OFF_PTR: usize = 24;
+
+/// `PRIO_MIN` — the nicest value. PM replies to `PM_GETPRIORITY` offset by
+/// this so that a successful result cannot be negative.
+pub const PRIO_MIN: i32 = -20;
+/// `PRIO_MAX`
+pub const PRIO_MAX: i32 = 20;
 
 // PM_FORK reply (via VFS_PM_FORK_REPLY): child pid in m1i1@8.
 const OFF_CHILD_PID: usize = 8;
@@ -78,13 +88,54 @@ const OFF_EXIT_STATUS: usize = 8;
 // PM_WAITPID args (matching PM's handle_waitpid):
 //   m1i1 = pid (i32) — child pid to wait for, or -1 for any
 //   m1i2 = options (i32) — WNOHANG, WUNTRACED
-// Reply: pid in m1i1, status in m1i2 (PM overwrites both).
+// Reply: pid in m1i1, w_exitcode-encoded status in m1i2, child real uid in m1i3.
 const OFF_WAIT_PID: usize = 8;
 const OFF_WAIT_OPTIONS: usize = 12;
 const OFF_WAIT_STATUS: usize = 12;
+const OFF_WAIT_UID: usize = 16;
 
 /// Wait options: return immediately if no child has exited.
 pub const WNOHANG: i32 = 1;
+/// `WUNTRACED`
+pub const WUNTRACED: i32 = 2;
+
+// `waitid` options and id types, in the numbering the port's `sys/wait.h` uses.
+
+/// `WSTOPPED` — refused: PM has no stop/continue encoding.
+pub const WSTOPPED: i32 = 0x02;
+/// `WEXITED` — the only wait state PM can report.
+pub const WEXITED: i32 = 0x04;
+/// `WCONTINUED` — refused, for the same reason as `WSTOPPED`.
+pub const WCONTINUED: i32 = 0x08;
+/// `WNOWAIT` — refused: PM cannot report a child without reaping it.
+pub const WNOWAIT: i32 = 0x0100_0000;
+
+/// `P_ALL`
+pub const P_ALL: i32 = 0;
+/// `P_PID`
+pub const P_PID: i32 = 1;
+/// `P_PGID`
+pub const P_PGID: i32 = 2;
+
+/// `CLD_EXITED` — the child called `exit`.
+pub const CLD_EXITED: i32 = 1;
+/// `CLD_KILLED` — the child was killed by a signal.
+pub const CLD_KILLED: i32 = 2;
+/// `CLD_DUMPED` — killed by a signal and left a core file.
+pub const CLD_DUMPED: i32 = 3;
+
+/// What `waitid` reports about a child that changed state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WaitIdInfo {
+    /// `si_code`: `CLD_EXITED`, `CLD_KILLED` or `CLD_DUMPED`.
+    pub code: i32,
+    /// `si_pid` — the child that changed state.
+    pub pid: i32,
+    /// `si_uid` — that child's real user id.
+    pub uid: i32,
+    /// `si_status` — the exit code, or the signal that killed the child.
+    pub status: i32,
+}
 
 /// ptrace(2) request codes (sys/ptrace.h PT_*; PM's handler aliases them
 /// T_*).
@@ -264,6 +315,14 @@ pub fn exit(status: i32) -> ! {
 /// `pid` is the child PID to wait for, or -1 for any child.
 /// `options` can be 0 (blocking) or `WNOHANG` (non-blocking).
 pub fn waitpid(pid: i32, options: i32) -> Result<(i32, i32), MinixErr> {
+    waitpid_full(pid, options).map(|(child, status, _)| (child, status))
+}
+
+/// Wait for a child and return `(pid, wait status, real uid)`.
+///
+/// The status is `w_exitcode`-encoded (what `WIFEXITED`/`WEXITSTATUS` decode).
+/// The uid is the child's real uid, which `waitid` reports as `si_uid`.
+pub fn waitpid_full(pid: i32, options: i32) -> Result<(i32, i32, i32), MinixErr> {
     #[cfg(target_os = "minix")]
     unsafe {
         let mut msg = [0u8; 64];
@@ -277,7 +336,11 @@ pub fn waitpid(pid: i32, options: i32) -> Result<(i32, i32), MinixErr> {
                 if mtype < 0 {
                     Err(MinixErr::from_i32(mtype))
                 } else {
-                    Ok((msg_i32(&msg, OFF_WAIT_PID), msg_i32(&msg, OFF_WAIT_STATUS)))
+                    Ok((
+                        msg_i32(&msg, OFF_WAIT_PID),
+                        msg_i32(&msg, OFF_WAIT_STATUS),
+                        msg_i32(&msg, OFF_WAIT_UID),
+                    ))
                 }
             }
             Err(e) => Err(e),
@@ -287,6 +350,54 @@ pub fn waitpid(pid: i32, options: i32) -> Result<(i32, i32), MinixErr> {
     {
         let _ = (pid, options);
         Err(MinixErr::ENOSYS)
+    }
+}
+
+/// `waitid`: wait for a child selected by `idtype`/`id` and describe it.
+///
+/// Only `WEXITED` is backed by PM. `WSTOPPED`, `WCONTINUED` and `WNOWAIT` are
+/// refused with `EINVAL`, because PM has no stop/continue encoding and cannot
+/// report a child without reaping it. Returns `Ok(None)` when `WNOHANG` is set
+/// and no child has changed state.
+pub fn waitid(idtype: i32, id: i32, options: i32) -> Result<Option<WaitIdInfo>, MinixErr> {
+    if options & WEXITED == 0 || options & (WSTOPPED | WCONTINUED | WNOWAIT) != 0 {
+        return Err(MinixErr::from_i32(crate::EINVAL));
+    }
+    let pid = match idtype {
+        P_ALL => -1,
+        P_PID => id,
+        P_PGID => -id,
+        _ => return Err(MinixErr::from_i32(crate::EINVAL)),
+    };
+    match waitpid_full(pid, options) {
+        Ok((child, status, uid)) => Ok(Some(decode_wait_status(status, child, uid))),
+        // WNOHANG with no child ready: no `siginfo_t` is filled.
+        Err(e) if e == MinixErr::EAGAIN => Ok(None),
+        Err(e) => Err(e),
+    }
+}
+
+/// Decode a `w_exitcode`-encoded wait status into what `waitid` reports.
+fn decode_wait_status(status: i32, pid: i32, uid: i32) -> WaitIdInfo {
+    // A clear low byte means a normal exit, bit 7 marks a core dump, and
+    // otherwise the low seven bits are the terminating signal.
+    let exited = status & 0x7f == 0;
+    let code = if exited {
+        CLD_EXITED
+    } else if status & 0x80 != 0 {
+        CLD_DUMPED
+    } else {
+        CLD_KILLED
+    };
+    WaitIdInfo {
+        code,
+        pid,
+        uid,
+        status: if exited {
+            (status >> 8) & 0xff
+        } else {
+            status & 0x7f
+        },
     }
 }
 
@@ -377,11 +488,21 @@ pub fn getpid() -> Result<(i32, i32), MinixErr> {
 /// Must be called with the PM server running.
 #[cfg(target_os = "minix")]
 unsafe fn pm_cred_call(call: u32, arg1: Option<i32>) -> Result<[u8; 64], MinixErr> {
+    unsafe { pm_call_args(call, [arg1.unwrap_or(0), 0, 0]) }
+}
+
+/// Send a PM call with up to three integer arguments (m1i1..m1i3).
+///
+/// # Safety
+///
+/// Must be called with the PM server running.
+#[cfg(target_os = "minix")]
+unsafe fn pm_call_args(call: u32, args: [i32; 3]) -> Result<[u8; 64], MinixErr> {
     let mut msg = [0u8; 64];
     msg_set_i32(&mut msg, OFF_TYPE, call as i32);
-    if let Some(v) = arg1 {
-        msg_set_i32(&mut msg, OFF_ARG1, v);
-    }
+    msg_set_i32(&mut msg, OFF_ARG1, args[0]);
+    msg_set_i32(&mut msg, OFF_ARG2, args[1]);
+    msg_set_i32(&mut msg, OFF_ARG3, args[2]);
     let result = unsafe { sendrec(PM_PROC_NR, &mut msg) };
     match result {
         Ok(_) => {
@@ -429,6 +550,55 @@ pub fn getsid(pid: i32) -> Result<i32, MinixErr> {
     #[cfg(not(target_os = "minix"))]
     {
         let _ = pid;
+        Err(MinixErr::ENOSYS)
+    }
+}
+
+/// Process group of `pid` (0 = self).
+pub fn getpgid(pid: i32) -> Result<i32, MinixErr> {
+    #[cfg(target_os = "minix")]
+    unsafe {
+        pm_cred_call(PM_GETPGRP, Some(pid)).map(|msg| msg_i32(&msg, OFF_ARG1))
+    }
+    #[cfg(not(target_os = "minix"))]
+    {
+        let _ = pid;
+        Err(MinixErr::ENOSYS)
+    }
+}
+
+/// Caller's process group.
+pub fn getpgrp() -> Result<i32, MinixErr> {
+    getpgid(0)
+}
+
+/// POSIX `getpriority`: the nice value for `which`/`who`.
+///
+/// PM answers with `mp_nice - PRIO_MIN` as the reply status (the C library's
+/// convention), so the value arrives in `m_type` rather than a payload field —
+/// which is also what keeps a failure (a negative status) distinct from a
+/// perfectly valid `-1`-equivalent result.
+pub fn getpriority(which: i32, who: i32) -> Result<i32, MinixErr> {
+    #[cfg(target_os = "minix")]
+    unsafe {
+        pm_call_args(PM_GETPRIORITY, [which, who, 0]).map(|msg| msg_i32(&msg, OFF_TYPE) + PRIO_MIN)
+    }
+    #[cfg(not(target_os = "minix"))]
+    {
+        let _ = (which, who);
+        Err(MinixErr::ENOSYS)
+    }
+}
+
+/// POSIX `setpriority`: set the nice value for `which`/`who`.
+pub fn setpriority(which: i32, who: i32, prio: i32) -> Result<(), MinixErr> {
+    #[cfg(target_os = "minix")]
+    unsafe {
+        pm_call_args(PM_SETPRIORITY, [which, who, prio]).map(|_| ())
+    }
+    #[cfg(not(target_os = "minix"))]
+    {
+        let _ = (which, who, prio);
         Err(MinixErr::ENOSYS)
     }
 }
@@ -599,6 +769,10 @@ impl MinixErr {
 
     /// ENOSYS error constant. C `errno.h`: `_SIGN 78`.
     pub const ENOSYS: MinixErr = MinixErr(78);
+
+    /// EAGAIN error constant. `MinixErr` stores positive errno values, so this
+    /// is `-EAGAIN`'s stored form.
+    pub const EAGAIN: MinixErr = MinixErr(11);
 }
 
 // Tests

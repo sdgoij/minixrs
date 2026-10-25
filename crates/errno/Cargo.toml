@@ -1,0 +1,20 @@
+# A stand-in for the `errno` crate, which has no minix arm: its backend is
+# chosen by `cfg_attr` over unix/windows/wasi/hermit, so a package named `errno`
+# cannot be built for this target as published. Projects that pull one in point
+# `[patch.crates-io]` here.
+#
+# The version is upstream's so it satisfies the requirements its consumers
+# declare (`^0.3.5` from smithay, `^0.3.10` from rustix). `publish` is off: a
+# name-shadowing package must never reach a registry.
+[package]
+name = "errno"
+version = "0.3.14"
+edition = "2024"
+rust-version = "1.96"
+license = "GPL2.0"
+description = "The minix errno slot, as a stand-in for the errno crate"
+publish = false
+
+[features]
+default = ["std"]
+std = []

@@ -21,10 +21,14 @@ int getppid(void);
 int isatty(int fd);
 int gethostname(char *name, size_t len);
 int getsid(int pid);
+pid_t getpgrp(void);
+pid_t getpgid(pid_t pid);
+int nice(int inc);
 
 int dup(int fd);
 int dup2(int fd, int newfd);
 int pipe(int fds[2]);
+int pipe2(int fds[2], int flags);
 off_t lseek(int fd, off_t offset, int whence);
 unsigned int alarm(unsigned int seconds);
 int unlink(const char *path);

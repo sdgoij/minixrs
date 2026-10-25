@@ -37,6 +37,20 @@ int msync(void *addr, size_t length, int flags);
 
 int madvise(void *addr, size_t length, int advice);
 
+/* The POSIX advice vocabulary; the port accepts and ignores every value, so
+ * these are the `MADV_*` numbers under their POSIX names. */
+#define POSIX_MADV_NORMAL 0
+#define POSIX_MADV_RANDOM 1
+#define POSIX_MADV_SEQUENTIAL 2
+#define POSIX_MADV_WILLNEED 3
+#define POSIX_MADV_DONTNEED 4
+int posix_madvise(void *addr, size_t length, int advice);
+
+/* No pageable backing store: every mapped page is resident, so locking is a
+ * no-op that succeeds. */
+int mlock(const void *addr, size_t length);
+int munlock(const void *addr, size_t length);
+
 /* POSIX shared memory — declared for ABI compatibility; minix has no
  * shm_open (the System V shmget/shmat interface is used instead). */
 int shm_open(const char *name, int oflag, mode_t mode);

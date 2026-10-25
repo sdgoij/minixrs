@@ -124,6 +124,7 @@ pub const EPERM: i32 = -1;
 pub const EFAULT: i32 = -14;
 pub const ESRCH: i32 = -3;
 pub const EBUSY: i32 = -16;
+pub const EACCES: i32 = -13;
 
 // SigSet — signal set type (sigset_t equivalent)
 
@@ -810,7 +811,9 @@ pub unsafe fn exit_proc(slot: usize, exit_status: i32, dump_core: bool) {
     unsafe { stop_proc(slot) };
     rmp.mp_flags |= EXITING;
     rmp.mp_exitstatus = exit_status as i8;
-    rmp.mp_sigstatus = (exit_status & 0xFF) as i8;
+    // `mp_sigstatus` is not derived from the exit status: C sets it only in
+    // `sig_proc_exit` (and VFS's core-dump reply), so a normal exit leaves the
+    // value `fork` cleared.
     rmp.mp_ksigpending.sigemptyset();
 
     // Reparent children to INIT (pid 1) if parent is PM or INIT.
@@ -1047,7 +1050,7 @@ pub unsafe fn check_parent(child_slot: usize, _try_cleanup: bool) {
     }
 
     if unsafe { wait_test(parent as usize, child) } {
-        unsafe { tell_parent(parent as usize, child) };
+        unsafe { tell_parent(parent as usize, child_slot) };
         return;
     }
 
@@ -1061,36 +1064,58 @@ pub unsafe fn check_parent(child_slot: usize, _try_cleanup: bool) {
 }
 
 /// Tell a waiting parent that its child has exited.
-/// Sends a reply to the parent's WAITPID call with child PID and status.
-/// Matching C tell_parent() in forkexit.c
+///
+/// Sends a reply to the parent's WAITPID call with the child's pid, its
+/// `w_exitcode`-encoded status and its real uid, and marks the child
+/// `TOLD_PARENT` (clearing `ZOMBIE`) so it cannot be reported a second time and
+/// so `exit_restart` cleans the slot up once VFS replies. That marking is C
+/// `tell_parent`'s, and it is what keeps a later `wait` from seeing the same
+/// child again.
 ///
 /// # Safety
 ///
-/// - `parent` must be < `NR_PROCS`.
-/// - `child` must point to a valid, in-use MProc entry.
-pub unsafe fn tell_parent(parent: usize, child: &MProc) {
-    if parent >= NR_PROCS {
+/// `parent` and `child_slot` must be < `NR_PROCS`. The caller must ensure
+/// exclusive access to the process table.
+pub unsafe fn tell_parent(parent: usize, child_slot: usize) {
+    if parent >= NR_PROCS || child_slot >= NR_PROCS {
         return;
     }
     let base = MPROC.as_ptr();
+    let child = unsafe { &*base.add(child_slot) };
+    if child.mp_flags & IN_USE == 0 {
+        return;
+    }
+    let pid = child.mp_pid;
+    let status = w_exitcode(
+        child.mp_exitstatus as i32,
+        child.mp_sigstatus as i32 & 0o377,
+    );
+    let ruid = child.mp_realuid;
+
     let parent_rmp = unsafe { &mut *base.add(parent) };
     if parent_rmp.mp_flags & IN_USE == 0 {
         return;
     }
     parent_rmp.mp_flags &= !WAITING;
+    let parent_ep = parent_rmp.mp_endpoint;
+
+    // C tell_parent: the child is no longer a zombie to its parent.
+    let child_mut = unsafe { &mut *base.add(child_slot) };
+    child_mut.mp_flags = (child_mut.mp_flags & !ZOMBIE) | TOLD_PARENT;
+
     let mut reply_msg = Message {
         m_source: 0,
         m_type: OK,
         m_payload: unsafe { core::mem::zeroed() },
     };
-
-    reply_msg.m_payload.m1.m1i1 = child.mp_pid;
-    reply_msg.m_payload.m1.m1i2 = (child.mp_exitstatus as i32) & 0xFF;
+    reply_msg.m_payload.m1.m1i1 = pid;
+    reply_msg.m_payload.m1.m1i2 = status;
+    reply_msg.m_payload.m1.m1i3 = ruid;
 
     let _ = unsafe {
         minix_rt::syscall2(
             minix_rt::SENDNB_CALL,
-            parent_rmp.mp_endpoint as u64,
+            parent_ep as u64,
             &mut reply_msg as *mut Message as u64,
         )
     };
@@ -1199,17 +1224,36 @@ pub unsafe fn cleanup(slot: usize) {
     PROCS_IN_USE.fetch_sub(1, Ordering::Relaxed);
 }
 
+/// Resolve `waitpid`'s pid argument the way C `do_waitpid` does: a pid of 0
+/// means "any child in my process group", which is the negated group id.
+///
+/// # Safety
+///
+/// `slot` must be < `NR_PROCS`.
+unsafe fn wait_pidarg(slot: usize, wpid: i32) -> i32 {
+    if wpid != 0 {
+        return wpid;
+    }
+    let base = MPROC.as_ptr();
+    unsafe { -(*base.add(slot)).mp_procgrp }
+}
+
 /// Wait for a child process to exit.
 ///
 /// `wpid` is the child PID to wait for, or -1 for any child. With `options`
 /// & WNOHANG set, returns `Err(EAGAIN)` when no zombie child exists instead
 /// of blocking (the caller turns a non-WNOHANG miss into a suspended wait).
 ///
+/// On success returns `(pid, wait status, real uid)`. The status is
+/// `w_exitcode`-encoded — the form `WIFEXITED`/`WEXITSTATUS` expect — matching
+/// C `do_waitpid`, and the uid is the child's real uid, which `waitid` reports
+/// as `si_uid` (PM still knows it at reap time).
+///
 /// # Safety
 ///
 /// `parent` must be < `NR_PROCS` and refer to a valid in-use process. The
 /// caller must ensure exclusive access to the process table.
-pub unsafe fn do_waitpid(parent: usize, wpid: i32, options: i32) -> Result<(i32, i32), i32> {
+pub unsafe fn do_waitpid(parent: usize, wpid: i32, options: i32) -> Result<(i32, i32, i32), i32> {
     if parent >= NR_PROCS {
         return Err(EINVAL);
     }
@@ -1219,6 +1263,8 @@ pub unsafe fn do_waitpid(parent: usize, wpid: i32, options: i32) -> Result<(i32,
     if parent_rmp.mp_flags & IN_USE == 0 {
         return Err(EINVAL);
     }
+    // C do_waitpid: 0 selects the caller's own process group.
+    let pidarg = unsafe { wait_pidarg(parent, wpid) };
 
     // Scan for a waitable child: an exited (zombie) child, or — for a
     // tracer — a traced child that stopped (TRACE_STOPPED + a pending
@@ -1245,7 +1291,12 @@ pub unsafe fn do_waitpid(parent: usize, wpid: i32, options: i32) -> Result<(i32,
         if !is_parent && child.mp_flags & ZOMBIE != 0 {
             continue;
         }
-        if wpid != -1 && child.mp_pid != wpid {
+        // C do_waitpid's pid test: a positive pid names one child, a value
+        // below -1 names a process group, and -1 accepts any child.
+        if pidarg > 0 && child.mp_pid != pidarg {
+            continue;
+        }
+        if pidarg < -1 && -pidarg != child.mp_procgrp {
             continue;
         }
         if is_tracer {
@@ -1263,7 +1314,7 @@ pub unsafe fn do_waitpid(parent: usize, wpid: i32, options: i32) -> Result<(i32,
                     if child.mp_sigtrace.sigismember(sig) {
                         let child_mut = unsafe { &mut *base.add(i) };
                         child_mut.mp_sigtrace.sigdelset(sig);
-                        return Ok((child.mp_pid, w_exitcode(sig, 0)));
+                        return Ok((child.mp_pid, w_exitcode(sig, 0), child.mp_realuid));
                     }
                 }
             }
@@ -1271,7 +1322,11 @@ pub unsafe fn do_waitpid(parent: usize, wpid: i32, options: i32) -> Result<(i32,
         if child.mp_flags & ZOMBIE != 0 {
             // Found a zombie child.
             let pid = child.mp_pid;
-            let status = (child.mp_exitstatus as i32) & 0xFF;
+            let status = w_exitcode(
+                child.mp_exitstatus as i32,
+                child.mp_sigstatus as i32 & 0o377,
+            );
+            let ruid = child.mp_realuid;
             let child_ep = child.mp_endpoint;
             // Safety: `free_proc` requires exclusive access to the process
             // table, which the caller guarantees.
@@ -1303,7 +1358,7 @@ pub unsafe fn do_waitpid(parent: usize, wpid: i32, options: i32) -> Result<(i32,
             let mut clear_msg = [0u8; 64];
             clear_msg[8..12].copy_from_slice(&child_ep.to_le_bytes());
             let _ = minix_rt::kernel_call(2, &mut clear_msg);
-            return Ok((pid, status));
+            return Ok((pid, status, ruid));
         }
     }
 
@@ -1603,9 +1658,13 @@ pub const WNOHANG: i32 = 1;
 
 /// Terminate a process due to a signal.
 ///
-/// Sets exit status to (signo | 0x80) and calls do_exit.
-/// If signo is in the core set (SIGQUIT=3, SIGILL=4, SIGTRAP=5, SIGABRT=6,
-/// SIGFPE=8, SIGSEGV=11), marks the slot for a core dump (not yet implemented).
+/// Sets `mp_sigstatus` to the signal and exits with status 0, which is what C
+/// `sig_proc_exit` does: the two halves of `w_exitcode` come from different
+/// fields, so a signal death must not also land in the exit status.
+///
+/// The core-dump signals (SIGQUIT=3, SIGILL=4, SIGTRAP=5, SIGABRT=6,
+/// SIGFPE=8, SIGSEGV=11) pass `dump_core` through; the flag is not yet
+/// reflected in `mp_sigstatus` because VFS core dumps are not wired.
 ///
 /// # Safety
 ///
@@ -1620,13 +1679,9 @@ pub unsafe fn sig_proc_exit(slot: usize, signo: i32) {
     if rmp.mp_flags & IN_USE == 0 {
         return;
     }
-    let exit_status = signo | 0x80;
-    // Core dump signals: SIGQUIT(3), SIGILL(4), SIGTRAP(5),
-    // SIGABRT(6), SIGFPE(8), SIGSEGV(11)
-    if matches!(signo, 3 | 4 | 5 | 6 | 8 | 11) {
-        // Core dump flag would go here when VM core dump is implemented.
-    }
-    unsafe { exit_proc(slot, exit_status, false) };
+    rmp.mp_sigstatus = signo as i8;
+    let dump_core = matches!(signo, 3 | 4 | 5 | 6 | 8 | 11);
+    unsafe { exit_proc(slot, 0, dump_core) };
 }
 
 /// Stop a process by setting PROC_STOPPED and sending a SYS_STOP kernel call.
@@ -2489,6 +2544,8 @@ pub const PM_SIGPENDING: i32 = PM_BASE + 22;
 pub const PM_SIGPROCMASK: i32 = PM_BASE + 23;
 pub const PM_SIGRETURN: i32 = PM_BASE + 24;
 pub const PM_SYSUNAME: i32 = PM_BASE + 25;
+pub const PM_GETPRIORITY: i32 = PM_BASE + 26;
+pub const PM_SETPRIORITY: i32 = PM_BASE + 27;
 pub const PM_GETTIMEOFDAY: i32 = PM_BASE + 28;
 pub const PM_SETEUID: i32 = PM_BASE + 29;
 pub const PM_SETEGID: i32 = PM_BASE + 30;
@@ -2781,11 +2838,13 @@ pub unsafe fn handle_fork(caller_slot: usize, msg: &mut Message) -> i32 {
 pub unsafe fn handle_waitpid(caller_slot: usize, msg: &mut Message) -> i32 {
     let wpid = unsafe { msg.m_payload.m1.m1i1 };
     let options = unsafe { msg.m_payload.m1.m1i2 };
-    match unsafe { do_waitpid(caller_slot, wpid, options) } {
-        Ok((pid, status)) => {
+    let pidarg = unsafe { wait_pidarg(caller_slot, wpid) };
+    match unsafe { do_waitpid(caller_slot, pidarg, options) } {
+        Ok((pid, status, ruid)) => {
             unsafe {
                 msg.m_payload.m1.m1i1 = pid;
                 msg.m_payload.m1.m1i2 = status;
+                msg.m_payload.m1.m1i3 = ruid;
             }
             OK
         }
@@ -2798,7 +2857,7 @@ pub unsafe fn handle_waitpid(caller_slot: usize, msg: &mut Message) -> i32 {
             unsafe {
                 let rmp = &mut *base.add(caller_slot);
                 rmp.mp_flags |= WAITING;
-                rmp.mp_wpid = wpid;
+                rmp.mp_wpid = pidarg;
             }
             EDONTREPLY
         }
@@ -3646,7 +3705,24 @@ pub unsafe fn handle_setsid(caller_slot: usize, _msg: &mut Message) -> i32 {
     OK
 }
 
-/// Handler for PM_GETPGRP — return process group.
+/// Slot of the in-use process with `pid`, if any.
+///
+/// # Safety
+///
+/// Must be called with exclusive access to the MProc table.
+unsafe fn slot_of_pid(pid: i32) -> Option<usize> {
+    let base = MPROC.as_ptr();
+    for i in 0..NR_PROCS {
+        let p = unsafe { &*base.add(i) };
+        if p.mp_flags & IN_USE != 0 && p.mp_pid == pid {
+            return Some(i);
+        }
+    }
+    None
+}
+
+/// Handler for PM_GETPGRP — m1i1 = pid (0 = self); replies with the target's
+/// process group in m1i1.
 ///
 /// # Safety
 ///
@@ -3654,10 +3730,87 @@ pub unsafe fn handle_setsid(caller_slot: usize, _msg: &mut Message) -> i32 {
 /// to a valid message buffer.
 #[allow(unused_unsafe)]
 pub unsafe fn handle_getpgrp(caller_slot: usize, msg: &mut Message) -> i32 {
+    let pid = unsafe { msg.m_payload.m1.m1i1 };
+    let target = if pid == 0 {
+        Some(caller_slot)
+    } else {
+        unsafe { slot_of_pid(pid) }
+    };
+    match target {
+        Some(slot) => {
+            let base = MPROC.as_ptr();
+            unsafe {
+                msg.m_payload.m1.m1i1 = (*base.add(slot)).mp_procgrp;
+            }
+            OK
+        }
+        None => ESRCH,
+    }
+}
+
+/// `PRIO_PROCESS` — the only selector implemented, as in C `do_getsetpriority`.
+const PRIO_PROCESS: i32 = 0;
+/// `PRIO_MIN`
+const PRIO_MIN: i32 = -20;
+/// `PRIO_MAX`
+const PRIO_MAX: i32 = 20;
+
+/// Handler for PM_GETPRIORITY and PM_SETPRIORITY — get or set a nice value.
+///
+/// m1i1 = which, m1i2 = who (0 = self), m1i3 = prio (set only). A get returns
+/// `mp_nice - PRIO_MIN`, i.e. the reply itself, which is how C's
+/// `do_getsetpriority` answers: the C library subtracts `PRIO_MIN` back, and
+/// the offset is what keeps a successful result from looking like an error.
+///
+/// `mp_nice` is recorded but not handed to the scheduler: the tree's
+/// priority/queue mapping is still unwired (see the boot-proc priority note),
+/// so this changes what `getpriority` reports, not the dispatch order.
+///
+/// # Safety
+///
+/// `caller_slot` must be a valid, in-use process slot. `msg` must point
+/// to a valid message buffer.
+pub unsafe fn handle_priority(caller_slot: usize, msg: &mut Message) -> i32 {
+    let which = unsafe { msg.m_payload.m1.m1i1 };
+    let who = unsafe { msg.m_payload.m1.m1i2 };
+    let prio = unsafe { msg.m_payload.m1.m1i3 };
+    let is_get = msg.m_type == PM_GETPRIORITY;
+
+    if which != PRIO_PROCESS {
+        return EINVAL;
+    }
+
+    let target_slot = if who == 0 {
+        caller_slot
+    } else {
+        match unsafe { slot_of_pid(who) } {
+            Some(slot) => slot,
+            None => return ESRCH,
+        }
+    };
+
     let base = MPROC.as_ptr();
-    let rmp = unsafe { &*base.add(caller_slot) };
+    let caller = unsafe { &*base.add(caller_slot) };
+    let target = unsafe { &*base.add(target_slot) };
+
+    if caller.mp_effuid != SUPER_USER
+        && caller.mp_effuid != target.mp_effuid
+        && caller.mp_effuid != target.mp_realuid
+    {
+        return EPERM;
+    }
+
+    if is_get {
+        return target.mp_nice - PRIO_MIN;
+    }
+
+    // Only root may make a process less nice, i.e. raise its priority.
+    if target.mp_nice > prio && caller.mp_effuid != SUPER_USER {
+        return EACCES;
+    }
+
     unsafe {
-        msg.m_payload.m1.m1i1 = rmp.mp_procgrp;
+        (*base.add(target_slot)).mp_nice = prio.clamp(PRIO_MIN, PRIO_MAX);
     }
     OK
 }
@@ -3850,6 +4003,8 @@ pub fn pm_dispatch(caller_slot: usize, msg: &mut Message) -> i32 {
         23 => unsafe { handle_sigprocmask(caller_slot, msg) },
         24 => unsafe { handle_sigreturn(caller_slot, msg) },
         25 => unsafe { handle_sysuname(caller_slot, msg) }, // PM_SYSUNAME
+        26 => unsafe { handle_priority(caller_slot, msg) }, // PM_GETPRIORITY
+        27 => unsafe { handle_priority(caller_slot, msg) }, // PM_SETPRIORITY
         28 => unsafe { handle_time(caller_slot, msg) },     // PM_GETTIMEOFDAY
         29 => unsafe { handle_seteuid(caller_slot, msg) },  // PM_SETEUID
         30 => unsafe { handle_setegid(caller_slot, msg) },  // PM_SETEGID
@@ -5656,7 +5811,8 @@ mod tests {
         assert_eq!(result, OK);
         unsafe {
             assert_eq!(msg.m_payload.m1.m1i1, 2); // pid
-            assert_eq!(msg.m_payload.m1.m1i2, 42); // status
+            assert_eq!(msg.m_payload.m1.m1i2, w_exitcode(42, 0)); // status
+            assert_eq!(msg.m_payload.m1.m1i3, 0); // child real uid
         }
     }
 
@@ -5701,7 +5857,7 @@ mod tests {
         }
         // Zombie present → reaped even with WNOHANG.
         let r = unsafe { do_waitpid(parent, -1, WNOHANG) };
-        assert_eq!(r, Ok((2, 9)));
+        assert_eq!(r, Ok((2, w_exitcode(9, 0), 0)));
     }
 
     #[test]
@@ -5745,7 +5901,7 @@ mod tests {
             (*base.add(child)).mp_exitstatus = 7;
         }
         let r = unsafe { do_waitpid(parent, -1, 0) };
-        assert_eq!(r, Ok((2, 7)));
+        assert_eq!(r, Ok((2, w_exitcode(7, 0), 0)));
         // Child slot should be freed
         unsafe {
             let base = MPROC.as_ptr();
@@ -5987,6 +6143,111 @@ mod tests {
         let r = unsafe { handle_getsid(b, &mut msg) };
         assert_eq!(r, OK);
         assert_eq!(unsafe { msg.m_payload.m1.m1i1 }, 8);
+    }
+
+    #[test]
+    fn test_getpgrp_takes_pid_or_self() {
+        init_proc();
+        let a = alloc_proc().unwrap();
+        let b = alloc_proc().unwrap();
+        unsafe {
+            let base = MPROC.as_ptr();
+            (*base.add(a)).mp_flags |= IN_USE;
+            (*base.add(a)).mp_pid = 42;
+            (*base.add(a)).mp_procgrp = 7;
+            (*base.add(b)).mp_flags |= IN_USE;
+            (*base.add(b)).mp_pid = 99;
+            (*base.add(b)).mp_procgrp = 8;
+        }
+        let mut msg = cred_msg();
+        // No pid: the caller's own group.
+        let r = unsafe { handle_getpgrp(b, &mut msg) };
+        assert_eq!(r, OK);
+        assert_eq!(unsafe { msg.m_payload.m1.m1i1 }, 8);
+        // A named pid.
+        msg.m_payload.m1.m1i1 = 42;
+        let r = unsafe { handle_getpgrp(b, &mut msg) };
+        assert_eq!(r, OK);
+        assert_eq!(unsafe { msg.m_payload.m1.m1i1 }, 7);
+        // Unknown pid.
+        msg.m_payload.m1.m1i1 = 12345;
+        assert_eq!(unsafe { handle_getpgrp(b, &mut msg) }, ESRCH);
+    }
+
+    #[test]
+    fn test_priority_get_and_set_on_self() {
+        init_proc();
+        let a = alloc_proc().unwrap();
+        unsafe {
+            let base = MPROC.as_ptr();
+            (*base.add(a)).mp_flags |= IN_USE;
+            (*base.add(a)).mp_pid = 42;
+        }
+        let mut msg = cred_msg();
+
+        // GETPRIORITY returns `mp_nice - PRIO_MIN` as the reply status, so a
+        // nice value of 0 is 20.
+        msg.m_type = PM_GETPRIORITY;
+        msg.m_payload.m1.m1i1 = PRIO_PROCESS;
+        msg.m_payload.m1.m1i2 = 0; // self
+        assert_eq!(unsafe { handle_priority(a, &mut msg) }, 20);
+
+        // SETPRIORITY records the value and the next get reports it.
+        msg.m_type = PM_SETPRIORITY;
+        msg.m_payload.m1.m1i3 = 5;
+        assert_eq!(unsafe { handle_priority(a, &mut msg) }, OK);
+        msg.m_type = PM_GETPRIORITY;
+        assert_eq!(unsafe { handle_priority(a, &mut msg) }, 25);
+
+        // Out-of-range values clamp to PRIO_MAX rather than fail, as C's
+        // sched_nice does.
+        msg.m_type = PM_SETPRIORITY;
+        msg.m_payload.m1.m1i3 = 999;
+        assert_eq!(unsafe { handle_priority(a, &mut msg) }, OK);
+        assert_eq!(unsafe { (*MPROC.as_ptr().add(a)).mp_nice }, PRIO_MAX);
+
+        // Any selector other than PRIO_PROCESS (1 = PRIO_PGRP) is unimplemented.
+        msg.m_payload.m1.m1i1 = 1;
+        assert_eq!(unsafe { handle_priority(a, &mut msg) }, EINVAL);
+    }
+
+    #[test]
+    fn test_priority_permissions() {
+        init_proc();
+        let a = alloc_proc().unwrap();
+        let b = alloc_proc().unwrap();
+        unsafe {
+            let base = MPROC.as_ptr();
+            (*base.add(a)).mp_flags |= IN_USE;
+            (*base.add(a)).mp_pid = 42;
+            (*base.add(a)).mp_effuid = 100;
+            (*base.add(b)).mp_flags |= IN_USE;
+            (*base.add(b)).mp_pid = 99;
+            (*base.add(b)).mp_effuid = 200;
+        }
+        let mut msg = cred_msg();
+        msg.m_type = PM_GETPRIORITY;
+        msg.m_payload.m1.m1i1 = PRIO_PROCESS;
+        msg.m_payload.m1.m1i2 = 99; // another user's process
+        assert_eq!(unsafe { handle_priority(a, &mut msg) }, EPERM);
+
+        // Unknown pid.
+        msg.m_payload.m1.m1i2 = 12345;
+        assert_eq!(unsafe { handle_priority(a, &mut msg) }, ESRCH);
+
+        // Same user: a non-root caller may make a process nicer but not less
+        // nice (that would raise its priority).
+        unsafe {
+            let base = MPROC.as_ptr();
+            (*base.add(b)).mp_effuid = 100;
+        }
+        msg.m_type = PM_SETPRIORITY;
+        msg.m_payload.m1.m1i2 = 99;
+        msg.m_payload.m1.m1i3 = -5;
+        assert_eq!(unsafe { handle_priority(a, &mut msg) }, EACCES);
+        msg.m_payload.m1.m1i3 = 5;
+        assert_eq!(unsafe { handle_priority(a, &mut msg) }, OK);
+        assert_eq!(unsafe { (*MPROC.as_ptr().add(b)).mp_nice }, 5);
     }
 
     #[test]
@@ -6325,7 +6586,7 @@ mod tests {
         // The tracer's waitpid reports W_STOPCODE(SIGSTOP) and consumes
         // the sigtrace entry.
         let r = unsafe { do_waitpid(tracer, -1, 0) };
-        assert_eq!(r, Ok((2, SIGSTOP << 8)));
+        assert_eq!(r, Ok((2, SIGSTOP << 8, 0)));
         unsafe {
             assert!(!(*base.add(child)).mp_sigtrace.sigismember(SIGSTOP));
         }

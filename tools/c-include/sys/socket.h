@@ -16,6 +16,7 @@ typedef unsigned short sa_family_t;
 
 #define AF_UNIX 1
 #define AF_INET 2
+#define AF_INET6 10
 #define AF_LOCAL AF_UNIX
 #define PF_UNIX AF_UNIX
 #define PF_LOCAL AF_UNIX
@@ -23,10 +24,29 @@ typedef unsigned short sa_family_t;
 #define SOCK_STREAM 1
 #define SOCK_DGRAM 2
 #define SOCK_RAW 3
+#define SOCK_RDM 4
+#define SOCK_SEQPACKET 5
+/* ORed into the type, as on Linux. */
+#define SOCK_CLOEXEC 0x80000
+#define SOCK_NONBLOCK 0x800
 
 /* MINIX's `SOL_SOCKET` is 0xffff (`sys/sys/socket.h`), not Linux's 1. */
 #define SOL_SOCKET 0xffff
+#define SO_REUSEADDR 2
+#define SO_TYPE 3
+#define SO_ERROR 4
+#define SO_BROADCAST 6
+#define SO_SNDBUF 7
+#define SO_RCVBUF 8
+#define SO_KEEPALIVE 9
+#define SO_OOBINLINE 10
+#define SO_LINGER 13
+#define SO_REUSEPORT 15
 #define SO_PEERCRED 17
+#define SO_RCVTIMEO 20
+#define SO_SNDTIMEO 21
+#define SO_ACCEPTCONN 30
+#define SO_DOMAIN 39
 
 struct sockaddr {
     sa_family_t sa_family;
@@ -39,17 +59,37 @@ struct in_addr {
     unsigned int s_addr;
 };
 
-/* Minix sockaddr_in layout (net/gen/socket.h): length byte, family byte,
- * then network-order port/address — matches minix-libc's decoder.
- *
- * sin_family is one byte and sin_len leads, which MINIX keeps from its BSD
- * ancestry; code that assigns AF_INET still compiles (it truncates). */
+/* POSIX layout: the family comes first. MINIX's own header keeps a BSD
+ * `sin_len` byte ahead of it; the port's decoder (`minix-libc`) and these
+ * declarations share one layout, and nothing outside them builds these bytes.
+ * sin_port/sin_addr are in network order. */
 struct sockaddr_in {
-    unsigned char sin_len;
-    unsigned char sin_family;
+    sa_family_t sin_family;
     unsigned short sin_port;
     struct in_addr sin_addr;
     char sin_zero[8];
+};
+
+struct in6_addr {
+    unsigned char s6_addr[16];
+};
+
+struct sockaddr_in6 {
+    sa_family_t sin6_family;
+    unsigned short sin6_port;
+    unsigned int sin6_flowinfo;
+    struct in6_addr sin6_addr;
+    unsigned int sin6_scope_id;
+};
+
+struct ip_mreq {
+    struct in_addr imr_multiaddr;
+    struct in_addr imr_interface;
+};
+
+struct ipv6_mreq {
+    struct in6_addr ipv6mr_multiaddr;
+    unsigned int ipv6mr_interface;
 };
 
 struct sockaddr_un {
@@ -72,6 +112,11 @@ struct sockaddr_un {
 #define MSG_CTRUNC 0x0020
 #define MSG_WAITALL 0x0040
 #define MSG_DONTWAIT 0x0080
+#define MSG_CONFIRM 0x0800
+#define MSG_ERRQUEUE 0x2000
+#define MSG_NOSIGNAL 0x4000
+#define MSG_MORE 0x8000
+#define MSG_CMSG_CLOEXEC 0x40000000
 
 struct cmsghdr {
     socklen_t cmsg_len;
@@ -114,8 +159,10 @@ int bind(int fd, const struct sockaddr *addr, socklen_t addrlen);
 int connect(int fd, const struct sockaddr *addr, socklen_t addrlen);
 int listen(int fd, int backlog);
 int accept(int fd, struct sockaddr *addr, socklen_t *addrlen);
+int accept4(int fd, struct sockaddr *addr, socklen_t *addrlen, int flags);
 int shutdown(int fd, int how);
 int setsockopt(int fd, int level, int optname, const void *optval, socklen_t optlen);
+int getsockopt(int fd, int level, int optname, void *optval, socklen_t *optlen);
 ssize_t send(int fd, const void *buf, size_t len, int flags);
 ssize_t sendto(int fd, const void *buf, size_t len, int flags,
                const struct sockaddr *dest_addr, socklen_t dest_len);
