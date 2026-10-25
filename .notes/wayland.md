@@ -1630,7 +1630,8 @@ and a `strerror_r`-backed `Display`. The `coreutils/` precedent still covers
 `getrandom`, but 0.3 selects a custom backend with the `getrandom_backend="custom"`
 cfg rather than 0.2's `custom` feature. Enabled-gated additions are
 `nix` (calloop's `signals`), `wayland-backend`/`wayland-sys` (4c) and `libloading`
-(`cfg(unix)`-gated; needed only for a `glow`/`ash` dynamic load). The C-library
+(4d: `backend_egl` loads EGL with it; `cfg(unix)`-gated, so it is a fork — the delta
+is measured below). The C-library
 bindings are a separate class: `xkbcommon` and, if that renderer is taken, `pixman` need
 the C library built for minix as Mesa already is; `gbm` has ours already. Everything
 else in smithay's required set is pure Rust and compiles unchanged.
@@ -1757,12 +1758,9 @@ whole-echo check turns that into a retype.
 - **`signalfd`** — absent in **both** trees (§3.2). Needed only if a stage enables
   `calloop`'s `signals` feature or a client uses `Signals`; the timerfd/eventfd/pipe
   sources do not need it.
-- **The renderer and the backend** — §6.5 says the first smithay target uses a
-  *custom* renderer over the software output, because smithay ships no pure-Rust one.
-  Phase 3 changed the arithmetic: there is now Mesa/virgl on a render node and
-  `zwp_linux_dmabuf_v1`, so smithay's GL (`gles`) renderer is a live option, not just
-  `pixman` or a custom software one. The *backend* is ours either way — there is no
-  udev/KMS to hand smithay.
+- **The renderer and the backend** — **decided in 4d (D17):** smithay's `GlesRenderer` over
+  Mesa/virgl first, with our own software renderer later behind the same `Renderer` seam. The
+  *backend* is ours either way — §6.5's output, with no udev/KMS to hand smithay.
 
 **Staged, each with a gate**
 
@@ -1772,9 +1770,52 @@ whole-echo check turns that into a retype.
 | **4b** | **The `rustix` surface**, per feature group, as smithay's dependencies draw on it | a probe per group |
 | **4c** | **`wayland-server` (wayland-rs 0.31) — the backend and the protocol tables.** **Landed:** a `Display` with a `wl_compositor` global and the `GlobalDispatch`/`Dispatch` impls serves a stock `wayland-client` over `/dev/uds` — the registry handshake, the bind, `create_surface`, `commit` and the client's `roundtrip` all arrive — after three socket-surface faults were fixed (register rows 30/31) | A `GlobalDispatch`/`Dispatch` round-trip with a stock client — `just test-wlgate-<arch>` (x86_64, riscv64, aarch64) |
 | **4d** | **A smithay compositor on screen** — `wayland_frontend` plus our renderer and input backend, one unmodified `wl_shm` client | a smithay compositor shows a stock client |
-| **4e** | **smithay's GL renderer** over Mesa/virgl, with `gbm`/`drm` | GL content through smithay |
+| **4e** | **The zero-copy GL path** — the compositor renders straight into a buffer it scans out, with `gbm`/`drm` as the allocator (4d reads back once, D18) | GL content through smithay with no CPU copy |
 | **4f** | **`cosmic-comp`** built against the ported smithay | `cosmic-comp` on screen |
 | **4g** | **`cosmic-session` + D-Bus** (`zbus`) | a `libcosmic` app connects |
+
+#### 4d — a compositor on screen (GLES first, software later)
+
+4d's gate is the first frame a *stock* client puts on screen through smithay. Two decisions
+shape it, and one measurement sets its first step.
+
+**D17 — the renderer is smithay's `GlesRenderer` over the port's Mesa/virgl, and the software
+renderer is a second implementation of the same seam.** Both implement smithay's `Renderer`, so
+the compositor is written against the trait and the choice is made at startup, not by a build
+variant of the compositor. GLES first because the accelerated path is what 3d built; the
+software one later, because it is both the fallback for an output with no GPU and the way to
+test composition without one. That ordering means no stage of 4d may *require* GL to say
+anything about the compositor's correctness.
+
+**D18 — the compositor renders offscreen, and 3d-b-1's scan-out presents the result.** The
+renderer is built from a surfaceless EGL display (`EGLSurfacelessDisplay` → `EGLContext` →
+`GlesRenderer`), draws into an offscreen target (`Offscreen<GlesTexture>`), and the frame is
+read back (`glReadPixels`) into a guest buffer the fb server scans out — the same one copy, for
+the same reason, as the composition helper's D16: on this host a drawn frame's pixels reach an
+object's own pages through no reader that agrees with the node's `TRANSFER_FROM_HOST_3D`, while
+a `glReadPixels` of that frame is exact. No swapchain, no GBM surface, no KMS: the output stays
+`/dev/fb`'s.
+
+**Measured: the GL stack compiles, and linking needs one more library.** With `backend_egl` and
+`renderer_gl` added, smithay's GL tree `check`s green on x86_64, riscv64 and aarch64 behind
+*one* new fork. `libloading` gates its `Library`/`Symbol` re-exports, its `safe` module and
+`os::unix` on `cfg(unix)`, and declares `cfg-if` only under `unix` — so without an arm,
+`extern crate cfg_if` falls back to the compiler's private copy in the sysroot. The fork is that
+arm plus the four `RTLD_*` values from the port's `dlfcn.h` (18 lines). Linking the first binary
+then failed on exactly one thing: `unable to find library -lxkbcommon`. smithay's `xkbcommon`
+dependency is unconditional and rustc emits a crate's native link flags whether or not its
+symbols are reachable, so **4d needs `libxkbcommon` built for minix** before any compositor
+links — the §6.6 port item, brought forward.
+
+Staged, each with a gate
+
+| Stage | Deliverable | Gate |
+|---|---|---|
+| **4d-1** | **The renderer on the port.** `libloading`'s fork as a submodule, `libxkbcommon` built and staged like `libdrm`/`libgbm`, and a binary that takes smithay's surfaceless `EGLDisplay` → `EGLContext` → `GlesRenderer` | The guest prints the GL renderer's name and clears a framebuffer whose pixel reads back |
+| **4d-2** | **The compositor.** `CompositorState`, `ShmGlobal` and an output, on its own socket; one stock `wl_shm` client commits a surface, smithay composes it into the offscreen target and 3d-b-1 scans the frame out | A host screendump shows the client's colour, and the client's `wl_buffer` is released |
+| **4d-3** | **Input.** The input server behind smithay's `InputBackend`, a `wl_seat` advertised and routed to the focused surface | A key reaches the client through smithay |
+| **4d-4** | **The software renderer** behind the same `Renderer` seam | 4d-2's gate with the software renderer selected |
+| **4d-5** | **`zwp_linux_dmabuf_v1` through smithay** (`DmabufGlobal` + `ImportDma`) | A dma-buf client's frame reaches the scan-out with no client-side transfer |
 
 ---
 
