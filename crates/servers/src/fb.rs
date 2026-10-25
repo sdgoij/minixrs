@@ -22,8 +22,11 @@ use drivers::video::fb::CanvasArch;
 use drivers::video::fb::VirtioGpuArch;
 use drivers::video::fb::{
     FBIO_SCANOUT_SRC, FBIOFLUSH, FBIOGET_FSCREENINFO, FBIOGET_VSCREENINFO, FBIOPAN_DISPLAY,
-    FBIOPUT_VSCREENINFO, FbArch, FbBackend, FbScanoutSrc, Framebuffer, ScanRange,
+    FBIOPUT_VSCREENINFO, FbArch, FbBackend, FbScanoutSrc, Framebuffer,
 };
+// Only the scanout re-point path names a range, and that path has no wasm build.
+#[cfg(all(target_os = "minix", not(target_arch = "wasm32")))]
+use drivers::video::fb::ScanRange;
 
 /// Global driver state — one backend + one driver instance (no heap).
 /// The backend is selected at boot: bochs-display on x86, virtio-gpu on
