@@ -954,6 +954,42 @@ test-wlfull-aarch64: system-image-aarch64
     python tools/wlfull_probe.py qemu-system-aarch64 -machine virt -cpu cortex-a57 -m 256M -nographic -monitor none -display none -no-reboot -global virtio-mmio.force-legacy=off -drive if=none,id=disk0,file=target/images/aarch64-unknown-minix/disk.img,format=raw,cache=writethrough -device virtio-blk-device,drive=disk0 -netdev user,id=net0 -device virtio-net-device,netdev=net0 -device virtio-gpu-device -device virtio-keyboard-device -kernel target/images/aarch64-unknown-minix/minix-aarch64-boot.elf -qmp tcp:127.0.0.1:4447,server=on,wait=off
     @echo "wlfull: a whole-output wl_shm frame was scanned out of the client's own buffer (aarch64)"
 
+# Phase 4a's gate (`.notes/wayland.md` 6.13): calloop's event loop on the port, which is the
+# loop smithay and every compositor above it live on. Four sources — a calloop timer, a timerfd,
+# an eventfd and a pipe — must all dispatch through one poll in one process. The binary needs
+# the forked OS crates (calloop, polling, rustix, libc), so it comes from its own cargo project
+# and is injected with MINIXFS_EXTRA rather than being a BOOT_BINS entry.
+# The gate binary itself, from its own cargo project (`tools/build-phase4-gate.py`): the forks
+# it links are patched in that project, not in this workspace.
+calloop-x86:
+    python tools/build-phase4-gate.py x86
+
+calloop-riscv64:
+    python tools/build-phase4-gate.py riscv64
+
+calloop-aarch64:
+    python tools/build-phase4-gate.py aarch64
+
+test-calloop-x86 boot-timeout="40": calloop-x86
+    MINIXFS_EXTRA='/bin/calloopgate=target/x86_64-pc-minix/release/calloopgate' just build-x86
+    mkdir -p target/images/x86_64-pc-minix
+    cp target/trampoline.elf target/images/x86_64-pc-minix/minix-x86.elf
+    @just _assert-qemu-version qemu-system-x86_64
+    FEED_SCENARIO=tools/smoke/calloop.tsv sh tools/smoke/feed.sh target/test-calloop-x86.log {{boot-timeout}} qemu-system-x86_64 -nographic -m 256M -no-reboot -vga none -device bochs-display,id=fb0 -kernel target/images/x86_64-pc-minix/minix-x86.elf -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0 -device virtio-tablet-pci,display=fb0
+    @echo "calloop: a timer, a timerfd, an eventfd and a pipe dispatched through one event loop (x86_64)"
+
+test-calloop-riscv64 boot-timeout="60": calloop-riscv64
+    MINIXFS_EXTRA='/bin/calloopgate=target/riscv64gc-unknown-minix/release/calloopgate' just build-riscv64
+    @just _assert-qemu-version qemu-system-riscv64
+    FEED_SCENARIO=tools/smoke/calloop.tsv sh tools/smoke/feed.sh target/test-calloop-riscv64.log {{boot-timeout}} qemu-system-riscv64 -machine virt -m 256M -nographic -global virtio-mmio.force-legacy=off -netdev user,id=net0 -device virtio-net-device,netdev=net0 -device virtio-gpu-device -device virtio-keyboard-device -kernel target/riscv64gc-unknown-minix/release/kernel-boot-riscv64
+    @echo "calloop: a timer, a timerfd, an eventfd and a pipe dispatched through one event loop (riscv64)"
+
+test-calloop-aarch64 boot-timeout="60": calloop-aarch64
+    MINIXFS_EXTRA='/bin/calloopgate=target/aarch64-unknown-minix/release/calloopgate' just build-aarch64
+    @just _assert-qemu-version qemu-system-aarch64
+    FEED_SCENARIO=tools/smoke/calloop.tsv sh tools/smoke/feed.sh target/test-calloop-aarch64.log {{boot-timeout}} qemu-system-aarch64 -machine virt -cpu cortex-a57 -m 256M -nographic -no-reboot -global virtio-mmio.force-legacy=off -netdev user,id=net0 -device virtio-net-device,netdev=net0 -device virtio-gpu-device -device virtio-keyboard-device -kernel target/aarch64-unknown-minix/release/kernel-boot-aarch64
+    @echo "calloop: a timer, a timerfd, an eventfd and a pipe dispatched through one event loop (aarch64)"
+
 test-gltriangle-riscv64 boot-timeout="180": gltriangle-riscv64 boot-image-riscv64
     @just _assert-qemu-version qemu-system-riscv64
     M=target/mesa/riscv64; E="/lib/libdrm.so.2=$M/lib/libdrm.so.2;/lib/libEGL.so.1=$M/lib/libEGL.so.1;/lib/libgbm.so.1=$M/lib/libgbm.so.1;/lib/libexpat.so.1=$M/lib/libexpat.so.1;/lib/libgallium-25.3.6.so=$M/lib/libgallium-25.3.6.so;/lib/libGLESv2.so.2=$M/lib/libGLESv2.so.2;/lib/libz.so.1=$M/lib/libz.so.1;/lib/swrast_dri.so=$M/lib/swrast_dri.so;/bin/gltriangle=$M/bin/gltriangle"; MINIXFS_EXTRA="$E" MINIXFS_BLOCKS=16384 cargo run -q -p boot-image --bin mkminixfs --release -- riscv64

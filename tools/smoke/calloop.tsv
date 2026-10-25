@@ -1,0 +1,9 @@
+# Phase 4a's gate, driven by `just test-calloop-<arch>`.
+#
+# `/bin/calloopgate` is a calloop event loop on the port: a calloop timer (the poll-timeout
+# path), a timerfd (a deadline in the port's timer server), an eventfd and a pipe, all four
+# registered with one loop and all four dispatched. It is a separate cargo project
+# (`tools/phase4-gate`) because it needs the forked OS crates, and it is injected with
+# MINIXFS_EXTRA rather than carried by every image, like bash: an image should not depend on
+# calloop unless its own gate built it.
+/bin/calloopgate	calloopgate: PASS timer, timerfd, eventfd and pipe all dispatched

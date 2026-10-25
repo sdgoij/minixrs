@@ -1,0 +1,35 @@
+# Phase 4a's gate binary. Its own workspace, like `tools/probes/phase4`: the root workspace
+# must not claim it (its `[patch.crates-io]` would then be read by every cargo invocation in
+# the tree, and the forks would become a checkout requirement for builds that never use them),
+# and `[patch.crates-io]` is only legal at a workspace root anyway.
+[workspace]
+
+[package]
+name = "phase4-gate"
+version = "0.0.0"
+edition = "2024"
+publish = false
+description = "Phase 4a's gate: a calloop event loop on the minix targets"
+
+[dependencies]
+calloop = "0.14.5"
+rustix = { version = "1.1.5", features = [
+    "event",
+    "fs",
+    "pipe",
+    "std",
+    "time",
+] }
+# The C ABI symbols rustix's `libc` backend names: the port's static C library.
+minix-libc = { path = "../../crates/minix-libc" }
+
+[patch.crates-io]
+errno = { path = "../../crates/errno" }
+libc = { path = "../../libc" }
+rustix = { path = "../../rustix" }
+polling = { path = "../../polling" }
+calloop = { path = "../../calloop" }
+
+[[bin]]
+name = "calloopgate"
+path = "src/main.rs"
