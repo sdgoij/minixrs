@@ -1,4 +1,4 @@
-# Phase 4a's gate binary. Its own workspace, like `tools/probes/phase4`: the root workspace
+# Phase 4's gate binaries. Its own workspace, like `tools/probes/phase4`: the root workspace
 # must not claim it (its `[patch.crates-io]` would then be read by every cargo invocation in
 # the tree, and the forks would become a checkout requirement for builds that never use them),
 # and `[patch.crates-io]` is only legal at a workspace root anyway.
@@ -9,7 +9,7 @@ name = "phase4-gate"
 version = "0.0.0"
 edition = "2024"
 publish = false
-description = "Phase 4a's gate: a calloop event loop on the minix targets"
+description = "Phase 4's gates: the event loop (4a) and the server runtime (4c) on the minix targets"
 
 [dependencies]
 calloop = "0.14.5"
@@ -20,8 +20,15 @@ rustix = { version = "1.1.5", features = [
     "std",
     "time",
 ] }
+wayland-client = "0.31"
+wayland-server = "0.31"
 # The C ABI symbols rustix's `libc` backend names: the port's static C library.
 minix-libc = { path = "../../crates/minix-libc" }
+# `fork`/`waitpid` for the gate that runs a server and a client in one process.
+minix-rt = { path = "../../crates/minix-rt", default-features = false }
+# The `udsprobe` diagnostic reaches the `/dev/uds` ioctls directly, below the `std` wrapper.
+minix-std = { path = "../../crates/minix-std" }
+net = { path = "../../crates/net" }
 
 [patch.crates-io]
 errno = { path = "../../crates/errno" }
@@ -29,7 +36,25 @@ libc = { path = "../../libc" }
 rustix = { path = "../../rustix" }
 polling = { path = "../../polling" }
 calloop = { path = "../../calloop" }
+# The wayland-rs family is patched together: the protocol crates generate code against the
+# server API, so a half-patched family pairs two versions of it.
+wayland-sys = { path = "../../wayland-rs/wayland-sys" }
+wayland-scanner = { path = "../../wayland-rs/wayland-scanner" }
+wayland-backend = { path = "../../wayland-rs/wayland-backend" }
+wayland-server = { path = "../../wayland-rs/wayland-server" }
+wayland-client = { path = "../../wayland-rs/wayland-client" }
+# `wayland-protocols*` is not patched yet: the 0.31 server and client generate the core
+# protocols into their own crates, and this gate binds nothing else. A gate that binds a
+# protocol from that crate must add the three entries here.
 
 [[bin]]
 name = "calloopgate"
 path = "src/main.rs"
+
+[[bin]]
+name = "wlgate"
+path = "src/bin/wlgate.rs"
+
+[[bin]]
+name = "udsprobe"
+path = "src/bin/udsprobe.rs"

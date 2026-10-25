@@ -18,8 +18,9 @@ use crate::fs::{O_RDWR, close, ioctl, open, read, write};
 use crate::{EINVAL, EOVERFLOW, MinixErr};
 use net::{
     MSG_CONTROL_LEN_OFF, MSG_CONTROL_SIZE, NWIOGUDSADDR, NWIOGUDSCTRL, NWIOGUDSMINOR,
-    NWIOGUDSPEERCRED, NWIOSUDSACCEPT, NWIOSUDSADDR, NWIOSUDSBLOG, NWIOSUDSCONN, NWIOSUDSCTRL,
-    NWIOSUDSPAIR, SOCKADDR_UN_SIZE, SockAddrUn, UUCRED_GID_OFF, UUCRED_SIZE, UUCRED_UID_OFF,
+    NWIOGUDSPADDR, NWIOGUDSPEERCRED, NWIOSUDSACCEPT, NWIOSUDSADDR, NWIOSUDSBLOG, NWIOSUDSCONN,
+    NWIOSUDSCTRL, NWIOSUDSPAIR, SOCKADDR_UN_SIZE, SockAddrUn, UUCRED_GID_OFF, UUCRED_SIZE,
+    UUCRED_UID_OFF,
 };
 
 /// The device every local-domain socket is an instance of.
@@ -101,10 +102,23 @@ pub fn connect(fd: i32, path: &[u8]) -> Result<(), MinixErr> {
     unsafe { ioctl(fd, NWIOSUDSCONN, b.as_mut_ptr()) }.map(|_| ())
 }
 
-/// `getsockname(2)`: the socket's bound name, as wire bytes.
+/// `getsockname(2)`: the socket's own name, as wire bytes.
+///
+/// A socket with no name — the end `accept` hands out, for instance — answers a zeroed
+/// address rather than an error.
 pub fn getsockname(fd: i32) -> Result<[u8; SOCKADDR_UN_SIZE], MinixErr> {
     let mut b = [0u8; SOCKADDR_UN_SIZE];
     unsafe { ioctl(fd, NWIOGUDSADDR, b.as_mut_ptr()) }?;
+    Ok(b)
+}
+
+/// `getpeername(2)`: the peer's own name, as wire bytes.
+///
+/// A peer that never bound answers a zeroed address; a socket with no peer fails with
+/// `ENOTCONN`.
+pub fn peer_name(fd: i32) -> Result<[u8; SOCKADDR_UN_SIZE], MinixErr> {
+    let mut b = [0u8; SOCKADDR_UN_SIZE];
+    unsafe { ioctl(fd, NWIOGUDSPADDR, b.as_mut_ptr()) }?;
     Ok(b)
 }
 

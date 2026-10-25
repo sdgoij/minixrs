@@ -1613,9 +1613,22 @@ pub unsafe extern "C" fn connect(sock: c_int, address: *const c_void, address_le
     }
 }
 
+/// The `msg_flags` this port's C ABI honours, as `sys/socket.h` spells them for the target.
+///
+/// Each is a promise the call can keep: a socket never blocks, so `MSG_DONTWAIT` is what a
+/// read or write already does; no signal is delivered to userspace, so there is nothing for
+/// `MSG_NOSIGNAL` to suppress; and `MSG_CMSG_CLOEXEC` is applied to the descriptors a
+/// `recvmsg` lifts out. Any other flag is still refused — silently ignoring one would be a
+/// promise the call did not keep.
+const MSG_DONTWAIT: c_int = 0x0080;
+const MSG_NOSIGNAL: c_int = 0x4000;
+const MSG_CMSG_CLOEXEC: c_int = 0x4000_0000;
+
+/// The flags a send, or a read without control data, may carry.
+const SEND_RECV_FLAGS: c_int = MSG_DONTWAIT | MSG_NOSIGNAL;
+
 /// `sendto(2)`: send one datagram, optionally to an explicit destination
-/// (a `struct sockaddr_in`). Only `flags == 0` is supported; on a
-/// connected socket `dest_addr` is ignored.
+/// (a `struct sockaddr_in`). On a connected socket `dest_addr` is ignored.
 #[cfg(target_os = "minix")]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sendto(
@@ -1626,7 +1639,7 @@ pub unsafe extern "C" fn sendto(
     dest_addr: *const c_void,
     dest_len: u32,
 ) -> isize {
-    if flags != 0 {
+    if flags & !SEND_RECV_FLAGS != 0 {
         return fail(95) as isize; // EOPNOTSUPP
     }
     if buf.is_null() {
@@ -1648,8 +1661,7 @@ pub unsafe extern "C" fn sendto(
 }
 
 /// `recvfrom(2)`: receive one datagram and, when `src_addr`/`src_len` are
-/// given, the sender's `struct sockaddr_in`. Only `flags == 0` is
-/// supported.
+/// given, the sender's `struct sockaddr_in`.
 #[cfg(target_os = "minix")]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn recvfrom(
@@ -1660,7 +1672,7 @@ pub unsafe extern "C" fn recvfrom(
     src_addr: *mut c_void,
     src_len: *mut u32,
 ) -> isize {
-    if flags != 0 {
+    if flags & !SEND_RECV_FLAGS != 0 {
         return fail(95) as isize; // EOPNOTSUPP
     }
     if buf.is_null() {
@@ -1689,12 +1701,11 @@ pub extern "C" fn shutdown(sock: c_int, how: c_int) -> c_int {
     }
 }
 
-/// `send(2)`: write the byte stream (TCP) or one datagram (UDP). Only
-/// `flags == 0` is supported.
+/// `send(2)`: write the byte stream (TCP) or one datagram (UDP).
 #[cfg(target_os = "minix")]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn send(sock: c_int, buf: *const c_void, len: usize, flags: c_int) -> isize {
-    if flags != 0 {
+    if flags & !SEND_RECV_FLAGS != 0 {
         return fail(95) as isize; // EOPNOTSUPP
     }
     if buf.is_null() {
@@ -1707,12 +1718,12 @@ pub unsafe extern "C" fn send(sock: c_int, buf: *const c_void, len: usize, flags
     }
 }
 
-/// `recv(2)`: read the byte stream (TCP) or one datagram (UDP). Only
-/// `flags == 0` is supported; 0 means EOF for a stream.
+/// `recv(2)`: read the byte stream (TCP) or one datagram (UDP); 0 means EOF
+/// for a stream.
 #[cfg(target_os = "minix")]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn recv(sock: c_int, buf: *mut c_void, len: usize, flags: c_int) -> isize {
-    if flags != 0 {
+    if flags & !SEND_RECV_FLAGS != 0 {
         return fail(95) as isize; // EOPNOTSUPP
     }
     if buf.is_null() {
@@ -1757,9 +1768,8 @@ pub unsafe extern "C" fn sendmsg(fd: c_int, msg: *const Msghdr, flags: c_int) ->
     if msg.is_null() {
         return fail(14) as isize; // EFAULT
     }
-    if flags != 0 {
-        // The reference's uds path refuses every flag (`sendmsg.c`).
-        return fail(78) as isize; // ENOSYS
+    if flags & !SEND_RECV_FLAGS != 0 {
+        return fail(95) as isize; // EOPNOTSUPP
     }
     let m = unsafe { &*msg };
     if !m.msg_control.is_null() && m.msg_controllen > 0 {
@@ -1787,31 +1797,60 @@ pub unsafe extern "C" fn recvmsg(fd: c_int, msg: *mut Msghdr, flags: c_int) -> s
     if msg.is_null() {
         return fail(14) as isize; // EFAULT
     }
-    if flags != 0 {
-        return fail(78) as isize; // ENOSYS
+    if flags & !(SEND_RECV_FLAGS | MSG_CMSG_CLOEXEC) != 0 {
+        return fail(95) as isize; // EOPNOTSUPP
     }
     let m = unsafe { &mut *msg };
-    if !m.msg_name.is_null() && m.msg_namelen > 0 {
-        // The reference fills the peer's name from `NWIOGUDSPADDR`; the port has
-        // no uds peer-address ioctl, so rather than hand back a buffer nobody
-        // wrote, say the call is unimplemented.
-        return fail(78) as isize; // ENOSYS
-    }
     let n = unsafe { readv(fd, m.msg_iov, m.msg_iovlen) };
     if n < 0 {
         return n;
+    }
+    if !m.msg_name.is_null() && m.msg_namelen > 0 {
+        // The peer's name, as `NWIOGUDSPADDR` reports it: a zeroed `sockaddr_un` when the
+        // peer never bound (which is every client that did not bind itself), and the
+        // peer's own path when it did. An unconnected socket leaves the buffer zeroed —
+        // the body has already moved, so a failure here cannot fail the call.
+        let len = (m.msg_namelen as usize).min(net::SOCKADDR_UN_SIZE);
+        let name = unsafe { core::slice::from_raw_parts_mut(m.msg_name as *mut u8, len) };
+        name.fill(0);
+        if let Ok(peer) = minix_std::uds::peer_name(fd) {
+            name.copy_from_slice(&peer[..len]);
+        }
+        m.msg_namelen = len as c_uint;
     }
     if !m.msg_control.is_null() && m.msg_controllen > 0 {
         let buf = unsafe {
             core::slice::from_raw_parts_mut(m.msg_control as *mut u8, m.msg_controllen as usize)
         };
         match minix_std::uds::recv_control_raw(fd, buf, m.msg_controllen as usize) {
-            Ok(got) => m.msg_controllen = got as c_uint,
+            Ok(got) => {
+                m.msg_controllen = got as c_uint;
+                if flags & MSG_CMSG_CLOEXEC != 0 && got > 0 {
+                    set_cloexec_on_rights(buf, got);
+                }
+            }
             Err(e) => return fail(e.0) as isize,
         }
     }
     m.msg_flags = 0;
     n
+}
+
+/// Apply `MSG_CMSG_CLOEXEC` to the descriptors a `recvmsg` just lifted out of `control`.
+///
+/// The `/dev/uds` driver hands the descriptors over without the flag, and this port has no
+/// receive-time equivalent of the kernel's atomic set, so it is applied here, after the
+/// body has moved. Every descriptor in a just-received control message is open, so the only
+/// outcome is the flag; a failure cannot be reported without losing the body that moved.
+#[cfg(target_os = "minix")]
+fn set_cloexec_on_rights(control: &[u8], controllen: usize) {
+    let mut fds = [0i32; net::MSG_CONTROL_MAX / 4];
+    let Ok(n) = net::parse_rights(control, controllen, &mut fds) else {
+        return;
+    };
+    for &fd in &fds[..n] {
+        let _ = fcntl(fd, F_SETFD, 1);
+    }
 }
 
 /// `listen(2)`: mark a bound socket as a listener with the given backlog.
