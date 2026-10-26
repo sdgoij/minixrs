@@ -54,6 +54,7 @@ use smithay::input::SeatState;
 use smithay::input::keyboard::{FilterResult, Keycode, XkbConfig};
 use smithay::input::pointer::{ButtonEvent, CursorImageStatus, MotionEvent};
 use smithay::output::{Mode as OutputMode, Output, PhysicalProperties, Subpixel};
+use smithay::reexports::wayland_protocols::xdg::decoration::zv1::server::zxdg_toplevel_decoration_v1;
 use smithay::reexports::wayland_server::backend::{ClientData, ClientId, DisconnectReason};
 use smithay::reexports::wayland_server::protocol::wl_buffer::WlBuffer;
 use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
@@ -65,13 +66,14 @@ use smithay::wayland::buffer::BufferHandler;
 use smithay::wayland::compositor::{CompositorClientState, CompositorHandler, CompositorState};
 use smithay::wayland::dmabuf::{DmabufGlobal, DmabufHandler, DmabufState, ImportNotifier};
 use smithay::wayland::output::OutputHandler;
+use smithay::wayland::shell::xdg::decoration::{XdgDecorationHandler, XdgDecorationState};
 use smithay::wayland::shell::xdg::{
     PopupSurface, PositionerState, ToplevelSurface, XdgShellHandler, XdgShellState,
 };
 use smithay::wayland::shm::{ShmHandler, ShmState};
 use smithay::{
     delegate_compositor, delegate_dmabuf, delegate_output, delegate_seat, delegate_shm,
-    delegate_xdg_shell,
+    delegate_xdg_decoration, delegate_xdg_shell,
 };
 
 use soft::{SoftRenderer, SoftTarget};
@@ -192,10 +194,10 @@ impl RenderPath {
         }
     }
 
-    fn render(&mut self, surfaces: &[WlSurface], out: &mut [u8]) -> Result<usize, String> {
+    fn render(&mut self, windows: &[Window], out: &mut [u8]) -> Result<usize, String> {
         match self {
-            Self::Gl { renderer, target } => render_scene(renderer, target, surfaces, out),
-            Self::Soft { renderer, target } => render_scene(renderer, target, surfaces, out),
+            Self::Gl { renderer, target } => render_scene(renderer, target, windows, out),
+            Self::Soft { renderer, target } => render_scene(renderer, target, windows, out),
         }
     }
 }
@@ -216,13 +218,21 @@ fn soft_dmabuf_formats() -> Vec<Format> {
     .collect()
 }
 
+/// One drawn surface and where on the output it sits. Every surface is a window: a toplevel is
+/// placed by the compositor, a popup at the position its positioner asked for.
+#[derive(Clone)]
+struct Window {
+    surface: WlSurface,
+    location: Point<i32, Logical>,
+}
+
 /// Draws every committed surface into `target`, reads the frame back and packs it for the
 /// scan-out. This is the one body both renderers share: it is written against smithay's traits,
 /// so the only thing that differs between them is the type parameter.
 fn render_scene<R, T>(
     renderer: &mut R,
     target: &mut T,
-    surfaces: &[WlSurface],
+    windows: &[Window],
     out: &mut [u8],
 ) -> Result<usize, String>
 where
@@ -233,12 +243,20 @@ where
     let region = Rectangle::from_size(size);
 
     let mut elements: Vec<WaylandSurfaceRenderElement<R>> = Vec::new();
-    for surface in surfaces {
+    // Smithay's element list is topmost first: it hides an element that an earlier one covers
+    // opaquely, and draws the list in reverse. The window list is creation order, so a popup,
+    // created after the toplevel it belongs to, must come first.
+    for window in windows.iter().rev() {
         elements.extend(render_elements_from_surface_tree::<
             R,
             WaylandSurfaceRenderElement<R>,
         >(
-            renderer, surface, (0, 0), 1.0, 1.0, Kind::Unspecified
+            renderer,
+            &window.surface,
+            window.location.to_physical(1),
+            1.0,
+            1.0,
+            Kind::Unspecified,
         ));
     }
     if elements.is_empty() {
@@ -313,7 +331,12 @@ struct State {
     _output: Output,
     seat_state: SeatState<State>,
     seat: Seat<State>,
-    surfaces: Vec<WlSurface>,
+    /// Every surface the compositor draws, with its place on the output. The order is creation
+    /// order, and hit testing walks it backwards so the newest window wins.
+    windows: Vec<Window>,
+    /// The `zxdg_decoration_manager_v1` delegate. This compositor draws no title bars, so every
+    /// toplevel is told to decorate itself.
+    decorations: XdgDecorationState,
     /// The `zwp_linux_dmabuf_v1` delegate. The global is created only when the selected renderer
     /// can import a format, so a client is never offered a buffer the compositor would refuse.
     dmabuf_state: DmabufState,
@@ -358,6 +381,7 @@ impl State {
         println!("wlcomp: wl_seat advertises a keyboard and a pointer");
 
         let xdg_shell = XdgShellState::new::<Self>(&dh);
+        let decorations = XdgDecorationState::new::<Self>(&dh);
 
         let output = Output::new(
             "minix".to_string(),
@@ -411,7 +435,8 @@ impl State {
             _output: output,
             seat_state,
             seat,
-            surfaces: Vec::new(),
+            windows: Vec::new(),
+            decorations,
             dmabuf_state,
             xdg_shell,
             pointer_at: (0.0, 0.0).into(),
@@ -429,7 +454,7 @@ impl State {
     fn present(&mut self) {
         // SAFETY: this process is the buffer's only writer, and the borrow ends with the call.
         let out = unsafe { &mut *core::ptr::addr_of_mut!(SCANOUT.0) };
-        let presented = match self.path.render(&self.surfaces, out) {
+        let presented = match self.path.render(&self.windows, out) {
             // A commit with no buffer (the first one, or an unmap) leaves the display alone.
             Ok(0) => return,
             Ok(presented) => presented,
@@ -491,13 +516,14 @@ impl State {
         }
     }
 
-    /// Moves the seat's pointer to `pointer_at`, focused on the first mapped surface. Every
-    /// surface is drawn at the origin, so the hit test is "is there a window at all", and the
-    /// focus's point is each surface's *origin*, which is where smithay subtracts it from the
-    /// event's location before the client sees it.
+    /// Moves the seat's pointer to `pointer_at`, focused on the window under it. The focus's
+    /// point is that *window's* origin, which is what smithay subtracts from the event's location
+    /// before the client sees it.
     fn pointer_motion(&mut self) {
         let location = self.pointer_at;
-        let focus = self.surfaces.iter().find(|s| is_mapped(s)).cloned();
+        let origin = self
+            .window_at(location)
+            .map(|window| (window.surface.clone(), window.location.to_f64()));
         let Some(pointer) = self.seat.get_pointer() else {
             return;
         };
@@ -506,9 +532,23 @@ impl State {
             serial: SERIAL_COUNTER.next_serial(),
             time: (now_us() / 1000) as u32,
         };
-        let origin = Point::<f64, Logical>::from((0.0, 0.0));
-        pointer.motion(self, focus.map(|s| (s, origin)), &event);
+        pointer.motion(self, origin, &event);
         pointer.frame(self);
+    }
+
+    /// The topmost window containing `point`, or `None` over the background. The newest window is
+    /// tested first, which puts a popup over the toplevel it belongs to.
+    fn window_at(&self, point: Point<f64, Logical>) -> Option<&Window> {
+        self.windows.iter().rev().find(|window| {
+            let Some(size) = surface_size(&window.surface) else {
+                return false;
+            };
+            let origin = window.location.to_f64();
+            point.x >= origin.x
+                && point.y >= origin.y
+                && point.x < origin.x + size.w as f64
+                && point.y < origin.y + size.h as f64
+        })
     }
 
     /// Hands the seat one button, on whichever surface the pointer is over.
@@ -528,6 +568,15 @@ impl State {
         };
         pointer.button(self, &event);
         pointer.frame(self);
+    }
+
+    /// Tell a toplevel to draw its own decorations. This compositor has no title bars, so a
+    /// request for client-side decorations and one for server-side are answered the same way.
+    fn client_side(&mut self, toplevel: &ToplevelSurface) {
+        toplevel.with_pending_state(|state| {
+            state.decoration_mode = Some(zxdg_toplevel_decoration_v1::Mode::ClientSide);
+        });
+        toplevel.send_configure();
     }
 
     /// Reads the input server's ring until it is empty and hands every record to the seat.
@@ -630,6 +679,14 @@ fn is_mapped(surface: &WlSurface) -> bool {
     .unwrap_or(false)
 }
 
+/// A surface's committed size, or `None` while it has no buffer. Used for the pointer's hit test.
+fn surface_size(surface: &WlSurface) -> Option<Size<i32, Logical>> {
+    smithay::backend::renderer::utils::with_renderer_surface_state(surface, |state| {
+        state.buffer_size()
+    })
+    .flatten()
+}
+
 impl CompositorHandler for State {
     fn compositor_state(&mut self) -> &mut CompositorState {
         &mut self.compositor
@@ -640,7 +697,10 @@ impl CompositorHandler for State {
     }
 
     fn new_surface(&mut self, surface: &WlSurface) {
-        self.surfaces.push(surface.clone());
+        self.windows.push(Window {
+            surface: surface.clone(),
+            location: Point::from((0, 0)),
+        });
     }
 
     fn commit(&mut self, surface: &WlSurface) {
@@ -652,7 +712,7 @@ impl CompositorHandler for State {
     }
 
     fn destroyed(&mut self, surface: &WlSurface) {
-        self.surfaces.retain(|s| s != surface);
+        self.windows.retain(|window| &window.surface != surface);
     }
 }
 
@@ -703,17 +763,35 @@ impl XdgShellHandler for State {
     }
 
     /// A client made a toplevel. There is no layout policy to wait for: the window is the output,
-    /// so it is configured at the size the output already has, and the commit with its first
-    /// buffer is what puts it on the scan-out.
+    /// so it takes the origin and is configured at once, and the commit with its first buffer is
+    /// what puts it on the scan-out.
     fn new_toplevel(&mut self, surface: ToplevelSurface) {
         surface.send_configure();
-        println!("wlcomp: a toplevel, configured");
+        println!("wlcomp: a toplevel, configured at 0,0");
     }
 
-    /// Popups are placed by their positioner, which this compositor has nothing to disagree with.
-    fn new_popup(&mut self, surface: PopupSurface, _positioner: PositionerState) {
+    /// A popup is placed where its positioner asked, relative to the window it belongs to, which
+    /// is the one piece of `xdg_shell` geometry a compositor cannot leave to the client.
+    fn new_popup(&mut self, surface: PopupSurface, positioner: PositionerState) {
+        let geometry = positioner.get_geometry();
+        let parent = surface
+            .get_parent_surface()
+            .and_then(|parent| self.windows.iter().find(|w| w.surface == parent))
+            .map(|window| window.location)
+            .unwrap_or_else(|| Point::from((0, 0)));
+        let location = Point::from((parent.x + geometry.loc.x, parent.y + geometry.loc.y));
+        if let Some(window) = self
+            .windows
+            .iter_mut()
+            .find(|w| w.surface == *surface.wl_surface())
+        {
+            window.location = location;
+        }
         let _ = surface.send_configure();
-        println!("wlcomp: a popup, configured");
+        println!(
+            "wlcomp: a popup, configured at {},{}",
+            location.x, location.y
+        );
     }
 
     /// A popup asked to be placed again. Nothing here moves popups, so the request is ignored and
@@ -737,6 +815,22 @@ impl XdgShellHandler for State {
     }
 }
 
+impl XdgDecorationHandler for State {
+    fn new_decoration(&mut self, toplevel: ToplevelSurface) {
+        println!("wlcomp: a toplevel asked for decorations, which it draws");
+        self.client_side(&toplevel);
+    }
+
+    fn request_mode(&mut self, toplevel: ToplevelSurface, mode: zxdg_toplevel_decoration_v1::Mode) {
+        println!("wlcomp: decoration mode {mode:?} requested, the client draws them");
+        self.client_side(&toplevel);
+    }
+
+    fn unset_mode(&mut self, toplevel: ToplevelSurface) {
+        self.client_side(&toplevel);
+    }
+}
+
 impl SeatHandler for State {
     type KeyboardFocus = WlSurface;
     type PointerFocus = WlSurface;
@@ -757,6 +851,7 @@ delegate_output!(State);
 delegate_seat!(State);
 delegate_dmabuf!(State);
 delegate_xdg_shell!(State);
+delegate_xdg_decoration!(State);
 
 #[derive(Default)]
 struct ClientState {

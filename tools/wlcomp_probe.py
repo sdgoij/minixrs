@@ -61,6 +61,9 @@ CLIENTS = {
         "waiting": b"wltoplevel: waiting for input",
         "body": bytes([0x10, 0x40, 0x80]),
         "band": bytes([0xF0, 0xE0, 0x00]),
+        # The popup the client asks for, at the position its positioner names; the compositor
+        # places it, so a pixel there is the placement's evidence.
+        "popup": {"x": 150, "y": 80, "colour": (0xFF, 0xFF, 0xFF)},
     },
 }
 
@@ -338,13 +341,19 @@ def main():
     top_mid = pxat(shot, 512, 40) == client["band"]
     centre = pxat(shot, 512, 384) == client["body"]
     corner = pxat(shot, 1023, 767) == client["body"]
-    print("after commit: band top-left=%s, band top-middle=%s, centre body=%s, corner body=%s"
-          % (top_left, top_mid, centre, corner), flush=True)
+    popup = None
+    if client.get("popup"):
+        want = client["popup"]
+        popup = pxat(shot, want["x"], want["y"]) == bytes(want["colour"])
+    print("after commit: band top-left=%s, band top-middle=%s, centre body=%s, corner body=%s%s"
+          % (top_left, top_mid, centre, corner,
+             "" if popup is None else ", popup=%s" % popup), flush=True)
 
     q.close()
     qemu.kill()
     sys.exit(0 if (took_scanout and presented and released and imported is not False
-                   and top_left and top_mid and centre and corner) else 1)
+                   and top_left and top_mid and centre and corner
+                   and popup is not False) else 1)
 
 
 if __name__ == "__main__":

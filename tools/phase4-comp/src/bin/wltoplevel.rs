@@ -17,7 +17,12 @@ use wayland_client::protocol::{
     wl_surface,
 };
 use wayland_client::{Connection, Dispatch, QueueHandle};
-use wayland_protocols::xdg::shell::client::{xdg_surface, xdg_toplevel, xdg_wm_base};
+use wayland_protocols::xdg::decoration::zv1::client::{
+    zxdg_decoration_manager_v1, zxdg_toplevel_decoration_v1,
+};
+use wayland_protocols::xdg::shell::client::{
+    xdg_popup, xdg_positioner, xdg_surface, xdg_toplevel, xdg_wm_base,
+};
 
 const SOCKET: &str = "/run/wlcomp";
 const WIDTH: i32 = 1024;
@@ -30,6 +35,16 @@ const FRAME: usize = (WIDTH as usize) * (HEIGHT as usize) * 4;
 const COLOUR_BODY: u32 = 0x0010_4080;
 const COLOUR_BAND: u32 = 0x00F0_E000;
 const BAND_ROWS: usize = 100;
+/// The popup's size and place inside the toplevel, and its colour: white, so the gate can tell
+/// the two surfaces apart.
+const POPUP_W: i32 = 200;
+const POPUP_H: i32 = 100;
+const POPUP_X: i32 = 100;
+const POPUP_Y: i32 = 50;
+const COLOUR_POPUP: u32 = 0x00FF_FFFF;
+
+/// The user-data marker on the popup's `xdg_surface`, so its configure reaches its own handler.
+struct PopupTag;
 
 #[derive(Default)]
 struct Client {
@@ -42,6 +57,10 @@ struct Client {
     motion: (f64, f64),
     moved: bool,
     pressed: bool,
+    /// The popup's `xdg_surface.configure` serial, or 0 before it.
+    popup_configure: u32,
+    /// The decoration mode the compositor answered with, once the client asked for one.
+    decoration: Option<zxdg_toplevel_decoration_v1::Mode>,
 }
 
 impl Dispatch<wl_registry::WlRegistry, GlobalListContents> for Client {
@@ -251,6 +270,86 @@ impl Dispatch<xdg_toplevel::XdgToplevel, ()> for Client {
     }
 }
 
+impl Dispatch<xdg_positioner::XdgPositioner, ()> for Client {
+    fn event(
+        _state: &mut Self,
+        _positioner: &xdg_positioner::XdgPositioner,
+        _event: xdg_positioner::Event,
+        _data: &(),
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+    ) {
+    }
+}
+
+impl Dispatch<xdg_surface::XdgSurface, PopupTag> for Client {
+    fn event(
+        state: &mut Self,
+        surface: &xdg_surface::XdgSurface,
+        event: xdg_surface::Event,
+        _data: &PopupTag,
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+    ) {
+        if let xdg_surface::Event::Configure { serial } = event {
+            state.popup_configure = serial;
+            surface.ack_configure(serial);
+            println!("wltoplevel: popup configure {serial}");
+        }
+    }
+}
+
+impl Dispatch<xdg_popup::XdgPopup, ()> for Client {
+    fn event(
+        _state: &mut Self,
+        _popup: &xdg_popup::XdgPopup,
+        event: xdg_popup::Event,
+        _data: &(),
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+    ) {
+        if let xdg_popup::Event::Configure {
+            x,
+            y,
+            width,
+            height,
+        } = event
+        {
+            println!("wltoplevel: popup at {x},{y} {width}x{height}");
+        }
+    }
+}
+
+impl Dispatch<zxdg_decoration_manager_v1::ZxdgDecorationManagerV1, ()> for Client {
+    fn event(
+        _state: &mut Self,
+        _manager: &zxdg_decoration_manager_v1::ZxdgDecorationManagerV1,
+        _event: zxdg_decoration_manager_v1::Event,
+        _data: &(),
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+    ) {
+    }
+}
+
+impl Dispatch<zxdg_toplevel_decoration_v1::ZxdgToplevelDecorationV1, ()> for Client {
+    fn event(
+        state: &mut Self,
+        _decoration: &zxdg_toplevel_decoration_v1::ZxdgToplevelDecorationV1,
+        event: zxdg_toplevel_decoration_v1::Event,
+        _data: &(),
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+    ) {
+        if let zxdg_toplevel_decoration_v1::Event::Configure { mode } = event {
+            if let wayland_client::WEnum::Value(mode) = mode {
+                state.decoration = Some(mode);
+                println!("wltoplevel: decoration mode {mode:?}");
+            }
+        }
+    }
+}
+
 /// One frame: the body colour with a band on its top rows, written through the pool's mapping.
 fn fill(ptr: *mut u32) {
     // SAFETY: the mapping is `FRAME` bytes and `u32`-aligned, as `mmap` returns it.
@@ -308,6 +407,11 @@ fn run() -> Result<(), String> {
     let xdg_surface = wm_base.get_xdg_surface(&surface, &qh, ());
     let toplevel = xdg_surface.get_toplevel(&qh, ());
     toplevel.set_title("wltoplevel".to_string());
+    // Ask for decorations. This compositor draws no title bars, so it answers client-side.
+    let decoration_manager: zxdg_decoration_manager_v1::ZxdgDecorationManagerV1 = globals
+        .bind(&qh, 1..=1, ())
+        .map_err(|e| format!("could not bind zxdg_decoration_manager_v1: {e:?}"))?;
+    let _decoration = decoration_manager.get_toplevel_decoration(&toplevel, &qh, ());
     // No buffer: a commit that only asks for a configure, which is how a client learns it may map.
     surface.commit();
 
@@ -329,6 +433,70 @@ fn run() -> Result<(), String> {
         "wltoplevel: mapped at {}x{}",
         state.configured_size.0, state.configured_size.1
     );
+
+    // A popup, placed by the compositor from this positioner's geometry rather than by anything
+    // the client says after the fact. Its own `xdg_surface` carries `PopupTag`, so its configure
+    // lands in `popup_configure` and not in the toplevel's.
+    let positioner = wm_base.create_positioner(&qh, ());
+    positioner.set_size(POPUP_W, POPUP_H);
+    positioner.set_anchor_rect(POPUP_X, POPUP_Y, 1, 1);
+    // Anchor at the rect's top-left and grow towards the bottom-right, so the popup's top-left
+    // *is* the anchor point. With the defaults (both unset) the protocol centres the popup over
+    // the anchor point, which lands it at 0,0 here because the size is halved.
+    positioner.set_anchor(xdg_positioner::Anchor::TopLeft);
+    positioner.set_gravity(xdg_positioner::Gravity::BottomRight);
+    let popup_surface = compositor.create_surface(&qh, ());
+    let popup_xdg_surface = wm_base.get_xdg_surface(&popup_surface, &qh, PopupTag);
+    let _popup = popup_xdg_surface.get_popup(Some(&xdg_surface), &positioner, &qh, ());
+    positioner.destroy();
+    popup_surface.commit();
+    while state.popup_configure == 0 {
+        queue
+            .blocking_dispatch(&mut state)
+            .map_err(|e| format!("waiting for the popup's configure failed: {e:?}"))?;
+    }
+
+    let popup_len = (POPUP_W * POPUP_H * 4) as usize;
+    let popup_fd =
+        minix_std::fs::memfd_create(0).map_err(|e| format!("memfd_create failed: {e:?}"))?;
+    minix_std::fs::truncate(popup_fd, popup_len as i64)
+        .map_err(|e| format!("ftruncate failed: {e:?}"))?;
+    // SAFETY: a fresh anonymous object of exactly this length, mapped read-write and shared.
+    let popup_ptr = unsafe {
+        minix_rt::vmem::mmap(
+            core::ptr::null_mut(),
+            popup_len,
+            minix_rt::vmem::PROT_READ | minix_rt::vmem::PROT_WRITE,
+            minix_rt::vmem::MAP_SHARED,
+            popup_fd,
+            0,
+        )
+    };
+    if popup_ptr == minix_rt::vmem::MAP_FAILED {
+        return Err("mmap of the popup's pool failed".to_string());
+    }
+    // SAFETY: the mapping is `popup_len` bytes and `u32`-aligned, as `mmap` returns it.
+    unsafe { core::slice::from_raw_parts_mut(popup_ptr as *mut u32, popup_len / 4) }
+        .fill(COLOUR_POPUP);
+    // SAFETY: the fd came from `memfd_create`, and the mapping keeps the object alive after close.
+    let popup_pool_fd = unsafe { OwnedFd::from_raw_fd(popup_fd) };
+    let popup_pool = shm.create_pool(popup_pool_fd.as_fd(), popup_len as i32, &qh, ());
+    let popup_buffer = popup_pool.create_buffer(
+        0,
+        POPUP_W,
+        POPUP_H,
+        POPUP_W * 4,
+        wl_shm::Format::Xrgb8888,
+        &qh,
+        (),
+    );
+    popup_surface.attach(Some(&popup_buffer), 0, 0);
+    popup_surface.commit();
+    queue
+        .roundtrip(&mut state)
+        .map_err(|e| format!("roundtrip after the popup failed: {e:?}"))?;
+    println!("wltoplevel: popup mapped");
+
     println!("wltoplevel: waiting for input");
 
     // The host drives the tablet here: motion and a left click, which the seat must deliver.
@@ -338,9 +506,16 @@ fn run() -> Result<(), String> {
             .map_err(|e| format!("waiting for input failed: {e:?}"))?;
     }
 
+    if state.popup_configure == 0 {
+        return Err("the popup was never configured".to_string());
+    }
+    if state.decoration.is_none() {
+        return Err("the compositor answered no decoration mode".to_string());
+    }
+
     println!(
-        "wltoplevel: PASS configured, keyboard focused, pointer entered and clicked at {},{}",
-        state.motion.0, state.motion.1
+        "wltoplevel: PASS configured, decorated {:?}, popup at {},{} placed, keyboard focused, pointer entered and clicked at {},{}",
+        state.decoration, POPUP_X, POPUP_Y, state.motion.0, state.motion.1
     );
     Ok(())
 }
