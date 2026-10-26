@@ -46,7 +46,6 @@ from stage1 import find_stage1_rustc  # noqa: E402
 
 PROJECT = ROOT / "tools" / "phase4-comp"
 BINARIES = ("glgate", "wlcomp", "wlshm", "wlseat", "wldmabuf", "wltoplevel")
-SMITHAY = ROOT / "target" / "smithay"
 # The EGL bootstrap is C (see the file's own note): the context smithay needs cannot come from
 # smithay's constructors, and the port's surfaceless recipe is already written in C.
 EGL_BOOTSTRAP = PROJECT / "src" / "egl_bootstrap.c"
@@ -65,16 +64,15 @@ def run(cmd: list[str], env: dict[str, str] | None = None) -> int:
 
 
 def ensure_smithay(arch: Arch) -> None:
-    """Fetch the pinned smithay checkout if it is not there yet.
+    """Make sure `target/smithay` is at the pin and carries the pin's edits.
 
-    `tools/build-smithay.py` owns the pin (and the stage1 capability probe), so it is the
-    thing to call rather than duplicating the fetch here.
+    `tools/build-smithay.py` owns the pin, the edits and the stage1 capability probe, so it
+    is the thing to call rather than duplicating any of that here. It is cheap once nothing
+    has changed (the smithay check is cached), and running it unconditionally is what makes a
+    cleaned-out or freshly fetched checkout buildable.
     """
-    if (SMITHAY / ".git").is_dir():
-        return
-    print("smithay checkout missing: fetching it with tools/build-smithay.py")
     if run([sys.executable, str(ROOT / "tools" / "build-smithay.py"), arch.name]) != 0:
-        die("tools/build-smithay.py failed (it fetches target/smithay and checks it)")
+        die("tools/build-smithay.py failed (it fetches target/smithay, edits it and checks it)")
 
 
 def build(arch: Arch, rustc: pathlib.Path, lld: pathlib.Path) -> int:

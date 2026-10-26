@@ -45,15 +45,37 @@ from ccarch import ALL, resolve  # noqa: E402
 
 SMITHAY_REPO = "https://github.com/Smithay/smithay"
 SMITHAY_TAG = "v0.7.0"
-SMITHAY_COMMIT = "a166cf4c94b5aedc332a65aa1dd753e8148829c3"
+SMITHAY_COMMIT = "8a270232f1bfc416c781273c98a3f52a812a0bba"
 """The revision every measurement in `.notes/wayland.md` §6.13 was taken at.
 
 The tag is not enough on its own: the checkout is verified against this sha, so
-a moved tag cannot silently change what the gate compiles.
+a moved tag cannot silently change what the gate compiles. `SMITHAY_TAG` is the
+clone's starting point only, so it lags the pin by design.
 """
 
 SMITHAY_DIR = ROOT / "target" / "smithay"
 PROBE_DIR = ROOT / "target" / "smithay-probe"
+SMITHAY_EDITS = {
+    # `reis` is declared unconditionally but only the libei backend uses it, and
+    # reis needs `UnixStream::shutdown`, which the port's std does not have.
+    "Cargo.toml": [
+        ('reis = { version = "0.7.0", features = ["calloop"] }',
+         'reis = { version = "0.7.0", features = ["calloop"], optional = true }'),
+        ('backend_libei = ["wayland_frontend"]',
+         'backend_libei = ["wayland_frontend", "reis"]'),
+    ],
+    "src/reexports.rs": [
+        ("pub use reis;", '#[cfg(feature = "backend_libei")]\npub use reis;'),
+    ],
+    # rand 0.10 moved `sample` to `RngExt`, and this branch is the one their CI never
+    # builds, so upstream still names the old trait.
+    "src/utils/sealed_file.rs": [
+        ("use rand::{Rng, distr::Alphanumeric};",
+         "use rand::{RngExt, distr::Alphanumeric};"),
+    ],
+}
+"""The pin's local edits, each an upstream bug rather than a port choice, applied and
+checked by `apply_smithay_edits` so the pin stays a fetch rather than a fork."""
 
 CARGO_TARGET = PROBE_DIR / f"target-{platform.system().lower()}"
 """Per host on purpose: the host artifacts (build scripts, proc macros) share
@@ -221,6 +243,32 @@ def ensure_smithay() -> None:
         head = output(["git", "rev-parse", "HEAD"], cwd=SMITHAY_DIR)
         if head != SMITHAY_COMMIT:
             die(f"smithay is at {head}, wanted {SMITHAY_COMMIT}")
+
+    apply_smithay_edits()
+
+
+def apply_smithay_edits() -> None:
+    """Apply the pin's edits, accepting a checkout that already carries them.
+
+    A patch file would be the obvious way to do this, but `git apply` compares
+    context bytes, and this checkout is checked out with the host's line endings,
+    so the same patch applies from one host and not another. Rewriting the text
+    keeps whatever endings the checkout has.
+    """
+    for name, edits in SMITHAY_EDITS.items():
+        path = SMITHAY_DIR / name
+        raw = path.read_bytes().decode("utf-8")
+        eol = "\r\n" if "\r\n" in raw else "\n"
+        text = raw.replace("\r\n", "\n")
+        for old, new in edits:
+            if text.count(new) == 1:
+                continue
+            found = text.count(old)
+            if found != 1:
+                die(f"{name} is neither the pin's text nor already edited: "
+                    f"{old!r} appears {found} times")
+            text = text.replace(old, new)
+        path.write_bytes(text.replace("\n", eol).encode("utf-8"))
 
 
 def write_probe() -> None:

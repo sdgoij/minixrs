@@ -22,7 +22,7 @@ use std::fmt;
 use std::os::fd::AsRawFd;
 use std::sync::{Arc, Mutex};
 
-use cgmath::{Matrix3, Vector2, Vector3};
+use glam::{Affine2, Vec2};
 use smithay::backend::allocator::Buffer as _;
 use smithay::backend::allocator::Fourcc;
 use smithay::backend::allocator::dmabuf::Dmabuf;
@@ -486,12 +486,9 @@ impl Frame for SoftFrame<'_, '_> {
             for (i, target_px) in row.chunks_exact_mut(BPP).enumerate() {
                 let px = (x0 + i as i32 - dst.loc.x) as f32 + 0.5;
                 let py = (y - dst.loc.y) as f32 + 0.5;
-                let uv = matrix * Vector3::new(px, py, 1.0);
-                if uv.z.abs() < f32::EPSILON {
-                    continue;
-                }
-                let u = (uv.x / uv.z).clamp(0.0, 1.0);
-                let v = (uv.y / uv.z).clamp(0.0, 1.0);
+                let uv = matrix.transform_point2(Vec2::new(px, py));
+                let u = uv.x.clamp(0.0, 1.0);
+                let v = uv.y.clamp(0.0, 1.0);
                 let column = ((u * tw) as usize).min(texture.width as usize - 1);
                 let line = ((v * th) as usize).min(texture.height as usize - 1);
                 let offset = (line * texture.width as usize + column) * BPP;
@@ -515,6 +512,10 @@ impl Frame for SoftFrame<'_, '_> {
         self.transform
     }
 
+    fn output_size(&self) -> Size<i32, Physical> {
+        (self.surface.width, self.surface.height).into()
+    }
+
     fn wait(&mut self, sync: &SyncPoint) -> Result<(), SoftError> {
         sync.wait().map_err(|_| SoftError::SyncInterrupted)
     }
@@ -533,33 +534,32 @@ fn texture_matrix(
     texture: (u32, u32),
     transform: Transform,
     y_inverted: bool,
-) -> Matrix3<f32> {
+) -> Affine2 {
     let transformed = transform.transform_size(src.size).to_f64();
     let dst_size = dst.size.to_f64();
-    let scale = Vector2::new(
+    let mut matrix = Affine2::from_scale(Vec2::new(
         (transformed.w / dst_size.w) as f32,
         (transformed.h / dst_size.h) as f32,
-    );
-    let mut matrix = Matrix3::from_nonuniform_scale(scale.x, scale.y);
+    ));
 
     let translation = match transform {
-        Transform::Normal => Vector2::new(0.0, 0.0),
-        Transform::_90 => Vector2::new(0.0, transformed.h as f32),
-        Transform::_180 => Vector2::new(transformed.w as f32, transformed.h as f32),
-        Transform::_270 => Vector2::new(transformed.h as f32, 0.0),
-        Transform::Flipped => Vector2::new(transformed.w as f32, 0.0),
-        Transform::Flipped90 => Vector2::new(0.0, 0.0),
-        Transform::Flipped180 => Vector2::new(0.0, transformed.h as f32),
-        Transform::Flipped270 => Vector2::new(transformed.h as f32, transformed.w as f32),
+        Transform::Normal => Vec2::new(0.0, 0.0),
+        Transform::_90 => Vec2::new(0.0, transformed.h as f32),
+        Transform::_180 => Vec2::new(transformed.w as f32, transformed.h as f32),
+        Transform::_270 => Vec2::new(transformed.h as f32, 0.0),
+        Transform::Flipped => Vec2::new(transformed.w as f32, 0.0),
+        Transform::Flipped90 => Vec2::new(0.0, 0.0),
+        Transform::Flipped180 => Vec2::new(0.0, transformed.h as f32),
+        Transform::Flipped270 => Vec2::new(transformed.h as f32, transformed.w as f32),
     };
     matrix = transform.matrix() * matrix;
-    matrix = Matrix3::from_translation(translation) * matrix;
-    matrix = Matrix3::from_translation(Vector2::new(src.loc.x as f32, src.loc.y as f32)) * matrix;
+    matrix = Affine2::from_translation(translation) * matrix;
+    matrix = Affine2::from_translation(Vec2::new(src.loc.x as f32, src.loc.y as f32)) * matrix;
     matrix =
-        Matrix3::from_nonuniform_scale(1.0 / texture.0 as f32, 1.0 / texture.1 as f32) * matrix;
+        Affine2::from_scale(Vec2::new(1.0 / texture.0 as f32, 1.0 / texture.1 as f32)) * matrix;
 
     if y_inverted {
-        matrix = Matrix3::from_nonuniform_scale(1.0, -1.0) * matrix;
+        matrix = Affine2::from_scale(Vec2::new(1.0, -1.0)) * matrix;
     }
     matrix
 }

@@ -36,8 +36,8 @@ use smithay::backend::allocator::Fourcc;
 use smithay::backend::allocator::dmabuf::Dmabuf;
 use smithay::backend::allocator::{Format, Modifier};
 use smithay::backend::input::{
-    ButtonState, Device, DeviceCapability, InputBackend, InputEvent, KeyState, KeyboardKeyEvent,
-    UnusedEvent,
+    ButtonState, Device, DeviceCapability, InputBackend, InputEvent, InputTime, KeyState,
+    KeyboardKeyEvent, UnusedEvent,
 };
 use smithay::backend::renderer::element::Kind;
 use smithay::backend::renderer::element::surface::{
@@ -66,15 +66,12 @@ use smithay::wayland::buffer::BufferHandler;
 use smithay::wayland::compositor::{CompositorClientState, CompositorHandler, CompositorState};
 use smithay::wayland::dmabuf::{DmabufGlobal, DmabufHandler, DmabufState, ImportNotifier};
 use smithay::wayland::output::OutputHandler;
+use smithay::wayland::pointer_constraints::PointerConstraintsHandler;
 use smithay::wayland::shell::xdg::decoration::{XdgDecorationHandler, XdgDecorationState};
 use smithay::wayland::shell::xdg::{
     PopupSurface, PositionerState, ToplevelSurface, XdgShellHandler, XdgShellState,
 };
 use smithay::wayland::shm::{ShmHandler, ShmState};
-use smithay::{
-    delegate_compositor, delegate_dmabuf, delegate_output, delegate_seat, delegate_shm,
-    delegate_xdg_decoration, delegate_xdg_shell,
-};
 
 use soft::{SoftRenderer, SoftTarget};
 
@@ -390,6 +387,7 @@ impl State {
                 subpixel: Subpixel::Unknown,
                 make: "minixrs".into(),
                 model: "wlcomp".into(),
+                serial_number: String::new(),
             },
         );
         output.create_global::<Self>(&dh);
@@ -530,7 +528,7 @@ impl State {
         let event = MotionEvent {
             location,
             serial: SERIAL_COUNTER.next_serial(),
-            time: (now_us() / 1000) as u32,
+            time: InputTime::from_micros(now_us()),
         };
         pointer.motion(self, origin, &event);
         pointer.frame(self);
@@ -558,7 +556,7 @@ impl State {
         };
         let event = ButtonEvent {
             serial: SERIAL_COUNTER.next_serial(),
-            time: (now_us() / 1000) as u32,
+            time: InputTime::from_micros(now_us()),
             button,
             state: if pressed {
                 ButtonState::Pressed
@@ -655,7 +653,7 @@ impl State {
     fn dispatch(&mut self, event: InputEvent<MinixInput>) {
         if let InputEvent::Keyboard { event } = event {
             let serial = SERIAL_COUNTER.next_serial();
-            let time = smithay::backend::input::Event::time_msec(&event);
+            let time = smithay::backend::input::Event::time(&event);
             if let Some(keyboard) = self.seat.get_keyboard() {
                 keyboard.input::<(), _>(
                     self,
@@ -845,13 +843,11 @@ impl SeatHandler for State {
     fn cursor_image(&mut self, _seat: &Seat<Self>, _image: CursorImageStatus) {}
 }
 
-delegate_compositor!(State);
-delegate_shm!(State);
-delegate_output!(State);
-delegate_seat!(State);
-delegate_dmabuf!(State);
-delegate_xdg_shell!(State);
-delegate_xdg_decoration!(State);
+/// Smithay's `WlSurface` pointer target now requires this trait, because a constraint can be
+/// asked for on the surface the pointer is over. No client here asks for one.
+impl PointerConstraintsHandler for State {}
+
+smithay::delegate_dispatch2!(State);
 
 #[derive(Default)]
 struct ClientState {
@@ -933,8 +929,8 @@ struct MinixKeyEvent {
 }
 
 impl smithay::backend::input::Event<MinixInput> for MinixKeyEvent {
-    fn time(&self) -> u64 {
-        self.time
+    fn time(&self) -> InputTime {
+        InputTime::from_micros(self.time)
     }
 
     fn device(&self) -> MinixDevice {

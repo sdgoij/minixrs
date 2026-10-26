@@ -1695,9 +1695,10 @@ fork declares `epoll_event`/`EPOLL_*`, `sigaction`/`raise`/`SA_*`, and `siginfo_
 pointer member at offset 16.
 
 **Measured, and reproducible from a script.** `tools/build-smithay.py` (or `just
-smithay`, `just smithay-build`) fetches smithay at the pinned `v0.7.0` commit
-`a166cf4c` into `target/smithay` and generates a workspace in `target/smithay-probe`
-whose `[patch.crates-io]` covers `libc`, `rustix`, `polling`, `calloop`, `errno` and
+smithay`, `just smithay-build`) fetches smithay at the pinned commit `8a27023` into
+`target/smithay`, applies its three edits there, and generates a workspace in
+`target/smithay-probe` whose `[patch.crates-io]` covers `libc`, `rustix`, `polling`,
+`calloop`, `errno` and
 `wayland-{sys,scanner,backend,server,protocols,protocols-wlr,protocols-misc}`;
 `cargo check` (and `cargo build`) for `wayland_frontend` is **green on x86_64,
 riscv64 and aarch64**. Two build-shaped notes: `getrandom` 0.3 needs
@@ -1712,18 +1713,24 @@ is 137 commits ahead and has moved `wayland_backend::server::ObjectData::request
 `destroyed` to `client_id: &ClientId`, `object_id: &ObjectId` and `Message` to
 `OwnedMessage`, while the maintenance commit `05196740` ("Bump versions for backport
 releases", 8 commits ahead) keeps the by-value signature as server 0.31.14, backend
-0.3.16, protocols 0.32.12. Smithay **0.7.0 and smithay master both still take
-`ClientId` by value**, so a master-based fork cannot link against either, faking the
+0.3.16 and protocols 0.32.12, and the fork adds one change of its own on top: the
+`wayland-protocols` upgrade to 0.32.13 that the pin above needs, which is the released crate
+verbatim (upstream 1.49 plus the `expr_2021` macro fragment). Smithay **0.7.0 and smithay
+master both still take `ClientId` by value**, so a master-based fork cannot link against either, faking the
 version string resolves the dependency and then fails to type-check. `feature/minixrs`
 therefore sits on `05196740`, and its own commit is API-independent (two `#[cfg]`
 gates), so moving it is a cherry-pick: onto the next 0.31.x release while smithay is
 where it is, and onto master once smithay adopts `&ClientId`/`OwnedMessage`.
 
-**Smithay and `xkbcommon` are unmodified, verified.** `cargo check` runs against a
-pristine `v0.7.0` checkout and the registry's `xkbcommon 0.8` (`git status` clean): the
-facade and the `libc` additions are what closed the gaps a fork of either would
-otherwise have covered. What is left for `xkbcommon` is the link, not the source: it
-still needs `-lxkbcommon`, so the C-library decision is unchanged.
+**`xkbcommon` is unmodified; smithay carries one patch.** `cargo check` runs against the
+registry's `xkbcommon 0.8` (`git status` clean), and the facade and the `libc` additions are
+what closed the gaps a fork of it would otherwise have covered. What is left for `xkbcommon`
+is the link, not the source: it still needs `-lxkbcommon`, so the C-library decision is
+unchanged. Smithay is no longer pristine: `tools/build-smithay.py` applies three text edits,
+each an upstream bug rather than a port choice (`reis` declared unconditionally while only the
+libei backend uses it, its re-export following the dependency, and `rand::Rng`/`sample` in a
+branch that only builds off Linux and FreeBSD), and it refuses a checkout whose text matches
+neither the pin nor the edit.
 
 **4c, landed: the server runtime, and the socket surface under it.** `wayland-server` 0.31 runs on the port: `/bin/wlgate` creates a `Display` with a `wl_compositor` global, accepts a stock `wayland-client` over `/run/wlgate`, and the client's registry handshake, bind, `create_surface`, `commit` and `roundtrip` all reach the server's `GlobalDispatch`/`Dispatch` impls (`just test-wlgate-<arch>`, x86_64/riscv64/aarch64). wayland-rs needed nothing beyond 4b's two epoll gates; what stood in the way was the port's **socket surface**, in three places, and each failed in a way that named the wrong layer:
 
@@ -2091,46 +2098,54 @@ server and its own in-house seat, so KMS has no counterpart here and 4d-2's nest
 settings-daemon binding. Dropping all of it costs the power and accessibility hooks and the
 settings integration, not the compositor.
 
-**Against the pin.** `cosmic-comp` requires smithay `8a27023` (2026-10-14); the port's pin is
-`v0.7.0` at `a166cf4c9` (2025-06-24). The delta is 242 files, +24659/-9765 in `src/`, 23
+**Against the pin.** `cosmic-comp` requires smithay `8a27023` (2026-10-14), and the port's pin
+was `v0.7.0` at `a166cf4c9` (2025-06-24) until this work moved it. The delta is 242 files, +24659/-9765 in `src/`, 23
 files added and 3 deleted; the protocol surfaces the shell leans on moved the most
 (`wayland/shell/xdg/mod.rs` 622 lines, `wlr_layer` 256, `output` 89), as did the renderer
 (`renderer/gles` 951, `renderer/element` 448). `cosmic-comp` also needs modules `v0.7.0`
 does not have: `wayland::background_effect` (5 files), `image_copy_capture` (12),
 `image_capture_source` (6), and `backend::libei` (8).
 
-Moving the pin was measured to the first compile error, and it is a fork-sync job rather than
-a re-check of the gates, in this order:
+**The pin moved, and the gates came with it.** The steps it took were measured, not
+assumed, and each is now in the tree:
 
-1. **`wayland-protocols` has to be 0.32.13 for real.** Smithay `8a27023` requires `^0.32.13`;
-   the fork's crate is the 0.32.12 *code* with the version string raised, and smithay names
-   what is missing: `zwp_linux_buffer_params_v1::Request::SetSamplingDevice`,
-   `TrancheFlags::Sampling` and `Error::InvalidDevTSize`. Raising the string resolves the
-   dependency and then fails to type-check, so the dmabuf-feedback generation has to be
-   brought over.
-2. **`reis` is a new unconditional dependency, and it needs `UnixStream::shutdown`.** `reis`
-   0.7.1, libei's protocol, calls `UnixStream::shutdown(std::net::Shutdown::Read)`;
-   `std::os::minix::net::UnixStream` has `connect`, `pair` and `set_nonblocking` only, and
-   `crates/servers/src/uds.rs` records "no `shutdown`" for the socket server. Closing it in
-   `std` is a stage1 rebuild, and upstream still makes `reis` unconditional on `master` as of
-   2026-10-26, so it will not disappear on its own.
-3. **`rand` 0.10.3 against 0.10.0.** Smithay imports `rand::Rng` for `sample`; 0.10.3 moved it
-   to `RngExt`, so the lock has to hold `=0.10.0`. A lockfile matter, not a port one.
+1. **`wayland-protocols` 0.32.13 for real.** Smithay `8a27023` requires `^0.32.13`, and the
+   fork's crate was the 0.32.12 *code* with the version string raised, which resolves the
+   dependency and then fails to type-check on
+   `zwp_linux_buffer_params_v1::Request::SetSamplingDevice`, `TrancheFlags::Sampling` and
+   `Error::InvalidDevTSize`. The published 0.32.13 is upstream wayland-protocols **1.49** plus
+   one macro change (`$path:expr` became `$path:expr_2021` for edition 2024), so the fork's
+   `protocols` submodule moves from 1.47 to 1.49 and its version string to 0.32.13.
+2. **`reis`, and the std call it names.** `reis` is declared unconditionally although only the
+   libei backend uses it, and it calls `UnixStream::shutdown`, which the port's std does not
+   have (`crates/servers/src/uds.rs` records "no `shutdown`" for the socket server). Closing
+   that in `std` is a stage1 rebuild, so `tools/build-smithay.py` edits the dependency optional
+   and gates its re-export on `backend_libei` instead.
+3. **`sealed_file.rs` names `rand::Rng`.** rand 0.10 moved `sample` to `RngExt`, and upstream's
+   copy sits in the branch that only builds off Linux and FreeBSD, so their CI never sees it.
+   The same patch fixes the import.
+4. **`delegate_*!` is one macro now.** `smithay::delegate_dispatch2!(State)` replaces the seven
+   per-protocol macros and blanket-implements `Dispatch`/`GlobalDispatch` over them. The rest of
+   the gate drift was four signatures: `Frame::output_size`, `InputTime` in place of a bare
+   `u64` or `u32` for every event's time (`Event::time_msec` is gone), `PhysicalProperties`'
+   `serial_number`, and `Transform::matrix` returning `glam::Affine2` rather than a `cgmath`
+   matrix, which the software renderer now uses directly. A `WlSurface` pointer target also
+   requires `PointerConstraintsHandler`, which the compositor implements empty.
 
-Only after those three do the gates themselves compile, and their drift is unmeasured.
+All seven 4d gates pass on the new pin, on QEMU 11.1.1: `test-glgate-x86`,
+`test-wlcomp-x86`, `test-wlcomp-soft-x86`, `test-wlcomp-dmabuf-x86`,
+`test-wlcomp-dmabuf-gl-x86`, `test-wlseat-x86` and `test-wlcomp-toplevel-x86`.
 
-**What this means for the stage.** Item 1 is work 4f needs either way, because the shell's own
-protocols are generated from the same crate; items 2 and 3 are the price of the pin, not of
-`cosmic-comp`; and the 504-package `libcosmic` subtree together with the KMS backend is 4f's
-own bill, which the pin does not change. So the pin moves with item 1's fork sync and items
-2's and 3's workarounds, the 4d gates are re-measured on it, and the shell is then taken from
-`cosmic-comp` with the iced chrome replaced by the compositor's own renderer and the KMS,
-D-Bus and `cosmic-config` modules cut.
+**What this means for the stage.** The pin now sits where `cosmic-comp` is written, so the shell
+can be taken at its own revision instead of backported; the 504-package `libcosmic` subtree and
+the KMS backend are still 4f's own bill, and the cut stays as above: the iced chrome replaced by
+the compositor's own renderer, and the KMS, D-Bus and `cosmic-config` modules dropped.
 
-**A trap in the build script.** `tools/build-smithay.py` verifies the checkout's `HEAD` but
-not that it is clean, so a hand edit under `target/smithay` survives (and changes what the
-gates build) until the next fetch moves the checkout and silently discards it. One was found
-there and removed: a zero-size `BufferData` orphan in `renderer/gles/mod.rs` that the next
+**A trap in the build script.** `tools/build-smithay.py` reaches the pin with
+`git checkout --force`, so a hand edit under `target/smithay` both changes what the gates build
+and is silently discarded by the next fetch; the script's own edits are rewritten by text and a
+file that matches neither the pin nor the edit is an error rather than a silent mix. One was
+found there and removed: a zero-size `BufferData` orphan in `renderer/gles/mod.rs` that the next
 line immediately overwrites.
 
 ---
@@ -2143,7 +2158,7 @@ line immediately overwrites.
 | **1** | In-house Wayland server, scoped in **§6.11**. **Landed:** 1a, the wire/interface crate and the registry + `sync` handshake over `/dev/uds` (`test-wayland-x86`); 1b, the `wl_shm` present path: `/sbin/wlserver` (boot proc 20) maps `/dev/fb`, `/bin/wlclient` draws into a memfd pool and commits a surface, and the frame is read back from `/dev/fb` (`test-wlshm-x86`); 1c, input: `wl_seat` keyboard/pointer, focus and `enter`, and a key routed from the device to a client (`test-wlkey-x86`), over an input-server ring that keeps a cursor per consumer and a terminal readiness path that reports instead of pushing (`KNOWN_ISSUES` 36, `test-pty-x86`). **Open:** none. | A `wl_shm` client renders through the server to `/dev/fb`, driven by a QEMU smoke scenario (same shape as `tools/smoke/`); a **ported stock** client later, on the same protocol |
 | **2** | `xdg_shell`, decorations, `layer_shell`, popups, damage tracking, cursor, keymaps, multi-output, scoped in **§6.12**. **Landed:** 2a, the seat's keymap, compiled into `wlserver` and served over an fd (`test-wlkey-x86`); 2b, `xdg_shell`: `xdg_wm_base`/`xdg_surface`/`xdg_toplevel`, `configure`/`ack_configure`, `ping`/`pong`, and a toplevel presented at the configured size (`test-wlx-x86`); 2c, several clients at once and per-surface focus, with input routed to the focused connection (`test-wlfocus-x86`); 2d, damage tracking, so only the damaged rectangle is recomposited, and the pointer's cursor image (`test-wlxd-x86`); 2e, popups, `zwlr_layer_shell_v1` and client-side decorations (`test-wlxe-x86`). **Open:** multi-output. | A real toolkit client runs a window with chrome and input |
 | **3** | GL rendering, scoped in **§6.10**, virgl over `virtio-gpu` first: 3D transport, a `virtgpu` render node, Mesa + `libdrm` as DSOs; llvmpipe kept as the fallback. **Landed:** 3a, the 3D transport and virgl negotiation (`test-gpu3d-x86`, `test-gpu3d-nogl-x86`); 3b, the `/dev/dri/renderD128` node: GEM, contexts, blobs, transfers, submits, `WAIT` and `mmap` (`test-drmmap-x86`, `test-drmgl-x86`); 3c's build half, Mesa builds with the `virgl` gallium driver and the C socket cmsg surface is in `minix-libc` (3c-3a). **Landed:** 3c-3, the virgl triangle on the render node (`just test-gltriangle-virgl-x86`, `GL_RENDERER=virgl`); 3d-a, a GL surface through the in-house compositor (`just test-wlgl-x86`). **Landed:** 3d-b-1, the scan-out present path, a whole-output `wl_shm` frame presented out of the client's own buffer with no CPU copy (`just test-wlfull-<arch>`, x86_64/riscv64/aarch64); 3d-b-2, the node's PRIME handoff, an object exported to a dma-buf descriptor and imported back (`just test-drmprime-x86`, the descriptor VFS-owned in `vfs::dmabuf`); 3d-b-3, `libgbm` built with the `dri_gbm.so` backend staged, a BO created on the node exported to a dma-buf and imported back (`just test-gbmtest-x86`); 3d-b-4, `zwp_linux_dmabuf_v1` end to end, a client's object scanned out through the compositor (`just test-wldmabuf-x86`), and the GL client whose render target *is* that buffer (`just test-wldmabufgl-x86`, with the client-side transfer of §5 row 26); 3d-b-5, GPU composition **landed**: its mechanism (5a) and cross-process handoff (5b, `just test-wlcompose-x86`) over the node's per-open context table (§5 row 28), and the compositor's surface list and end-to-end gate (5c/5d, `just test-wlscene-x86`), two dma-buf surfaces composed on the render node and the frame scanned out as one. **Open:** none. | The compositor renders GL content |
-| **4** | smithay port; `cosmic-comp` against our backends; `cosmic-session` + D-Bus, scoped in **§6.13**. **Landed:** 4a, the patched OS crates and a calloop loop (`just test-calloop-<arch>`); 4b, `std`'s Unix names over the port and smithay's whole `check`; 4c, `wayland-server` serving a stock client (`just test-wlgate-<arch>`); 4d-1, smithay's `GlesRenderer` clearing and reading back an offscreen target on the port (`just test-glgate-x86`); 4d-2, a stock `wl_shm` client composed by smithay and scanned out (`just test-wlcomp-x86`); 4d-3, a host key through smithay's seat to a stock client (`just test-wlseat-x86`). | `cosmic-comp` on screen; a `libcosmic` app connects |
+| **4** | smithay port; `cosmic-comp` against our backends; `cosmic-session` + D-Bus, scoped in **§6.13**. **Landed:** 4a, the patched OS crates and a calloop loop (`just test-calloop-<arch>`); 4b, `std`'s Unix names over the port and smithay's whole `check`; 4c, `wayland-server` serving a stock client (`just test-wlgate-<arch>`); 4d-1, smithay's `GlesRenderer` clearing and reading back an offscreen target on the port (`just test-glgate-x86`); 4d-2, a stock `wl_shm` client composed by smithay and scanned out (`just test-wlcomp-x86`); 4d-3, a host key through smithay's seat to a stock client (`just test-wlseat-x86`); 4d-4 to 4d-6, the software renderer, dma-buf import and window placement; and the pin moved to `8a27023`, the revision `cosmic-comp` requires, with every 4d gate re-passing on it. | `cosmic-comp` on screen; a `libcosmic` app connects |
 | **5** | Portals, fonts, the `libcosmic` suite | A usable session |
 
 ---
