@@ -1860,9 +1860,10 @@ shell's prompt returns and the gate can type `/bin/wlshm` next: a stock `wayland
 two whole-output `Xrgb8888` frames in one `memfd`, commits them in turn and waits for the first
 `wl_buffer.release`. smithay's `CompositorState` (`wl_compositor`), `ShmState` (`wl_shm`) and a
 `wl_output` serve it; the commit handler draws every committed surface into 4d-1's offscreen
-target, reads the frame back, packs it as `XRGB8888` (bottom row first to top row first, R and B
-swapped) and re-points the scan-out at that buffer. `just test-wlcomp-x86` is green: the log shows
-`fb: scanout src`, `wlcomp: presented 1 surface(s), scanout re-pointed` and `wlshm: wl_buffer
+target, reads the frame back, packs it as `XRGB8888` (rows in the order the read-back returns
+them, R and B swapped) and re-points the scan-out at that buffer. `just test-wlcomp-x86` is green:
+the log shows `fb: scanout src`, `wlcomp: presented 1 surface(s), scanout re-pointed` and `wlshm:
+wl_buffer
 released`, and a QMP screendump is the second frame's magenta. The driver is `softpipe`, as in
 4d-1.
 
@@ -1927,6 +1928,31 @@ Input reaches the compositor through `/dev/kbd` rather than the input server's e
 user-spawned process may not `SENDREC` to `/sbin/input` any more than to the fb server (4d-2's
 `ECALLDENIED`), and VFS serves the read on a 20 ms tick.
 
+**4d-4, landed: the software renderer draws the same scene, and the present path stopped flipping
+it.** `/bin/wlcomp soft` selects a renderer of this project's own
+(`tools/phase4-comp/src/soft.rs`) instead of `GlesRenderer`: an offscreen `SoftTarget` in
+`Abgr8888`, `wl_shm` imports copied into a texture, a `Frame` that clears and blends solid colours
+and textures with nearest-neighbour sampling, and `ExportMem` handing the frame back. It implements
+smithay's `Renderer`, `Frame`, `Bind`, `Offscreen`, `ImportMem`, `ImportMemWl`, `ImportDma`,
+`ImportDmaWl` and `ExportMem`, so the compositor's drawing code is one generic body (`render_scene`)
+instantiated for whichever renderer startup selected. The argument is `gl` or `soft`, and `gl`
+falls back to `soft` when EGL cannot give a context, which is what an output with no GPU looks
+like; the gate requires `wlcomp: renderer soft` in the log, so a fallback cannot pass for it.
+`just test-wlcomp-soft-x86` is green.
+
+The gate found a display bug 4d-2 could not see. Frame B is now magenta with its top 100 rows
+green, and against that frame the old present path put the client's top rows at the *bottom* of
+the screen: the pack loop reversed the read-back's rows. The read-back's row 0 is already the
+output's top row, so the pack keeps the rows in order and swaps R and B only. The soft path
+agreed with that measurement rather than with GLES's `TextureMapping::flipped`, which reports
+`true` for a mapping whose first row is the top; the screendump is the authority here, and
+`wlshm` keeps the band so both renderers assert it.
+
+The software path needs no Mesa: it never creates an EGL display, and its only library is the
+`libc.so` the image already links (the executable still `DT_NEEDED`s `libEGL.so.1` and
+`libGLESv2.so.2` because the GL path lives in the same binary, so the image stages them as
+before). dmabufs are not importable, which is the next stage's work.
+
 Staged, each with a gate
 
 | Stage | Deliverable | Gate |
@@ -1934,7 +1960,7 @@ Staged, each with a gate
 | **4d-1** | **The renderer on the port.** `libloading`'s fork as a submodule, `libxkbcommon` built and staged like `libdrm`/`libgbm`, and a binary that takes smithay's surfaceless `EGLDisplay` → `EGLContext` → `GlesRenderer`. **Landed:** `/bin/glgate` clears a 64×64 `Abgr8888` offscreen target through `GlesRenderer` and reads the pixel back exactly, on the software driver (`softpipe`, this host's virgl being ES2-only); `libxkbcommon` is staged both ways | The guest prints the GL renderer's name and clears a framebuffer whose pixel reads back, `just test-glgate-x86` |
 | **4d-2** | **The compositor.** `CompositorState`, `ShmGlobal` and an output, on its own socket; one stock `wl_shm` client commits a surface, smithay composes it into the offscreen target and 3d-b-1 scans the frame out. **Landed:** `/bin/wlcomp` serves a stock `wayland-client` that commits two frames; the second is on the scan-out and the first's `wl_buffer` is released. A user process reaches the fb server through VFS, so `FBIO_SCANOUT_SRC` is now a sized `_IOW` ioctl | A host screendump shows the client's colour, and the client's `wl_buffer` is released, `just test-wlcomp-x86` |
 | **4d-3** | **Input.** The input server behind smithay's `InputBackend`, a `wl_seat` advertised and routed to the focused surface. **Landed:** `/bin/wlcomp` has a `wl_seat` with a keyboard fed from `/dev/kbd` on a tick, focuses the first mapped surface, and `/bin/wlseat` receives the keymap, `enter` and evdev 30, with the keymap's components materialised from the tree's compiled keymap, a `tempfile` stand-in for smithay's keymap file, and a VFS `creat` fix (`O_CREAT|O_RDWR` had been write-only) | A key reaches the client through smithay, `just test-wlseat-x86` |
-| **4d-4** | **The software renderer** behind the same `Renderer` seam | 4d-2's gate with the software renderer selected |
+| **4d-4** | **The software renderer** behind the same `Renderer` seam. **Landed:** `/bin/wlcomp soft` draws the same scene with `tools/phase4-comp/src/soft.rs` and never creates an EGL display; the read-back is presented top row first, which fixed a flip the single-colour frames had hidden | 4d-2's gate with the software renderer selected, `just test-wlcomp-soft-x86` |
 | **4d-5** | **`zwp_linux_dmabuf_v1` through smithay** (`DmabufGlobal` + `ImportDma`) | A dma-buf client's frame reaches the scan-out with no client-side transfer |
 
 ---

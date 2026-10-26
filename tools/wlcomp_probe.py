@@ -5,14 +5,19 @@
 `ShmState` + a `wl_output`) serving in the child (`.notes/wayland.md` 6.13, 4d-2). `/bin/wlshm`
 is a stock `wayland-client`: it creates one memfd with two 1024x768 `Xrgb8888` frames, commits
 them in turn, and waits for the first `wl_buffer.release`. The compositor draws each commit into
-an offscreen GLES target, reads the frame back (D18) and re-points the fb server's scan-out at
-it (`FBIO_SCANOUT_SRC`), so the frame *is* the compositor's buffer and the display shows what
+an offscreen target, reads the frame back (D18) and re-points the fb server's scan-out at it
+(`FBIO_SCANOUT_SRC`), so the frame *is* the compositor's buffer and the display shows what
 smithay composed.
 
+`--renderer soft` runs the same gate with the compositor's own software renderer selected, which
+is the gate for that renderer: every assertion below is the same, and the log has to carry
+`wlcomp: renderer soft` so a fallback cannot pass for it.
+
 Evidence: the serial log's `fb: scanout src` line (the re-point was taken), the client's release
-line (the compositor held and returned the buffer), and a QMP screendump of the second frame's
-colour. The output is a `virtio-gpu-pci` with no bochs-display, because only a virtio-gpu can
-re-back its scanout (D11).
+line (the compositor held and returned the buffer), and a QMP screendump. The screenshot is the
+orientation check as well: frame B is magenta with its *top* 100 rows green, so green at the top
+of the screen says the present path did not flip the frame. The output is a `virtio-gpu-pci` with
+no bochs-display, because only a virtio-gpu can re-back its scanout (D11).
 """
 import json
 import os
@@ -24,8 +29,12 @@ import time
 
 SCREEN = "target/wlcomp.ppm"
 
+# Frame B's top band, in the client's own rows: green, with magenta below it.
+BAND_RGB = bytes([0, 255, 0])
+MAGENTA_RGB = bytes([255, 0, 255])
+
 # The compositor returns to the shell as soon as its socket is bound; the client is typed next.
-SERVER_CMD = "/bin/wlcomp"
+SERVER_BASE = "/bin/wlcomp"
 CLIENT_CMD = "/bin/wlshm"
 
 lock = threading.Lock()
@@ -143,8 +152,21 @@ def tail(n=1200):
 def main():
     global qemu
     argv = sys.argv[1:]
+    renderer = "gl"
+    if "--renderer" in argv:
+        i = argv.index("--renderer")
+        try:
+            renderer = argv[i + 1]
+        except IndexError:
+            print("usage: wlcomp_probe.py [--renderer gl|soft] <qemu command...>", file=sys.stderr)
+            sys.exit(2)
+        del argv[i:i + 2]
+    if renderer not in ("gl", "soft"):
+        print("--renderer takes `gl` or `soft`", file=sys.stderr)
+        sys.exit(2)
+    server_cmd = SERVER_BASE if renderer == "gl" else f"{SERVER_BASE} {renderer}"
     if not argv:
-        print("usage: wlcomp_probe.py <qemu command...>", file=sys.stderr)
+        print("usage: wlcomp_probe.py [--renderer gl|soft] <qemu command...>", file=sys.stderr)
         sys.exit(2)
     qemu = subprocess.Popen(
         argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
@@ -177,11 +199,22 @@ def main():
         qemu.kill()
         sys.exit(1)
 
-    if not type_line_and_wait(SERVER_CMD, b"wlcomp: ready on", b"wlcomp: FAIL", 60):
+    if not type_line_and_wait(server_cmd, b"wlcomp: ready on", b"wlcomp: FAIL", 60):
         print("the compositor did not become ready; tail:\n%s" % tail(), file=sys.stderr)
         q.close()
         qemu.kill()
         sys.exit(1)
+
+    with lock:
+        started = bytes(out)
+    which = ("wlcomp: renderer %s" % renderer).encode()
+    if which not in started:
+        print("the compositor did not report `%s`; tail:\n%s" % (which.decode(), tail()),
+              file=sys.stderr)
+        q.close()
+        qemu.kill()
+        sys.exit(1)
+    print("renderer: %s" % renderer, flush=True)
 
     if not type_line_and_wait(CLIENT_CMD, b"wlshm: PASS", b"wlshm: FAIL", 40):
         print("the client did not pass; tail:\n%s" % tail(), file=sys.stderr)
@@ -208,14 +241,20 @@ def main():
         q.close()
         qemu.kill()
         sys.exit(1)
-    # Buffer B is Xrgb8888 0x00FF00FF: B=FF,G=00,R=FF -> RGB (255,0,255).
-    centre = pxat(shot, 512, 384) == bytes([255, 0, 255])
-    corner = pxat(shot, 0, 0) == bytes([255, 0, 255])
-    print("after commit: centre magenta=%s, corner magenta=%s" % (centre, corner), flush=True)
+    # Frame B is Xrgb8888 0x00FF00FF (magenta) with its top 100 rows 0x0000FF00 (green). The
+    # client counts rows from the top of its image, so an upright present path puts the band at
+    # the top of the screen; a flipped one puts it at the bottom.
+    top_left = pxat(shot, 0, 0) == BAND_RGB
+    top_mid = pxat(shot, 512, 40) == BAND_RGB
+    centre = pxat(shot, 512, 384) == MAGENTA_RGB
+    corner = pxat(shot, 1023, 767) == MAGENTA_RGB
+    print("after commit: band top-left=%s, band top-middle=%s, centre magenta=%s, corner magenta=%s"
+          % (top_left, top_mid, centre, corner), flush=True)
 
     q.close()
     qemu.kill()
-    sys.exit(0 if (took_scanout and presented and released and centre and corner) else 1)
+    sys.exit(0 if (took_scanout and presented and released and top_left and top_mid
+                   and centre and corner) else 1)
 
 
 if __name__ == "__main__":

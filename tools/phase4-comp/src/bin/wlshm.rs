@@ -3,8 +3,12 @@
 //!
 //! The release is the interesting half. smithay sends it when the second commit replaces the
 //! first buffer, so seeing it means the compositor took the buffer, held it while it drew, and
-//! gave it back — the client-side half of 4d-2's gate. The other half is the display: buffer B
+//! gave it back, the client-side half of 4d-2's gate. The other half is the display: buffer B
 //! is what remains on the scan-out, and the host's screendump has to be its colour.
+//!
+//! B is not one colour. Its top 100 rows are green and the rest magenta, which is what lets the
+//! gate tell an upright present from a flipped one: a single-colour frame looks the same either
+//! way, and a flipped frame did pass this gate before the band was added.
 
 use std::os::fd::{AsFd, FromRawFd, OwnedFd};
 
@@ -24,6 +28,10 @@ const FRAME: usize = (WIDTH as usize) * (HEIGHT as usize) * 4;
 /// display must show once both commits have been drawn.
 const COLOUR_A: u32 = 0x0000_FF00;
 const COLOUR_B: u32 = 0x00FF_00FF;
+/// Frame B's first rows, in the client's own order, so the gate can see whether the present path
+/// kept the frame upright.
+const COLOUR_BAND: u32 = 0x0000_FF00;
+const BAND_ROWS: usize = 100;
 
 #[derive(Default)]
 struct Client {
@@ -146,6 +154,8 @@ fn run() -> Result<(), String> {
     let pixels = unsafe { core::slice::from_raw_parts_mut(ptr as *mut u32, pool_len / 4) };
     pixels[..FRAME / 4].fill(COLOUR_A);
     pixels[FRAME / 4..].fill(COLOUR_B);
+    let band = FRAME / 4 + BAND_ROWS * WIDTH as usize;
+    pixels[FRAME / 4..band].fill(COLOUR_BAND);
 
     // SAFETY: the fd came from `memfd_create` and the mapping keeps the object alive after close.
     let pool_fd = unsafe { OwnedFd::from_raw_fd(fd) };

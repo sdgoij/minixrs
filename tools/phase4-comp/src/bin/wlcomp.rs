@@ -1,8 +1,9 @@
-//! Phase 4d-2's compositor: smithay's `CompositorState` and `ShmState` on `/run/wlcomp`, drawing
-//! the committed surfaces into an offscreen GLES target and presenting the read-back through the
-//! fb server's scan-out (`FBIO_SCANOUT_SRC`) — D17's renderer with 3d-b-1's present (D18). 4d-3
-//! adds the seat: a `wl_seat` with a keyboard, fed from the input server's ring through a
-//! `smithay::backend::input::InputBackend` of this port's own.
+//! The compositor 4d-2 put on `/run/wlcomp`: smithay's `CompositorState` and `ShmState`, the seat
+//! 4d-3 added, and a renderer behind smithay's `Renderer` seam. The committed surfaces are drawn
+//! into an offscreen target, the frame is read back, and the fb server's scan-out is re-pointed at
+//! it (D17's renderer, D18's present). The renderer is chosen once at startup: `gl` is smithay's
+//! `GlesRenderer` over EGL, `soft` is this project's own software rasteriser, and `gl` falls back
+//! to `soft` when EGL cannot give a context, which is an output with no GPU.
 //!
 //! `/bin/wlcomp` binds the socket, forks, and leaves the compositor in the child, so the shell's
 //! prompt comes back and this boot's gate can type the client next (`/bin/wlshm`, `/bin/wlseat`).
@@ -18,6 +19,8 @@
 mod gl;
 #[path = "../keymap.rs"]
 mod keymap;
+#[path = "../soft.rs"]
+mod soft;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -37,7 +40,9 @@ use smithay::backend::renderer::element::surface::{
 };
 use smithay::backend::renderer::gles::{GlesRenderer, GlesTexture};
 use smithay::backend::renderer::utils::{draw_render_elements, on_commit_buffer_handler};
-use smithay::backend::renderer::{Bind, Color32F, ExportMem, Frame, Offscreen, Renderer};
+use smithay::backend::renderer::{
+    Bind, Color32F, ExportMem, Frame, ImportAll, Offscreen, Renderer,
+};
 use smithay::input::Seat;
 use smithay::input::SeatHandler;
 use smithay::input::SeatState;
@@ -54,6 +59,8 @@ use smithay::wayland::compositor::{CompositorClientState, CompositorHandler, Com
 use smithay::wayland::output::OutputHandler;
 use smithay::wayland::shm::{ShmHandler, ShmState};
 use smithay::{delegate_compositor, delegate_output, delegate_seat, delegate_shm};
+
+use soft::{SoftRenderer, SoftTarget};
 
 /// The socket a client connects to, and the only name this gate uses.
 const SOCKET: &str = "/run/wlcomp";
@@ -72,31 +79,176 @@ struct Scanout([u8; FRAME_LEN]);
 
 static mut SCANOUT: Scanout = Scanout([0; FRAME_LEN]);
 
+/// What the operator asked for on the command line. The renderer is fixed at startup (D17), and
+/// the compositor below is written against `Renderer` rather than either implementation.
+#[derive(Clone, Copy)]
+enum Choice {
+    Gl,
+    Soft,
+}
+
+/// The renderer and its offscreen target. Both variants answer the same calls; `render_scene`
+/// instantiates against the trait, so nothing below `present` knows which one is in use.
+enum RenderPath {
+    Gl {
+        renderer: GlesRenderer,
+        target: GlesTexture,
+    },
+    Soft {
+        renderer: SoftRenderer,
+        target: SoftTarget,
+    },
+}
+
+impl RenderPath {
+    /// `gl` falls back to `soft` when EGL cannot produce a context, which is what an output with
+    /// no GPU looks like; `soft` never touches EGL at all. The gate asserts which one ran, so a
+    /// fallback cannot pass for the accelerated path.
+    fn new(choice: Choice) -> Result<Self, String> {
+        let size = Size::<i32, Buffer>::from((WIDTH as i32, HEIGHT as i32));
+        match choice {
+            Choice::Gl => match Self::gl(size) {
+                Ok(path) => Ok(path),
+                Err(e) => {
+                    println!("wlcomp: GL renderer unavailable ({e}), using the software renderer");
+                    Self::soft(size)
+                }
+            },
+            Choice::Soft => Self::soft(size),
+        }
+    }
+
+    fn gl(size: Size<i32, Buffer>) -> Result<Self, String> {
+        let (bootstrap, context) = gl::create_context(WIDTH as i32, HEIGHT as i32)?;
+        println!("wlcomp: {}", gl::describe(&bootstrap));
+        // SAFETY: the bootstrap made this context current and nothing else uses GL in this thread.
+        let mut renderer = unsafe { GlesRenderer::new(context) }
+            .map_err(|e| format!("GLES renderer failed: {e:?}"))?;
+        let target = Offscreen::<GlesTexture>::create_buffer(&mut renderer, Fourcc::Abgr8888, size)
+            .map_err(|e| format!("offscreen target failed: {e:?}"))?;
+        Ok(Self::Gl { renderer, target })
+    }
+
+    fn soft(size: Size<i32, Buffer>) -> Result<Self, String> {
+        let mut renderer = SoftRenderer::new();
+        let target = Offscreen::<SoftTarget>::create_buffer(&mut renderer, Fourcc::Abgr8888, size)
+            .map_err(|e| format!("software target failed: {e}"))?;
+        Ok(Self::Soft { renderer, target })
+    }
+
+    fn name(&self) -> &'static str {
+        match self {
+            Self::Gl { .. } => "gl",
+            Self::Soft { .. } => "soft",
+        }
+    }
+
+    fn render(&mut self, surfaces: &[WlSurface], out: &mut [u8]) -> Result<usize, String> {
+        match self {
+            Self::Gl { renderer, target } => render_scene(renderer, target, surfaces, out),
+            Self::Soft { renderer, target } => render_scene(renderer, target, surfaces, out),
+        }
+    }
+}
+
+/// Draws every committed surface into `target`, reads the frame back and packs it for the
+/// scan-out. This is the one body both renderers share: it is written against smithay's traits,
+/// so the only thing that differs between them is the type parameter.
+fn render_scene<R, T>(
+    renderer: &mut R,
+    target: &mut T,
+    surfaces: &[WlSurface],
+    out: &mut [u8],
+) -> Result<usize, String>
+where
+    R: Renderer + ImportAll + ExportMem + Bind<T> + Offscreen<T>,
+    R::TextureId: Clone + 'static,
+{
+    let size = Size::<i32, Physical>::from((WIDTH as i32, HEIGHT as i32));
+    let buffer_size = Size::<i32, Buffer>::from((WIDTH as i32, HEIGHT as i32));
+    let region = Rectangle::from_size(size);
+
+    let mut elements: Vec<WaylandSurfaceRenderElement<R>> = Vec::new();
+    for surface in surfaces {
+        elements.extend(render_elements_from_surface_tree::<
+            R,
+            WaylandSurfaceRenderElement<R>,
+        >(
+            renderer, surface, (0, 0), 1.0, 1.0, Kind::Unspecified
+        ));
+    }
+    if elements.is_empty() {
+        // A commit with no buffer (the first one, or an unmap) leaves the display alone.
+        return Ok(0);
+    }
+
+    let mut bound = renderer
+        .bind(target)
+        .map_err(|e| format!("bind failed: {e}"))?;
+    let mut frame = renderer
+        .render(&mut bound, size, Transform::Normal)
+        .map_err(|e| format!("render failed: {e}"))?;
+    frame
+        .clear(Color32F::new(0.02, 0.02, 0.03, 1.0), &[region])
+        .map_err(|e| format!("clear failed: {e}"))?;
+    draw_render_elements(&mut frame, 1.0, &elements, &[region])
+        .map_err(|e| format!("draw failed: {e}"))?;
+    let _sync = frame.finish().map_err(|e| format!("finish failed: {e}"))?;
+    let mapping = renderer
+        .copy_framebuffer(&bound, Rectangle::from_size(buffer_size), Fourcc::Abgr8888)
+        .map_err(|e| format!("read-back failed: {e}"))?;
+    drop(bound);
+    let bytes = renderer
+        .map_texture(&mapping)
+        .map_err(|e| format!("map failed: {e}"))?;
+    if bytes.len() < FRAME_LEN {
+        return Err(format!(
+            "read back {} bytes, wanted {FRAME_LEN}",
+            bytes.len()
+        ));
+    }
+
+    // Row 0 of the read-back is the output's top row, for both renderers: a client's top rows
+    // arrive in the mapping's first rows (the gate's green band proves it), and the scan-out
+    // and the client both count rows from the top. The read-back is RGBA, the fb's frame is
+    // XRGB8888, so the pack is the R and B swap and the opaque byte.
+    for y in 0..HEIGHT {
+        let src = &bytes[y * STRIDE..][..STRIDE];
+        let dst = &mut out[y * STRIDE..][..STRIDE];
+        for (dst_px, src_px) in dst.chunks_exact_mut(4).zip(src.chunks_exact(4)) {
+            dst_px[0] = src_px[2];
+            dst_px[1] = src_px[1];
+            dst_px[2] = src_px[0];
+            dst_px[3] = 0xFF;
+        }
+    }
+    Ok(elements.len())
+}
+
 struct State {
     dh: DisplayHandle,
     compositor: CompositorState,
     shm: ShmState,
-    /// Kept for its global and its `wl_output` state; nothing renders through it yet (the seat
-    /// routes input, and 4d-4 swaps the renderer behind the same seam).
+    /// Kept for its global and its `wl_output` state; the compositor renders every surface at
+    /// the origin, so the output's mode is what the frame is sized to.
     _output: Output,
     seat_state: SeatState<State>,
     seat: Seat<State>,
     surfaces: Vec<WlSurface>,
-    renderer: GlesRenderer,
-    target: GlesTexture,
+    path: RenderPath,
     /// `/dev/fb`, opened for the scan-out re-point. An ordinary user process reaches the fb
     /// server through VFS; a boot process would send `CDEV_IOCTL` directly (§6.11).
     fb: i32,
     /// `/dev/kbd`, read non-blocking on the input tick.
     kbd: i32,
     /// Whether a surface has been given keyboard focus. The gate has one window, so the first
-    /// mapped surface takes it — there is no window manager to ask.
+    /// mapped surface takes it, there is no window manager to ask.
     focused: bool,
     presented: u32,
 }
 
 impl State {
-    fn new(dh: DisplayHandle) -> Result<Self, String> {
+    fn new(dh: DisplayHandle, path: RenderPath) -> Result<Self, String> {
         let compositor = CompositorState::new::<Self>(&dh);
         let shm = ShmState::new::<Self>(&dh, vec![]);
 
@@ -138,17 +290,6 @@ impl State {
         );
         output.set_preferred(mode);
 
-        let (bootstrap, context) = gl::create_context(WIDTH as i32, HEIGHT as i32)?;
-        println!("wlcomp: {}", gl::describe(&bootstrap));
-        // SAFETY: the bootstrap made this context current and nothing else uses GL in this thread.
-        let mut renderer = unsafe { GlesRenderer::new(context) }
-            .map_err(|e| format!("GLES renderer failed: {e:?}"))?;
-        let target_size = Size::<i32, Buffer>::from((WIDTH as i32, HEIGHT as i32));
-        let target =
-            Offscreen::<GlesTexture>::create_buffer(&mut renderer, Fourcc::Abgr8888, target_size)
-                .map_err(|e| format!("offscreen target failed: {e:?}"))?;
-        println!("wlcomp: offscreen target {WIDTH}x{HEIGHT} Abgr8888");
-
         // SAFETY: fixed paths, opened for the present path and for the input tick below.
         let fb = unsafe { minix_std::fs::open(b"/dev/fb", minix_std::fs::O_RDWR, 0) }
             .map_err(|e| format!("open /dev/fb failed: {e:?}"))?;
@@ -164,8 +305,7 @@ impl State {
             seat_state,
             seat,
             surfaces: Vec::new(),
-            renderer,
-            target,
+            path,
             fb,
             kbd,
             focused: false,
@@ -177,111 +317,26 @@ impl State {
     /// server. Called from the surface commit handler, which wayland-server runs inside its own
     /// dispatch, so the frame is on the scan-out before the client's roundtrip is answered.
     fn present(&mut self) {
-        let size = Size::<i32, Physical>::from((WIDTH as i32, HEIGHT as i32));
-        let buffer_size = Size::<i32, Buffer>::from((WIDTH as i32, HEIGHT as i32));
-        let region = Rectangle::from_size(size);
-
-        let mut elements = Vec::new();
-        for surface in &self.surfaces {
-            elements.extend(render_elements_from_surface_tree::<
-                GlesRenderer,
-                WaylandSurfaceRenderElement<GlesRenderer>,
-            >(
-                &mut self.renderer,
-                surface,
-                (0, 0),
-                1.0,
-                1.0,
-                Kind::Unspecified,
-            ));
-        }
-        if elements.is_empty() {
+        // SAFETY: this process is the buffer's only writer, and the borrow ends with the call.
+        let out = unsafe { &mut *core::ptr::addr_of_mut!(SCANOUT.0) };
+        let presented = match self.path.render(&self.surfaces, out) {
             // A commit with no buffer (the first one, or an unmap) leaves the display alone.
-            return;
-        }
-
-        let renderer = &mut self.renderer;
-        let target = &mut self.target;
-        let mut bound = match renderer.bind(target) {
-            Ok(bound) => bound,
+            Ok(0) => return,
+            Ok(presented) => presented,
             Err(e) => {
-                println!("wlcomp: bind failed: {e:?}");
+                println!("wlcomp: {e}");
                 return;
             }
         };
-        match renderer.render(&mut bound, size, Transform::Normal) {
-            Ok(mut frame) => {
-                if let Err(e) = frame.clear(Color32F::new(0.02, 0.02, 0.03, 1.0), &[region]) {
-                    println!("wlcomp: clear failed: {e:?}");
-                }
-                match draw_render_elements(&mut frame, 1.0, &elements, &[region]) {
-                    Ok(_) => {}
-                    Err(e) => println!("wlcomp: draw failed: {e:?}"),
-                }
-                if let Err(e) = frame.finish() {
-                    println!("wlcomp: frame finish failed: {e:?}");
-                }
-            }
-            Err(e) => {
-                println!("wlcomp: render failed: {e:?}");
-                return;
-            }
-        }
-        drop(bound);
-
-        {
-            let mapping = match renderer.copy_texture(
-                target,
-                Rectangle::from_size(buffer_size),
-                Fourcc::Abgr8888,
-            ) {
-                Ok(mapping) => mapping,
-                Err(e) => {
-                    println!("wlcomp: copy_texture failed: {e:?}");
-                    return;
-                }
-            };
-            let bytes = match renderer.map_texture(&mapping) {
-                Ok(bytes) => bytes,
-                Err(e) => {
-                    println!("wlcomp: map_texture failed: {e:?}");
-                    return;
-                }
-            };
-            if bytes.len() < FRAME_LEN {
-                println!(
-                    "wlcomp: read back {} bytes, wanted {FRAME_LEN}",
-                    bytes.len()
-                );
-                return;
-            }
-            // The read-back is RGBA, bottom row first; the fb's frame is XRGB8888, top row first.
-            // Doing both here is what lets the present stay a re-point with no copy.
-            let out = unsafe { &mut *core::ptr::addr_of_mut!(SCANOUT.0) };
-            for y in 0..HEIGHT {
-                let src = &bytes[(HEIGHT - 1 - y) * STRIDE..][..STRIDE];
-                let dst = &mut out[y * STRIDE..][..STRIDE];
-                for (dst_px, src_px) in dst.chunks_exact_mut(4).zip(src.chunks_exact(4)) {
-                    dst_px[0] = src_px[2]; // B
-                    dst_px[1] = src_px[1]; // G
-                    dst_px[2] = src_px[0]; // R
-                    dst_px[3] = 0xFF; // X
-                }
-            }
-        }
-
         let va = unsafe { core::ptr::addr_of_mut!(SCANOUT.0) } as u64;
         // Revert first: the fb server skips a re-point it believes is the same buffer, and this
-        // buffer's *contents* change between commits — a flush would leave the host showing the
+        // buffer's *contents* change between commits, so a flush would leave the host showing the
         // frame it already had (D27, `VirtioGpuArch::present_resource`).
-        let _ = self.scanout(0, 0);
+        self.scanout(0, 0);
         let status = self.scanout(va, FRAME_LEN as u64);
         self.presented += 1;
         if status == 0 {
-            println!(
-                "wlcomp: presented {} surface(s), scanout re-pointed",
-                elements.len()
-            );
+            println!("wlcomp: presented {presented} surface(s), scanout re-pointed");
         } else {
             println!("wlcomp: scanout refused ({status})");
         }
@@ -575,7 +630,7 @@ fn now_us() -> u64 {
     }
 }
 
-fn serve(listener: std::os::minix::net::UnixListener) -> ! {
+fn serve(listener: std::os::minix::net::UnixListener, choice: Choice) -> ! {
     let mut event_loop: EventLoop<State> = match EventLoop::try_new() {
         Ok(event_loop) => event_loop,
         Err(e) => {
@@ -591,7 +646,15 @@ fn serve(listener: std::os::minix::net::UnixListener) -> ! {
         }
     };
     let dh = display.handle();
-    let mut state = match State::new(dh) {
+    let path = match RenderPath::new(choice) {
+        Ok(path) => path,
+        Err(e) => {
+            println!("wlcomp: FAIL {e}");
+            std::process::exit(1);
+        }
+    };
+    println!("wlcomp: renderer {}", path.name());
+    let mut state = match State::new(dh, path) {
         Ok(state) => state,
         Err(e) => {
             println!("wlcomp: FAIL {e}");
@@ -670,6 +733,15 @@ fn serve(listener: std::os::minix::net::UnixListener) -> ! {
 }
 
 fn main() {
+    let choice = match std::env::args().nth(1).as_deref() {
+        None | Some("gl") => Choice::Gl,
+        Some("soft") => Choice::Soft,
+        Some(other) => {
+            println!("wlcomp: unknown renderer {other:?}: pass `gl` or `soft`");
+            std::process::exit(2);
+        }
+    };
+
     let listener = match std::os::minix::net::UnixListener::bind(SOCKET) {
         Ok(listener) => listener,
         Err(e) => {
@@ -683,7 +755,7 @@ fn main() {
     // is what leaves the frame on screen for the gate's screendump.
     let child = minix_rt::fork();
     if child == 0 {
-        serve(listener);
+        serve(listener, choice);
     }
     if child < 0 {
         println!("wlcomp: fork failed");

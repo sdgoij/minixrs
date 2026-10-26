@@ -1074,6 +1074,17 @@ test-wlcomp-x86: wlcomp-x86 boot-image-x86
     python tools/wlcomp_probe.py qemu-system-x86_64 -nographic -m 512M -no-reboot -vga none -device virtio-gpu-pci -qmp tcp:127.0.0.1:4447,server=on,wait=off -kernel target/images/x86_64-pc-minix/minix-x86-boot.elf -drive if=none,id=disk0,file=target/images/x86_64-pc-minix/disk.img,format=raw,cache=writethrough -device virtio-blk-pci,disable-legacy=on,drive=disk0 -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0
     @echo "wlcomp: smithay composed a stock wl_shm client onto the scan-out (x86_64)"
 
+# The same compositor gate with the software renderer selected: `/bin/wlcomp soft` draws the
+# committed surfaces with this project's own rasteriser and never opens EGL, so the frame the
+# scan-out gets came from no GL driver at all. The probe requires `wlcomp: renderer soft` in
+# the log, which is what keeps the GL path's fallback from passing for it.
+test-wlcomp-soft-x86: wlcomp-x86 boot-image-x86
+    @just _assert-qemu-version qemu-system-x86_64
+    MINIXFS_EXTRA="/lib/libdrm.so.2=target/mesa/x86/lib/libdrm.so.2;/lib/libEGL.so.1=target/mesa/x86/lib/libEGL.so.1;/lib/libgbm.so.1=target/mesa/x86/lib/libgbm.so.1;/lib/libexpat.so.1=target/mesa/x86/lib/libexpat.so.1;/lib/libgallium-25.3.6.so=target/mesa/x86/lib/libgallium-25.3.6.so;/lib/libGLESv2.so.2=target/mesa/x86/lib/libGLESv2.so.2;/lib/libz.so.1=target/mesa/x86/lib/libz.so.1;/lib/dri_gbm.so=target/mesa/x86/lib/dri_gbm.so;/lib/swrast_dri.so=target/mesa/x86/lib/swrast_dri.so;/bin/wlcomp=target/x86_64-pc-minix/release/wlcomp;/bin/wlshm=target/x86_64-pc-minix/release/wlshm" MINIXFS_BLOCKS=16384 cargo run -q -p boot-image --bin mkminixfs --release -- x86_64
+    @just mkfs-x86
+    python tools/wlcomp_probe.py --renderer soft qemu-system-x86_64 -nographic -m 512M -no-reboot -vga none -device virtio-gpu-pci -qmp tcp:127.0.0.1:4447,server=on,wait=off -kernel target/images/x86_64-pc-minix/minix-x86-boot.elf -drive if=none,id=disk0,file=target/images/x86_64-pc-minix/disk.img,format=raw,cache=writethrough -device virtio-blk-pci,disable-legacy=on,drive=disk0 -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0
+    @echo "wlcomp: the software renderer composed a stock wl_shm client onto the scan-out (x86_64)"
+
 # Phase 4d-3's gate (`.notes/wayland.md` 6.13): a `wl_seat` with a keyboard on the smithay
 # compositor, fed from the input server's ring through the port's own `InputBackend`. The host
 # injects `a` with QMP -- the serial console never reaches the input server -- and the stock

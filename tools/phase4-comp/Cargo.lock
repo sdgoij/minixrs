@@ -294,6 +294,7 @@ name = "phase4-comp"
 version = "0.0.0"
 dependencies = [
  "calloop",
+ "cgmath",
  "getrandom",
  "libc",
  "minix-rt",

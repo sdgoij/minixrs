@@ -42,6 +42,9 @@ libc = "0.2"
 getrandom = "0.3"
 # The compositor's loop: the same calloop 4a proved, driving the display and the listening socket.
 calloop = "0.14.5"
+# The software renderer's texture matrix: the same 3x3 type and helpers smithay's `Transform`
+# hands out (`Transform::matrix`), so the two renderers compose identical transforms.
+cgmath = "0.18"
 
 [patch.crates-io]
 errno = { path = "../../crates/errno" }
