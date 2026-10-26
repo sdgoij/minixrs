@@ -36,7 +36,8 @@ use smithay::backend::allocator::Fourcc;
 use smithay::backend::allocator::dmabuf::Dmabuf;
 use smithay::backend::allocator::{Format, Modifier};
 use smithay::backend::input::{
-    Device, DeviceCapability, InputBackend, InputEvent, KeyState, KeyboardKeyEvent, UnusedEvent,
+    ButtonState, Device, DeviceCapability, InputBackend, InputEvent, KeyState, KeyboardKeyEvent,
+    UnusedEvent,
 };
 use smithay::backend::renderer::element::Kind;
 use smithay::backend::renderer::element::surface::{
@@ -51,19 +52,27 @@ use smithay::input::Seat;
 use smithay::input::SeatHandler;
 use smithay::input::SeatState;
 use smithay::input::keyboard::{FilterResult, Keycode, XkbConfig};
-use smithay::input::pointer::CursorImageStatus;
+use smithay::input::pointer::{ButtonEvent, CursorImageStatus, MotionEvent};
 use smithay::output::{Mode as OutputMode, Output, PhysicalProperties, Subpixel};
 use smithay::reexports::wayland_server::backend::{ClientData, ClientId, DisconnectReason};
 use smithay::reexports::wayland_server::protocol::wl_buffer::WlBuffer;
 use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
 use smithay::reexports::wayland_server::{Client, Display, DisplayHandle};
-use smithay::utils::{Buffer, Physical, Rectangle, SERIAL_COUNTER, Size, Transform};
+use smithay::utils::{
+    Buffer, Logical, Physical, Point, Rectangle, SERIAL_COUNTER, Size, Transform,
+};
 use smithay::wayland::buffer::BufferHandler;
 use smithay::wayland::compositor::{CompositorClientState, CompositorHandler, CompositorState};
 use smithay::wayland::dmabuf::{DmabufGlobal, DmabufHandler, DmabufState, ImportNotifier};
 use smithay::wayland::output::OutputHandler;
+use smithay::wayland::shell::xdg::{
+    PopupSurface, PositionerState, ToplevelSurface, XdgShellHandler, XdgShellState,
+};
 use smithay::wayland::shm::{ShmHandler, ShmState};
-use smithay::{delegate_compositor, delegate_dmabuf, delegate_output, delegate_seat, delegate_shm};
+use smithay::{
+    delegate_compositor, delegate_dmabuf, delegate_output, delegate_seat, delegate_shm,
+    delegate_xdg_shell,
+};
 
 use soft::{SoftRenderer, SoftTarget};
 
@@ -308,6 +317,12 @@ struct State {
     /// The `zwp_linux_dmabuf_v1` delegate. The global is created only when the selected renderer
     /// can import a format, so a client is never offered a buffer the compositor would refuse.
     dmabuf_state: DmabufState,
+    /// The `xdg_wm_base` delegate. A toplevel is configured as soon as it is made, because this
+    /// compositor has no layout policy to wait for: the window is the output.
+    xdg_shell: XdgShellState,
+    /// The pointer's position in the output, fed from the input ring's absolute and relative
+    /// pages. Every surface is drawn at the origin, so this is also the seat's pointer location.
+    pointer_at: Point<f64, Logical>,
     path: RenderPath,
     /// `/dev/fb`, opened for the scan-out re-point. An ordinary user process reaches the fb
     /// server through VFS; a boot process would send `CDEV_IOCTL` directly (§6.11).
@@ -339,7 +354,10 @@ impl State {
             25,
         )
         .map_err(|e| format!("seat keyboard failed: {e:?}"))?;
-        println!("wlcomp: wl_seat advertises a keyboard");
+        seat.add_pointer();
+        println!("wlcomp: wl_seat advertises a keyboard and a pointer");
+
+        let xdg_shell = XdgShellState::new::<Self>(&dh);
 
         let output = Output::new(
             "minix".to_string(),
@@ -395,6 +413,8 @@ impl State {
             seat,
             surfaces: Vec::new(),
             dmabuf_state,
+            xdg_shell,
+            pointer_at: (0.0, 0.0).into(),
             path,
             fb,
             kbd,
@@ -461,12 +481,7 @@ impl State {
         if self.focused {
             return;
         }
-        let mapped =
-            smithay::backend::renderer::utils::with_renderer_surface_state(surface, |state| {
-                state.buffer().is_some()
-            })
-            .unwrap_or(false);
-        if !mapped {
+        if !is_mapped(surface) {
             return;
         }
         if let Some(keyboard) = self.seat.get_keyboard() {
@@ -476,11 +491,53 @@ impl State {
         }
     }
 
-    /// Reads the input server's ring until it is empty and hands every key to the seat.
+    /// Moves the seat's pointer to `pointer_at`, focused on the first mapped surface. Every
+    /// surface is drawn at the origin, so the hit test is "is there a window at all", and the
+    /// focus's point is each surface's *origin*, which is where smithay subtracts it from the
+    /// event's location before the client sees it.
+    fn pointer_motion(&mut self) {
+        let location = self.pointer_at;
+        let focus = self.surfaces.iter().find(|s| is_mapped(s)).cloned();
+        let Some(pointer) = self.seat.get_pointer() else {
+            return;
+        };
+        let event = MotionEvent {
+            location,
+            serial: SERIAL_COUNTER.next_serial(),
+            time: (now_us() / 1000) as u32,
+        };
+        let origin = Point::<f64, Logical>::from((0.0, 0.0));
+        pointer.motion(self, focus.map(|s| (s, origin)), &event);
+        pointer.frame(self);
+    }
+
+    /// Hands the seat one button, on whichever surface the pointer is over.
+    fn pointer_button(&mut self, button: u32, pressed: bool) {
+        let Some(pointer) = self.seat.get_pointer() else {
+            return;
+        };
+        let event = ButtonEvent {
+            serial: SERIAL_COUNTER.next_serial(),
+            time: (now_us() / 1000) as u32,
+            button,
+            state: if pressed {
+                ButtonState::Pressed
+            } else {
+                ButtonState::Released
+            },
+        };
+        pointer.button(self, &event);
+        pointer.frame(self);
+    }
+
+    /// Reads the input server's ring until it is empty and hands every record to the seat.
     ///
-    /// `/dev/kbd` is a char device, not a descriptor that signals, so this runs on the loop's
-    /// tick — the same 20 ms `wlserver` uses. A record is 8 bytes: HID page, usage and value,
-    /// all little-endian; only the keyboard page is translated here (4d-3's stage).
+    /// `</dev/kbd` is a char device, not a descriptor that signals, so this runs on the loop's
+    /// tick, the same 20 ms `wlserver` uses. A record is 8 bytes: HID page, usage and value, all
+    /// little-endian. The keyboard page becomes a key, the button page a pointer button, and the
+    /// absolute and relative position pages a motion. The absolute page is a tablet: QEMU
+    /// normalises it to 0..0x7FFF, so it is scaled to the output; the relative page is a mouse's
+    /// deltas and is accumulated.
     fn drain_input(&mut self) {
         let mut batch = [0u8; 48];
         loop {
@@ -493,24 +550,54 @@ impl State {
                 let page = u16::from_le_bytes([record[0], record[1]]);
                 let usage = u16::from_le_bytes([record[2], record[3]]);
                 let value = i32::from_le_bytes([record[4], record[5], record[6], record[7]]);
-                if page != PAGE_KEY {
-                    continue;
+                match page {
+                    PAGE_KEY => {
+                        let Some(evdev) = wayland::input::hid_to_evdev(usage) else {
+                            continue;
+                        };
+                        let event = MinixKeyEvent {
+                            device: MinixDevice,
+                            time: now_us(),
+                            // The keyboard takes xkb keycodes: the evdev code plus 8.
+                            key: Keycode::from(u32::from(evdev) + 8),
+                            state: if value != 0 {
+                                KeyState::Pressed
+                            } else {
+                                KeyState::Released
+                            },
+                        };
+                        self.dispatch(InputEvent::Keyboard { event });
+                    }
+                    PAGE_BUTTON => {
+                        let button = match usage {
+                            BUTTON_1 => wayland::input::BTN_LEFT,
+                            BUTTON_2 => wayland::input::BTN_RIGHT,
+                            BUTTON_3 => wayland::input::BTN_MIDDLE,
+                            _ => continue,
+                        };
+                        self.pointer_button(button, value != 0);
+                    }
+                    PAGE_ABS => {
+                        let scaled = value.clamp(0, 0x7FFF) as f64 / 0x8000 as f64;
+                        match usage {
+                            GD_X => self.pointer_at.x = scaled * WIDTH as f64,
+                            GD_Y => self.pointer_at.y = scaled * HEIGHT as f64,
+                            _ => continue,
+                        }
+                        self.pointer_motion();
+                    }
+                    PAGE_POINTER => {
+                        match usage {
+                            GD_X => self.pointer_at.x += value as f64,
+                            GD_Y => self.pointer_at.y += value as f64,
+                            _ => continue,
+                        }
+                        self.pointer_at.x = self.pointer_at.x.clamp(0.0, (WIDTH - 1) as f64);
+                        self.pointer_at.y = self.pointer_at.y.clamp(0.0, (HEIGHT - 1) as f64);
+                        self.pointer_motion();
+                    }
+                    _ => {}
                 }
-                let Some(evdev) = wayland::input::hid_to_evdev(usage) else {
-                    continue;
-                };
-                let event = MinixKeyEvent {
-                    device: MinixDevice,
-                    time: now_us(),
-                    // The keyboard takes xkb keycodes: the evdev code plus 8.
-                    key: Keycode::from(u32::from(evdev) + 8),
-                    state: if value != 0 {
-                        KeyState::Pressed
-                    } else {
-                        KeyState::Released
-                    },
-                };
-                self.dispatch(InputEvent::Keyboard { event });
             }
         }
     }
@@ -532,6 +619,15 @@ impl State {
             }
         }
     }
+}
+
+/// Whether a surface has a buffer, which is what makes it visible and focusable. Smithay records
+/// it in the surface's renderer state on commit.
+fn is_mapped(surface: &WlSurface) -> bool {
+    smithay::backend::renderer::utils::with_renderer_surface_state(surface, |state| {
+        state.buffer().is_some()
+    })
+    .unwrap_or(false)
 }
 
 impl CompositorHandler for State {
@@ -601,6 +697,46 @@ impl DmabufHandler for State {
     }
 }
 
+impl XdgShellHandler for State {
+    fn xdg_shell_state(&mut self) -> &mut XdgShellState {
+        &mut self.xdg_shell
+    }
+
+    /// A client made a toplevel. There is no layout policy to wait for: the window is the output,
+    /// so it is configured at the size the output already has, and the commit with its first
+    /// buffer is what puts it on the scan-out.
+    fn new_toplevel(&mut self, surface: ToplevelSurface) {
+        surface.send_configure();
+        println!("wlcomp: a toplevel, configured");
+    }
+
+    /// Popups are placed by their positioner, which this compositor has nothing to disagree with.
+    fn new_popup(&mut self, surface: PopupSurface, _positioner: PositionerState) {
+        let _ = surface.send_configure();
+        println!("wlcomp: a popup, configured");
+    }
+
+    /// A popup asked to be placed again. Nothing here moves popups, so the request is ignored and
+    /// the client keeps the position it was given.
+    fn reposition_request(
+        &mut self,
+        _surface: PopupSurface,
+        _positioner: PositionerState,
+        _token: u32,
+    ) {
+    }
+
+    /// A popup asked for the pointer. Nothing here takes grabs, so the request is refused by
+    /// simply not sending `popup_done`, which is what the client is waiting for.
+    fn grab(
+        &mut self,
+        _surface: PopupSurface,
+        _seat: smithay::reexports::wayland_server::protocol::wl_seat::WlSeat,
+        _serial: smithay::utils::Serial,
+    ) {
+    }
+}
+
 impl SeatHandler for State {
     type KeyboardFocus = WlSurface;
     type PointerFocus = WlSurface;
@@ -620,6 +756,7 @@ delegate_shm!(State);
 delegate_output!(State);
 delegate_seat!(State);
 delegate_dmabuf!(State);
+delegate_xdg_shell!(State);
 
 #[derive(Default)]
 struct ClientState {
@@ -642,6 +779,18 @@ struct FbScanoutSrc {
 /// The HID keyboard page (`drivers::input::constants::INPUT_PAGE_KEY`); the only page this
 /// backend translates.
 const PAGE_KEY: u16 = 0x07;
+/// The HID button page (`drivers::input::constants::INPUT_PAGE_BUTTON`) and the generic-desktop
+/// page a relative mouse reports through; `0xFD` is the absolute page a tablet reports through.
+const PAGE_BUTTON: u16 = 0x09;
+const PAGE_POINTER: u16 = 0x01;
+const PAGE_ABS: u16 = 0xfd;
+/// The generic-desktop X and Y usage ids both position pages use.
+const GD_X: u16 = 0x30;
+const GD_Y: u16 = 0x31;
+/// The button page's three buttons, in the order the input server numbers them.
+const BUTTON_1: u16 = 0x01;
+const BUTTON_2: u16 = 0x02;
+const BUTTON_3: u16 = 0x03;
 
 /// The input server's tick. The ring is a char device, so it has to be polled; 20 ms is a
 /// frame's worth, the same value `wlserver` uses.

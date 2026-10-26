@@ -91,3 +91,7 @@ path = "src/bin/wlseat.rs"
 [[bin]]
 name = "wldmabuf"
 path = "src/bin/wldmabuf.rs"
+
+[[bin]]
+name = "wltoplevel"
+path = "src/bin/wltoplevel.rs"

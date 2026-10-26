@@ -52,6 +52,16 @@ CLIENTS = {
         "body": bytes([0, 0, 255]),
         "band": bytes([255, 255, 0]),
     },
+    # An `xdg_shell` toplevel that also waits for the seat's pointer, so this one is driven: the
+    # probe types it, waits for it to be mapped, then moves the tablet and clicks.
+    "toplevel": {
+        "cmd": "/bin/wltoplevel",
+        "pass": b"wltoplevel: PASS",
+        "fail": b"wltoplevel: FAIL",
+        "waiting": b"wltoplevel: waiting for input",
+        "body": bytes([0x10, 0x40, 0x80]),
+        "band": bytes([0xF0, 0xE0, 0x00]),
+    },
 }
 
 # The compositor returns to the shell as soon as its socket is bound; the client is typed next.
@@ -164,6 +174,29 @@ def pxat(screen, x, y):
     return px[off:off + 3]
 
 
+def inject_pointer(s):
+    """Drive the tablet to the middle of the output, then press and release the left button.
+
+    The guest's input server turns the absolute page into a pointer motion and the button page
+    into a `wl_pointer.button`, and the client asserts both. `device` names the display device by
+    its QEMU id, which is why the gate's QEMU line gives the virtio-gpu `id=fb0`.
+    """
+    events = [
+        {"type": "abs", "data": {"axis": "x", "value": 0x4000}},
+        {"type": "abs", "data": {"axis": "y", "value": 0x3000}},
+    ]
+    for _ in range(4):
+        qmp_cmd(s, {"execute": "input-send-event",
+                    "arguments": {"device": "fb0", "events": events}})
+        time.sleep(0.08)
+    for down in (True, False):
+        qmp_cmd(s, {"execute": "input-send-event",
+                    "arguments": {"device": "fb0",
+                                  "events": [{"type": "btn",
+                                              "data": {"button": "left", "down": down}}]}})
+        time.sleep(0.1)
+
+
 def tail(n=1200):
     with lock:
         return bytes(out[-n:]).decode(errors="replace")
@@ -171,7 +204,7 @@ def tail(n=1200):
 
 def main():
     global qemu
-    usage = ("usage: wlcomp_probe.py [--renderer gl|soft] [--client shm|dmabuf] "
+    usage = ("usage: wlcomp_probe.py [--renderer gl|soft] [--client shm|dmabuf|toplevel] "
              "<qemu command...>")
     argv = sys.argv[1:]
     options = {"--renderer": "gl", "--client": "shm"}
@@ -191,7 +224,7 @@ def main():
         sys.exit(2)
     client_name = options["--client"]
     if client_name not in CLIENTS:
-        print("--client takes `shm` or `dmabuf`", file=sys.stderr)
+        print("--client takes `shm`, `dmabuf` or `toplevel`", file=sys.stderr)
         sys.exit(2)
     client = CLIENTS[client_name]
     server_cmd = SERVER_BASE if renderer == "gl" else f"{SERVER_BASE} {renderer}"
@@ -246,7 +279,26 @@ def main():
         sys.exit(1)
     print("renderer: %s" % renderer, flush=True)
 
-    if not type_line_and_wait(client["cmd"], client["pass"], client["fail"], 40):
+    if client.get("waiting") is not None:
+        if not type_line_and_wait(client["cmd"], client["waiting"], client["fail"], 60):
+            print("the client never mapped; tail:\n%s" % tail(), file=sys.stderr)
+            q.close()
+            qemu.kill()
+            sys.exit(1)
+        inject_pointer(q)
+        if not wait_for(lambda: client["pass"] in out or client["fail"] in out, 60):
+            print("the client did not pass; tail:\n%s" % tail(), file=sys.stderr)
+            q.close()
+            qemu.kill()
+            sys.exit(1)
+        with lock:
+            seen = bytes(out)
+        if client["fail"] in seen:
+            print("the client failed; tail:\n%s" % tail(), file=sys.stderr)
+            q.close()
+            qemu.kill()
+            sys.exit(1)
+    elif not type_line_and_wait(client["cmd"], client["pass"], client["fail"], 40):
         print("the client did not pass; tail:\n%s" % tail(), file=sys.stderr)
         q.close()
         qemu.kill()
@@ -257,12 +309,16 @@ def main():
     took_scanout = b"fb: scanout src" in log and b"fb: scanout src refused" not in log
     presented = b"wlcomp: presented" in log
     released = client["pass"].split(b":")[0] + b": wl_buffer released" in log
+    if "waiting" in client:
+        # This client commits one frame and holds it; there is no second commit to release the
+        # first one, so the release is not part of what it asserts.
+        released = True
     imported = None
     if client_name == "dmabuf":
         imported = ("wlcomp: dmabuf imported by the %s renderer" % renderer).encode() in log
     for line in log.splitlines():
         text = line.decode(errors="replace")
-        if text.startswith(("fb: scanout", "wlcomp:", "wlshm:", "wldmabuf:")):
+        if text.startswith(("fb: scanout", "wlcomp:", "wlshm:", "wldmabuf:", "wltoplevel:")):
             print("serial: %s" % text, flush=True)
     print("scanout re-pointed=%s presented=%s buffer released=%s imported=%s"
           % (took_scanout, presented, released,

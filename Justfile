@@ -1115,6 +1115,18 @@ test-wlcomp-dmabuf-gl-x86: wlcomp-x86 boot-image-x86
     python tools/wlcomp_probe.py --renderer gl --client dmabuf qemu-system-x86_64 -display egl-headless -serial stdio -m 512M -no-reboot -vga none -device virtio-gpu-pci -device virtio-gpu-gl-pci,blob=on -qmp tcp:127.0.0.1:4447,server=on,wait=off -kernel target/images/x86_64-pc-minix/minix-x86-boot.elf -drive if=none,id=disk0,file=target/images/x86_64-pc-minix/disk.img,format=raw,cache=writethrough -device virtio-blk-pci,disable-legacy=on,drive=disk0 -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0
     @echo "wlcomp: a dma-buf client's frame reached the scan-out through the GL renderer (x86_64)"
 
+# The `xdg_shell` and pointer gate: `/bin/wltoplevel` creates a toplevel, maps a `wl_shm` buffer
+# once the compositor has configured it, and waits for the seat's keyboard and pointer. Once it
+# says it is mapped the probe drives the tablet with QMP (absolute motion, then a left click), so
+# a pass covers the input server's ring, smithay's seat and the protocol the client reads. The
+# display carries an id because `input-send-event` names its device that way.
+test-wlcomp-toplevel-x86: wlcomp-x86 boot-image-x86
+    @just _assert-qemu-version qemu-system-x86_64
+    MINIXFS_EXTRA="/lib/libdrm.so.2=target/mesa/x86/lib/libdrm.so.2;/lib/libEGL.so.1=target/mesa/x86/lib/libEGL.so.1;/lib/libgbm.so.1=target/mesa/x86/lib/libgbm.so.1;/lib/libexpat.so.1=target/mesa/x86/lib/libexpat.so.1;/lib/libgallium-25.3.6.so=target/mesa/x86/lib/libgallium-25.3.6.so;/lib/libGLESv2.so.2=target/mesa/x86/lib/libGLESv2.so.2;/lib/libz.so.1=target/mesa/x86/lib/libz.so.1;/lib/dri_gbm.so=target/mesa/x86/lib/dri_gbm.so;/lib/swrast_dri.so=target/mesa/x86/lib/swrast_dri.so;/bin/wlcomp=target/x86_64-pc-minix/release/wlcomp;/bin/wlshm=target/x86_64-pc-minix/release/wlshm;/bin/wltoplevel=target/x86_64-pc-minix/release/wltoplevel" MINIXFS_BLOCKS=16384 cargo run -q -p boot-image --bin mkminixfs --release -- x86_64
+    @just mkfs-x86
+    python tools/wlcomp_probe.py --client toplevel qemu-system-x86_64 -nographic -m 512M -no-reboot -vga none -device virtio-gpu-pci,id=fb0 -device virtio-tablet-pci,display=fb0 -qmp tcp:127.0.0.1:4447,server=on,wait=off -kernel target/images/x86_64-pc-minix/minix-x86-boot.elf -drive if=none,id=disk0,file=target/images/x86_64-pc-minix/disk.img,format=raw,cache=writethrough -device virtio-blk-pci,disable-legacy=on,drive=disk0 -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0
+    @echo "wlcomp: a stock toplevel was configured, focused, and clicked (x86_64)"
+
 # Phase 4d-3's gate (`.notes/wayland.md` 6.13): a `wl_seat` with a keyboard on the smithay
 # compositor, fed from the input server's ring through the port's own `InputBackend`. The host
 # injects `a` with QMP -- the serial console never reaches the input server -- and the stock

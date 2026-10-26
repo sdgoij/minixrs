@@ -2002,6 +2002,21 @@ stood between it and passing:
   arena is one slot per entry (`crates/servers/src/fb.rs`), 32 x 4 MiB now, and the 256 MiB gates
   still boot with it.
 
+**A real window, and a pointer.** The compositor serves `xdg_wm_base` now: `new_toplevel` configures
+the surface at once, because the window is the output and there is no layout policy to wait for, and
+the client maps on the commit that acknowledges the configure. The seat has a pointer too, fed from
+the same input ring as the keyboard: page `0x09` is a button, page `0xfd` is a tablet's absolute
+position (QEMU normalises it to 0..0x7FFF) and page `0x01` is a mouse's deltas, the same three
+shapes `wlserver` reads. One trap belongs to smithay's API rather than the port: the point in the
+pointer's focus tuple is the surface's *origin*, because smithay subtracts it from the event's
+location before the client sees it. Passing the pointer's position there sends every motion to the
+client as `0,0`, which is what the first run of this gate measured. The host drives the pointer with
+QMP `input-send-event` on a `virtio-tablet-pci` bound to the display (`-device
+virtio-gpu-pci,id=fb0 -device virtio-tablet-pci,display=fb0`), because this QEMU never delivers
+PS/2-mouse events (`tools/mouse_probe.py` measured that first); the gate is
+`just test-wlcomp-toplevel-x86`, and it asserts the configure, the keyboard's `enter`, the pointer's
+`enter`, a motion and a click, and the client's colours in the screendump.
+
 **The zero-copy scan-out route is closed on this machine.** The compositor scans out guest
 memory today, which costs one read-back. The alternative is a host blob: the fb server already
 knows how to create one (`crates/drivers/src/video/virtio_gpu.rs`'s `init_blob_scanout`) and
@@ -2028,6 +2043,7 @@ Staged, each with a gate
 | **4d-3** | **Input.** The input server behind smithay's `InputBackend`, a `wl_seat` advertised and routed to the focused surface. **Landed:** `/bin/wlcomp` has a `wl_seat` with a keyboard fed from `/dev/kbd` on a tick, focuses the first mapped surface, and `/bin/wlseat` receives the keymap, `enter` and evdev 30, with the keymap's components materialised from the tree's compiled keymap, a `tempfile` stand-in for smithay's keymap file, and a VFS `creat` fix (`O_CREAT|O_RDWR` had been write-only) | A key reaches the client through smithay, `just test-wlseat-x86` |
 | **4d-4** | **The software renderer** behind the same `Renderer` seam. **Landed:** `/bin/wlcomp soft` draws the same scene with `tools/phase4-comp/src/soft.rs` and never creates an EGL display; the read-back is presented top row first, which fixed a flip the single-colour frames had hidden | 4d-2's gate with the software renderer selected, `just test-wlcomp-soft-x86` |
 | **4d-5** | **`zwp_linux_dmabuf_v1` through smithay** (`DmabufGlobal` + `ImportDma`). **Landed:** `/bin/wlcomp` advertises the formats its selected renderer can import and `/bin/wldmabuf` commits two render-node objects, which the software renderer maps through the node and the GL renderer samples as an EGLImage; a dma-buf descriptor now answers `ESPIPE` to `lseek` as Linux's does, the node's table holds 32 objects, and a client transfers its fill to the host copy | A dma-buf client's frame reaches the scan-out through either renderer, `just test-wlcomp-dmabuf-x86` and `just test-wlcomp-dmabuf-gl-x86` |
+| **4d-6** | **`xdg_shell` and the seat's pointer.** `/bin/wlcomp` serves `xdg_wm_base`, configures a toplevel as soon as it is made and draws it like any other surface; the seat gains a pointer driven by the input ring's button, absolute and relative pages. **Landed:** `/bin/wltoplevel` maps a toplevel after its configure, takes keyboard focus and receives a pointer `enter`, a motion and a click injected by the host | A stock client's window is configured, focused and clicked, `just test-wlcomp-toplevel-x86` |
 
 ---
 
