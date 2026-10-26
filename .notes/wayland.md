@@ -2136,10 +2136,48 @@ All seven 4d gates pass on the new pin, on QEMU 11.1.1: `test-glgate-x86`,
 `test-wlcomp-x86`, `test-wlcomp-soft-x86`, `test-wlcomp-dmabuf-x86`,
 `test-wlcomp-dmabuf-gl-x86`, `test-wlseat-x86` and `test-wlcomp-toplevel-x86`.
 
+**What the fork has to cut, measured.** A probe project pulling cosmic-comp's dependency set
+into a minix build says the cut is narrower than the module counts suggest. These compile for
+`x86_64-pc-minix` as they stand: `cosmic-protocols`, `id_tree`, `glam`, `jiff`,
+`ordered-float`, `keyframe`, `sanitize-filename`, `xdg`, `cosmic-text`, `tiny-skia`, `png`,
+`xcursor`, `resvg`, `rust-embed`, `i18n-embed`, `i18n-embed-fl` and `notify`. Three things do
+not:
+
+- **`libdisplay-info`**, a C binding whose build script wants pkg-config. It is EDID parsing
+  for KMS and for `cosmic-comp-config`'s output model, so the cut drops it rather than build
+  another C library.
+- **`libcosmic`**, and this is the one that decides the shape of 4f. Its tiny-skia path is fine
+  until `softbuffer`, which picks its platform with `cfg(unix)`-style aliases that minix
+  matches none of, compiles an empty dispatch enum, and produces 26 errors. A minix arm is not
+  a cfg edit either: softbuffer's Unix dependency block is `cfg(all(unix, ...))`, so the
+  platform it would ride needs `rustix 0.38`, which this tree's `rustix` fork (1.1.5) cannot
+  satisfy. So the chrome cannot be kept, and "the iced chrome replaced by the compositor's own
+  renderer" is a rewrite of the window element layer rather than a deletion: `CosmicStack` and
+  `CosmicWindow` *are* `IcedElement`s, and `CosmicStack` is what the layout maps, moves and
+  clips (it holds `windows: Vec<CosmicSurface>`, an active index, tiled state, a
+  `cosmic::Theme` and a `tiny_skia::Mask`). The tabs-free version keeps that API and renders
+  the active `CosmicSurface`'s elements, which `surface.rs` (1169 lines, zero iced references)
+  already produces.
+- **`cosmic-config`**, which is two bugs rather than a platform gap: `system_path` is declared
+  under `#[cfg(unix)]` and `#[cfg(windows)]` and used unconditionally, so any third platform
+  fails, and on the port the state directory is `dirs`', not `xdg`'s. Vendoring 1.5k lines of a
+  fast-moving crate for two lines is the wrong trade, so the fork gets a local
+  `crates/cosmic-config`: the same `Config`/`CosmicConfigEntry` API over one ron document per
+  app and version, a recorded deviation from the one-file-per-key layout rather than a port.
+  `crates/dirs` (over `$HOME` and `XDG_*`) and `crates/atomicwrites` (write beside the target,
+  then `rename`) would be the pieces of that which are not ours to invent, both stand-ins in the
+  `crates/tempfile` style.
+
+`zbus` never enters the picture: `cosmic-config`'s D-Bus half sits behind its `dbus` feature,
+which cosmic-comp does not enable, so the settings files work without a message bus. The D-Bus
+wall is 4g's, not 4f's.
+
 **What this means for the stage.** The pin now sits where `cosmic-comp` is written, so the shell
-can be taken at its own revision instead of backported; the 504-package `libcosmic` subtree and
-the KMS backend are still 4f's own bill, and the cut stays as above: the iced chrome replaced by
-the compositor's own renderer, and the KMS, D-Bus and `cosmic-config` modules dropped.
+is taken at its own revision instead of backported. The fork's slices, in order: the manifest
+and the module deletions (KMS, winit, X11, D-Bus, systemd, libei, xwayland, `theme` and
+`utils/iced`); a tabs-free `CosmicStack` and the iced widgets out of `shell/element`; a local
+`cosmic-config` so `config/` and the settings types stay; and a minix output backend in place
+of KMS, which is the shape 4d-2 already proves.
 
 **A trap in the build script.** `tools/build-smithay.py` reaches the pin with
 `git checkout --force`, so a hand edit under `target/smithay` both changes what the gates build
