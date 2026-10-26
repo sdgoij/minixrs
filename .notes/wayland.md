@@ -1771,7 +1771,7 @@ whole-echo check turns that into a retype.
 | **4c** | **`wayland-server` (wayland-rs 0.31), the backend and the protocol tables.** **Landed:** a `Display` with a `wl_compositor` global and the `GlobalDispatch`/`Dispatch` impls serves a stock `wayland-client` over `/dev/uds`, the registry handshake, the bind, `create_surface`, `commit` and the client's `roundtrip` all arrive, after three socket-surface faults were fixed (register rows 30/31) | A `GlobalDispatch`/`Dispatch` round-trip with a stock client, `just test-wlgate-<arch>` (x86_64, riscv64, aarch64) |
 | **4d** | **A smithay compositor on screen**, `wayland_frontend` plus our renderer and input backend, one unmodified `wl_shm` client | a smithay compositor shows a stock client |
 | **4e** | **The zero-copy GL path**, the compositor renders straight into a buffer it scans out, with `gbm`/`drm` as the allocator (4d reads back once, D18) | GL content through smithay with no CPU copy |
-| **4f** | **`cosmic-comp`** built against the ported smithay | `cosmic-comp` on screen |
+| **4f** | **`cosmic-comp`** on the ported smithay. Measured in the 4f subsection: the pin moves first (`wayland-protocols` 0.32.13 for real, `reis`, `rand`), then the shell without the iced chrome, the KMS backend and D-Bus | `cosmic-comp` on screen |
 | **4g** | **`cosmic-session` + D-Bus** (`zbus`) | a `libcosmic` app connects |
 
 #### 4d: a compositor on screen (GLES first, software later)
@@ -2057,6 +2057,81 @@ Staged, each with a gate
 | **4d-4** | **The software renderer** behind the same `Renderer` seam. **Landed:** `/bin/wlcomp soft` draws the same scene with `tools/phase4-comp/src/soft.rs` and never creates an EGL display; the read-back is presented top row first, which fixed a flip the single-colour frames had hidden | 4d-2's gate with the software renderer selected, `just test-wlcomp-soft-x86` |
 | **4d-5** | **`zwp_linux_dmabuf_v1` through smithay** (`DmabufGlobal` + `ImportDma`). **Landed:** `/bin/wlcomp` advertises the formats its selected renderer can import and `/bin/wldmabuf` commits two render-node objects, which the software renderer maps through the node and the GL renderer samples as an EGLImage; a dma-buf descriptor now answers `ESPIPE` to `lseek` as Linux's does, the node's table holds 32 objects, and a client transfers its fill to the host copy | A dma-buf client's frame reaches the scan-out through either renderer, `just test-wlcomp-dmabuf-x86` and `just test-wlcomp-dmabuf-gl-x86` |
 | **4d-6** | **`xdg_shell`, window placement and the seat's pointer.** `/bin/wlcomp` serves `xdg_wm_base` and `zxdg_decoration_manager_v1`, gives every surface a place on the output, configures a toplevel as soon as it is made and places a popup from its positioner; the seat gains a pointer driven by the input ring's button, absolute and relative pages. **Landed:** `/bin/wltoplevel` maps a toplevel after its configure, asks for decorations, maps a popup at its positioner's place, takes keyboard focus and receives a pointer `enter`, a motion and a click injected by the host | A stock client's window is configured, decorated, focused and clicked, and its popup is where it asked to be, `just test-wlcomp-toplevel-x86` |
+
+#### 4f: what `cosmic-comp` needs (measured)
+
+`cosmic-comp` is pinned at `6700a5d03f` with its own `Cargo.lock` (702 packages) in
+`target/cosmic-comp`. Its graph **resolves** for the port with no conflict: `cargo metadata`
+completes in 31s and names 661 packages, 54 of them direct dependencies and 14 reached
+through git. What it does not do is compile, and the measurement splits the reasons into
+three independent walls.
+
+**The wall is `libcosmic`, not the compositor.** 504 of the 661 packages are `libcosmic`'s
+subtree: iced 0.14 with `wgpu` 28 and `naga`, `winit` 0.31 (beta), `taffy`,
+`cosmic-text` 0.19, `resvg`/`usvg`/`tiny-skia`, the `image` codecs, `notify`/`inotify`,
+`x11rb`/`tiny-xlib`, `softbuffer`, `fontdb`/`harfrust`/`swash`, and `zbus` 5.16, which
+brings `async-io`, `async-executor` and `ordered-stream` rather than tokio. `cosmic-comp`
+names the crate `cosmic`, its library name, and uses it for the *chrome*: `cosmic::Theme`,
+`Renderer` and `Element` plus `iced_widget` containers draw the tab bars, the right-click
+menu, the resize and swap indicators and the zoom preview, through `utils/iced` (1488 lines)
+into `tiny_skia` images the compositor then draws. The tiling logic does not need it:
+`shell/layout` (9494 lines) and `shell/focus` (2428) reach `iced` only through `id_tree` and
+`smithay`.
+
+**The second wall is the backend.** 24 of `cosmic-comp`'s 160 files name `smithay::backend`:
+`backend/kms` (5963 lines), `backend/udev`, `backend/libinput`, `backend/winit`,
+`backend/x11`, `backend/session` (logind/libseat) and `backend/libei`. `cosmic-comp` is a
+*system* compositor that owns a DRM device; the port's output is `/dev/fb` behind its own fb
+server and its own in-house seat, so KMS has no counterpart here and 4d-2's nested output
+(D18) is the shape a minix backend takes.
+
+**The third wall is D-Bus.** `dbus/` is 6 files and 81 `zbus` references (`power`,
+`a11y_keyboard_monitor`, `ei`, `logind`, `name_owners`), `systemd.rs` names `libsystemd`, and
+`cosmic-config` (17 references, in `config/` and `theme.rs`) pulls `zbus` for its
+settings-daemon binding. Dropping all of it costs the power and accessibility hooks and the
+settings integration, not the compositor.
+
+**Against the pin.** `cosmic-comp` requires smithay `8a27023` (2026-10-14); the port's pin is
+`v0.7.0` at `a166cf4c9` (2025-06-24). The delta is 242 files, +24659/-9765 in `src/`, 23
+files added and 3 deleted; the protocol surfaces the shell leans on moved the most
+(`wayland/shell/xdg/mod.rs` 622 lines, `wlr_layer` 256, `output` 89), as did the renderer
+(`renderer/gles` 951, `renderer/element` 448). `cosmic-comp` also needs modules `v0.7.0`
+does not have: `wayland::background_effect` (5 files), `image_copy_capture` (12),
+`image_capture_source` (6), and `backend::libei` (8).
+
+Moving the pin was measured to the first compile error, and it is a fork-sync job rather than
+a re-check of the gates, in this order:
+
+1. **`wayland-protocols` has to be 0.32.13 for real.** Smithay `8a27023` requires `^0.32.13`;
+   the fork's crate is the 0.32.12 *code* with the version string raised, and smithay names
+   what is missing: `zwp_linux_buffer_params_v1::Request::SetSamplingDevice`,
+   `TrancheFlags::Sampling` and `Error::InvalidDevTSize`. Raising the string resolves the
+   dependency and then fails to type-check, so the dmabuf-feedback generation has to be
+   brought over.
+2. **`reis` is a new unconditional dependency, and it needs `UnixStream::shutdown`.** `reis`
+   0.7.1, libei's protocol, calls `UnixStream::shutdown(std::net::Shutdown::Read)`;
+   `std::os::minix::net::UnixStream` has `connect`, `pair` and `set_nonblocking` only, and
+   `crates/servers/src/uds.rs` records "no `shutdown`" for the socket server. Closing it in
+   `std` is a stage1 rebuild, and upstream still makes `reis` unconditional on `master` as of
+   2026-10-26, so it will not disappear on its own.
+3. **`rand` 0.10.3 against 0.10.0.** Smithay imports `rand::Rng` for `sample`; 0.10.3 moved it
+   to `RngExt`, so the lock has to hold `=0.10.0`. A lockfile matter, not a port one.
+
+Only after those three do the gates themselves compile, and their drift is unmeasured.
+
+**What this means for the stage.** Item 1 is work 4f needs either way, because the shell's own
+protocols are generated from the same crate; items 2 and 3 are the price of the pin, not of
+`cosmic-comp`; and the 504-package `libcosmic` subtree together with the KMS backend is 4f's
+own bill, which the pin does not change. So the pin moves with item 1's fork sync and items
+2's and 3's workarounds, the 4d gates are re-measured on it, and the shell is then taken from
+`cosmic-comp` with the iced chrome replaced by the compositor's own renderer and the KMS,
+D-Bus and `cosmic-config` modules cut.
+
+**A trap in the build script.** `tools/build-smithay.py` verifies the checkout's `HEAD` but
+not that it is clean, so a hand edit under `target/smithay` survives (and changes what the
+gates build) until the next fetch moves the checkout and silently discards it. One was found
+there and removed: a zero-size `BufferData` orphan in `renderer/gles/mod.rs` that the next
+line immediately overwrites.
 
 ---
 
