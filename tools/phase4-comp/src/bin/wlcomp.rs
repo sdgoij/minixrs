@@ -1,25 +1,36 @@
 //! Phase 4d-2's compositor: smithay's `CompositorState` and `ShmState` on `/run/wlcomp`, drawing
 //! the committed surfaces into an offscreen GLES target and presenting the read-back through the
-//! fb server's scan-out (`FBIO_SCANOUT_SRC`) — D17's renderer with 3d-b-1's present (D18).
+//! fb server's scan-out (`FBIO_SCANOUT_SRC`) — D17's renderer with 3d-b-1's present (D18). 4d-3
+//! adds the seat: a `wl_seat` with a keyboard, fed from the input server's ring through a
+//! `smithay::backend::input::InputBackend` of this port's own.
 //!
 //! `/bin/wlcomp` binds the socket, forks, and leaves the compositor in the child, so the shell's
-//! prompt comes back and this boot's gate can type the client next (`/bin/wlshm`). The child is
-//! an orphan from the shell's point of view, which is what the gate needs: the last frame has to
-//! still be on the scanout when the probe takes its screendump.
+//! prompt comes back and this boot's gate can type the client next (`/bin/wlshm`, `/bin/wlseat`).
+//! The child is an orphan from the shell's point of view, which is what the gates need: the last
+//! frame has to still be on the scanout when a probe takes its screendump.
 //!
 //! `/dev/fb` is opened only for the re-point: the frame is the compositor's own buffer, handed to
 //! the fb server as the scanout (`FBIO_SCANOUT_SRC`, through VFS because this is an ordinary user
-//! process), so a commit costs one read-back and no blit.
+//! process), so a commit costs one read-back and no blit. `/dev/kbd` is read the same way, on a
+//! tick, because the input server's ring is a char device rather than a descriptor that signals.
 
 #[path = "../gl.rs"]
 mod gl;
+#[path = "../keymap.rs"]
+mod keymap;
 
+use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 
 use calloop::generic::Generic;
+use calloop::timer::{TimeoutAction, Timer};
 use calloop::{EventLoop, Interest, Mode, PostAction};
 
 use smithay::backend::allocator::Fourcc;
+use smithay::backend::input::{
+    Device, DeviceCapability, InputBackend, InputEvent, KeyState, KeyboardKeyEvent, UnusedEvent,
+};
 use smithay::backend::renderer::element::Kind;
 use smithay::backend::renderer::element::surface::{
     WaylandSurfaceRenderElement, render_elements_from_surface_tree,
@@ -27,17 +38,22 @@ use smithay::backend::renderer::element::surface::{
 use smithay::backend::renderer::gles::{GlesRenderer, GlesTexture};
 use smithay::backend::renderer::utils::{draw_render_elements, on_commit_buffer_handler};
 use smithay::backend::renderer::{Bind, Color32F, ExportMem, Frame, Offscreen, Renderer};
+use smithay::input::Seat;
+use smithay::input::SeatHandler;
+use smithay::input::SeatState;
+use smithay::input::keyboard::{FilterResult, Keycode, XkbConfig};
+use smithay::input::pointer::CursorImageStatus;
 use smithay::output::{Mode as OutputMode, Output, PhysicalProperties, Subpixel};
 use smithay::reexports::wayland_server::backend::{ClientData, ClientId, DisconnectReason};
 use smithay::reexports::wayland_server::protocol::wl_buffer::WlBuffer;
 use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
 use smithay::reexports::wayland_server::{Client, Display, DisplayHandle};
-use smithay::utils::{Buffer, Physical, Rectangle, Size, Transform};
+use smithay::utils::{Buffer, Physical, Rectangle, SERIAL_COUNTER, Size, Transform};
 use smithay::wayland::buffer::BufferHandler;
 use smithay::wayland::compositor::{CompositorClientState, CompositorHandler, CompositorState};
 use smithay::wayland::output::OutputHandler;
 use smithay::wayland::shm::{ShmHandler, ShmState};
-use smithay::{delegate_compositor, delegate_output, delegate_shm};
+use smithay::{delegate_compositor, delegate_output, delegate_seat, delegate_shm};
 
 /// The socket a client connects to, and the only name this gate uses.
 const SOCKET: &str = "/run/wlcomp";
@@ -60,15 +76,22 @@ struct State {
     dh: DisplayHandle,
     compositor: CompositorState,
     shm: ShmState,
-    /// Kept for its global and its `wl_output` state; nothing renders through it yet (4d-3 adds
-    /// the seat, 4d-2 only needs the output to exist and be advertised).
+    /// Kept for its global and its `wl_output` state; nothing renders through it yet (the seat
+    /// routes input, and 4d-4 swaps the renderer behind the same seam).
     _output: Output,
+    seat_state: SeatState<State>,
+    seat: Seat<State>,
     surfaces: Vec<WlSurface>,
     renderer: GlesRenderer,
     target: GlesTexture,
     /// `/dev/fb`, opened for the scan-out re-point. An ordinary user process reaches the fb
     /// server through VFS; a boot process would send `CDEV_IOCTL` directly (§6.11).
     fb: i32,
+    /// `/dev/kbd`, read non-blocking on the input tick.
+    kbd: i32,
+    /// Whether a surface has been given keyboard focus. The gate has one window, so the first
+    /// mapped surface takes it — there is no window manager to ask.
+    focused: bool,
     presented: u32,
 }
 
@@ -76,6 +99,22 @@ impl State {
     fn new(dh: DisplayHandle) -> Result<Self, String> {
         let compositor = CompositorState::new::<Self>(&dh);
         let shm = ShmState::new::<Self>(&dh, vec![]);
+
+        // smithay compiles its keymap from xkb components, and this image ships none; the
+        // components are materialised from the compiled keymap the in-house server serves.
+        keymap::materialize()?;
+        let mut seat_state = SeatState::new();
+        let mut seat = seat_state.new_wl_seat(&dh, "minix");
+        seat.add_keyboard(
+            XkbConfig {
+                layout: "us",
+                ..XkbConfig::default()
+            },
+            200,
+            25,
+        )
+        .map_err(|e| format!("seat keyboard failed: {e:?}"))?;
+        println!("wlcomp: wl_seat advertises a keyboard");
 
         let output = Output::new(
             "minix".to_string(),
@@ -110,19 +149,26 @@ impl State {
                 .map_err(|e| format!("offscreen target failed: {e:?}"))?;
         println!("wlcomp: offscreen target {WIDTH}x{HEIGHT} Abgr8888");
 
-        // SAFETY: a fixed path, opened read-write for the present path below.
+        // SAFETY: fixed paths, opened for the present path and for the input tick below.
         let fb = unsafe { minix_std::fs::open(b"/dev/fb", minix_std::fs::O_RDWR, 0) }
             .map_err(|e| format!("open /dev/fb failed: {e:?}"))?;
+        let mode = minix_std::fs::O_RDONLY | minix_std::fs::O_NONBLOCK;
+        let kbd = unsafe { minix_std::fs::open(b"/dev/kbd", mode, 0) }
+            .map_err(|e| format!("open /dev/kbd failed: {e:?}"))?;
 
         Ok(Self {
             dh,
             compositor,
             shm,
             _output: output,
+            seat_state,
+            seat,
             surfaces: Vec::new(),
             renderer,
             target,
             fb,
+            kbd,
+            focused: false,
             presented: 0,
         })
     }
@@ -262,6 +308,85 @@ impl State {
             }
         }
     }
+
+    /// Give the first *mapped* surface the keyboard. There is no window manager to arbitrate, so
+    /// this compositor's policy is "the first window that has a buffer"; the seat sends `enter`
+    /// to every keyboard that is (or later becomes) bound.
+    fn focus(&mut self, surface: &WlSurface) {
+        if self.focused {
+            return;
+        }
+        let mapped =
+            smithay::backend::renderer::utils::with_renderer_surface_state(surface, |state| {
+                state.buffer().is_some()
+            })
+            .unwrap_or(false);
+        if !mapped {
+            return;
+        }
+        if let Some(keyboard) = self.seat.get_keyboard() {
+            keyboard.set_focus(self, Some(surface.clone()), SERIAL_COUNTER.next_serial());
+            self.focused = true;
+            println!("wlcomp: keyboard focus -> the first mapped surface");
+        }
+    }
+
+    /// Reads the input server's ring until it is empty and hands every key to the seat.
+    ///
+    /// `/dev/kbd` is a char device, not a descriptor that signals, so this runs on the loop's
+    /// tick — the same 20 ms `wlserver` uses. A record is 8 bytes: HID page, usage and value,
+    /// all little-endian; only the keyboard page is translated here (4d-3's stage).
+    fn drain_input(&mut self) {
+        let mut batch = [0u8; 48];
+        loop {
+            // SAFETY: the descriptor is open for reading and the batch is writable for its length.
+            let n = match unsafe { minix_std::fs::read(self.kbd, &mut batch) } {
+                Ok(n) if n > 0 => n as usize,
+                _ => break,
+            };
+            for record in batch[..n].chunks_exact(8) {
+                let page = u16::from_le_bytes([record[0], record[1]]);
+                let usage = u16::from_le_bytes([record[2], record[3]]);
+                let value = i32::from_le_bytes([record[4], record[5], record[6], record[7]]);
+                if page != PAGE_KEY {
+                    continue;
+                }
+                let Some(evdev) = wayland::input::hid_to_evdev(usage) else {
+                    continue;
+                };
+                let event = MinixKeyEvent {
+                    device: MinixDevice,
+                    time: now_us(),
+                    // The keyboard takes xkb keycodes: the evdev code plus 8.
+                    key: Keycode::from(u32::from(evdev) + 8),
+                    state: if value != 0 {
+                        KeyState::Pressed
+                    } else {
+                        KeyState::Released
+                    },
+                };
+                self.dispatch(InputEvent::Keyboard { event });
+            }
+        }
+    }
+
+    /// Hands one backend event to smithay's seat.
+    fn dispatch(&mut self, event: InputEvent<MinixInput>) {
+        if let InputEvent::Keyboard { event } = event {
+            let serial = SERIAL_COUNTER.next_serial();
+            let time = smithay::backend::input::Event::time_msec(&event);
+            if let Some(keyboard) = self.seat.get_keyboard() {
+                keyboard.input::<(), _>(
+                    self,
+                    event.key_code(),
+                    event.state(),
+                    serial,
+                    time,
+                    |_, _, _| FilterResult::Forward,
+                );
+            }
+        }
+    }
 }
 
 impl CompositorHandler for State {
@@ -282,6 +407,7 @@ impl CompositorHandler for State {
         // renderer sees no texture and every frame would be the clear colour.
         on_commit_buffer_handler::<Self>(surface);
         self.present();
+        self.focus(surface);
     }
 
     fn destroyed(&mut self, surface: &WlSurface) {
@@ -301,9 +427,24 @@ impl BufferHandler for State {
 
 impl OutputHandler for State {}
 
+impl SeatHandler for State {
+    type KeyboardFocus = WlSurface;
+    type PointerFocus = WlSurface;
+    type TouchFocus = WlSurface;
+
+    fn seat_state(&mut self) -> &mut SeatState<Self> {
+        &mut self.seat_state
+    }
+
+    fn focus_changed(&mut self, _seat: &Seat<Self>, _focused: Option<&WlSurface>) {}
+
+    fn cursor_image(&mut self, _seat: &Seat<Self>, _image: CursorImageStatus) {}
+}
+
 delegate_compositor!(State);
 delegate_shm!(State);
 delegate_output!(State);
+delegate_seat!(State);
 
 #[derive(Default)]
 struct ClientState {
@@ -321,6 +462,117 @@ impl ClientData for ClientState {
 struct FbScanoutSrc {
     va: u64,
     len: u64,
+}
+
+/// The HID keyboard page (`drivers::input::constants::INPUT_PAGE_KEY`); the only page this
+/// backend translates.
+const PAGE_KEY: u16 = 0x07;
+
+/// The input server's tick. The ring is a char device, so it has to be polled; 20 ms is a
+/// frame's worth, the same value `wlserver` uses.
+const TICK: Duration = Duration::from_millis(20);
+
+/// This port's `InputBackend`: the input server's HID records, one keyboard device.
+///
+/// The trait carries only the event *types* — a backend exposes its own `dispatch_*` — so the
+/// implementation is the association list plus the two event impls below. Everything this port
+/// does not source (pointer, touch, gestures, tablets) is `UnusedEvent`, which is what the enum's
+/// `match *self {}` impls are for.
+struct MinixInput;
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct MinixDevice;
+
+impl Device for MinixDevice {
+    fn id(&self) -> String {
+        "minix-kbd".to_string()
+    }
+
+    fn name(&self) -> String {
+        "the input server's keyboard".to_string()
+    }
+
+    fn has_capability(&self, capability: DeviceCapability) -> bool {
+        capability == DeviceCapability::Keyboard
+    }
+
+    fn usb_id(&self) -> Option<(u32, u32)> {
+        None
+    }
+
+    fn syspath(&self) -> Option<PathBuf> {
+        None
+    }
+}
+
+#[derive(Debug)]
+struct MinixKeyEvent {
+    device: MinixDevice,
+    time: u64,
+    key: Keycode,
+    state: KeyState,
+}
+
+impl smithay::backend::input::Event<MinixInput> for MinixKeyEvent {
+    fn time(&self) -> u64 {
+        self.time
+    }
+
+    fn device(&self) -> MinixDevice {
+        self.device.clone()
+    }
+}
+
+impl KeyboardKeyEvent<MinixInput> for MinixKeyEvent {
+    fn key_code(&self) -> Keycode {
+        self.key
+    }
+
+    fn state(&self) -> KeyState {
+        self.state
+    }
+
+    fn count(&self) -> u32 {
+        0
+    }
+}
+
+impl InputBackend for MinixInput {
+    type Device = MinixDevice;
+    type KeyboardKeyEvent = MinixKeyEvent;
+    type PointerAxisEvent = UnusedEvent;
+    type PointerButtonEvent = UnusedEvent;
+    type PointerMotionEvent = UnusedEvent;
+    type PointerMotionAbsoluteEvent = UnusedEvent;
+    type GestureSwipeBeginEvent = UnusedEvent;
+    type GestureSwipeUpdateEvent = UnusedEvent;
+    type GestureSwipeEndEvent = UnusedEvent;
+    type GesturePinchBeginEvent = UnusedEvent;
+    type GesturePinchUpdateEvent = UnusedEvent;
+    type GesturePinchEndEvent = UnusedEvent;
+    type GestureHoldBeginEvent = UnusedEvent;
+    type GestureHoldEndEvent = UnusedEvent;
+    type TouchDownEvent = UnusedEvent;
+    type TouchUpEvent = UnusedEvent;
+    type TouchMotionEvent = UnusedEvent;
+    type TouchCancelEvent = UnusedEvent;
+    type TouchFrameEvent = UnusedEvent;
+    type TabletToolAxisEvent = UnusedEvent;
+    type TabletToolProximityEvent = UnusedEvent;
+    type TabletToolTipEvent = UnusedEvent;
+    type TabletToolButtonEvent = UnusedEvent;
+    type SwitchToggleEvent = UnusedEvent;
+    type SpecialEvent = ();
+}
+
+/// Microseconds from the port's monotonic clock, the base `Event::time` documents as undefined.
+fn now_us() -> u64 {
+    match minix_std::time::clock_gettime(minix_std::time::CLOCK_MONOTONIC) {
+        Ok(ts) => (ts.tv_sec as u64)
+            .wrapping_mul(1_000_000)
+            .wrapping_add(ts.tv_nsec as u64 / 1_000),
+        Err(_) => 0,
+    }
 }
 
 fn serve(listener: std::os::minix::net::UnixListener) -> ! {
@@ -342,7 +594,7 @@ fn serve(listener: std::os::minix::net::UnixListener) -> ! {
     let mut state = match State::new(dh) {
         Ok(state) => state,
         Err(e) => {
-            println!("wlcomp: {e}");
+            println!("wlcomp: FAIL {e}");
             std::process::exit(1);
         }
     };
@@ -391,6 +643,20 @@ fn serve(listener: std::os::minix::net::UnixListener) -> ! {
         },
     ) {
         println!("wlcomp: registering the display failed: {e}");
+        std::process::exit(1);
+    }
+
+    // The input tick. The ring has no descriptor to wait on, so the loop polls it; anything the
+    // tick produces is queued on the display, which then has to be flushed or it would sit in the
+    // socket until the client's next request.
+    if let Err(e) = handle.insert_source(Timer::from_duration(TICK), |_, _, state| {
+        state.drain_input();
+        if let Err(e) = state.dh.flush_clients() {
+            println!("wlcomp: input flush failed: {e}");
+        }
+        TimeoutAction::ToDuration(TICK)
+    }) {
+        println!("wlcomp: registering the input tick failed: {e}");
         std::process::exit(1);
     }
 

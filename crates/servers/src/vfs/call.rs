@@ -402,11 +402,20 @@ pub fn do_creat() -> i32 {
         return ENOENT;
     }
 
+    // The access bits `open(O_CREAT, flags)` asked for. `creat(2)` itself has no flags and
+    // arrives as write-only, but this call is also how the port's libc and std create a file for
+    // `open(O_CREAT|O_RDONLY|O_RDWR)`, and a filp pinned to `W_BIT` here makes the descriptor
+    // unreadable afterwards -- every `read` would answer `EBADF` (found by 4d-3's keymap fd).
+    let mode_bits = match open_flags & 0o3 {
+        1 => crate::vfs::protect::W_BIT,
+        2 => crate::vfs::protect::R_BIT | crate::vfs::protect::W_BIT,
+        _ => crate::vfs::protect::R_BIT,
+    };
+
     // For an already-existing file, run the open-existing checks: verify
     // write permission, and truncate regular files when O_TRUNC is set.
     if !created {
-        let r =
-            crate::vfs::protect::forbidden(fp, unsafe { &*vp }, crate::vfs::protect::W_BIT, false);
+        let r = crate::vfs::protect::forbidden(fp, unsafe { &*vp }, mode_bits, false);
         if r != OK {
             fp.fp_filp[fd as usize] = -1;
             unsafe { mount::put_vnode(vp) };
@@ -443,7 +452,7 @@ pub fn do_creat() -> i32 {
         (*filp_arr.add(filp_idx as usize)).filp_count = 1;
         (*filp_arr.add(filp_idx as usize)).filp_vno = vp;
         (*filp_arr.add(filp_idx as usize)).filp_flags = open_flags;
-        (*filp_arr.add(filp_idx as usize)).filp_mode = crate::vfs::protect::W_BIT;
+        (*filp_arr.add(filp_idx as usize)).filp_mode = mode_bits;
     }
     fp.fp_filp[fd as usize] = filp_idx;
     // As in `do_open`: the reference from `eat_path` belongs to the filp now.

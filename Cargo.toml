@@ -24,6 +24,9 @@ exclude = [
     # it would shadow nothing (`[patch]` is the only way it is consumed) and
     # would build the wrong thing into this workspace's lockfile.
     "crates/errno",
+    # The same shape, for `tempfile`: the published crate has no minix arm, and
+    # smithay needs one function (`tempfile_in`) to hand a keymap to a client.
+    "crates/tempfile",
 ]
 
 members = [

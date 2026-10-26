@@ -16,7 +16,7 @@ static image (there is no loader in the address space). So the link carries
 *statically* - a crate's native libraries land inside rustc's `-Bstatic` window.
 The entry point stays `minix-rt`'s `_start`, which is what sets up the runtime std expects.
 
-Outputs: `target/<triple>/release/{glgate,wlcomp,wlshm}`, where `MINIXFS_EXTRA` can name them.
+Outputs: `target/<triple>/release/{glgate,wlcomp,wlshm,wlseat}`, where `MINIXFS_EXTRA` can name them.
 
 Usage: python tools/build-phase4-comp.py [all|x86|riscv64|aarch64|<triple>]
                                         (default: x86_64-pc-minix)
@@ -45,7 +45,7 @@ from lld import find_lld  # noqa: E402
 from stage1 import find_stage1_rustc  # noqa: E402
 
 PROJECT = ROOT / "tools" / "phase4-comp"
-BINARIES = ("glgate", "wlcomp", "wlshm")
+BINARIES = ("glgate", "wlcomp", "wlshm", "wlseat")
 SMITHAY = ROOT / "target" / "smithay"
 # The EGL bootstrap is C (see the file's own note): the context smithay needs cannot come from
 # smithay's constructors, and the port's surfaceless recipe is already written in C.

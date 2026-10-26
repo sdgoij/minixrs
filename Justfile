@@ -1074,6 +1074,26 @@ test-wlcomp-x86: wlcomp-x86 boot-image-x86
     python tools/wlcomp_probe.py qemu-system-x86_64 -nographic -m 512M -no-reboot -vga none -device virtio-gpu-pci -qmp tcp:127.0.0.1:4447,server=on,wait=off -kernel target/images/x86_64-pc-minix/minix-x86-boot.elf -drive if=none,id=disk0,file=target/images/x86_64-pc-minix/disk.img,format=raw,cache=writethrough -device virtio-blk-pci,disable-legacy=on,drive=disk0 -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0
     @echo "wlcomp: smithay composed a stock wl_shm client onto the scan-out (x86_64)"
 
+# Phase 4d-3's gate (`.notes/wayland.md` 6.13): a `wl_seat` with a keyboard on the smithay
+# compositor, fed from the input server's ring through the port's own `InputBackend`. The host
+# injects `a` with QMP -- the serial console never reaches the input server -- and the stock
+# client must read the keymap the seat serves and then receive evdev 30.
+#
+# The seat needs an xkb keymap, and smithay compiles one from xkb components, which this image
+# does not install; the compositor materialises the components from the compiled keymap the
+# in-house server serves (`crates/servers/data/us-evdev.xkb`) under `/tmp/xkb` at startup.
+wlseat-x86: wlcomp-x86
+
+test-wlseat-x86: wlseat-x86 boot-image-x86
+    @just _assert-qemu-version qemu-system-x86_64
+    M=target/mesa/x86; E="/lib/libdrm.so.2=$M/lib/libdrm.so.2;/lib/libEGL.so.1=$M/lib/libEGL.so.1;/lib/libgbm.so.1=$M/lib/libgbm.so.1;/lib/libexpat.so.1=$M/lib/libexpat.so.1;/lib/libgallium-25.3.6.so=$M/lib/libgallium-25.3.6.so;/lib/libGLESv2.so.2=$M/lib/libGLESv2.so.2;/lib/libz.so.1=$M/lib/libz.so.1;/lib/dri_gbm.so=$M/lib/dri_gbm.so;/lib/swrast_dri.so=$M/lib/swrast_dri.so;/bin/wlcomp=target/x86_64-pc-minix/release/wlcomp;/bin/wlshm=target/x86_64-pc-minix/release/wlshm;/bin/wlseat=target/x86_64-pc-minix/release/wlseat"; MINIXFS_EXTRA="$E" MINIXFS_BLOCKS=16384 cargo run -q -p boot-image --bin mkminixfs --release -- x86_64
+    @just mkfs-x86
+    python tools/wlseat_probe.py qemu-system-x86_64 -nographic -m 512M -no-reboot -vga none -device virtio-gpu-pci -qmp tcp:127.0.0.1:4472,server=on,wait=off -kernel target/images/x86_64-pc-minix/minix-x86-boot.elf -drive if=none,id=disk0,file=target/images/x86_64-pc-minix/disk.img,format=raw,cache=writethrough -device virtio-blk-pci,disable-legacy=on,drive=disk0 -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0
+    @echo "wlseat: a host key reached a stock client through smithay's seat (x86_64)"
+
+test-wlseat arch="x86":
+    @just test-wlseat-{{arch}}
+
 test-gltriangle-riscv64 boot-timeout="180": gltriangle-riscv64 boot-image-riscv64
     @just _assert-qemu-version qemu-system-riscv64
     M=target/mesa/riscv64; E="/lib/libdrm.so.2=$M/lib/libdrm.so.2;/lib/libEGL.so.1=$M/lib/libEGL.so.1;/lib/libgbm.so.1=$M/lib/libgbm.so.1;/lib/libexpat.so.1=$M/lib/libexpat.so.1;/lib/libgallium-25.3.6.so=$M/lib/libgallium-25.3.6.so;/lib/libGLESv2.so.2=$M/lib/libGLESv2.so.2;/lib/libz.so.1=$M/lib/libz.so.1;/lib/swrast_dri.so=$M/lib/swrast_dri.so;/bin/gltriangle=$M/bin/gltriangle"; MINIXFS_EXTRA="$E" MINIXFS_BLOCKS=16384 cargo run -q -p boot-image --bin mkminixfs --release -- riscv64

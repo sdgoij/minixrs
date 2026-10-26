@@ -1,0 +1,9 @@
+[package]
+name = "tempfile"
+version = "3.27.0" # the version smithay's `tempfile = "3.0"` requirement resolves to
+description = "A minimal tempfile for minix: `tempfile_in`, which is all smithay uses"
+edition = "2024"
+license = "GPL2.0"
+
+[lib]
+crate-type = ["rlib"]

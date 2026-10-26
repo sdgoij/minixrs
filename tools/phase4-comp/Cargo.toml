@@ -29,8 +29,14 @@ smithay = { path = "../../target/smithay", default-features = false, features = 
 minix-rt = { path = "../../crates/minix-rt", default-features = false }
 # The client's shm pool: `memfd_create`/`ftruncate` live in the port's syscall layer.
 minix-std = { path = "../../crates/minix-std" }
+# The HID usage -> evdev table the in-house seat already uses (host-tested), so the compositor
+# translates input the same way `wlserver` does.
+wayland = { path = "../../crates/wayland" }
 # The gate's client half: a stock wayland-rs client, patched to the fork like the server.
 wayland-client = "0.31"
+# `setenv`, for the compositor's `XKB_CONFIG_ROOT`: `std::env::set_var` on this port only updates
+# Rust's own snapshot, and xkbcommon is C. The libc is the fork, patched below.
+libc = "0.2"
 # `rand` in smithay's graph reaches `getrandom`, whose 0.3 line takes its backend from a
 # `register_custom_getrandom!` in the binary (`--cfg getrandom_backend="custom"`).
 getrandom = "0.3"
@@ -39,6 +45,9 @@ calloop = "0.14.5"
 
 [patch.crates-io]
 errno = { path = "../../crates/errno" }
+# The published crate implements `cfg(unix)`/`cfg(windows)`, so minix gets its "unsupported
+# platform" stub; smithay needs `tempfile_in` to hand an xkb keymap to a client.
+tempfile = { path = "../../crates/tempfile" }
 libc = { path = "../../libc" }
 # `libloading` is what `backend_egl` loads EGL with; it gates its Unix half on `cfg(unix)`.
 libloading = { path = "../../rust_libloading" }
@@ -67,3 +76,7 @@ path = "src/bin/wlcomp.rs"
 [[bin]]
 name = "wlshm"
 path = "src/bin/wlshm.rs"
+
+[[bin]]
+name = "wlseat"
+path = "src/bin/wlseat.rs"
