@@ -1031,10 +1031,11 @@ test-wlgate-aarch64 boot-timeout="60": wlgate-aarch64
 # static image has no loader. `libxkbcommon` is linked in (statically - see
 # `tools/build-xkbcommon.py`).
 #
-# No GL device on the QEMU line, on purpose: the *software* driver is the one whose context is
-# GLES 3 on every host (measured: this host's virgl offers ES2 only, so `ExportMem` - the
-# read-back D18 needs - fails there with `UnsupportedPixelFormat`). That also makes this a gate
-# a CI runner can boot, unlike 3c-3 and 3d-a.
+# No GL device on the QEMU line, on purpose: a GL device needs a display backend with GL, which a
+# CI runner has not, and this gate is meant to boot anywhere. The software driver is what runs and
+# the pixel it reads back is the assertion. That is not a claim about virgl: with
+# `-device virtio-gpu-gl-pci,blob=on` the guest gets virgl, OpenGL ES 3.2 and both dma-buf import
+# extensions, and `ExportMem` works there; without `blob=on` it stays on softpipe instead.
 glgate-x86: dynlib-x86
     python tools/build-xkbcommon.py x86 --build
     python tools/build-phase4-comp.py x86
@@ -1084,6 +1085,32 @@ test-wlcomp-soft-x86: wlcomp-x86 boot-image-x86
     @just mkfs-x86
     python tools/wlcomp_probe.py --renderer soft qemu-system-x86_64 -nographic -m 512M -no-reboot -vga none -device virtio-gpu-pci -qmp tcp:127.0.0.1:4447,server=on,wait=off -kernel target/images/x86_64-pc-minix/minix-x86-boot.elf -drive if=none,id=disk0,file=target/images/x86_64-pc-minix/disk.img,format=raw,cache=writethrough -device virtio-blk-pci,disable-legacy=on,drive=disk0 -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0
     @echo "wlcomp: the software renderer composed a stock wl_shm client onto the scan-out (x86_64)"
+
+# The dma-buf gate (`.notes/wayland.md` 6.13): a stock `wayland-client` commits
+# `zwp_linux_dmabuf_v1` buffers that are render-node objects, so the pixels the compositor draws
+# are the client's own object (`tools/phase4-comp/src/dmabuf.rs`), with no frame copied between
+# them. It runs with the software renderer, which is the one that can import on a device set with
+# no GL device: it maps the descriptor through the node. The probe requires
+# `wlcomp: dmabuf imported by the soft renderer`.
+test-wlcomp-dmabuf-x86: wlcomp-x86 boot-image-x86
+    @just _assert-qemu-version qemu-system-x86_64
+    MINIXFS_EXTRA="/lib/libdrm.so.2=target/mesa/x86/lib/libdrm.so.2;/lib/libEGL.so.1=target/mesa/x86/lib/libEGL.so.1;/lib/libgbm.so.1=target/mesa/x86/lib/libgbm.so.1;/lib/libexpat.so.1=target/mesa/x86/lib/libexpat.so.1;/lib/libgallium-25.3.6.so=target/mesa/x86/lib/libgallium-25.3.6.so;/lib/libGLESv2.so.2=target/mesa/x86/lib/libGLESv2.so.2;/lib/libz.so.1=target/mesa/x86/lib/libz.so.1;/lib/dri_gbm.so=target/mesa/x86/lib/dri_gbm.so;/lib/swrast_dri.so=target/mesa/x86/lib/swrast_dri.so;/bin/wlcomp=target/x86_64-pc-minix/release/wlcomp;/bin/wlshm=target/x86_64-pc-minix/release/wlshm;/bin/wldmabuf=target/x86_64-pc-minix/release/wldmabuf" MINIXFS_BLOCKS=16384 cargo run -q -p boot-image --bin mkminixfs --release -- x86_64
+    @just mkfs-x86
+    python tools/wlcomp_probe.py --renderer soft --client dmabuf qemu-system-x86_64 -nographic -m 512M -no-reboot -vga none -device virtio-gpu-pci -qmp tcp:127.0.0.1:4447,server=on,wait=off -kernel target/images/x86_64-pc-minix/minix-x86-boot.elf -drive if=none,id=disk0,file=target/images/x86_64-pc-minix/disk.img,format=raw,cache=writethrough -device virtio-blk-pci,disable-legacy=on,drive=disk0 -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0
+    @echo "wlcomp: a dma-buf client's frame reached the scan-out through the software renderer (x86_64)"
+
+# The same dma-buf client on the GL renderer, whose import is an EGLImage: the compositor samples
+# the client's object through virgl, so this is the gate for the path a real compositor takes.
+# The device set is `/bin/wlcompose`'s: a 2D `virtio-gpu-pci` first, which is the display the
+# `fb: scanout src` re-point and the screendump need, and the GL device second, which EGL picks
+# because the 2D one has no GL. The probe requires `wlcomp: dmabuf imported by the gl renderer`
+# and the client's colours in the screendump.
+test-wlcomp-dmabuf-gl-x86: wlcomp-x86 boot-image-x86
+    @just _assert-qemu-version qemu-system-x86_64
+    MINIXFS_EXTRA="/lib/libdrm.so.2=target/mesa/x86/lib/libdrm.so.2;/lib/libEGL.so.1=target/mesa/x86/lib/libEGL.so.1;/lib/libgbm.so.1=target/mesa/x86/lib/libgbm.so.1;/lib/libexpat.so.1=target/mesa/x86/lib/libexpat.so.1;/lib/libgallium-25.3.6.so=target/mesa/x86/lib/libgallium-25.3.6.so;/lib/libGLESv2.so.2=target/mesa/x86/lib/libGLESv2.so.2;/lib/libz.so.1=target/mesa/x86/lib/libz.so.1;/lib/dri_gbm.so=target/mesa/x86/lib/dri_gbm.so;/bin/wlcomp=target/x86_64-pc-minix/release/wlcomp;/bin/wlshm=target/x86_64-pc-minix/release/wlshm;/bin/wldmabuf=target/x86_64-pc-minix/release/wldmabuf" MINIXFS_BLOCKS=16384 cargo run -q -p boot-image --bin mkminixfs --release -- x86_64
+    @just mkfs-x86
+    python tools/wlcomp_probe.py --renderer gl --client dmabuf qemu-system-x86_64 -display egl-headless -serial stdio -m 512M -no-reboot -vga none -device virtio-gpu-pci -device virtio-gpu-gl-pci,blob=on -qmp tcp:127.0.0.1:4447,server=on,wait=off -kernel target/images/x86_64-pc-minix/minix-x86-boot.elf -drive if=none,id=disk0,file=target/images/x86_64-pc-minix/disk.img,format=raw,cache=writethrough -device virtio-blk-pci,disable-legacy=on,drive=disk0 -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0
+    @echo "wlcomp: a dma-buf client's frame reached the scan-out through the GL renderer (x86_64)"
 
 # Phase 4d-3's gate (`.notes/wayland.md` 6.13): a `wl_seat` with a keyboard on the smithay
 # compositor, fed from the input server's ring through the port's own `InputBackend`. The host

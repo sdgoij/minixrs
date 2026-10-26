@@ -1832,11 +1832,14 @@ shape, and each was measured rather than assumed:
 - **`Abgr8888`, not `Argb8888`.** The latter maps to `GL_BGRA_EXT`, which virgl does not
   expose; `Abgr8888` is `GL_RGBA`/`UNSIGNED_BYTE`, which is R,G,B,A in memory on a
   little-endian machine, the order the gate asserts.
-- **This host's virgl offers ES2 only** (capabilities `[Instancing, Renderbuffer,
-  ExportFence, Debug]`), so the gate's QEMU line carries **no GL device** and the software
-  driver is what runs. That is not a fallback dressed as a pass: the gate asserts the pixel,
-  and it makes 4d-1 a gate a CI runner can boot, unlike 3c-3 and 3d-a. The accelerated path
-  stays measured by `test-gltriangle-virgl` and `test-wlgl`, which need a GL host.
+- **The gate's QEMU line carries no GL device**, so the software driver is what runs. That is
+  not a claim about virgl, and an earlier version of this note made one: measured with
+  `-device virtio-gpu-gl-pci,blob=on` the guest gets `GL_RENDERER=virgl`, `OpenGL ES 3.2 Mesa
+  25.3.6` and both dma-buf import extensions, so "this host's virgl is ES2-only" was wrong.
+  Without `blob=on` the same device line leaves the guest on softpipe instead. The gate keeps the
+  software driver because a GL device needs `-display egl-headless,gl=on`, which a CI runner has
+  not: that makes 4d-1 a gate any runner can boot, while the accelerated path stays measured by
+  `test-gltriangle-virgl` and `test-wlgl`, which need a GL host.
 
 **The gate is the tree's first dynamically linked `std` binary, and two link facts follow.**
 `GlesRenderer` loads EGL with `libloading`, i.e. `dlopen`, and `minix-libc`'s rlib is the
@@ -1951,17 +1954,65 @@ agreed with that measurement rather than with GLES's `TextureMapping::flipped`, 
 The software path needs no Mesa: it never creates an EGL display, and its only library is the
 `libc.so` the image already links (the executable still `DT_NEEDED`s `libEGL.so.1` and
 `libGLESv2.so.2` because the GL path lives in the same binary, so the image stages them as
-before). dmabufs are not importable, which is the next stage's work.
+before). The dma-buf stage below gives that path an import too.
+
+**4d-5, landed: a dma-buf client's frame is the compositor's frame.** `/bin/wlcomp` advertises
+`zwp_linux_dmabuf_v1` with the formats the renderer it runs can actually import, and answers
+`dmabuf_imported` by importing the buffer into that renderer. `/bin/wldmabuf` is a stock
+`wayland-client` that makes two render-node objects, fills them and commits them as
+`zwp_linux_dmabuf_v1` buffers. The software renderer's import is `PRIME_FD_TO_HANDLE`,
+`VIRTGPU_MAP` and `mmap` through the node, then a copy out of the client's object, so the pixels
+the scan-out shows are the client's own memory and nothing moves a frame between the two
+processes. `just test-wlcomp-dmabuf-x86` is green: the log carries `wl_dmabuf global offers 4
+format(s)`, `dmabuf imported by the soft renderer` twice and the client's `PASS`, and the
+screendump is frame B (blue with a yellow top band).
+
+Two facts decided that shape. **The GL global is only as good as the display it runs on.** On
+the device set the 4d gates use (a 2D `virtio-gpu-pci`, so softpipe) `eglQueryString` reports
+neither `EGL_EXT_image_dma_buf_import` nor its modifiers extension, and
+`GlesRenderer::dmabuf_formats` is empty, so a global built from the GL side alone would advertise
+nothing and refuse every buffer. On a GL device (`virtio-gpu-gl-pci,blob=on`, so virgl on Mesa
+25.3.6, OpenGL ES 3.2) both extensions are present, `dmabuf_formats` reports 48 formats, and the
+same compositor logs `dmabuf imported by the gl renderer`. The global is therefore built from
+whichever renderer is selected: the software renderer offers its four 4-byte formats as `Linear`,
+and the GL renderer offers what EGL says.
+
+The GL half runs too, once the device set carries both a GL renderer and a scan-out. EGL needs a
+device with GL, and `FBIO_SCANOUT_SRC` needs a display the fb server can re-back, so the gate uses
+`/bin/wlcompose`'s pairing: a 2D `virtio-gpu-pci` first and `virtio-gpu-gl-pci,blob=on` second,
+under `-display egl-headless`. EGL takes the GL device because the 2D one has no GL, the renderer
+logs `dmabuf imported by the gl renderer`, and the screendump is frame B.
+`just test-wlcomp-dmabuf-gl-x86` is that gate. Two facts of the guest, not of smithay, are what
+stood between it and passing:
+
+- A client writes its object through the node's mapping, which is guest memory. A node with GL
+  also holds a *host* copy of every resource, and that is the copy a GL renderer samples, so a
+  fill with no `VIRTGPU_TRANSFER_TO_HOST` reads back as black in the compositor while the
+  software renderer and the scan-out, which read guest memory, show the right frame. The client
+  now transfers the box before it exports the descriptor.
+- A virgl context holds a dozen objects on the render node by itself (its surface, its transfer
+  staging buffers, the small buffers Mesa makes lazily), and a dma-buf import adds several more,
+  so the node's table went from 16 entries to 32. At 16 the second frame's first read-back band
+  was refused `ENOSPC`, which Mesa surfaces as `GL_OUT_OF_MEMORY` from `glBufferData`. The
+  arena is one slot per entry (`crates/servers/src/fb.rs`), 32 x 4 MiB now, and the 256 MiB gates
+  still boot with it.
+
+**A dma-buf descriptor is not seekable.** smithay validates a plane by seeking the client's
+descriptor to its end and comparing the offset and stride with that length. This port's
+descriptor answered `0`, so every import was refused with `Invalid stride 4096 for plane 0`.
+Linux's dma-buf file has no `llseek` either, so its consumers get `ESPIPE` and skip the check;
+`do_lseek` now answers `ESPIPE` for a dma-buf vnode, and the import proceeds. The length stays 0
+in `fstat` for the same reason: the extent belongs to the exporter, not to the descriptor.
 
 Staged, each with a gate
 
 | Stage | Deliverable | Gate |
 |---|---|---|
-| **4d-1** | **The renderer on the port.** `libloading`'s fork as a submodule, `libxkbcommon` built and staged like `libdrm`/`libgbm`, and a binary that takes smithay's surfaceless `EGLDisplay` → `EGLContext` → `GlesRenderer`. **Landed:** `/bin/glgate` clears a 64×64 `Abgr8888` offscreen target through `GlesRenderer` and reads the pixel back exactly, on the software driver (`softpipe`, this host's virgl being ES2-only); `libxkbcommon` is staged both ways | The guest prints the GL renderer's name and clears a framebuffer whose pixel reads back, `just test-glgate-x86` |
+| **4d-1** | **The renderer on the port.** `libloading`'s fork as a submodule, `libxkbcommon` built and staged like `libdrm`/`libgbm`, and a binary that takes smithay's surfaceless `EGLDisplay` → `EGLContext` → `GlesRenderer`. **Landed:** `/bin/glgate` clears a 64×64 `Abgr8888` offscreen target through `GlesRenderer` and reads the pixel back exactly, on the software driver (`softpipe`; a GL device needs a GL display backend, so the gate boots anywhere); `libxkbcommon` is staged both ways | The guest prints the GL renderer's name and clears a framebuffer whose pixel reads back, `just test-glgate-x86` |
 | **4d-2** | **The compositor.** `CompositorState`, `ShmGlobal` and an output, on its own socket; one stock `wl_shm` client commits a surface, smithay composes it into the offscreen target and 3d-b-1 scans the frame out. **Landed:** `/bin/wlcomp` serves a stock `wayland-client` that commits two frames; the second is on the scan-out and the first's `wl_buffer` is released. A user process reaches the fb server through VFS, so `FBIO_SCANOUT_SRC` is now a sized `_IOW` ioctl | A host screendump shows the client's colour, and the client's `wl_buffer` is released, `just test-wlcomp-x86` |
 | **4d-3** | **Input.** The input server behind smithay's `InputBackend`, a `wl_seat` advertised and routed to the focused surface. **Landed:** `/bin/wlcomp` has a `wl_seat` with a keyboard fed from `/dev/kbd` on a tick, focuses the first mapped surface, and `/bin/wlseat` receives the keymap, `enter` and evdev 30, with the keymap's components materialised from the tree's compiled keymap, a `tempfile` stand-in for smithay's keymap file, and a VFS `creat` fix (`O_CREAT|O_RDWR` had been write-only) | A key reaches the client through smithay, `just test-wlseat-x86` |
 | **4d-4** | **The software renderer** behind the same `Renderer` seam. **Landed:** `/bin/wlcomp soft` draws the same scene with `tools/phase4-comp/src/soft.rs` and never creates an EGL display; the read-back is presented top row first, which fixed a flip the single-colour frames had hidden | 4d-2's gate with the software renderer selected, `just test-wlcomp-soft-x86` |
-| **4d-5** | **`zwp_linux_dmabuf_v1` through smithay** (`DmabufGlobal` + `ImportDma`) | A dma-buf client's frame reaches the scan-out with no client-side transfer |
+| **4d-5** | **`zwp_linux_dmabuf_v1` through smithay** (`DmabufGlobal` + `ImportDma`). **Landed:** `/bin/wlcomp` advertises the formats its selected renderer can import and `/bin/wldmabuf` commits two render-node objects, which the software renderer maps through the node and the GL renderer samples as an EGLImage; a dma-buf descriptor now answers `ESPIPE` to `lseek` as Linux's does, the node's table holds 32 objects, and a client transfers its fill to the host copy | A dma-buf client's frame reaches the scan-out through either renderer, `just test-wlcomp-dmabuf-x86` and `just test-wlcomp-dmabuf-gl-x86` |
 
 ---
 

@@ -302,6 +302,7 @@ dependencies = [
  "smithay",
  "wayland",
  "wayland-client",
+ "wayland-protocols",
 ]
 
 [[package]]
@@ -620,6 +621,7 @@ version = "0.32.12"
 dependencies = [
  "bitflags",
  "wayland-backend",
+ "wayland-client",
  "wayland-scanner",
  "wayland-server",
 ]

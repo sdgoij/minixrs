@@ -28,6 +28,10 @@ pub struct GlBootstrap {
     pub gl_vendor: [core::ffi::c_char; 64],
     pub gl_renderer: [core::ffi::c_char; 64],
     pub gl_version: [core::ffi::c_char; 64],
+    /// Whether the display advertises the dmabuf import extensions, plain and with the
+    /// format/modifier query that is the only source of a `zwp_linux_dmabuf_v1` format list.
+    pub have_dmabuf_import: i32,
+    pub have_dmabuf_modifiers: i32,
 }
 
 impl GlBootstrap {
@@ -46,6 +50,8 @@ impl GlBootstrap {
             gl_vendor: [0; 64],
             gl_renderer: [0; 64],
             gl_version: [0; 64],
+            have_dmabuf_import: 0,
+            have_dmabuf_modifiers: 0,
         }
     }
 }
@@ -92,12 +98,14 @@ pub fn create_context(width: i32, height: i32) -> Result<(GlBootstrap, EGLContex
 /// What the GL actually is, as one line for a boot log.
 pub fn describe(bootstrap: &GlBootstrap) -> String {
     format!(
-        "GL_VENDOR={} GL_RENDERER={} GL_VERSION={} (EGL {}.{})",
+        "GL_VENDOR={} GL_RENDERER={} GL_VERSION={} (EGL {}.{}; dmabuf import={} modifiers={})",
         c_string(&bootstrap.gl_vendor),
         c_string(&bootstrap.gl_renderer),
         c_string(&bootstrap.gl_version),
         bootstrap.egl_major,
-        bootstrap.egl_minor
+        bootstrap.egl_minor,
+        bootstrap.have_dmabuf_import != 0,
+        bootstrap.have_dmabuf_modifiers != 0
     )
 }
 

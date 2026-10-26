@@ -6,7 +6,10 @@
 # the GL renderer/vendor/version it found before the verdict, so a boot log says which driver
 # ran (`virgl` on the GL host this recipe needs) even though the gate itself asserts the pixel.
 #
-# The QEMU line carries no GL device on purpose: the software driver is the one whose context
-# is GLES 3 on every host, and `ExportMem` (the read-back) needs GLES 3. Measured on this host,
-# virgl offers an ES2 context, where every `copy_texture` fails `UnsupportedPixelFormat`.
+# The QEMU line carries no GL device on purpose: a GL device needs a display backend with GL
+# (`-display egl-headless,gl=on`), which a CI runner has not, and this gate is meant to boot
+# anywhere. The software driver is what runs, and the pixel it reads back is the assertion.
+# That is not a claim about virgl: measured with `-device virtio-gpu-gl-pci,blob=on` the guest
+# gets `virgl`, OpenGL ES 3.2 and both dma-buf import extensions; without `blob=on` the same
+# device line leaves it on softpipe instead.
 /bin/glgate	glgate: PASS clear=green

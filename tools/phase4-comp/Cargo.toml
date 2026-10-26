@@ -34,6 +34,10 @@ minix-std = { path = "../../crates/minix-std" }
 wayland = { path = "../../crates/wayland" }
 # The gate's client half: a stock wayland-rs client, patched to the fork like the server.
 wayland-client = "0.31"
+# The dma-buf client's `wp::linux_dmabuf::zv1`, the same protocol crate the server side uses and
+# patched to the fork with the rest of the wayland-rs family. The version is the fork's (the
+# protocol crates must pair with the backend), and `client` is what generates the client side.
+wayland-protocols = { version = "0.32", features = ["client"] }
 # `setenv`, for the compositor's `XKB_CONFIG_ROOT`: `std::env::set_var` on this port only updates
 # Rust's own snapshot, and xkbcommon is C. The libc is the fork, patched below.
 libc = "0.2"
@@ -83,3 +87,7 @@ path = "src/bin/wlshm.rs"
 [[bin]]
 name = "wlseat"
 path = "src/bin/wlseat.rs"
+
+[[bin]]
+name = "wldmabuf"
+path = "src/bin/wldmabuf.rs"

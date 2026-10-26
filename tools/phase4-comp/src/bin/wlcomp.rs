@@ -15,6 +15,8 @@
 //! process), so a commit costs one read-back and no blit. `/dev/kbd` is read the same way, on a
 //! tick, because the input server's ring is a char device rather than a descriptor that signals.
 
+#[path = "../dmabuf.rs"]
+mod dmabuf;
 #[path = "../gl.rs"]
 mod gl;
 #[path = "../keymap.rs"]
@@ -31,6 +33,8 @@ use calloop::timer::{TimeoutAction, Timer};
 use calloop::{EventLoop, Interest, Mode, PostAction};
 
 use smithay::backend::allocator::Fourcc;
+use smithay::backend::allocator::dmabuf::Dmabuf;
+use smithay::backend::allocator::{Format, Modifier};
 use smithay::backend::input::{
     Device, DeviceCapability, InputBackend, InputEvent, KeyState, KeyboardKeyEvent, UnusedEvent,
 };
@@ -41,7 +45,7 @@ use smithay::backend::renderer::element::surface::{
 use smithay::backend::renderer::gles::{GlesRenderer, GlesTexture};
 use smithay::backend::renderer::utils::{draw_render_elements, on_commit_buffer_handler};
 use smithay::backend::renderer::{
-    Bind, Color32F, ExportMem, Frame, ImportAll, Offscreen, Renderer,
+    Bind, Color32F, ExportMem, Frame, ImportAll, ImportDma, Offscreen, Renderer,
 };
 use smithay::input::Seat;
 use smithay::input::SeatHandler;
@@ -56,9 +60,10 @@ use smithay::reexports::wayland_server::{Client, Display, DisplayHandle};
 use smithay::utils::{Buffer, Physical, Rectangle, SERIAL_COUNTER, Size, Transform};
 use smithay::wayland::buffer::BufferHandler;
 use smithay::wayland::compositor::{CompositorClientState, CompositorHandler, CompositorState};
+use smithay::wayland::dmabuf::{DmabufGlobal, DmabufHandler, DmabufState, ImportNotifier};
 use smithay::wayland::output::OutputHandler;
 use smithay::wayland::shm::{ShmHandler, ShmState};
-use smithay::{delegate_compositor, delegate_output, delegate_seat, delegate_shm};
+use smithay::{delegate_compositor, delegate_dmabuf, delegate_output, delegate_seat, delegate_shm};
 
 use soft::{SoftRenderer, SoftTarget};
 
@@ -71,6 +76,9 @@ const WIDTH: usize = 1024;
 const HEIGHT: usize = 768;
 const STRIDE: usize = WIDTH * 4;
 const FRAME_LEN: usize = STRIDE * HEIGHT;
+/// Rows per read-back. Each band is one pixel-pack buffer on the render node, so reading a
+/// whole frame in bands asks the node for a quarter of a megabyte at a time instead of three.
+const BAND_ROWS: usize = 64;
 
 /// The frame the scan-out points at. Page-aligned because `FBIO_SCANOUT_SRC` resolves it page by
 /// page and refuses a range whose address or length is not a page multiple.
@@ -126,6 +134,12 @@ impl RenderPath {
             .map_err(|e| format!("GLES renderer failed: {e:?}"))?;
         let target = Offscreen::<GlesTexture>::create_buffer(&mut renderer, Fourcc::Abgr8888, size)
             .map_err(|e| format!("offscreen target failed: {e:?}"))?;
+        let formats = ImportDma::dmabuf_formats(&renderer);
+        println!(
+            "wlcomp: EGL offers {} dmabuf format(s), first {:?}",
+            formats.iter().count(),
+            formats.iter().next()
+        );
         Ok(Self::Gl { renderer, target })
     }
 
@@ -143,12 +157,54 @@ impl RenderPath {
         }
     }
 
+    /// The formats a `zwp_linux_dmabuf_v1` global can offer. The GL renderer answers from the EGL
+    /// display, which is the only thing that knows what it can import; the software renderer
+    /// samples the node's linear memory, so it offers its four 4-byte formats as `Linear`.
+    fn dmabuf_formats(&self) -> Vec<Format> {
+        match self {
+            Self::Gl { renderer, .. } => renderer.dmabuf_formats().iter().copied().collect(),
+            Self::Soft { .. } => soft_dmabuf_formats(),
+        }
+    }
+
+    /// Imports a client's dma-buf into the renderer that draws, which is what decides whether the
+    /// buffer is usable at all. The texture is not kept: the draw imports it again from the
+    /// surface's buffer, because the client may write the object between the two.
+    fn import_dmabuf(&mut self, buffer: &Dmabuf) -> Result<(), String> {
+        match self {
+            Self::Gl { renderer, .. } => renderer
+                .import_dmabuf(buffer, None)
+                .map(|_| ())
+                .map_err(|e| format!("{e:?}")),
+            Self::Soft { renderer, .. } => renderer
+                .import_dmabuf(buffer, None)
+                .map(|_| ())
+                .map_err(|e| e.to_string()),
+        }
+    }
+
     fn render(&mut self, surfaces: &[WlSurface], out: &mut [u8]) -> Result<usize, String> {
         match self {
             Self::Gl { renderer, target } => render_scene(renderer, target, surfaces, out),
             Self::Soft { renderer, target } => render_scene(renderer, target, surfaces, out),
         }
     }
+}
+
+/// What the software renderer can import: one linear plane in any of its four 4-byte formats.
+fn soft_dmabuf_formats() -> Vec<Format> {
+    [
+        Fourcc::Argb8888,
+        Fourcc::Xrgb8888,
+        Fourcc::Abgr8888,
+        Fourcc::Xbgr8888,
+    ]
+    .into_iter()
+    .map(|code| Format {
+        code,
+        modifier: Modifier::Linear,
+    })
+    .collect()
 }
 
 /// Draws every committed surface into `target`, reads the frame back and packs it for the
@@ -165,7 +221,6 @@ where
     R::TextureId: Clone + 'static,
 {
     let size = Size::<i32, Physical>::from((WIDTH as i32, HEIGHT as i32));
-    let buffer_size = Size::<i32, Buffer>::from((WIDTH as i32, HEIGHT as i32));
     let region = Rectangle::from_size(size);
 
     let mut elements: Vec<WaylandSurfaceRenderElement<R>> = Vec::new();
@@ -194,34 +249,49 @@ where
     draw_render_elements(&mut frame, 1.0, &elements, &[region])
         .map_err(|e| format!("draw failed: {e}"))?;
     let _sync = frame.finish().map_err(|e| format!("finish failed: {e}"))?;
-    let mapping = renderer
-        .copy_framebuffer(&bound, Rectangle::from_size(buffer_size), Fourcc::Abgr8888)
-        .map_err(|e| format!("read-back failed: {e}"))?;
-    drop(bound);
-    let bytes = renderer
-        .map_texture(&mapping)
-        .map_err(|e| format!("map failed: {e}"))?;
-    if bytes.len() < FRAME_LEN {
-        return Err(format!(
-            "read back {} bytes, wanted {FRAME_LEN}",
-            bytes.len()
-        ));
-    }
 
-    // Row 0 of the read-back is the output's top row, for both renderers: a client's top rows
-    // arrive in the mapping's first rows (the gate's green band proves it), and the scan-out
-    // and the client both count rows from the top. The read-back is RGBA, the fb's frame is
-    // XRGB8888, so the pack is the R and B swap and the opaque byte.
-    for y in 0..HEIGHT {
-        let src = &bytes[y * STRIDE..][..STRIDE];
-        let dst = &mut out[y * STRIDE..][..STRIDE];
-        for (dst_px, src_px) in dst.chunks_exact_mut(4).zip(src.chunks_exact(4)) {
-            dst_px[0] = src_px[2];
-            dst_px[1] = src_px[1];
-            dst_px[2] = src_px[0];
-            dst_px[3] = 0xFF;
+    // Row 0 of a read-back is the output's top row, for both renderers: a client's top rows
+    // arrive in the mapping's first rows (the gate's band proves it), and the scan-out and the
+    // client both count rows from the top. The read-back is RGBA, the fb's frame is XRGB8888, so
+    // the pack is the R and B swap and the opaque byte.
+    for top in (0..HEIGHT).step_by(BAND_ROWS) {
+        let rows = BAND_ROWS.min(HEIGHT - top);
+        let band = Rectangle::new(
+            smithay::utils::Point::<i32, Buffer>::from((0, top as i32)),
+            Size::<i32, Buffer>::from((WIDTH as i32, rows as i32)),
+        );
+        let mapping = renderer
+            .copy_framebuffer(&bound, band, Fourcc::Abgr8888)
+            .map_err(|e| format!("read-back at row {top} failed: {e}"))?;
+        let bytes = renderer
+            .map_texture(&mapping)
+            .map_err(|e| format!("map at row {top} failed: {e}"))?;
+        if bytes.len() < rows * STRIDE {
+            return Err(format!(
+                "read back {} bytes at row {top}, wanted {}",
+                bytes.len(),
+                rows * STRIDE
+            ));
         }
+        for y in 0..rows {
+            let src = &bytes[y * STRIDE..][..STRIDE];
+            let dst = &mut out[(top + y) * STRIDE..][..STRIDE];
+            for (dst_px, src_px) in dst.chunks_exact_mut(4).zip(src.chunks_exact(4)) {
+                dst_px[0] = src_px[2];
+                dst_px[1] = src_px[1];
+                dst_px[2] = src_px[0];
+                dst_px[3] = 0xFF;
+            }
+        }
+        drop(bytes);
+        drop(mapping);
+        // A read-back buffer is a node object. Freeing this band's before the next band asks for
+        // one leaves the table's spare slots to the surfaces that are still on screen.
+        renderer
+            .cleanup_texture_cache()
+            .map_err(|e| format!("cleanup at row {top} failed: {e}"))?;
     }
+    drop(bound);
     Ok(elements.len())
 }
 
@@ -235,6 +305,9 @@ struct State {
     seat_state: SeatState<State>,
     seat: Seat<State>,
     surfaces: Vec<WlSurface>,
+    /// The `zwp_linux_dmabuf_v1` delegate. The global is created only when the selected renderer
+    /// can import a format, so a client is never offered a buffer the compositor would refuse.
+    dmabuf_state: DmabufState,
     path: RenderPath,
     /// `/dev/fb`, opened for the scan-out re-point. An ordinary user process reaches the fb
     /// server through VFS; a boot process would send `CDEV_IOCTL` directly (§6.11).
@@ -290,6 +363,22 @@ impl State {
         );
         output.set_preferred(mode);
 
+        let mut dmabuf_state = DmabufState::new();
+        let formats = path.dmabuf_formats();
+        if formats.is_empty() {
+            println!(
+                "wlcomp: no dmabuf global: the {} renderer imports no format",
+                path.name()
+            );
+        } else {
+            println!(
+                "wlcomp: wl_dmabuf global offers {} format(s) to the {} renderer",
+                formats.len(),
+                path.name()
+            );
+            dmabuf_state.create_global::<Self>(&dh, formats);
+        }
+
         // SAFETY: fixed paths, opened for the present path and for the input tick below.
         let fb = unsafe { minix_std::fs::open(b"/dev/fb", minix_std::fs::O_RDWR, 0) }
             .map_err(|e| format!("open /dev/fb failed: {e:?}"))?;
@@ -305,6 +394,7 @@ impl State {
             seat_state,
             seat,
             surfaces: Vec::new(),
+            dmabuf_state,
             path,
             fb,
             kbd,
@@ -482,6 +572,35 @@ impl BufferHandler for State {
 
 impl OutputHandler for State {}
 
+impl DmabufHandler for State {
+    fn dmabuf_state(&mut self) -> &mut DmabufState {
+        &mut self.dmabuf_state
+    }
+
+    fn dmabuf_imported(
+        &mut self,
+        _global: &DmabufGlobal,
+        dmabuf: Dmabuf,
+        notifier: ImportNotifier,
+    ) {
+        match self.path.import_dmabuf(&dmabuf) {
+            Ok(()) => {
+                println!(
+                    "wlcomp: dmabuf imported by the {} renderer",
+                    self.path.name()
+                );
+                if let Err(e) = notifier.successful::<Self>() {
+                    println!("wlcomp: the dmabuf's client went away before its buffer: {e}");
+                }
+            }
+            Err(e) => {
+                println!("wlcomp: dmabuf import failed: {e}");
+                notifier.failed();
+            }
+        }
+    }
+}
+
 impl SeatHandler for State {
     type KeyboardFocus = WlSurface;
     type PointerFocus = WlSurface;
@@ -500,6 +619,7 @@ delegate_compositor!(State);
 delegate_shm!(State);
 delegate_output!(State);
 delegate_seat!(State);
+delegate_dmabuf!(State);
 
 #[derive(Default)]
 struct ClientState {

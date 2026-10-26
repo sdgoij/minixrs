@@ -38,6 +38,11 @@ struct glgate_egl {
 	char gl_vendor[64];
 	char gl_renderer[64];
 	char gl_version[64];
+	/* Whether the display advertises the two extensions dmabuf import needs: the plain import
+	 * (`EGL_EXT_image_dma_buf_import`) and its format/modifier query, which is the only source
+	 * of the format list a `zwp_linux_dmabuf_v1` global can advertise. */
+	int have_dmabuf_import;
+	int have_dmabuf_modifiers;
 };
 
 static void copy_gl_string(char *dst, size_t len, GLenum name)
@@ -97,6 +102,13 @@ int glgate_egl_bootstrap(struct glgate_egl *out, int width, int height)
 	if (!eglInitialize(dpy, &major, &minor)) {
 		out->error = eglGetError();
 		return -2;
+	}
+
+	{
+		const char *ext = eglQueryString(dpy, EGL_EXTENSIONS);
+		out->have_dmabuf_import = ext != NULL && strstr(ext, "EGL_EXT_image_dma_buf_import") != NULL;
+		out->have_dmabuf_modifiers = ext != NULL &&
+		                              strstr(ext, "EGL_EXT_image_dma_buf_import_modifiers") != NULL;
 	}
 
 	out->egl_major = (int)major;

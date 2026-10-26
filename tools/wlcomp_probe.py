@@ -13,11 +13,16 @@ smithay composed.
 is the gate for that renderer: every assertion below is the same, and the log has to carry
 `wlcomp: renderer soft` so a fallback cannot pass for it.
 
+`--client dmabuf` types `/bin/wldmabuf` instead, which commits `zwp_linux_dmabuf_v1` buffers made
+from render-node objects: the frame the compositor draws is then the client's own object, and the
+log has to carry `wlcomp: dmabuf imported by the <renderer> renderer` before the screendump is
+believed. Its two colours are blue (body) and yellow (top band).
+
 Evidence: the serial log's `fb: scanout src` line (the re-point was taken), the client's release
 line (the compositor held and returned the buffer), and a QMP screendump. The screenshot is the
-orientation check as well: frame B is magenta with its *top* 100 rows green, so green at the top
-of the screen says the present path did not flip the frame. The output is a `virtio-gpu-pci` with
-no bochs-display, because only a virtio-gpu can re-back its scanout (D11).
+orientation check as well: the second frame is one colour with its *top* 100 rows another, so the
+band at the top of the screen says the present path did not flip the frame. The output is a
+`virtio-gpu-pci` with no bochs-display, because only a virtio-gpu can re-back its scanout (D11).
 """
 import json
 import os
@@ -29,13 +34,28 @@ import time
 
 SCREEN = "target/wlcomp.ppm"
 
-# Frame B's top band, in the client's own rows: green, with magenta below it.
-BAND_RGB = bytes([0, 255, 0])
-MAGENTA_RGB = bytes([255, 0, 255])
+# The clients this gate can type, with the colours their second frame paints: `body` everywhere
+# and `band` on its top rows. The shm client's band is the orientation check; the dma-buf client's
+# colours are distinct so a stale frame from the other one cannot pass.
+CLIENTS = {
+    "shm": {
+        "cmd": "/bin/wlshm",
+        "pass": b"wlshm: PASS",
+        "fail": b"wlshm: FAIL",
+        "body": bytes([255, 0, 255]),
+        "band": bytes([0, 255, 0]),
+    },
+    "dmabuf": {
+        "cmd": "/bin/wldmabuf",
+        "pass": b"wldmabuf: PASS",
+        "fail": b"wldmabuf: FAIL",
+        "body": bytes([0, 0, 255]),
+        "band": bytes([255, 255, 0]),
+    },
+}
 
 # The compositor returns to the shell as soon as its socket is bound; the client is typed next.
 SERVER_BASE = "/bin/wlcomp"
-CLIENT_CMD = "/bin/wlshm"
 
 lock = threading.Lock()
 out = bytearray()
@@ -151,22 +171,32 @@ def tail(n=1200):
 
 def main():
     global qemu
+    usage = ("usage: wlcomp_probe.py [--renderer gl|soft] [--client shm|dmabuf] "
+             "<qemu command...>")
     argv = sys.argv[1:]
-    renderer = "gl"
-    if "--renderer" in argv:
-        i = argv.index("--renderer")
-        try:
-            renderer = argv[i + 1]
-        except IndexError:
-            print("usage: wlcomp_probe.py [--renderer gl|soft] <qemu command...>", file=sys.stderr)
-            sys.exit(2)
-        del argv[i:i + 2]
+    options = {"--renderer": "gl", "--client": "shm"}
+    for option in list(options):
+        if option in argv:
+            i = argv.index(option)
+            try:
+                options[option] = argv[i + 1]
+            except IndexError:
+                print(usage, file=sys.stderr)
+                sys.exit(2)
+            del argv[i:i + 2]
+
+    renderer = options["--renderer"]
     if renderer not in ("gl", "soft"):
         print("--renderer takes `gl` or `soft`", file=sys.stderr)
         sys.exit(2)
+    client_name = options["--client"]
+    if client_name not in CLIENTS:
+        print("--client takes `shm` or `dmabuf`", file=sys.stderr)
+        sys.exit(2)
+    client = CLIENTS[client_name]
     server_cmd = SERVER_BASE if renderer == "gl" else f"{SERVER_BASE} {renderer}"
     if not argv:
-        print("usage: wlcomp_probe.py [--renderer gl|soft] <qemu command...>", file=sys.stderr)
+        print(usage, file=sys.stderr)
         sys.exit(2)
     qemu = subprocess.Popen(
         argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
@@ -216,7 +246,7 @@ def main():
         sys.exit(1)
     print("renderer: %s" % renderer, flush=True)
 
-    if not type_line_and_wait(CLIENT_CMD, b"wlshm: PASS", b"wlshm: FAIL", 40):
+    if not type_line_and_wait(client["cmd"], client["pass"], client["fail"], 40):
         print("the client did not pass; tail:\n%s" % tail(), file=sys.stderr)
         q.close()
         qemu.kill()
@@ -226,13 +256,17 @@ def main():
         log = bytes(out)
     took_scanout = b"fb: scanout src" in log and b"fb: scanout src refused" not in log
     presented = b"wlcomp: presented" in log
-    released = b"wlshm: wl_buffer released" in log
+    released = client["pass"].split(b":")[0] + b": wl_buffer released" in log
+    imported = None
+    if client_name == "dmabuf":
+        imported = ("wlcomp: dmabuf imported by the %s renderer" % renderer).encode() in log
     for line in log.splitlines():
         text = line.decode(errors="replace")
-        if text.startswith(("fb: scanout", "wlcomp:", "wlshm:")):
+        if text.startswith(("fb: scanout", "wlcomp:", "wlshm:", "wldmabuf:")):
             print("serial: %s" % text, flush=True)
-    print("scanout re-pointed=%s presented=%s buffer released=%s"
-          % (took_scanout, presented, released), flush=True)
+    print("scanout re-pointed=%s presented=%s buffer released=%s imported=%s"
+          % (took_scanout, presented, released,
+             "n/a" if imported is None else imported), flush=True)
 
     time.sleep(0.5)
     shot = screendump(q)
@@ -241,20 +275,20 @@ def main():
         q.close()
         qemu.kill()
         sys.exit(1)
-    # Frame B is Xrgb8888 0x00FF00FF (magenta) with its top 100 rows 0x0000FF00 (green). The
-    # client counts rows from the top of its image, so an upright present path puts the band at
-    # the top of the screen; a flipped one puts it at the bottom.
-    top_left = pxat(shot, 0, 0) == BAND_RGB
-    top_mid = pxat(shot, 512, 40) == BAND_RGB
-    centre = pxat(shot, 512, 384) == MAGENTA_RGB
-    corner = pxat(shot, 1023, 767) == MAGENTA_RGB
-    print("after commit: band top-left=%s, band top-middle=%s, centre magenta=%s, corner magenta=%s"
+    # The second frame is `body` with its top 100 rows `band`. The client counts rows from the
+    # top of its image, so an upright present path puts the band at the top of the screen; a
+    # flipped one puts it at the bottom.
+    top_left = pxat(shot, 0, 0) == client["band"]
+    top_mid = pxat(shot, 512, 40) == client["band"]
+    centre = pxat(shot, 512, 384) == client["body"]
+    corner = pxat(shot, 1023, 767) == client["body"]
+    print("after commit: band top-left=%s, band top-middle=%s, centre body=%s, corner body=%s"
           % (top_left, top_mid, centre, corner), flush=True)
 
     q.close()
     qemu.kill()
-    sys.exit(0 if (took_scanout and presented and released and top_left and top_mid
-                   and centre and corner) else 1)
+    sys.exit(0 if (took_scanout and presented and released and imported is not False
+                   and top_left and top_mid and centre and corner) else 1)
 
 
 if __name__ == "__main__":

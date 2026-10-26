@@ -19,9 +19,11 @@
 //! and `import_dmabuf` answers `DmabufUnsupported` rather than pretending.
 
 use std::fmt;
+use std::os::fd::AsRawFd;
 use std::sync::{Arc, Mutex};
 
 use cgmath::{Matrix3, Vector2, Vector3};
+use smithay::backend::allocator::Buffer as _;
 use smithay::backend::allocator::Fourcc;
 use smithay::backend::allocator::dmabuf::Dmabuf;
 use smithay::backend::renderer::sync::SyncPoint;
@@ -54,7 +56,10 @@ pub enum SoftError {
     },
     /// A texture lock was poisoned by a panic in another thread.
     Poisoned,
-    DmabufUnsupported,
+    /// The node could not map a descriptor's plane.
+    DmabufMap(String),
+    /// The dma-buf has a plane count this renderer does not sample.
+    DmabufPlanes(usize),
     SyncInterrupted,
 }
 
@@ -73,7 +78,8 @@ impl fmt::Display for SoftError {
                 stride,
             } => write!(f, "bad buffer geometry {width}x{height} stride {stride}"),
             Self::Poisoned => write!(f, "texture lock poisoned"),
-            Self::DmabufUnsupported => write!(f, "dmabuf import is not implemented"),
+            Self::DmabufMap(e) => write!(f, "dmabuf mapping: {e}"),
+            Self::DmabufPlanes(n) => write!(f, "dmabuf has {n} plane(s), wanted one"),
             Self::SyncInterrupted => write!(f, "waiting for a sync point was interrupted"),
         }
     }
@@ -707,12 +713,65 @@ impl ImportMemWl for SoftRenderer {
 }
 
 impl ImportDma for SoftRenderer {
+    /// Maps the descriptor's plane through the render node and copies it in. A dma-buf here is a
+    /// `virtgpu` object in the node's linear memory (`.notes/wayland.md` section 5, row 25), so
+    /// the import is the same work `import_shm_buffer` does: read the client's pixels, which the
+    /// node map already points at. Nothing is tiled and there is one plane.
     fn import_dmabuf(
         &mut self,
-        _dmabuf: &Dmabuf,
+        buffer: &Dmabuf,
         _damage: Option<&[Rectangle<i32, Buffer>]>,
     ) -> Result<SoftTexture, SoftError> {
-        Err(SoftError::DmabufUnsupported)
+        let format = buffer.format().code;
+        if layout(format).is_none() {
+            return Err(SoftError::UnsupportedFormat(format));
+        }
+        if buffer.num_planes() != 1 {
+            return Err(SoftError::DmabufPlanes(buffer.num_planes()));
+        }
+        let size = buffer.size();
+        if size.w <= 0 || size.h <= 0 {
+            return Err(SoftError::BadGeometry {
+                width: size.w,
+                height: size.h,
+                stride: 0,
+            });
+        }
+        let (width, height) = (size.w as usize, size.h as usize);
+        let Some(fd) = buffer.handles().next() else {
+            return Err(SoftError::DmabufPlanes(0));
+        };
+        let offset = buffer.offsets().next().unwrap_or(0) as usize;
+        let stride = buffer.strides().next().unwrap_or(0) as usize;
+        if stride < width * BPP {
+            return Err(SoftError::BadGeometry {
+                width: size.w,
+                height: size.h,
+                stride: stride as i32,
+            });
+        }
+        let need = offset + (height - 1) * stride + width * BPP;
+        let mapping =
+            crate::dmabuf::map_descriptor(fd.as_raw_fd(), need).map_err(SoftError::DmabufMap)?;
+        let source = mapping.as_slice();
+        let mut pixels = Vec::with_capacity(width * height * BPP);
+        for row in 0..height {
+            let start = offset + row * stride;
+            let Some(line) = source.get(start..start + width * BPP) else {
+                return Err(SoftError::BufferTooSmall {
+                    need,
+                    got: source.len(),
+                });
+            };
+            pixels.extend_from_slice(line);
+        }
+        Ok(SoftTexture::new(
+            width as u32,
+            height as u32,
+            format,
+            false,
+            pixels,
+        ))
     }
 }
 

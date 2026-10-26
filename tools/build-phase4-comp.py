@@ -45,7 +45,7 @@ from lld import find_lld  # noqa: E402
 from stage1 import find_stage1_rustc  # noqa: E402
 
 PROJECT = ROOT / "tools" / "phase4-comp"
-BINARIES = ("glgate", "wlcomp", "wlshm", "wlseat")
+BINARIES = ("glgate", "wlcomp", "wlshm", "wlseat", "wldmabuf")
 SMITHAY = ROOT / "target" / "smithay"
 # The EGL bootstrap is C (see the file's own note): the context smithay needs cannot come from
 # smithay's constructors, and the port's surfaceless recipe is already written in C.

@@ -90,7 +90,9 @@ fn export(dev: u32, user_ep: i32, va: u64, flags: i32) -> i32 {
     let token = u32::from_ne_bytes(token_bytes);
 
     // The descriptor's identity *is* the token, so importing it needs nothing but the
-    // number the node hands back.
+    // number the node hands back. Its length stays 0 and it is not seekable (`do_lseek`
+    // answers `ESPIPE`): both are what Linux's dma-buf file does, whose extent belongs to
+    // the exporter and not to the descriptor.
     let (vp, _id, fd) = match unsafe {
         crate::vfs::anon::create_anon(arch_common::com::DMABUF_DEV, DMABUF_MODE, 0)
     } {
@@ -178,10 +180,10 @@ fn token_of_fd(fd: i32) -> Result<u32, i32> {
 
 /// `fstat` on a dma-buf, built here rather than asked of a filesystem.
 ///
-/// The length is 0: the object's length lives on the node, and nothing a client does
-/// with a dma-buf descriptor needs it here (a consumer imports the descriptor and reads
-/// the length from the handle). Reporting the file kind is what lets `fdopen`-style
-/// code tell it apart from a socket or a tty.
+/// The length is 0, as it is for Linux's dma-buf file: the object's extent belongs to the
+/// exporter, and a consumer reads it from the handle it imported rather than from the
+/// descriptor. Reporting the file kind is what lets `fdopen`-style code tell it apart from a
+/// socket or a tty.
 ///
 /// # Safety
 ///

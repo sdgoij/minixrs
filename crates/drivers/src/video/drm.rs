@@ -454,10 +454,11 @@ impl Transfer3d {
 /// The most objects one node may hold at once. A node's backing is a fixed arena with one slot
 /// per entry (`crates/servers/src/fb.rs`'s `GEM_OBJECT_LEN`), so this count is fixed with it.
 ///
-/// Sized so that several GL clients compose at once: the driver of each holds a surface, the
-/// image it imports from a peer's surface, and a readback staging buffer, so one client is
-/// several objects and a peer-plus-compositor pair is more (§6.10 3d-b-5).
-pub const MAX_OBJECTS: usize = 16;
+/// Sized so that several GL clients compose at once: a virgl context alone holds a dozen
+/// objects (its surface, its transfer staging buffers and the small buffers Mesa allocates
+/// lazily), and each client that imports a dma-buf adds its buffer and the image the
+/// compositor makes of it, so a compositor plus two clients is more than a dozen.
+pub const MAX_OBJECTS: usize = 32;
 
 /// `struct drm_virtgpu_resource_create`, as [`dispatch`] decoded it.
 ///

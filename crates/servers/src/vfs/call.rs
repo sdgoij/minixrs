@@ -498,6 +498,16 @@ pub fn do_lseek() -> i32 {
         let p = core::ptr::addr_of_mut!(glob.filp) as *mut Filp;
         p.add(filp_idx as usize)
     };
+
+    // A dma-buf descriptor is not seekable. Linux's dma-buf file has no `llseek`, so a consumer
+    // asking for its length gets `ESPIPE`; the object's extent lives on the node, not on this
+    // descriptor. A consumer that validates a buffer with `lseek(SEEK_END)` therefore skips the
+    // check here as it does there, instead of comparing against a length this side would have to
+    // invent.
+    if unsafe { crate::vfs::dmabuf::is_dmabuf((*filp_ptr).filp_vno) } {
+        return ESPIPE;
+    }
+
     unsafe {
         match _whence {
             0 => (*filp_ptr).filp_pos = _offset as i64,

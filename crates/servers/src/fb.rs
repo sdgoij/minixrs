@@ -111,6 +111,10 @@ fn scanout_refused(why: &[u8]) {
 /// client-supplied blobs of 3b-4. There is one slot per `MAX_OBJECTS`, so the arena's size is
 /// `MAX_OBJECTS` × 4 MiB and a client that runs out hears `ENOSPC` from the node.
 ///
+/// The arena is part of this server's image, so each entry of `MAX_OBJECTS` costs 4 MiB of
+/// guest RAM in one contiguous segment at load. Thirty-two entries is 128 MiB, which is what a
+/// virgl context and its clients need and what the 256 MiB gates still boot.
+///
 /// x86-only, like the probe that fills it: it is the arch where the render device is a
 /// device of its own rather than the one already presenting (D3), so it is the only one with
 /// a node to back.
