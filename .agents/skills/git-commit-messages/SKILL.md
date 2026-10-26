@@ -5,14 +5,14 @@ description: Write proper Git commit messages with subject line and descriptive 
 
 # Git Commit Messages
 
-When asked to write a commit message, produce the entire message (subject + body) in your response. **Do not ask for clarification** — read the staged files or the diff and write the message yourself.
+When asked to write a commit message, produce the entire message (subject + body) in your response. **Do not ask for clarification**: read the staged files or the diff and write the message yourself.
 
 ## Format
 
 ```
 <type>: <subject, imperative mood, no period>
 
-<body — explain what and why, not how. Omit if the subject alone suffices.>
+<body: explain what and why, not how. Omit if the subject alone suffices.>
 ```
 
 **Subject line rules:**
@@ -20,16 +20,28 @@ When asked to write a commit message, produce the entire message (subject + body
 - No trailing period
 - Type prefix: `feat:`, `fix:`, `test:`, `refactor:`, `docs:`, `chore:` etc.
 - Don't repeat information from the subject in the message body
+- **No em dashes.** Use commas, periods, colons or parentheses. An em dash reads as a typographic flourish in prose and as noise in a subject; plain punctuation is what people type. This applies to commit messages and to everything under `.notes/`.
+- **No internal plan identifiers.** Phase, stage, slice, task and item numbers (`phase4`, `4d-2`, `slice 3`, `item 7`) name a step in a planning document, not a change in the tree. A reader of `git log` later cannot search for them, cannot tell what they touched, and (outside the one document that numbers them) they mean nothing. Say what the change does in the project's own terms (`feat: serve a stock Wayland client from smithay`). If the number matters, it belongs in the body, anchored to the document that defines it (`.notes/wayland.md` 6.13).
 
 **Body rules:**
 - Only include when the subject alone isn't enough
-- Explain *what* changed and *why* — not *how*
+- Explain *what* changed and *why*, not *how*
 - Separate from subject with a blank line
 - **Never hard-wrap.** Write each paragraph as ONE long line and let the reader's client wrap it, exactly like markdown prose. Do not insert line breaks at a column. Do not "keep lines short". Measure length in paragraphs and sentences, not characters.
+- A plan identifier is allowed here **only** next to the document and section that defines it; a bare `4d-2` in a body is as unsearchable as one in a subject.
+
+## Why no plan numbers in the subject
+
+A number like `4d-2` is an index into one document's staging table. It is not a component, not a file, not a behaviour, and not something a reader can look up unless they already know the document. It also rots: stage tables get renumbered, split and merged, and the commit's subject then describes a plan that no longer exists. The subject should describe the change; the plan is context, and context goes in the body with a pointer to its source.
+
+| Don't | Do |
+|---|---|
+| `feat(phase4): land 4d-2, a smithay compositor` | `feat: compose a stock Wayland client with smithay` |
+| `feat(phase3): 3d-b-1 scan-out present path` | `feat(fb): scan out the client's own buffer` |
 
 ## Why there is no line-length rule
 
-Hard-wrapped bodies look right only in the terminal width they were written for. Every reader — `git log`, the forge UI, a review tool, another agent — re-wraps or quotes them at a different width, so the artificial breaks resurface as mid-sentence gaps and ragged text, and anyone reflowing the message later has to guess which breaks were intentional. Git and markdown both treat a single newline as a soft break, so a hard-wrapped paragraph is still ONE logical line to anything that parses it: the breaks are pure noise, while a real paragraph break is the only newline that carries meaning. Never wrap. A subject may be a full sentence and a body paragraph may run long — that is fine.
+Hard-wrapped bodies look right only in the terminal width they were written for. Every reader (`git log`, the forge UI, a review tool, another agent) re-wraps or quotes them at a different width, so the artificial breaks resurface as mid-sentence gaps and ragged text, and anyone reflowing the message later has to guess which breaks were intentional. Git and markdown both treat a single newline as a soft break, so a hard-wrapped paragraph is still ONE logical line to anything that parses it: the breaks are pure noise, while a real paragraph break is the only newline that carries meaning. Never wrap. A subject may be a full sentence and a body paragraph may run long, and that is fine.
 
 ## Example Patterns
 
@@ -106,6 +118,8 @@ Add remaining Phase 2/3 tests. Brings total from 229 to 663.
 | Group related changes | List every file individually |
 | Write each paragraph as one unwrapped line | Hard-wrap the body at a column |
 | Close with notes (tests, migration) | Leave the body empty when there's substance |
+| Name the behaviour or subsystem | Put a phase/stage/slice/task number in the subject |
+| Use commas, parentheses, colons, periods | Use an em dash |
 
 ## If the user says "better" or "descriptive"
 
