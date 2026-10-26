@@ -1834,12 +1834,17 @@ shape, and each was measured rather than assumed:
   little-endian machine, the order the gate asserts.
 - **The gate's QEMU line carries no GL device**, so the software driver is what runs. That is
   not a claim about virgl, and an earlier version of this note made one: measured with
-  `-device virtio-gpu-gl-pci,blob=on` the guest gets `GL_RENDERER=virgl`, `OpenGL ES 3.2 Mesa
-  25.3.6` and both dma-buf import extensions, so "this host's virgl is ES2-only" was wrong.
-  Without `blob=on` the same device line leaves the guest on softpipe instead. The gate keeps the
-  software driver because a GL device needs `-display egl-headless,gl=on`, which a CI runner has
-  not: that makes 4d-1 a gate any runner can boot, while the accelerated path stays measured by
-  `test-gltriangle-virgl` and `test-wlgl`, which need a GL host.
+  `-device virtio-gpu-gl-pci,blob=on` on a Mesa host the guest gets `GL_RENDERER=virgl`,
+  `OpenGL ES 3.2 Mesa 25.3.6` and both dma-buf import extensions, so "this host's virgl is
+  ES2-only" was wrong. Without `blob=on` the same device line leaves the guest on softpipe
+  instead. **The host's GL is what decides the version.** The same guest on Windows' ANGLE gets
+  ES2-only configs (`eglChooseConfig` for `EGL_OPENGL_ES3_BIT` finds none: the configs answer
+  renderable type `0xd`, without `0x40`), so `ExportMem` is unavailable there and the compositor
+  falls back to its software renderer. The accelerated compositor gate is therefore a gate for a
+  Mesa host, which here means WSL; on Windows it fails at `wlcomp: renderer gl`, correctly. The
+  gate keeps the software driver for 4d-1 because a GL device needs `-display egl-headless`,
+  which a CI runner has not: that makes 4d-1 a gate any runner can boot, while the accelerated
+  path stays measured by `test-gltriangle-virgl` and `test-wlgl`, which need a GL host.
 
 **The gate is the tree's first dynamically linked `std` binary, and two link facts follow.**
 `GlesRenderer` loads EGL with `libloading`, i.e. `dlopen`, and `minix-libc`'s rlib is the
@@ -1996,6 +2001,16 @@ stood between it and passing:
   was refused `ENOSPC`, which Mesa surfaces as `GL_OUT_OF_MEMORY` from `glBufferData`. The
   arena is one slot per entry (`crates/servers/src/fb.rs`), 32 x 4 MiB now, and the 256 MiB gates
   still boot with it.
+
+**The zero-copy scan-out route is closed on this machine.** The compositor scans out guest
+memory today, which costs one read-back. The alternative is a host blob: the fb server already
+knows how to create one (`crates/drivers/src/video/virtio_gpu.rs`'s `init_blob_scanout`) and
+`SET_SCANOUT_BLOB` would point the display straight at host memory. Measured with
+`-device virtio-gpu-gl-pci,blob=on,hostmem=256M`, `RESOURCE_CREATE_BLOB` with `BLOB_MEM_HOST3D`
+is answered `EINVAL` by virglrenderer on both hosts (`virgl blob create error: Invalid
+argument`), for `blob_id` 0 and 1 and both with and without `USE_MAPPABLE`. Without `hostmem=`
+the window does not exist at all. So a host blob, and the scan-out it enables, needs a host
+whose virglrenderer can allocate one; this one cannot.
 
 **A dma-buf descriptor is not seekable.** smithay validates a plane by seeking the client's
 descriptor to its end and comparing the offset and stride with that length. This port's

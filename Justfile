@@ -1101,6 +1101,9 @@ test-wlcomp-dmabuf-x86: wlcomp-x86 boot-image-x86
 
 # The same dma-buf client on the GL renderer, whose import is an EGLImage: the compositor samples
 # the client's object through virgl, so this is the gate for the path a real compositor takes.
+# It needs a host GL that gives the guest virgl ES 3, which here means Mesa (WSL): Windows' ANGLE
+# offers ES2-only configs, so the compositor falls back to its software renderer and the probe
+# fails at `wlcomp: renderer gl`.
 # The device set is `/bin/wlcompose`'s: a 2D `virtio-gpu-pci` first, which is the display the
 # `fb: scanout src` re-point and the screendump need, and the GL device second, which EGL picks
 # because the 2D one has no GL. The probe requires `wlcomp: dmabuf imported by the gl renderer`
