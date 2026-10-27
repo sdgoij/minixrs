@@ -2179,6 +2179,17 @@ and the module deletions (KMS, winit, X11, D-Bus, systemd, libei, xwayland, `the
 `cosmic-config` so `config/` and the settings types stay; and a minix output backend in place
 of KMS, which is the shape 4d-2 already proves.
 
+**The tree is LF everywhere.** Every repo here, submodules included, is configured
+`core.autocrlf=false` and checked out LF, so a Windows checkout and a Linux one see the same
+bytes. That is not tidiness: with a CRLF worktree LLVM's `config.guess` dies under a Linux
+shell, `x.py`'s LLVM stamp (`git diff-index` over `src/llvm-project`) hashes the entire tree
+and wedges when the tree sits on a 9p mount, and `git status` reports every file modified.
+The exceptions are byte-exact fixtures committed with CRLF on purpose: rustfmt's
+`tests/source/**/crlf*.rs` and `issue-3494/`, LLVM's `Inputs/crlf/`, coreutils' `*-win.spec`
+and `join/non-line_feeds_1.txt`. Converting those changes what they test, so a pass that
+renormalises EOLs has to restore them by hand (18 files in `rust/`, 137 in `src/llvm-project`,
+5 in `coreutils/`).
+
 **A trap in the build script.** `tools/build-smithay.py` reaches the pin with
 `git checkout --force`, so a hand edit under `target/smithay` both changes what the gates build
 and is silently discarded by the next fetch; the script's own edits are rewritten by text and a
