@@ -27,6 +27,9 @@ exclude = [
     # The same shape, for `tempfile`: the published crate has no minix arm, and
     # smithay needs one function (`tempfile_in`) to hand a keymap to a client.
     "crates/tempfile",
+    # And for `terminal_size`: it asks rustix's termios for the window size, which
+    # the port's rustix fork does not serve. `clap`'s `wrap_help` pulls it in.
+    "crates/terminal_size",
 ]
 
 members = [
