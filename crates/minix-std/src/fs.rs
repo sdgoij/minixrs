@@ -35,6 +35,10 @@ pub const VFS_BASE: u32 = 0x100;
 
 pub const VFS_READ: u32 = VFS_BASE;
 pub const VFS_WRITE: u32 = VFS_BASE + 1;
+/// `pread`, a port addition: MINIX has no positioned read (see `vfs::call`).
+pub const VFS_PREAD: u32 = VFS_BASE + 59;
+/// `pwrite`, a port addition as well.
+pub const VFS_PWRITE: u32 = VFS_BASE + 60;
 pub const VFS_LSEEK: u32 = VFS_BASE + 2;
 pub const VFS_OPEN: u32 = VFS_BASE + 3;
 pub const VFS_CREAT: u32 = VFS_BASE + 4;
@@ -686,6 +690,56 @@ pub unsafe fn write(fd: i32, buf: &[u8]) -> Result<i64, MinixErr> {
         msg_set_u64(&mut msg, OFF_RW_BUF, buf.as_ptr() as u64);
         msg_set_u64(&mut msg, OFF_RW_NBYTES, buf.len() as u64);
         msg_set_u64(&mut msg, OFF_RW_POSITION, 0);
+        let mtype = vfs_call(&mut msg)?;
+        Ok(mtype as i64)
+    }
+}
+
+/// Read from a file descriptor at an explicit offset, leaving the descriptor's
+/// file offset where it is (POSIX `pread`).
+///
+/// # Safety
+///
+/// `buf` must be a valid, mutable byte slice in the caller's address space.
+pub unsafe fn pread(fd: i32, buf: &mut [u8], offset: u64) -> Result<i64, MinixErr> {
+    #[cfg(not(target_os = "minix"))]
+    {
+        let _ = (fd, buf, offset, VFS_PROC_NR);
+        Err(MinixErr::ENOSYS)
+    }
+    #[cfg(target_os = "minix")]
+    unsafe {
+        let mut msg = [0u8; 64];
+        msg_set_i32(&mut msg, OFF_CALL, VFS_PREAD as i32);
+        msg_set_i32(&mut msg, OFF_RW_FD, fd);
+        msg_set_u64(&mut msg, OFF_RW_BUF, buf.as_ptr() as u64);
+        msg_set_u64(&mut msg, OFF_RW_NBYTES, buf.len() as u64);
+        msg_set_u64(&mut msg, OFF_RW_POSITION, offset);
+        let mtype = vfs_call(&mut msg)?;
+        Ok(mtype as i64)
+    }
+}
+
+/// Write to a file descriptor at an explicit offset, leaving the descriptor's
+/// file offset where it is (POSIX `pwrite`).
+///
+/// # Safety
+///
+/// `buf` must be a valid byte slice in the caller's address space.
+pub unsafe fn pwrite(fd: i32, buf: &[u8], offset: u64) -> Result<i64, MinixErr> {
+    #[cfg(not(target_os = "minix"))]
+    {
+        let _ = (fd, buf, offset, VFS_PROC_NR);
+        Err(MinixErr::ENOSYS)
+    }
+    #[cfg(target_os = "minix")]
+    unsafe {
+        let mut msg = [0u8; 64];
+        msg_set_i32(&mut msg, OFF_CALL, VFS_PWRITE as i32);
+        msg_set_i32(&mut msg, OFF_RW_FD, fd);
+        msg_set_u64(&mut msg, OFF_RW_BUF, buf.as_ptr() as u64);
+        msg_set_u64(&mut msg, OFF_RW_NBYTES, buf.len() as u64);
+        msg_set_u64(&mut msg, OFF_RW_POSITION, offset);
         let mtype = vfs_call(&mut msg)?;
         Ok(mtype as i64)
     }

@@ -492,6 +492,47 @@ pub unsafe extern "C" fn write(fd: c_int, buf: *const c_void, count: size_t) -> 
     }
 }
 
+/// `pread()` (POSIX): read at an explicit offset, leaving the descriptor's file
+/// offset where it is. VFS answers `ESPIPE` for anything but a regular file or a
+/// memfd.
+#[cfg(target_os = "minix")]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn pread(
+    fd: c_int,
+    buf: *mut c_void,
+    count: size_t,
+    offset: off_t,
+) -> ssize_t {
+    if buf.is_null() || offset < 0 {
+        return fail(22) as isize; // EINVAL
+    }
+    let slice = unsafe { core::slice::from_raw_parts_mut(buf as *mut u8, count) };
+    match unsafe { minix_std::fs::pread(fd, slice, offset as u64) } {
+        Ok(n) => n as isize,
+        Err(e) => fail(e.0) as isize,
+    }
+}
+
+/// `pwrite()` (POSIX): write at an explicit offset, leaving the descriptor's
+/// file offset where it is.
+#[cfg(target_os = "minix")]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn pwrite(
+    fd: c_int,
+    buf: *const c_void,
+    count: size_t,
+    offset: off_t,
+) -> ssize_t {
+    if buf.is_null() || offset < 0 {
+        return fail(22) as isize; // EINVAL
+    }
+    let slice = unsafe { core::slice::from_raw_parts(buf as *const u8, count) };
+    match unsafe { minix_std::fs::pwrite(fd, slice, offset as u64) } {
+        Ok(n) => n as isize,
+        Err(e) => fail(e.0) as isize,
+    }
+}
+
 /// `struct iovec` (`sys/uio.h`): one segment of a scatter/gather request.
 ///
 /// The layout is the C caller's — a pointer and a `size_t` — so the structures
@@ -787,9 +828,23 @@ struct Rusage {
 #[cfg(target_os = "minix")]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn fork() -> c_int {
+    // POSIX: the prepare handlers run in the parent before the split, then the
+    // parent's in the process that keeps the parent's identity and the child's
+    // in the new one.
+    unsafe { crate::pthread::atfork::prepare() };
     match unsafe { minix_std::process::fork() } {
-        Ok(pid) => pid,
-        Err(e) => fail(e.0),
+        Ok(0) => {
+            unsafe { crate::pthread::atfork::child() };
+            0
+        }
+        Ok(pid) => {
+            unsafe { crate::pthread::atfork::parent() };
+            pid
+        }
+        Err(e) => {
+            unsafe { crate::pthread::atfork::parent() };
+            fail(e.0)
+        }
     }
 }
 

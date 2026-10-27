@@ -1,0 +1,19 @@
+# A stand-in for the `terminal_size` crate, for minix: upstream asks
+# `rustix::termios` for `TIOCGWINSZ`, a surface the port's rustix fork does not
+# serve, and the port's request encoding is NetBSD's, not Linux's. `clap`'s
+# `wrap_help` feature is what pulls it in.
+#
+# The version is upstream's, so it satisfies `clap_builder`'s `^0.4.4`
+# requirement. `publish` is off: a name-shadowing package must never reach a
+# registry.
+[package]
+name = "terminal_size"
+version = "0.4.4"
+edition = "2024"
+rust-version = "1.96"
+license = "GPL2.0"
+description = "The terminal's window size from the tty server, for minix"
+publish = false
+
+[lib]
+crate-type = ["rlib"]

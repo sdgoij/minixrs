@@ -28,9 +28,8 @@ impl Errno {
         let mut buf = [0u8; 256];
         // SAFETY: the buffer and length handed to `strerror_r` are `buf` and
         // its length; `minix-libc` copies at most `buf.len() - 1` bytes into
-        // it and terminates the copy, returning `buf` (or null if it cannot).
-        let described =
-            unsafe { !strerror_r(self.0, buf.as_mut_ptr().cast(), buf.len()).is_null() };
+        // it, terminates the copy, and returns 0 (POSIX 2008 form).
+        let described = unsafe { strerror_r(self.0, buf.as_mut_ptr().cast(), buf.len()) == 0 };
         let msg = if described {
             let len = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
             std::str::from_utf8(&buf[..len]).unwrap_or("Unknown error")
@@ -88,5 +87,5 @@ pub fn set_errno(err: Errno) {
 
 unsafe extern "C" {
     fn __errno_location() -> *mut c_int;
-    fn strerror_r(errnum: c_int, buf: *mut c_char, buflen: usize) -> *mut c_char;
+    fn strerror_r(errnum: c_int, buf: *mut c_char, buflen: usize) -> c_int;
 }

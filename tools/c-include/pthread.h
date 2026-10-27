@@ -43,6 +43,7 @@ void pthread_exit(void *retval);
 pthread_t pthread_self(void);
 int pthread_equal(pthread_t a, pthread_t b);
 int pthread_detach(pthread_t thread);
+int pthread_atfork(void (*prepare)(void), void (*parent)(void), void (*child)(void));
 
 int pthread_mutexattr_init(pthread_mutexattr_t *attr);
 int pthread_mutexattr_destroy(pthread_mutexattr_t *attr);

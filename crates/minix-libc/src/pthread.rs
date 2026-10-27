@@ -856,3 +856,90 @@ fn fail(e: i32) -> i32 {
     set_errno(e);
     -1
 }
+
+/// `pthread_atfork()`: the handler lists `fork()` runs around the split.
+///
+/// The kernel has no `fork` of its own either; `fork()` here is a PM call that
+/// clones the process, so the C library runs these handlers around it (see
+/// `crate::fork`). Registration order is call order for all three lists, which
+/// POSIX leaves open.
+#[cfg(target_os = "minix")]
+pub(crate) mod atfork {
+    use core::ffi::c_int;
+    use core::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
+
+    use super::ENOMEM;
+
+    const MAX_ATFORK: usize = 16;
+    type Handler = unsafe extern "C" fn();
+
+    static LOCK: AtomicU32 = AtomicU32::new(0);
+    static PREPARE: [AtomicUsize; MAX_ATFORK] = [const { AtomicUsize::new(0) }; MAX_ATFORK];
+    static PARENT: [AtomicUsize; MAX_ATFORK] = [const { AtomicUsize::new(0) }; MAX_ATFORK];
+    static CHILD: [AtomicUsize; MAX_ATFORK] = [const { AtomicUsize::new(0) }; MAX_ATFORK];
+    static PREPARE_LEN: AtomicUsize = AtomicUsize::new(0);
+    static PARENT_LEN: AtomicUsize = AtomicUsize::new(0);
+    static CHILD_LEN: AtomicUsize = AtomicUsize::new(0);
+
+    fn push(list: &[AtomicUsize; MAX_ATFORK], len: &AtomicUsize, handler: Option<Handler>) -> bool {
+        let Some(handler) = handler else { return true };
+        let i = len.load(Ordering::Relaxed);
+        if i >= MAX_ATFORK {
+            return false;
+        }
+        list[i].store(handler as usize, Ordering::Relaxed);
+        len.store(i + 1, Ordering::Release);
+        true
+    }
+
+    unsafe fn run(list: &[AtomicUsize; MAX_ATFORK], len: &AtomicUsize) {
+        let registered = len.load(Ordering::Acquire);
+        for i in 0..registered.min(MAX_ATFORK) {
+            let handler = list[i].load(Ordering::Acquire);
+            if handler != 0 {
+                let handler: Handler = unsafe { core::mem::transmute(handler) };
+                unsafe { handler() };
+            }
+        }
+    }
+
+    pub(crate) unsafe fn prepare() {
+        unsafe { run(&PREPARE, &PREPARE_LEN) }
+    }
+
+    pub(crate) unsafe fn parent() {
+        unsafe { run(&PARENT, &PARENT_LEN) }
+    }
+
+    pub(crate) unsafe fn child() {
+        unsafe { run(&CHILD, &CHILD_LEN) }
+    }
+
+    /// POSIX `pthread_atfork()`: register the handlers `fork()` runs around
+    /// the split. The lists are fixed, so a full one answers `ENOMEM` the way
+    /// a failed allocation would.
+    ///
+    /// # Safety
+    ///
+    /// The handlers are called with no arguments at whatever point `fork()` is
+    /// at; they must be `extern "C"` functions with no parameters, as the
+    /// prototype says.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn pthread_atfork(
+        prepare: Option<Handler>,
+        parent: Option<Handler>,
+        child: Option<Handler>,
+    ) -> c_int {
+        while LOCK
+            .compare_exchange(0, 1, Ordering::Acquire, Ordering::Relaxed)
+            .is_err()
+        {
+            core::hint::spin_loop();
+        }
+        let ok = push(&PREPARE, &PREPARE_LEN, prepare)
+            && push(&PARENT, &PARENT_LEN, parent)
+            && push(&CHILD, &CHILD_LEN, child);
+        LOCK.store(0, Ordering::Release);
+        if ok { 0 } else { ENOMEM }
+    }
+}

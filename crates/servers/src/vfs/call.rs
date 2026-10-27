@@ -31,6 +31,9 @@ use minix_std::fs::Stat;
 
 /// Common: fd field offset in payload.
 const FD_OFF: usize = 8;
+/// pread/pwrite: the offset the call addresses (u64). `read` and `write` leave
+/// the slot zero and use the descriptor's own file offset.
+const RW_POS_OFF: usize = 32;
 /// lseek: offset (u64).
 const LSEEK_OFF_OFF: usize = 12;
 
@@ -585,10 +588,41 @@ fn block_io(
     moved as i32
 }
 
+/// The offset a read or write addresses.
+///
+/// `pread`/`pwrite` carry one and leave the descriptor's file offset where it
+/// is. Only regular files and memfds have bytes that an offset addresses, so
+/// every other descriptor answers `ESPIPE`, the way `pread` on a pipe does.
+///
+/// # Safety
+///
+/// `vp` must be the non-null vnode of an open descriptor.
+unsafe fn rw_offset(vp: *const Vnode, at: Option<u64>, filp_pos: i64) -> Result<i64, i32> {
+    let Some(at) = at else { return Ok(filp_pos) };
+    // SAFETY: the caller passes the descriptor's open vnode.
+    let seekable =
+        unsafe { (*vp).v_mode } & S_IFMT == S_IFREG || unsafe { crate::vfs::memfd::is_memfd(vp) };
+    if !seekable {
+        return Err(ESPIPE);
+    }
+    i64::try_from(at).map_err(|_| EINVAL)
+}
+
 /// Perform the `read(fd, buf, count)` system call.
 ///
 /// C source: `minix/servers/vfs/read.c` â€” `do_read()` (line 31)
 pub fn do_read() -> i32 {
+    read_fd(None)
+}
+
+/// Perform the `pread(fd, buf, count, offset)` system call, which reads at an
+/// explicit offset. MINIX has no `pread`, so this is a port addition.
+pub fn do_pread() -> i32 {
+    let glob = unsafe { &*vfs_global() };
+    read_fd(Some(r_u64(&glob.fs_m_in, RW_POS_OFF)))
+}
+
+fn read_fd(at: Option<u64>) -> i32 {
     let fp = match current_fp() {
         Some(fp) => fp,
         None => return EINVAL,
@@ -616,6 +650,10 @@ pub fn do_read() -> i32 {
         if vp.is_null() {
             return EBADF;
         }
+        let pos = match rw_offset(vp, at, filp.filp_pos) {
+            Ok(pos) => pos,
+            Err(err) => return err,
+        };
         // Pipes route through PFS (C rw_pipe): readiness check, then
         // req_read into PFS's block cache.
         if ((*vp).v_mode & S_IFMT) == S_IFIFO {
@@ -670,12 +708,12 @@ pub fn do_read() -> i32 {
                 fp.fp_endpoint,
                 (*vp).v_inode_nr,
                 (*vp).v_size,
-                filp.filp_pos,
+                pos,
                 buf_addr,
                 count,
                 false,
             );
-            if r >= 0 {
+            if r >= 0 && at.is_none() {
                 filp.filp_pos += r as i64;
             }
             return r;
@@ -685,12 +723,12 @@ pub fn do_read() -> i32 {
             (*vp).v_fs_e,
             (*vp).v_inode_nr,
             buf_addr as *mut u8,
-            filp.filp_pos,
+            pos,
             count as u32,
             fp.fp_endpoint,
             0,
         );
-        if r >= 0 {
+        if r >= 0 && at.is_none() {
             filp.filp_pos = new_pos;
         }
         r
@@ -701,6 +739,17 @@ pub fn do_read() -> i32 {
 ///
 /// C source: `minix/servers/vfs/read.c` â€” `read_write()` (line 132)
 pub fn do_write() -> i32 {
+    write_fd(None)
+}
+
+/// Perform the `pwrite(fd, buf, count, offset)` system call, which writes at an
+/// explicit offset. MINIX has no `pwrite`, so this is a port addition.
+pub fn do_pwrite() -> i32 {
+    let glob = unsafe { &*vfs_global() };
+    write_fd(Some(r_u64(&glob.fs_m_in, RW_POS_OFF)))
+}
+
+fn write_fd(at: Option<u64>) -> i32 {
     let fp = match current_fp() {
         Some(fp) => fp,
         None => return EINVAL,
@@ -728,6 +777,10 @@ pub fn do_write() -> i32 {
         if vp.is_null() {
             return EBADF;
         }
+        let pos = match rw_offset(vp, at, filp.filp_pos) {
+            Ok(pos) => pos,
+            Err(err) => return err,
+        };
         // Pipes route through PFS (C rw_pipe): readiness check, then
         // req_write into PFS's block cache.
         if ((*vp).v_mode & S_IFMT) == S_IFIFO {
@@ -777,12 +830,12 @@ pub fn do_write() -> i32 {
                 fp.fp_endpoint,
                 (*vp).v_inode_nr,
                 (*vp).v_size,
-                filp.filp_pos,
+                pos,
                 buf_addr,
                 count,
                 true,
             );
-            if r >= 0 {
+            if r >= 0 && at.is_none() {
                 filp.filp_pos += r as i64;
             }
             return r;
@@ -791,12 +844,12 @@ pub fn do_write() -> i32 {
             (*vp).v_fs_e,
             (*vp).v_inode_nr,
             buf_addr as *const u8,
-            filp.filp_pos,
+            pos,
             count as u32,
             fp.fp_endpoint,
             0,
         );
-        if r >= 0 {
+        if r >= 0 && at.is_none() {
             filp.filp_pos = new_pos;
         }
         r

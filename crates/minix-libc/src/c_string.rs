@@ -127,18 +127,27 @@ pub unsafe extern "C" fn strndup(s: *const c_char, n: usize) -> *mut c_char {
     out
 }
 
-/// `strerror_r()` (the GNU variant): the message for `errnum`, copied into
-/// `buf`, with `buf` returned. libc++'s `system_error.cpp`, under its thread
-/// path, dispatches on whichever return type this resolves to.
+/// `ERANGE`: the message did not fit the caller's buffer.
+#[cfg(target_os = "minix")]
+const ERANGE: c_int = 34;
+/// `EINVAL`: the caller passed no buffer at all.
+#[cfg(target_os = "minix")]
+const EINVAL: c_int = 22;
+
+/// `strerror_r()` (POSIX 2008 form): the message for `errnum` copied into `buf`,
+/// returning 0, or `ERANGE` when the buffer was too small and the message
+/// truncated. libc++'s `system_error.cpp` dispatches on the return type, so it
+/// takes this form as well as the older `char *` one, and the Rust crates that
+/// name `strerror_r` (`errno`, `getrandom`) expect this one.
 #[cfg(target_os = "minix")]
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn strerror_r(errnum: c_int, buf: *mut c_char, buflen: usize) -> *mut c_char {
+pub unsafe extern "C" fn strerror_r(errnum: c_int, buf: *mut c_char, buflen: usize) -> c_int {
     if buf.is_null() || buflen == 0 {
-        return core::ptr::null_mut();
+        return EINVAL;
     }
     let msg = unsafe { strerror(errnum) };
     if msg.is_null() {
-        return core::ptr::null_mut();
+        return EINVAL;
     }
     let mut n = 0usize;
     while unsafe { *msg.add(n) } != 0 {
@@ -149,7 +158,7 @@ pub unsafe extern "C" fn strerror_r(errnum: c_int, buf: *mut c_char, buflen: usi
         core::ptr::copy_nonoverlapping(msg as *const u8, buf as *mut u8, copy);
         *buf.add(copy) = 0;
     }
-    buf
+    if copy < n { ERANGE } else { 0 }
 }
 
 /// POSIX `strcoll()`: collation in the C locale is byte order, which is what

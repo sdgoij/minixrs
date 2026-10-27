@@ -15,6 +15,8 @@ extern "C" {
 
 ssize_t read(int fd, void *buf, size_t count);
 ssize_t write(int fd, const void *buf, size_t count);
+ssize_t pread(int fd, void *buf, size_t count, off_t offset);
+ssize_t pwrite(int fd, const void *buf, size_t count, off_t offset);
 int close(int fd);
 int getpid(void);
 int getppid(void);

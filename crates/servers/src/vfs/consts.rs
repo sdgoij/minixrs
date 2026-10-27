@@ -285,9 +285,15 @@ pub const VFS_EPOLL_CREATE1: i32 = VFS_BASE + 56;
 pub const VFS_EPOLL_CTL: i32 = VFS_BASE + 57;
 /// `epoll_wait(epfd, events, maxevents, timeout)` — report the ready interests.
 pub const VFS_EPOLL_WAIT: i32 = VFS_BASE + 58;
+/// `pread(fd, buf, count, offset)` — read at an explicit offset, leaving the
+/// descriptor's file offset alone. Not a reference call: MINIX has no `pread`.
+pub const VFS_PREAD: i32 = VFS_BASE + 59;
+/// `pwrite(fd, buf, count, offset)` — write at an explicit offset, leaving the
+/// descriptor's file offset alone. Not a reference call either.
+pub const VFS_PWRITE: i32 = VFS_BASE + 60;
 
 /// Number of VFS calls.
-pub const NR_VFS_CALLS: usize = 59;
+pub const NR_VFS_CALLS: usize = 61;
 
 /// F_DUPFD = 0 — duplicate fd as lowest available >= arg.
 pub const F_DUPFD: i32 = 0;
