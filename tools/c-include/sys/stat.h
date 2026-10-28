@@ -64,7 +64,9 @@ extern "C" {
 int stat(const char *path, struct stat *buf);
 int fstat(int fd, struct stat *buf);
 int lstat(const char *path, struct stat *buf);
+int fstatat(int dirfd, const char *path, struct stat *buf, int flags);
 int mkdir(const char *path, mode_t mode);
+int mkdirat(int dirfd, const char *path, mode_t mode);
 int mknod(const char *path, mode_t mode, dev_t dev);
 int mkfifo(const char *path, mode_t mode);
 int chmod(const char *path, mode_t mode);

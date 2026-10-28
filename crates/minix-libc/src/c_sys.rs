@@ -15,6 +15,8 @@ use crate::c_time::TimeT;
 const EINVAL: i32 = 22;
 const ENOMEM: i32 = 12;
 const EFAULT: i32 = 14;
+const EBADF: i32 = 9;
+const EIO: i32 = 5;
 /// C `errno.h` value, positive because this is what `fail` stores in `errno`.
 const ENOSYS: i32 = 78;
 
@@ -428,6 +430,21 @@ pub unsafe extern "C" fn getpagesize() -> c_int {
 #[cfg(target_os = "minix")]
 #[unsafe(no_mangle)]
 pub extern "C" fn sync() {}
+
+/// `posix_fadvise(2)`: declare an expected access pattern for an open file.
+///
+/// The VFS keeps no page cache of its own, so there is no advice to store and
+/// no readahead to prime; every advice value is accepted as a no-op.
+#[cfg(target_os = "minix")]
+#[unsafe(no_mangle)]
+pub extern "C" fn posix_fadvise(
+    _fd: c_int,
+    _offset: c_long,
+    _len: c_long,
+    _advice: c_int,
+) -> c_int {
+    0
+}
 
 /// BSD `flock()`: advisory whole-file locking. The VFS has no file locks, so the
 /// lock is granted unconditionally; the caller is Mesa's on-disk cache DB, which
@@ -921,12 +938,417 @@ pub unsafe extern "C" fn symlink(target: *const c_char, linkpath: *const c_char)
     }
 }
 
+/// `AT_FDCWD` from `tools/c-include/fcntl.h`: resolve relative to the cwd.
+#[cfg(target_os = "minix")]
+const AT_FDCWD: c_int = -100;
+
+/// `AT_SYMLINK_FOLLOW` from `tools/c-include/fcntl.h`.
+#[cfg(target_os = "minix")]
+const AT_SYMLINK_FOLLOW: c_int = 0x400;
+
+/// `AT_SYMLINK_NOFOLLOW` from `tools/c-include/fcntl.h`.
+#[cfg(target_os = "minix")]
+const AT_SYMLINK_NOFOLLOW: c_int = 0x200;
+
+/// `AT_REMOVEDIR` from `tools/c-include/fcntl.h`.
+#[cfg(target_os = "minix")]
+const AT_REMOVEDIR: c_int = 0x800;
+
+/// `AT_EACCESS` from `tools/c-include/fcntl.h`.
+#[cfg(target_os = "minix")]
+const AT_EACCESS: c_int = 0x100;
+
+#[cfg(target_os = "minix")]
+fn is_absolute(path: &[u8]) -> bool {
+    path.first() == Some(&b'/')
+}
+
+/// Run `f` with the process cwd moved to `dirfd`, then put it back.
+///
+/// The VFS has only path-based calls, so a directory descriptor handed to an
+/// `*at` function becomes an `fchdir` for the duration of one call. The cwd is
+/// process-wide, so a caller that reaches the move is the only thread whose
+/// relative paths are in flight.
+#[cfg(target_os = "minix")]
+unsafe fn with_dirfd<R>(
+    dirfd: c_int,
+    path: &[u8],
+    f: impl FnOnce() -> Result<R, minix_std::MinixErr>,
+) -> Result<R, minix_std::MinixErr> {
+    use minix_std::MinixErr;
+
+    if dirfd == AT_FDCWD || is_absolute(path) {
+        return f();
+    }
+    if dirfd < 0 {
+        return Err(MinixErr(EBADF));
+    }
+    // `getcwd(NULL, 0)` allocates, so the saved path is freed below.
+    let saved = unsafe { getcwd(core::ptr::null_mut(), 0) };
+    if saved.is_null() {
+        return Err(MinixErr(unsafe { *crate::__errno_location() }));
+    }
+    if let Err(e) = minix_std::fs::fchdir(dirfd) {
+        unsafe { crate::free(saved.cast()) };
+        return Err(e);
+    }
+    let out = f();
+    let restored = minix_std::fs::chdir(unsafe { core::ffi::CStr::from_ptr(saved) }.to_bytes());
+    unsafe { crate::free(saved.cast()) };
+    if restored.is_err() {
+        // The call already ran. A cwd that cannot be put back would misdirect
+        // every later relative path, so report it rather than continue.
+        return Err(MinixErr(EIO));
+    }
+    out
+}
+
+/// Resolve the two names of a `linkat`/`renameat`-shaped call.
+///
+/// The VFS takes both names in one call, so a pair that needs two different
+/// directories cannot be served by the single `fchdir` the port has; those
+/// pairs fail rather than half-apply. A name that was relative to the cwd also
+/// changes meaning under the move, so a cwd-relative name mixed with a
+/// dirfd-relative one is refused for the same reason.
+#[cfg(target_os = "minix")]
+unsafe fn two_paths<R>(
+    olddirfd: c_int,
+    old: &[u8],
+    newdirfd: c_int,
+    new: &[u8],
+    f: impl FnOnce() -> Result<R, minix_std::MinixErr>,
+) -> Result<R, minix_std::MinixErr> {
+    use minix_std::MinixErr;
+
+    let old_via_fd = !is_absolute(old) && olddirfd != AT_FDCWD;
+    let new_via_fd = !is_absolute(new) && newdirfd != AT_FDCWD;
+    let old_via_cwd = !is_absolute(old) && olddirfd == AT_FDCWD;
+    let new_via_cwd = !is_absolute(new) && newdirfd == AT_FDCWD;
+
+    if old_via_fd && new_via_fd {
+        if olddirfd != newdirfd {
+            return Err(MinixErr(ENOSYS));
+        }
+        return unsafe { with_dirfd(olddirfd, old, f) };
+    }
+    if (old_via_fd && new_via_cwd) || (new_via_fd && old_via_cwd) {
+        return Err(MinixErr(ENOSYS));
+    }
+    if old_via_fd {
+        return unsafe { with_dirfd(olddirfd, old, f) };
+    }
+    if new_via_fd {
+        return unsafe { with_dirfd(newdirfd, new, f) };
+    }
+    f()
+}
+
+/// `linkat(2)`: hard link `oldpath` to `newpath`, resolving either name
+/// against its `dirfd` when the name is relative.
+///
+/// The VFS link call never dereferences the old name, so `AT_SYMLINK_FOLLOW`
+/// has nothing to map onto and fails rather than linking the wrong inode.
+#[cfg(target_os = "minix")]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn linkat(
+    olddirfd: c_int,
+    oldpath: *const c_char,
+    newdirfd: c_int,
+    newpath: *const c_char,
+    flags: c_int,
+) -> c_int {
+    if oldpath.is_null() || newpath.is_null() {
+        return crate::fail(EINVAL);
+    }
+    if flags & !AT_SYMLINK_FOLLOW != 0 {
+        return crate::fail(EINVAL);
+    }
+    if flags & AT_SYMLINK_FOLLOW != 0 {
+        return crate::fail(ENOSYS);
+    }
+    let old = unsafe { core::ffi::CStr::from_ptr(oldpath) }.to_bytes();
+    let new = unsafe { core::ffi::CStr::from_ptr(newpath) }.to_bytes();
+    let result = unsafe {
+        two_paths(olddirfd, old, newdirfd, new, || {
+            minix_std::fs::link(old, new)
+        })
+    };
+    match result {
+        Ok(()) => 0,
+        Err(e) => crate::fail(e.0),
+    }
+}
+
+/// `symlinkat(2)`: `linkpath` is resolved against `newdirfd` when it is
+/// relative; `target` is stored as given and never resolved.
+#[cfg(target_os = "minix")]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn symlinkat(
+    target: *const c_char,
+    newdirfd: c_int,
+    linkpath: *const c_char,
+) -> c_int {
+    if target.is_null() || linkpath.is_null() {
+        return crate::fail(EINVAL);
+    }
+    let target_bytes = unsafe { core::ffi::CStr::from_ptr(target) }.to_bytes();
+    let linkpath_bytes = unsafe { core::ffi::CStr::from_ptr(linkpath) }.to_bytes();
+    let result = unsafe {
+        with_dirfd(newdirfd, linkpath_bytes, || {
+            minix_std::fs::symlink(target_bytes, linkpath_bytes)
+        })
+    };
+    match result {
+        Ok(()) => 0,
+        Err(e) => crate::fail(e.0),
+    }
+}
+
 /// Truncate an open file (VFS truncate).
 #[cfg(target_os = "minix")]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn ftruncate(fd: c_int, length: c_long) -> c_int {
     match minix_std::fs::truncate(fd, length as i64) {
         Ok(()) => 0,
+        Err(e) => crate::fail(e.0),
+    }
+}
+
+/// `openat(2)`: `path` is resolved against `dirfd` when it is relative.
+#[cfg(target_os = "minix")]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn openat(
+    dirfd: c_int,
+    path: *const c_char,
+    flags: c_int,
+    mode: c_uint,
+) -> c_int {
+    if path.is_null() {
+        return crate::fail(EINVAL);
+    }
+    let path_bytes = unsafe { core::ffi::CStr::from_ptr(path) }.to_bytes();
+    let result = unsafe {
+        with_dirfd(dirfd, path_bytes, || {
+            minix_std::fs::open(path_bytes, flags, mode)
+        })
+    };
+    match result {
+        Ok(fd) => fd,
+        Err(e) => crate::fail(e.0),
+    }
+}
+
+/// `renameat(2)`: `oldpath` and `newpath` are resolved against their own
+/// `dirfd` when relative; see [`two_paths`] for the pairs that cannot be.
+#[cfg(target_os = "minix")]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn renameat(
+    olddirfd: c_int,
+    oldpath: *const c_char,
+    newdirfd: c_int,
+    newpath: *const c_char,
+) -> c_int {
+    if oldpath.is_null() || newpath.is_null() {
+        return crate::fail(EINVAL);
+    }
+    let old = unsafe { core::ffi::CStr::from_ptr(oldpath) }.to_bytes();
+    let new = unsafe { core::ffi::CStr::from_ptr(newpath) }.to_bytes();
+    let result = unsafe {
+        two_paths(olddirfd, old, newdirfd, new, || {
+            minix_std::fs::rename(old, new)
+        })
+    };
+    match result {
+        Ok(()) => 0,
+        Err(e) => crate::fail(e.0),
+    }
+}
+
+/// `unlinkat(2)`: remove a name, or a directory when `AT_REMOVEDIR` is set.
+#[cfg(target_os = "minix")]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn unlinkat(dirfd: c_int, path: *const c_char, flags: c_int) -> c_int {
+    if path.is_null() {
+        return crate::fail(EINVAL);
+    }
+    if flags & !AT_REMOVEDIR != 0 {
+        return crate::fail(EINVAL);
+    }
+    let path_bytes = unsafe { core::ffi::CStr::from_ptr(path) }.to_bytes();
+    let result = unsafe {
+        with_dirfd(dirfd, path_bytes, || {
+            if flags & AT_REMOVEDIR != 0 {
+                minix_std::fs::rmdir(path_bytes)
+            } else {
+                minix_std::fs::unlink(path_bytes)
+            }
+        })
+    };
+    match result {
+        Ok(()) => 0,
+        Err(e) => crate::fail(e.0),
+    }
+}
+
+/// `mkdirat(2)`: create a directory relative to `dirfd`.
+#[cfg(target_os = "minix")]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mkdirat(dirfd: c_int, path: *const c_char, mode: c_uint) -> c_int {
+    if path.is_null() {
+        return crate::fail(EINVAL);
+    }
+    let path_bytes = unsafe { core::ffi::CStr::from_ptr(path) }.to_bytes();
+    let result =
+        unsafe { with_dirfd(dirfd, path_bytes, || minix_std::fs::mkdir(path_bytes, mode)) };
+    match result {
+        Ok(()) => 0,
+        Err(e) => crate::fail(e.0),
+    }
+}
+
+/// `faccessat(2)`: check the accessibility of a name relative to `dirfd`.
+#[cfg(target_os = "minix")]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn faccessat(
+    dirfd: c_int,
+    path: *const c_char,
+    mode: c_int,
+    flags: c_int,
+) -> c_int {
+    if path.is_null() {
+        return crate::fail(EINVAL);
+    }
+    // The VFS access check always follows the final component, so no flag the
+    // caller can pass has anything to change.
+    if flags & !AT_EACCESS != 0 {
+        return crate::fail(ENOSYS);
+    }
+    let path_bytes = unsafe { core::ffi::CStr::from_ptr(path) }.to_bytes();
+    let result = unsafe {
+        with_dirfd(dirfd, path_bytes, || {
+            minix_std::fs::access(path_bytes, mode as u32)
+        })
+    };
+    match result {
+        Ok(()) => 0,
+        Err(e) => crate::fail(e.0),
+    }
+}
+
+/// `fchmodat(2)`: change the mode of a name relative to `dirfd`.
+#[cfg(target_os = "minix")]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn fchmodat(
+    dirfd: c_int,
+    path: *const c_char,
+    mode: c_uint,
+    flags: c_int,
+) -> c_int {
+    if path.is_null() {
+        return crate::fail(EINVAL);
+    }
+    if flags != 0 {
+        return crate::fail(ENOSYS);
+    }
+    let path_bytes = unsafe { core::ffi::CStr::from_ptr(path) }.to_bytes();
+    let result =
+        unsafe { with_dirfd(dirfd, path_bytes, || minix_std::fs::chmod(path_bytes, mode)) };
+    match result {
+        Ok(()) => 0,
+        Err(e) => crate::fail(e.0),
+    }
+}
+
+/// `fchownat(2)`: change the owner of a name relative to `dirfd`.
+#[cfg(target_os = "minix")]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn fchownat(
+    dirfd: c_int,
+    path: *const c_char,
+    owner: c_uint,
+    group: c_uint,
+    flags: c_int,
+) -> c_int {
+    if path.is_null() {
+        return crate::fail(EINVAL);
+    }
+    if flags != 0 {
+        return crate::fail(ENOSYS);
+    }
+    let path_bytes = unsafe { core::ffi::CStr::from_ptr(path) }.to_bytes();
+    let result = unsafe {
+        with_dirfd(dirfd, path_bytes, || {
+            minix_std::fs::chown(path_bytes, owner, group)
+        })
+    };
+    match result {
+        Ok(()) => 0,
+        Err(e) => crate::fail(e.0),
+    }
+}
+
+/// `readlinkat(2)`: read a symlink's contents, relative to `dirfd`.
+#[cfg(target_os = "minix")]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn readlinkat(
+    dirfd: c_int,
+    path: *const c_char,
+    buf: *mut c_char,
+    bufsiz: usize,
+) -> isize {
+    if path.is_null() || (buf.is_null() && bufsiz != 0) {
+        return crate::fail(EINVAL) as isize;
+    }
+    let path_bytes = unsafe { core::ffi::CStr::from_ptr(path) }.to_bytes();
+    // A null buffer with a zero size is the one shape POSIX leaves unspecified;
+    // there is nothing to write and nothing to build a slice from.
+    let out = if bufsiz == 0 {
+        &mut [][..]
+    } else {
+        unsafe { core::slice::from_raw_parts_mut(buf as *mut u8, bufsiz) }
+    };
+    let result = unsafe {
+        with_dirfd(dirfd, path_bytes, || {
+            minix_std::fs::readlink(path_bytes, out)
+        })
+    };
+    match result {
+        Ok(n) => n as isize,
+        Err(e) => crate::fail(e.0) as isize,
+    }
+}
+
+/// `fstatat(2)`: metadata for a name relative to `dirfd`.
+///
+/// `AT_SYMLINK_NOFOLLOW` selects the lstat form, which is the only flag the
+/// VFS can honour; anything else is refused rather than silently ignored.
+#[cfg(target_os = "minix")]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn fstatat(
+    dirfd: c_int,
+    path: *const c_char,
+    buf: *mut c_void,
+    flags: c_int,
+) -> c_int {
+    if path.is_null() || buf.is_null() {
+        return crate::fail(EINVAL);
+    }
+    if flags & !AT_SYMLINK_NOFOLLOW != 0 {
+        return crate::fail(ENOSYS);
+    }
+    let path_bytes = unsafe { core::ffi::CStr::from_ptr(path) }.to_bytes();
+    let stat_fn = if flags & AT_SYMLINK_NOFOLLOW != 0 {
+        minix_std::fs::lstat
+    } else {
+        minix_std::fs::stat
+    };
+    let result = unsafe {
+        with_dirfd(dirfd, path_bytes, || {
+            Ok(crate::stat_path_impl(stat_fn, path, buf))
+        })
+    };
+    match result {
+        Ok(rc) => rc,
         Err(e) => crate::fail(e.0),
     }
 }

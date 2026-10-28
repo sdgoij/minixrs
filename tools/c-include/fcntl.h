@@ -46,7 +46,9 @@ extern "C" {
 #endif
 
 int open(const char *path, int flags, ...);
+int openat(int dirfd, const char *path, int flags, ...);
 int fcntl(int fd, int cmd, ...);
+int posix_fadvise(int fd, off_t offset, off_t len, int advice);
 
 #ifdef __cplusplus
 }

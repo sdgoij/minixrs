@@ -35,6 +35,7 @@ mod c_string;
 mod c_sys;
 mod c_termios;
 mod c_time;
+mod c_unwind;
 mod c_wchar;
 
 /// The `panic` lang item for the shared-object build (`libc.so`).
@@ -1212,7 +1213,7 @@ pub unsafe extern "C" fn fstat(fd: c_int, buf: *mut c_void) -> c_int {
 /// `path` must be a NUL-terminated C string and `buf` must point to at
 /// least `size_of::<Stat>()` writable bytes.
 #[cfg(target_os = "minix")]
-unsafe fn stat_path_impl(
+pub(crate) unsafe fn stat_path_impl(
     f: fn(&str) -> Result<minix_std::fs::Stat, minix_std::MinixErr>,
     path: *const c_char,
     buf: *mut c_void,
