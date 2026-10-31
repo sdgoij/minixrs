@@ -33,3 +33,7 @@
 	path = rust_libloading
 	url = git@github.com:sdgoij/rust_libloading.git
 	branch = feature/minixrs
+[submodule "cosmic-comp"]
+	path = cosmic-comp
+	url = git@github.com:sdgoij/cosmic-comp.git
+	branch = feature/minixrs

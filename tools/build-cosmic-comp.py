@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-"""Fetch cosmic-comp at its pin and check it against the forks.
+"""Check the cosmic-comp fork against the forks.
 
-cosmic-comp is never modified: it is fetched at a pinned revision into
-`target/cosmic-comp` and built from a generated workspace
-(`target/cosmic-comp-probe`) whose `[patch.crates-io]` points every OS-keyed
-crate at this tree's fork, exactly as `tools/build-smithay.py` does for smithay.
-The smithay checkout that script owns is this build's smithay too, so run it (or
-just this script, which ensures it) first.
+cosmic-comp is carried as the `cosmic-comp/` submodule, at a revision that
+contains the one `.notes/wayland.md` 6.13 measured, and built from a generated
+workspace (`target/cosmic-comp-probe`) whose `[patch.crates-io]` points every
+OS-keyed crate at this tree's fork, exactly as `tools/build-smithay.py` does for
+smithay. The smithay checkout that script owns is this build's smithay too, so
+run it (or just this script, which ensures it) first.
 
 Usage: python tools/build-cosmic-comp.py [all|x86|riscv64|aarch64|<triple>]
                                   [--metadata|--check|--build]
@@ -18,8 +18,7 @@ Usage: python tools/build-cosmic-comp.py [all|x86|riscv64|aarch64|<triple>]
 
 Runs on any host with a stage1 for it (`just bootstrap` or `just fetch-stage1`).
 
-Outputs: `target/cosmic-comp` (the pinned checkout) and
-`target/cosmic-comp-probe` (the generated workspace).
+Outputs: `target/cosmic-comp-probe` (the generated workspace).
 """
 
 from __future__ import annotations
@@ -28,7 +27,6 @@ import importlib.util
 import os
 import pathlib
 import platform
-import shutil
 import subprocess
 import sys
 
@@ -37,12 +35,11 @@ sys.path.insert(0, str(ROOT / "tools"))
 
 from ccarch import ALL, resolve  # noqa: E402
 
-COSMIC_REPO = "https://github.com/pop-os/cosmic-comp"
 COSMIC_COMMIT = "6700a5d03f86983bbdb05c48e8190a9b46ff79ad"
-"""The revision `.notes/wayland.md` 6.13 was measured at. The checkout is
-verified against this sha, so a moved default branch cannot change the build."""
+"""The upstream revision `.notes/wayland.md` 6.13 was measured at. The fork must
+contain it, so a branch that has lost the measurement cannot build silently."""
 
-COSMIC_DIR = ROOT / "target" / "cosmic-comp"
+COSMIC_DIR = ROOT / "cosmic-comp"
 PROBE_DIR = ROOT / "target" / "cosmic-comp-probe"
 CARGO_TARGET = ROOT / "target" / f"cosmic-comp-target-{platform.system().lower()}"
 
@@ -82,7 +79,7 @@ edition = "2021"
 [dependencies]
 # The shell at its own revision, with the system-integration features off: the
 # port has no D-Bus, logind or systemd.
-cosmic-comp = {{ path = "../cosmic-comp", default-features = false }}
+cosmic-comp = {{ path = "../../cosmic-comp", default-features = false }}
 
 [patch.crates-io]
 smithay = {{ path = "../smithay" }}
@@ -126,21 +123,15 @@ def load_smithay_tool():
 
 
 def ensure_cosmic() -> None:
-    """Fetch the pinned checkout, or move the existing one onto the pin."""
-    if not (COSMIC_DIR / ".git").is_dir():
-        if COSMIC_DIR.exists():
-            shutil.rmtree(COSMIC_DIR)
-        print(f"fetching cosmic-comp into {COSMIC_DIR.relative_to(ROOT)}")
-        run(["git", "clone", "--filter=blob:none", COSMIC_REPO, str(COSMIC_DIR)])
-
+    """Check that the submodule is present and still contains the measured revision."""
+    if not (COSMIC_DIR / ".git").exists():
+        die("cosmic-comp is not checked out: run `git submodule update --init cosmic-comp`")
     head = output(["git", "rev-parse", "HEAD"], cwd=COSMIC_DIR)
-    if head != COSMIC_COMMIT:
-        print(f"moving cosmic-comp from {head[:12]} to the pin {COSMIC_COMMIT[:12]}")
-        run(["git", "fetch", "--depth", "1", "origin", COSMIC_COMMIT], cwd=COSMIC_DIR)
-        run(["git", "checkout", "--force", COSMIC_COMMIT], cwd=COSMIC_DIR)
-        head = output(["git", "rev-parse", "HEAD"], cwd=COSMIC_DIR)
-        if head != COSMIC_COMMIT:
-            die(f"cosmic-comp is at {head}, wanted {COSMIC_COMMIT}")
+    contains = subprocess.run(["git", "merge-base", "--is-ancestor",
+                               COSMIC_COMMIT, head], cwd=COSMIC_DIR)
+    if contains.returncode != 0:
+        die(f"cosmic-comp at {head[:12]} does not contain the measured revision "
+            f"{COSMIC_COMMIT[:12]}")
 
 
 def render_git_patches() -> str:

@@ -19,6 +19,9 @@ exclude = [
     "rustix",
     "polling",
     "calloop",
+    # The compositor is fetched as a fork and built from a generated workspace
+    # of its own (`tools/build-cosmic-comp.py`), never as a member here.
+    "cosmic-comp",
     # A `[patch.crates-io]` stand-in for the `errno` crate. It is ours rather
     # than a fork, but it exists to be patched into a foreign graph: as a member
     # it would shadow nothing (`[patch]` is the only way it is consumed) and
