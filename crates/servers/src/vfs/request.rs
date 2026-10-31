@@ -386,13 +386,25 @@ pub unsafe fn req_create(
 ) -> (i32, NodeDetails) {
     #[cfg(target_os = "minix")]
     {
-        let path_bytes = if _path.is_null() {
-            &[]
+        // The name travels through a direct grant, as `req_link`'s does: it is VFS's own
+        // NUL-terminated copy of the path's last component, and the message's spare bytes are
+        // far too few for a name (`MFS_NAME_MAX` is 60), which is why the embedded form this
+        // used to use silently truncated every longer one.
+        let path_len = if _path.is_null() {
+            0
         } else {
-            core::ffi::CStr::from_ptr(_path.cast::<core::ffi::c_char>()).to_bytes()
+            core::ffi::CStr::from_ptr(_path.cast::<core::ffi::c_char>())
+                .to_bytes()
+                .len()
+                + 1
         };
-        let path_len = path_bytes.len() + 1;
-        let path_copy_len = path_bytes.len().min(28);
+        let grant_id = cpf_grant_direct(
+            arch_common::com::VFS_PROC_NR,
+            fs_e,
+            _path as u64,
+            path_len,
+            false,
+        );
 
         let mut msg = [0u8; 56];
         w_i32(&mut msg, M_TYPE_OFF, REQ_CREATE);
@@ -401,15 +413,10 @@ pub unsafe fn req_create(
         w_u16(&mut msg, PAYLOAD_OFF + 6, uid); // uid
         w_u16(&mut msg, PAYLOAD_OFF + 8, gid); // gid
         w_u32(&mut msg, PAYLOAD_OFF + 12, path_len as u32); // path_len
-        // Embed path at offset 16 (up to 28 bytes)
-        if path_copy_len > 0 {
-            msg[PAYLOAD_OFF + 16..PAYLOAD_OFF + 16 + path_copy_len]
-                .copy_from_slice(&path_bytes[..path_copy_len]);
-        }
-        // Null-terminate
-        msg[PAYLOAD_OFF + 16 + path_copy_len] = 0;
+        w_i32(&mut msg, PAYLOAD_OFF + 16, grant_id); // name grant
 
         let r = fs_sendrec(fs_e, &mut msg);
+        crate::vfs::grant::cpf_revoke(grant_id);
 
         if r != crate::vfs::consts::OK {
             return (r, NodeDetails::default());
@@ -793,13 +800,22 @@ pub unsafe fn req_mkdir(
 ) -> i32 {
     #[cfg(target_os = "minix")]
     {
-        let path_bytes = if _lastc.is_null() {
-            &[]
+        // The name travels through a direct grant; see `req_create`.
+        let path_len = if _lastc.is_null() {
+            0
         } else {
-            core::ffi::CStr::from_ptr(_lastc.cast::<core::ffi::c_char>()).to_bytes()
+            core::ffi::CStr::from_ptr(_lastc.cast::<core::ffi::c_char>())
+                .to_bytes()
+                .len()
+                + 1
         };
-        let path_len = path_bytes.len() + 1;
-        let path_copy_len = path_bytes.len().min(28);
+        let grant_id = cpf_grant_direct(
+            arch_common::com::VFS_PROC_NR,
+            fs_e,
+            _lastc as u64,
+            path_len,
+            false,
+        );
 
         let mut msg = [0u8; 56];
         w_i32(&mut msg, M_TYPE_OFF, REQ_MKDIR);
@@ -808,15 +824,11 @@ pub unsafe fn req_mkdir(
         w_u16(&mut msg, PAYLOAD_OFF + 6, uid); // uid
         w_u16(&mut msg, PAYLOAD_OFF + 8, gid); // gid
         w_u32(&mut msg, PAYLOAD_OFF + 12, path_len as u32); // path_len
-        // Embed path at offset 16 (up to 28 bytes)
-        if path_copy_len > 0 {
-            msg[PAYLOAD_OFF + 16..PAYLOAD_OFF + 16 + path_copy_len]
-                .copy_from_slice(&path_bytes[..path_copy_len]);
-        }
-        // Null-terminate
-        msg[PAYLOAD_OFF + 16 + path_copy_len] = 0;
+        w_i32(&mut msg, PAYLOAD_OFF + 16, grant_id); // name grant
 
-        fs_sendrec(fs_e, &mut msg)
+        let r = fs_sendrec(fs_e, &mut msg);
+        crate::vfs::grant::cpf_revoke(grant_id);
+        r
     }
     #[cfg(not(target_os = "minix"))]
     {
@@ -843,13 +855,26 @@ pub unsafe fn req_mknod(
 ) -> i32 {
     #[cfg(target_os = "minix")]
     {
-        let path_bytes = if lastc.is_null() {
-            &[]
+        // The name travels through a direct grant; see `req_create`.
+        let path_len = if lastc.is_null() {
+            0
         } else {
-            core::ffi::CStr::from_ptr(lastc.cast::<core::ffi::c_char>()).to_bytes()
+            core::ffi::CStr::from_ptr(lastc.cast::<core::ffi::c_char>())
+                .to_bytes()
+                .len()
+                + 1
         };
-        let mut msg = build_mknod_msg(inode_nr, dmode, uid, gid, dev, path_bytes);
-        fs_sendrec(fs_e, &mut msg)
+        let grant_id = cpf_grant_direct(
+            arch_common::com::VFS_PROC_NR,
+            fs_e,
+            lastc as u64,
+            path_len,
+            false,
+        );
+        let mut msg = build_mknod_msg(inode_nr, dmode, uid, gid, dev, grant_id, path_len);
+        let r = fs_sendrec(fs_e, &mut msg);
+        crate::vfs::grant::cpf_revoke(grant_id);
+        r
     }
     #[cfg(not(target_os = "minix"))]
     {
@@ -858,15 +883,15 @@ pub unsafe fn req_mknod(
     }
 }
 
-/// Build the REQ_MKNOD request — embedded-path layout, parsed by MFS
+/// Build the REQ_MKNOD request — grant-carrying layout, parsed by MFS
 /// `parse_mknod_request` (see crates/fs/src/mfs/main.rs):
 ///   raw[0..4]  = inode (u32)
 ///   raw[4..6]  = mode (u16)
 ///   raw[6..8]  = uid (u16)
 ///   raw[8..10] = gid (u16)
 ///   raw[10..14]= device (u32)
-///   raw[14..18]= path_len (u32)
-///   raw[18..]  = path data (up to 30 bytes, null-terminated)
+///   raw[14..18]= path_len (u32, the NUL counted)
+///   raw[18..22]= name grant (i32)
 #[cfg(any(test, target_os = "minix"))]
 fn build_mknod_msg(
     inode_nr: u32,
@@ -874,13 +899,9 @@ fn build_mknod_msg(
     uid: u16,
     gid: u16,
     dev: u32,
-    path_bytes: &[u8],
+    grant_id: i32,
+    path_len: usize,
 ) -> [u8; 56] {
-    let path_len = path_bytes.len() + 1;
-    // The embedded field ends at the message's last byte, so the terminator
-    // only fits for 29 bytes of name: a 30-byte one wrote byte 56 of 56.
-    let path_copy_len = path_bytes.len().min(56 - (PAYLOAD_OFF + 18) - 1);
-
     let mut msg = [0u8; 56];
     w_i32(&mut msg, M_TYPE_OFF, REQ_MKNOD);
     w_u32(&mut msg, PAYLOAD_OFF, inode_nr); // inode
@@ -888,12 +909,8 @@ fn build_mknod_msg(
     w_u16(&mut msg, PAYLOAD_OFF + 6, uid); // uid
     w_u16(&mut msg, PAYLOAD_OFF + 8, gid); // gid
     w_u32(&mut msg, PAYLOAD_OFF + 10, dev); // device
-    w_u32(&mut msg, PAYLOAD_OFF + 14, path_len as u32);
-    if path_copy_len > 0 {
-        msg[PAYLOAD_OFF + 18..PAYLOAD_OFF + 18 + path_copy_len]
-            .copy_from_slice(&path_bytes[..path_copy_len]);
-    }
-    msg[PAYLOAD_OFF + 18 + path_copy_len] = 0;
+    w_u32(&mut msg, PAYLOAD_OFF + 14, path_len as u32); // path_len
+    w_i32(&mut msg, PAYLOAD_OFF + 18, grant_id); // name grant
 
     msg
 }
@@ -1731,22 +1748,20 @@ mod tests {
 
     #[test]
     fn test_req_mknod_wire_layout() {
-        // VFS → FS mknod embedded-path layout: inode u32@payload[0], mode
-        // u16@4, uid u16@6, gid u16@8, device u32@10, path_len u32@14,
-        // name at 18.. null-terminated. MFS parse_mknod_request reads the
-        // same offsets — the pin keeps both sides from drifting (the
-        // pre-Stage-3 grant-based layout was never parsed by MFS).
-        let msg = build_mknod_msg(7, 0o10000, 0x11, 0x22, 0x33, b"fifo");
+        // VFS → FS mknod grant layout: inode u32@payload[0], mode u16@4, uid
+        // u16@6, gid u16@8, device u32@10, path_len u32@14, name grant
+        // i32@18. The filesystems parse the same offsets — the pin keeps both
+        // sides from drifting, and the name is never in the message (a name
+        // can be 60 bytes and the payload has 30 spare).
+        let msg = build_mknod_msg(7, 0o10000, 0x11, 0x22, 0x33, 5, 5);
         assert_eq!(r_i32(&msg, M_TYPE_OFF), REQ_MKNOD);
         assert_eq!(r_u32(&msg, PAYLOAD_OFF), 7);
         assert_eq!(r_u16(&msg, PAYLOAD_OFF + 4), 0o10000);
         assert_eq!(r_u16(&msg, PAYLOAD_OFF + 6), 0x11);
         assert_eq!(r_u16(&msg, PAYLOAD_OFF + 8), 0x22);
         assert_eq!(r_u32(&msg, PAYLOAD_OFF + 10), 0x33);
-        // name "fifo" + NUL at payload[18..]
         assert_eq!(r_u32(&msg, PAYLOAD_OFF + 14), 5); // path_len
-        assert_eq!(&msg[PAYLOAD_OFF + 18..PAYLOAD_OFF + 22], b"fifo");
-        assert_eq!(msg[PAYLOAD_OFF + 22], 0);
+        assert_eq!(r_i32(&msg, PAYLOAD_OFF + 18), 5); // name grant
     }
 
     #[test]

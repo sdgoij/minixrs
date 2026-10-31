@@ -328,6 +328,30 @@ pub fn safecopy_from(granter: i32, grant_id: i32, dst: &mut [u8]) -> i32 {
     minix_rt::kernel_call(31, &mut kmsg) // SYS_SAFECOPYFROM
 }
 
+/// Copy the entry name of a mknod/create/mkdir request out of the direct grant VFS placed on
+/// its own NUL-terminated copy of the path's last component, and return the status.
+///
+/// `path_len` counts that terminator. The name cannot travel inside the message: the payload
+/// leaves 28 bytes after the scalar fields, while a name may be `MFS_NAME_MAX` (60), so the
+/// embedded form silently truncated every longer one.
+///
+/// A host build has no kernel to copy through, so there the caller (a test) leaves the name in
+/// `dst`, as it does for `fs_lookup`'s path.
+pub fn load_entry_name(grant: i32, path_len: usize, dst: &mut [u8]) -> i32 {
+    let copy_len = path_len.clamp(1, dst.len());
+    #[cfg(target_os = "minix")]
+    {
+        let r = safecopy_from(arch_common::com::VFS_PROC_NR, grant, &mut dst[..copy_len]);
+        if r != OK {
+            return r;
+        }
+    }
+    #[cfg(not(target_os = "minix"))]
+    let _ = grant;
+    dst[copy_len - 1] = 0;
+    OK
+}
+
 /// Copy `src` into the grant `grant_id` (granted by `granter`) via
 /// `SYS_SAFECOPYTO`. Used to write reply payloads (e.g. stat buffers)
 /// into the granter's granted memory.

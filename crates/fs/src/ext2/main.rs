@@ -72,10 +72,10 @@ pub unsafe fn init_server() -> i32 {
     OK
 }
 
-/// Parse a REQ_MKNOD message payload (VFS `req_mknod`'s embedded-path layout)
-/// into the fields `fs_mknod` reads: cch[0] = dir_ino, cch[1] = mode,
-/// cch[2] = device, cch[3] = uid, cch[4] = gid, plus the entry name in
-/// user_path (null-terminated).
+/// Parse a REQ_MKNOD message payload (VFS `req_mknod`'s grant-carrying
+/// layout) into the fields `fs_mknod` reads: cch[0] = dir_ino, cch[1] = mode,
+/// cch[2] = device, cch[3] = uid, cch[4] = gid. Returns the entry name's grant
+/// and length, for [`crate::block_io::load_entry_name`].
 ///
 /// Payload-relative byte offsets (kept in lockstep with `vfs/request.rs`
 /// `build_mknod_msg`):
@@ -84,12 +84,12 @@ pub unsafe fn init_server() -> i32 {
 ///   raw[6..8]   = uid (u16)
 ///   raw[8..10]  = gid (u16)
 ///   raw[10..14] = device (u32)
-///   raw[14..18] = path_len (u32)
-///   raw[18..]   = name (up to 30 bytes, null-terminated)
+///   raw[14..18] = path_len (u32, the NUL counted)
+///   raw[18..22] = name grant (i32)
 ///
-/// Short/truncated payloads parse defensively (zeros, empty name).
+/// Short/truncated payloads parse defensively (zeros).
 #[cfg(any(test, target_os = "minix"))]
-pub(crate) fn parse_mknod_request(raw: &[u8], cch: &mut [i32], user_path: &mut [u8]) {
+pub(crate) fn parse_mknod_request(raw: &[u8], cch: &mut [i32]) -> (i32, usize) {
     let rd32 = |off: usize| {
         u32::from_le_bytes(
             raw.get(off..off + 4)
@@ -111,30 +111,22 @@ pub(crate) fn parse_mknod_request(raw: &[u8], cch: &mut [i32], user_path: &mut [
     cch[3] = rd16(6) as i32;
     cch[4] = rd16(8) as i32;
 
-    let path_len = rd32(14) as usize;
-    let copy_len = path_len
-        .min(PATH_MAX - 1)
-        .min(30)
-        .min(raw.len().saturating_sub(18));
-    if copy_len > 0 {
-        user_path[..copy_len].copy_from_slice(&raw[18..18 + copy_len]);
-    }
-    user_path[copy_len] = 0;
+    (rd32(18) as i32, rd32(14) as usize)
 }
 
 /// Parse a REQ_CREATE / REQ_MKDIR payload into cch[0] = dir_ino,
-/// cch[1] = mode, cch[2] = uid, cch[3] = gid, with the entry name in
-/// user_path (null-terminated).
+/// cch[1] = mode, cch[2] = uid, cch[3] = gid, and return the entry name's grant
+/// and length for [`crate::block_io::load_entry_name`].
 ///
 /// Payload-relative byte offsets (VFS `build_create_msg`/`build_mkdir_msg`):
 ///   raw[0..4]   = dir_ino (u32)
 ///   raw[4..6]   = mode (u16)
 ///   raw[6..8]   = uid (u16)
 ///   raw[8..10]  = gid (u16)
-///   raw[12..16] = path_len (u32)
-///   raw[16..]   = name (up to 28 bytes, null-terminated)
+///   raw[12..16] = path_len (u32, the NUL counted)
+///   raw[16..20] = name grant (i32)
 #[cfg(any(test, target_os = "minix"))]
-pub(crate) fn parse_dir_create_request(raw: &[u8], cch: &mut [i32], user_path: &mut [u8]) {
+pub(crate) fn parse_dir_create_request(raw: &[u8], cch: &mut [i32]) -> (i32, usize) {
     let rd32 = |off: usize| {
         u32::from_le_bytes(
             raw.get(off..off + 4)
@@ -155,15 +147,7 @@ pub(crate) fn parse_dir_create_request(raw: &[u8], cch: &mut [i32], user_path: &
     cch[2] = rd16(6) as i32;
     cch[3] = rd16(8) as i32;
 
-    let path_len = rd32(12) as usize;
-    let copy_len = path_len
-        .min(PATH_MAX - 1)
-        .min(28)
-        .min(raw.len().saturating_sub(16));
-    if copy_len > 0 {
-        user_path[..copy_len].copy_from_slice(&raw[16..16 + copy_len]);
-    }
-    user_path[copy_len] = 0;
+    (rd32(16) as i32, rd32(12) as usize)
 }
 
 /// Main message processing loop.
@@ -218,15 +202,26 @@ pub fn ext2_main() -> i32 {
                 let raw = &(*ext2).m_in.m_payload.raw;
                 let cch = core::ptr::addr_of_mut!((*ext2).cch);
                 let user_path = core::ptr::addr_of_mut!((*ext2).user_path);
-                match req_nr {
+                let name = match req_nr {
                     // REQ_MKNOD
-                    21 => parse_mknod_request(raw, &mut *cch, &mut *user_path),
+                    21 => Some(parse_mknod_request(raw, &mut *cch)),
                     // REQ_MKDIR, REQ_CREATE
-                    22 | 23 => parse_dir_create_request(raw, &mut *cch, &mut *user_path),
-                    _ => {}
-                }
+                    22 | 23 => Some(parse_dir_create_request(raw, &mut *cch)),
+                    _ => None,
+                };
+                // The name arrives through VFS's grant, not inside the message.
+                let name_status = match name {
+                    Some((grant, path_len)) => {
+                        crate::block_io::load_entry_name(grant, path_len, &mut *user_path)
+                    }
+                    None => OK,
+                };
 
-                let status = dispatch(req_nr);
+                let status = if name_status == OK {
+                    dispatch(req_nr)
+                } else {
+                    name_status
+                };
 
                 // Handlers build their reply in `m_out` (C: fs_m_out), so the
                 // loop only stamps the status and sends it.
@@ -268,30 +263,30 @@ mod tests {
         raw[6..8].copy_from_slice(&1u16.to_le_bytes());
         raw[8..10].copy_from_slice(&2u16.to_le_bytes());
         raw[10..14].copy_from_slice(&0x0103u32.to_le_bytes());
-        raw[14..18].copy_from_slice(&3u32.to_le_bytes());
-        raw[18..21].copy_from_slice(b"dev");
+        raw[14..18].copy_from_slice(&4u32.to_le_bytes());
+        raw[18..22].copy_from_slice(&11i32.to_le_bytes());
 
         let mut cch = [0i32; 8];
-        let mut path = [0u8; PATH_MAX];
-        parse_mknod_request(&raw, &mut cch, &mut path);
+        let (grant, path_len) = parse_mknod_request(&raw, &mut cch);
 
         assert_eq!(cch[0], 7);
         assert_eq!(cch[1], 0o20644);
         assert_eq!(cch[2], 0x0103);
         assert_eq!(cch[3], 1);
         assert_eq!(cch[4], 2);
-        assert_eq!(&path[..4], b"dev\0");
+        assert_eq!(grant, 11);
+        assert_eq!(path_len, 4);
     }
 
     #[test]
     fn test_parse_mknod_request_short_payload() {
         let raw = [0u8; 4];
         let mut cch = [0i32; 8];
-        let mut path = [0xffu8; PATH_MAX];
-        parse_mknod_request(&raw, &mut cch, &mut path);
+        let (grant, path_len) = parse_mknod_request(&raw, &mut cch);
 
         assert_eq!(cch[..5], [0, 0, 0, 0, 0]);
-        assert_eq!(path[0], 0);
+        assert_eq!(grant, 0);
+        assert_eq!(path_len, 0);
     }
 
     #[test]
@@ -302,32 +297,25 @@ mod tests {
         raw[6..8].copy_from_slice(&5u16.to_le_bytes());
         raw[8..10].copy_from_slice(&6u16.to_le_bytes());
         raw[12..16].copy_from_slice(&4u32.to_le_bytes());
-        raw[16..20].copy_from_slice(b"file");
+        raw[16..20].copy_from_slice(&12i32.to_le_bytes());
 
         let mut cch = [0i32; 8];
-        let mut path = [0u8; PATH_MAX];
-        parse_dir_create_request(&raw, &mut cch, &mut path);
+        let (grant, path_len) = parse_dir_create_request(&raw, &mut cch);
 
         assert_eq!(cch[0], 9);
         assert_eq!(cch[1], 0o40755);
         assert_eq!(cch[2], 5);
         assert_eq!(cch[3], 6);
-        assert_eq!(&path[..5], b"file\0");
+        assert_eq!(grant, 12);
+        assert_eq!(path_len, 4);
     }
 
     #[test]
-    fn test_parse_dir_create_request_terminates_long_name() {
-        // A maximum-length name still gets a NUL terminator, and a path_len
-        // past the payload must not read past the end of it.
-        let mut raw = [0u8; 16 + 28];
-        raw[12..16].copy_from_slice(&28u32.to_le_bytes());
-        raw[16..44].fill(b'x');
-
-        let mut cch = [0i32; 8];
-        let mut path = [0u8; PATH_MAX];
-        parse_dir_create_request(&raw, &mut cch, &mut path);
-
-        assert!(path[..28].iter().all(|b| *b == b'x'));
-        assert_eq!(path[28], 0);
+    fn test_load_entry_name_terminates_long_name() {
+        // A maximum-length name must still be NUL-terminated, and a length past
+        // the destination must not write past its end.
+        let mut dst = [b'x'; 8];
+        assert_eq!(crate::block_io::load_entry_name(0, 64, &mut dst), OK);
+        assert_eq!(dst[7], 0);
     }
 }
