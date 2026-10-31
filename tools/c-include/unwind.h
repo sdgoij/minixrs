@@ -29,6 +29,8 @@ struct _Unwind_Exception {
 
 _Unwind_Reason_Code _Unwind_Backtrace(_Unwind_Trace_Fn cb, void *arg);
 _Unwind_Ptr _Unwind_GetIP(struct _Unwind_Context *ctx);
+_Unwind_Word _Unwind_GetCFA(struct _Unwind_Context *ctx);
+void *_Unwind_FindEnclosingFunction(void *pc);
 
 #ifdef __cplusplus
 }

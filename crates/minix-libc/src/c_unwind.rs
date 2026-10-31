@@ -29,3 +29,19 @@ pub extern "C" fn _Unwind_Backtrace(
 pub unsafe extern "C" fn _Unwind_GetIP(_ctx: *mut c_void) -> usize {
     0
 }
+
+/// The canonical frame address in an unwind context. Unreachable while the walk
+/// above yields no context to ask about.
+#[cfg(target_os = "minix")]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn _Unwind_GetCFA(_ctx: *mut c_void) -> usize {
+    0
+}
+
+/// The function enclosing `_pc`. The port loads no unwind tables, so there is
+/// nothing to look up and no symbol to name.
+#[cfg(target_os = "minix")]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn _Unwind_FindEnclosingFunction(_pc: *mut c_void) -> *mut c_void {
+    core::ptr::null_mut()
+}

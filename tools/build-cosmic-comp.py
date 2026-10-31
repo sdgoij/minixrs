@@ -34,6 +34,7 @@ ROOT = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "tools"))
 
 from ccarch import ALL, resolve  # noqa: E402
+from lld import find_lld  # noqa: E402
 
 COSMIC_COMMIT = "6700a5d03f86983bbdb05c48e8190a9b46ff79ad"
 """The upstream revision `.notes/wayland.md` 6.13 was measured at. The fork must
@@ -80,12 +81,66 @@ edition = "2021"
 # The shell at its own revision, with the system-integration features off: the
 # port has no D-Bus, logind or systemd.
 cosmic-comp = {{ path = "../../cosmic-comp", default-features = false }}
+# The probe binary supplies the custom RNG hook, so it names the crate whose
+# `Error` type that hook returns.
+getrandom = "0.4"
+
+[[bin]]
+name = "cosmic-comp"
+path = "src/main.rs"
 
 [patch.crates-io]
 smithay = {{ path = "../smithay" }}
 {patches}
 
 {git_patches}
+"""
+
+MAIN_RS = """\
+//! The compositor binary the probe links.
+//!
+//! cosmic-comp is a library here so this package can own the `getrandom` hook: the port has
+//! no entropy device, and a binary that pulls `rand` must supply the custom backend itself.
+
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{SystemTime, UNIX_EPOCH};
+
+static STATE: AtomicU64 = AtomicU64::new(0);
+
+/// Fill `dest` with pseudo-random bytes.
+///
+/// There is no `/dev/random` and no entropy server on the port, so the generator is seeded
+/// from the clock and an address, then xorshifted. That is enough for identifiers and seeds;
+/// it is not a source of cryptographic randomness.
+#[unsafe(no_mangle)]
+pub unsafe fn __getrandom_v03_custom(dest: *mut u8, len: usize) -> Result<(), getrandom::Error> {
+    let mut state = STATE.load(Ordering::Relaxed);
+    if state == 0 {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_nanos() as u64)
+            .unwrap_or(0x9e37_79b9_7f4a_7c15);
+        state = (now ^ (&STATE as *const AtomicU64 as usize as u64)) | 1;
+    }
+    // SAFETY: the caller passes a buffer of `len` writable bytes, which is the contract
+    // getrandom's custom backend names.
+    let bytes = unsafe { core::slice::from_raw_parts_mut(dest, len) };
+    for chunk in bytes.chunks_mut(8) {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        chunk.copy_from_slice(&state.to_le_bytes()[..chunk.len()]);
+    }
+    STATE.store(state, Ordering::Relaxed);
+    Ok(())
+}
+
+fn main() {
+    if let Err(err) = cosmic_comp::run() {
+        eprintln!("cosmic-comp: {err}");
+        std::process::exit(1);
+    }
+}
 """
 
 
@@ -161,13 +216,14 @@ def write_probe(smithay_tool) -> None:
     (PROBE_DIR / "Cargo.toml").write_text(manifest.rstrip() + "\n", encoding="utf-8")
     (PROBE_DIR / "src" / "lib.rs").write_text(
         "//! Pulls cosmic-comp into a minix build.\n", encoding="utf-8")
+    (PROBE_DIR / "src" / "main.rs").write_text(MAIN_RS, encoding="utf-8")
 
 
 def main(argv: list[str]) -> int:
     mode = "metadata"
     archs = []
     for arg in argv:
-        if arg in ("--metadata", "--check", "--build"):
+        if arg in ("--metadata", "--check", "--build", "--path"):
             mode = arg[2:]
         elif arg == "all":
             archs.extend(ALL)
@@ -177,6 +233,13 @@ def main(argv: list[str]) -> int:
             archs.append(resolve(arg))
     if not archs:
         archs = [resolve("x86")]
+
+    # The artifact path is host-named (`CARGO_TARGET` carries the host), so the Justfile asks
+    # for it instead of spelling it out.
+    if mode == "path":
+        for arch in archs:
+            print(CARGO_TARGET / arch.triple / "release" / "cosmic-comp")
+        return 0
 
     smithay_tool = load_smithay_tool()
     smithay_tool.check_submodules()
@@ -197,17 +260,43 @@ def main(argv: list[str]) -> int:
         return 0
 
     rustc = smithay_tool.find_stage1_rustc()
+    lld = find_lld()
+    if lld is None:
+        die("no lld to link with: run `just bootstrap` or install LLVM")
+
     env = dict(os.environ)
     env["RUSTC"] = str(rustc)
-    # `getrandom` 0.3 selects a custom backend with a cfg, not a feature.
-    env["RUSTFLAGS"] = '--cfg getrandom_backend="custom"'
     env["CARGO_TARGET_DIR"] = str(CARGO_TARGET)
 
     verb = "check" if mode == "check" else "build"
     for arch in archs:
         smithay_tool.check_stage1_surface(rustc, arch.triple)
+        release = ROOT / "target" / arch.triple / "release"
+        xkb = ROOT / "target" / "xkbcommon" / arch.name / "lib"
+        if mode == "build" and not (xkb / "libxkbcommon.a").is_file():
+            die(f"no {xkb / 'libxkbcommon.a'}: run `just xkbcommon {arch.name} --build` first")
+        # The binary loads EGL through `libloading`, so it is a *dynamic* program: `libc.so`
+        # and the loader, like the phase 4 gates. The crate's own `-lxkbcommon` lands inside
+        # rustc's static window, and the two `-L`s have to precede it, hence `pre-link-arg`.
+        link = [
+            f"-Z pre-link-arg=-L{release.as_posix()}",
+            f"-Z pre-link-arg=-L{xkb.as_posix()}",
+            f"-C link-arg=-T{(ROOT / 'tools' / 'minix-user.ld').as_posix()}",
+            "-C link-arg=--no-eh-frame-hdr",
+            "-C link-arg=-Bdynamic",
+            "-C link-arg=--allow-shlib-undefined",
+            "-C link-arg=-l:libc.so",
+            "-C link-arg=--dynamic-linker=/libexec/ld.so",
+        ]
+        # `getrandom` 0.3 selects a custom backend with a cfg, not a feature.
+        env["RUSTFLAGS"] = '--cfg getrandom_backend="custom" ' + " ".join(link)
+        key = arch.triple.upper().replace("-", "_")
+        env[f"CARGO_TARGET_{key}_LINKER"] = str(lld)
         print(f"cargo {verb} cosmic-comp for {arch.triple}")
-        run(["cargo", verb, "--target", arch.triple], cwd=PROBE_DIR, env=env)
+        cmd = ["cargo", verb, "--target", arch.triple]
+        if mode == "build":
+            cmd.insert(2, "--release")
+        run(cmd, cwd=PROBE_DIR, env=env)
     print(f"cosmic-comp: {verb} ok for " + ", ".join(a.triple for a in archs))
     return 0
 

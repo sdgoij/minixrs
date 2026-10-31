@@ -1129,6 +1129,29 @@ test-wlcomp-toplevel-x86: wlcomp-x86 boot-image-x86
     python tools/wlcomp_probe.py --client toplevel qemu-system-x86_64 -nographic -m 512M -no-reboot -vga none -device virtio-gpu-pci,id=fb0 -device virtio-tablet-pci,display=fb0 -qmp tcp:127.0.0.1:4447,server=on,wait=off -kernel target/images/x86_64-pc-minix/minix-x86-boot.elf -drive if=none,id=disk0,file=target/images/x86_64-pc-minix/disk.img,format=raw,cache=writethrough -device virtio-blk-pci,disable-legacy=on,drive=disk0 -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0
     @echo "wlcomp: a stock toplevel was configured, focused, and clicked (x86_64)"
 
+# cosmic-comp: the System76 compositor, built against the port's smithay and linked dynamically
+# so it can load Mesa. `tools/build-cosmic-comp.py` is the whole build; `--path` prints the
+# artifact, whose directory is host-named.
+cosmic-comp-x86:
+    python tools/build-mesa.py x86 --stage
+    @test -f target/mesa/x86/lib/libEGL.so.1 || (echo 'cosmic-comp: no Mesa DSOs - run `just build-mesa x86 --build` first' >&2; exit 1)
+    python tools/build-cosmic-comp.py x86 --build
+
+# The bring-up gate: the compositor starts from the shell, binds `wayland-0` under `/tmp`,
+# compiles its keymap (which the port's own keymap artifact provides the components for),
+# creates the seat and its output, draws a frame with the software GL driver and hands it to
+# the fb server's scan-out. `tools/cosmic_probe.py` holds the assertions and the reasoning.
+#
+# The display is a `virtio-gpu`: only a virtio-gpu can re-back its scan-out, which is the
+# present path (`FBIO_SCANOUT_SRC`); a `bochs-display` answers `ENOTTY`. The first frame takes
+# a while inside the guest because `swrast` JIT-compiles its shaders, hence the timeout.
+test-cosmic-comp-x86 boot-timeout="300": cosmic-comp-x86 boot-image-x86
+    @just _assert-qemu-version qemu-system-x86_64
+    M=target/mesa/x86; B=$(python tools/build-cosmic-comp.py x86 --path); E="/lib/libdrm.so.2=$M/lib/libdrm.so.2;/lib/libEGL.so.1=$M/lib/libEGL.so.1;/lib/libgbm.so.1=$M/lib/libgbm.so.1;/lib/libexpat.so.1=$M/lib/libexpat.so.1;/lib/libgallium-25.3.6.so=$M/lib/libgallium-25.3.6.so;/lib/libGLESv2.so.2=$M/lib/libGLESv2.so.2;/lib/libz.so.1=$M/lib/libz.so.1;/lib/swrast_dri.so=$M/lib/swrast_dri.so;/bin/cosmic-comp=$B"; MINIXFS_EXTRA="$E" MINIXFS_BLOCKS=32768 cargo run -q -p boot-image --bin mkminixfs --release -- x86_64
+    @just mkfs-x86
+    python tools/cosmic_probe.py qemu-system-x86_64 -nographic -m 512M -no-reboot -vga none -device virtio-gpu-pci,id=fb0 -device virtio-tablet-pci,display=fb0 -kernel target/images/x86_64-pc-minix/minix-x86-boot.elf -drive if=none,id=disk0,file=target/images/x86_64-pc-minix/disk.img,format=raw,cache=writethrough -device virtio-blk-pci,disable-legacy=on,drive=disk0 -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0
+    @echo "cosmic-comp: the compositor bound its socket and put its first frame on the scan-out (x86_64)"
+
 # Phase 4d-3's gate (`.notes/wayland.md` 6.13): a `wl_seat` with a keyboard on the smithay
 # compositor, fed from the input server's ring through the port's own `InputBackend`. The host
 # injects `a` with QMP -- the serial console never reaches the input server -- and the stock
