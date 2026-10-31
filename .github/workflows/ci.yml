@@ -52,6 +52,13 @@
 # switch processes (finding 62), the second of which reached a reader as `stopped:
 # the syscall budget ran out` while dragging the mouse over the desktop.
 #
+# The browser demo publishes that same wasm system from `main`. `wasm-demo` stages it into
+# `docs/` with `tools/wasm-browser/publish.sh`, which boots the staged copy before it is
+# published, and uploads it as the Pages artifact; `deploy-web` is the separate job that owns
+# the two permissions publishing needs. A pull request builds the site as a gate but never
+# replaces the live one, and a tag run skips it. Pages must be set to "GitHub Actions" under
+# Settings -> Pages -> Source for the artifact to be accepted.
+#
 # `wasm-wire-tests` needs none of that toolchain: the network link is plain
 # JavaScript and its tests exercise the *link* rather than the guest, so they need
 # no artifacts. Splitting it out means a toolchain problem cannot hide the cheap
@@ -256,6 +263,81 @@ jobs:
 
       - name: The page's own code, under a stub DOM
         run: node tools/wasm-browser/page.test.js
+
+  # The browser demo: the page, its JS, and the three artifacts the wasm system builds, staged
+  # into `docs/` by `publish.sh` (which ends by booting the staged copy, so what is published is
+  # what was tested). It runs after `wasm-tests` so a broken guest cannot reach the live site, and
+  # builds on pull requests as a gate while only `deploy-web` ever publishes.
+  wasm-demo:
+    name: browser demo
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    needs: [wasm-tests]
+    # A tag run publishes the release archives; it does not need a site build, and skipping it
+    # keeps the Pages artifact out of the release download.
+    if: ${{ !startsWith(github.ref, 'refs/tags/') }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: false
+          token: ${{ secrets.SUBMODULE_TOKEN || github.token }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+
+      # The wasm crates declare path dependencies into `rust/library/...`, so cargo has to see the
+      # submodule even though this job only builds the demo.
+      - name: Check out the rust submodule
+        run: |
+          set -euo pipefail
+          git config --global url."https://github.com/".insteadOf "git@github.com:"
+          git submodule update --init --depth 1 rust
+
+      - name: Make python resolve
+        run: sudo ln -sf /usr/bin/python3 /usr/local/bin/python
+
+      - name: Install the prebuilt stage1
+        run: python tools/fetch-stage1.py
+
+      - name: Install Binaryen where build.sh looks for it
+        run: npm install binaryen --prefix tools/fork-spike/.tools --no-save
+
+      # This is a second job, so it cannot reuse the workspace `wasm-tests` built: it runs the
+      # same build again, stages the result into `docs/`, and boots the staged copy.
+      - name: Build and stage the site
+        run: sh tools/wasm-browser/publish.sh
+
+      - name: Configure Pages
+        uses: actions/configure-pages@v6
+
+      - name: Upload the site
+        uses: actions/upload-pages-artifact@v5
+        with:
+          path: docs
+
+  deploy-web:
+    name: Deploy the browser demo
+    needs: wasm-demo
+    # Pull requests build the demo as a gate but must not publish it, and a tag build is a
+    # release, not a deployment.
+    if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/main')
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    # A deployment is ordered: a later run waits rather than cancelling one already publishing.
+    concurrency:
+      group: pages
+      cancel-in-progress: false
+    steps:
+      - name: Deploy
+        id: deployment
+        uses: actions/deploy-pages@v5
 
   # Decides whether the pinned rust commit needs a toolchain before anything
   # consumes one. Read-only, so it needs no write permission; `stage1` below does
