@@ -10,6 +10,7 @@
 //! Built on top of `minix-rt` syscall wrappers.
 
 #![no_std]
+#![cfg_attr(target_os = "minix", feature(thread_local))]
 
 pub mod font;
 pub mod fs;
@@ -110,6 +111,52 @@ impl MinixErr {
             Err(MinixErr(-ret))
         }
     }
+}
+
+/// Per-thread `errno`.
+///
+/// The port has no kernel errno: a failed syscall returns a negative code that
+/// [`MinixErr`] carries, so Rust callers never need this. It exists for the two
+/// callers that follow the POSIX convention instead, the C library's
+/// `__errno_location` and code that has just made a C call.
+#[cfg(target_os = "minix")]
+#[thread_local]
+static ERRNO: core::cell::UnsafeCell<i32> = core::cell::UnsafeCell::new(0);
+
+/// Host builds are single-threaded test scaffolding, so a plain atomic stands
+/// in without needing the `thread_local` feature on a stable toolchain.
+#[cfg(not(target_os = "minix"))]
+static ERRNO: core::sync::atomic::AtomicI32 = core::sync::atomic::AtomicI32::new(0);
+
+/// Read this thread's `errno`.
+pub fn errno() -> i32 {
+    #[cfg(target_os = "minix")]
+    {
+        // SAFETY: only this thread reads its own slot, and an `i32` write is
+        // not something another thread can observably tear.
+        unsafe { *ERRNO.get() }
+    }
+    #[cfg(not(target_os = "minix"))]
+    ERRNO.load(core::sync::atomic::Ordering::Relaxed)
+}
+
+/// Overwrite this thread's `errno`.
+pub fn set_errno(value: i32) {
+    #[cfg(target_os = "minix")]
+    {
+        // SAFETY: as in [`errno`].
+        unsafe { *ERRNO.get() = value }
+    }
+    #[cfg(not(target_os = "minix"))]
+    ERRNO.store(value, core::sync::atomic::Ordering::Relaxed);
+}
+
+/// The address of this thread's `errno`, which is what a C `errno` macro reads.
+#[cfg(target_os = "minix")]
+pub fn errno_location() -> *mut i32 {
+    // SAFETY: the pointer is handed to code that reads and writes this thread's
+    // own slot, and it outlives the thread.
+    ERRNO.get()
 }
 
 // Error constants (negative errno values, matching MINIX C definitions).

@@ -5,15 +5,14 @@
 //!
 //! All functions follow the POSIX convention: return -1 on error (or
 //! `MAP_FAILED`/`SIG_ERR` where POSIX says so) and set `errno` (via
-//! `__errno_location`). `errno` is a `#[thread_local]` slot, so each C
-//! thread sees its own value.
+//! `__errno_location`), which is the thread-local slot `minix-std` owns.
 
 #![no_std]
 #![allow(dead_code)]
 // `#[thread_local]` on statics is feature-gated in this toolchain line; the
 // std crate declares the same feature for its TLS statics. Only minix builds
-// compile TLS code (the per-thread errno slot); host builds use a plain
-// static and need no gate, so the crate compiles on a stable host toolchain.
+// compile TLS code (the pthread handle), so host builds need no gate and still
+// compile on a stable toolchain.
 #![cfg_attr(target_os = "minix", feature(thread_local))]
 
 #[cfg(target_os = "minix")]
@@ -58,36 +57,19 @@ use core::ffi::{c_char, c_long, c_ulong};
 
 // ---- errno ----
 
-/// Per-thread errno in native TLS on minix. `crt0` (and the pthread
-/// trampoline) sets up the thread pointer (FS base) before `main`, so this is
-/// genuinely per-thread: each C thread sees its own `errno`. Host builds
-/// (single-threaded test scaffolding) use a shared atomic slot instead, which
-/// avoids needing the `thread_local` feature on a stable host toolchain.
-#[cfg(target_os = "minix")]
-#[thread_local]
-static ERRNO: core::cell::UnsafeCell<i32> = core::cell::UnsafeCell::new(0);
-
-#[cfg(not(target_os = "minix"))]
-static ERRNO: core::sync::atomic::AtomicI32 = core::sync::atomic::AtomicI32::new(0);
-
 /// POSIX `errno` accessor: returns this thread's TLS errno slot.
+///
+/// The slot itself lives in `minix-std`, which owns the runtime; this is the C
+/// ABI name for its address.
 #[cfg(target_os = "minix")]
 #[unsafe(no_mangle)]
 pub extern "C" fn __errno_location() -> *mut c_int {
-    // SAFETY: the pointer is only used by C `errno` reads and stays valid for
-    // the thread's lifetime.
-    ERRNO.get().cast::<c_int>()
+    minix_std::errno_location()
 }
 
 #[inline]
 pub(crate) fn set_errno(e: i32) {
-    #[cfg(target_os = "minix")]
-    {
-        // SAFETY: only this thread touches its own TLS errno slot.
-        unsafe { *ERRNO.get() = e }
-    }
-    #[cfg(not(target_os = "minix"))]
-    ERRNO.store(e, core::sync::atomic::Ordering::Relaxed);
+    minix_std::set_errno(e);
 }
 
 // ---- per-thread TLS runtime ----
