@@ -274,8 +274,14 @@ jobs:
     timeout-minutes: 40
     needs: [wasm-tests]
     # A tag run publishes the release archives; it does not need a site build, and skipping it
-    # keeps the Pages artifact out of the release download.
-    if: ${{ !startsWith(github.ref, 'refs/tags/') }}
+    # keeps the Pages artifact out of the release download. `!cancelled()` and the `needs`
+    # result are the idiom the rest of this workflow uses, and they are load-bearing: `stage1`
+    # is skipped whenever its release already exists, and a job whose condition does not say
+    # to continue past that is dropped by the scheduler even though its own need succeeded.
+    if: >-
+      !cancelled() &&
+      needs.wasm-tests.result == 'success' &&
+      !startsWith(github.ref, 'refs/tags/')
     steps:
       - uses: actions/checkout@v7
         with:
@@ -321,7 +327,11 @@ jobs:
     needs: wasm-demo
     # Pull requests build the demo as a gate but must not publish it, and a tag build is a
     # release, not a deployment.
-    if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/main')
+    if: >-
+      !cancelled() &&
+      needs.wasm-demo.result == 'success' &&
+      (github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'push' && github.ref == 'refs/heads/main'))
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
