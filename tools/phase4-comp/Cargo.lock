@@ -368,6 +368,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
+ "minix-std",
  "windows-sys",
 ]
 

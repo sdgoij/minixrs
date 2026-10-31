@@ -114,10 +114,21 @@ impl Dispatch<wl_surface::WlSurface, ()> for Client {
     }
 }
 
-fn run() -> Result<(), String> {
+fn connect() -> Result<Connection, String> {
+    // A compositor that spawns this client tells it where to connect: cosmic-comp runs its
+    // kiosk child with `WAYLAND_DISPLAY` set and the session's `XDG_RUNTIME_DIR` inherited.
+    // The fixed path is the phase 4 compositional probe's own socket.
+    if std::env::var_os("WAYLAND_DISPLAY").is_some() {
+        return Connection::connect_to_env()
+            .map_err(|e| format!("connect_to_env failed: {e:?}"));
+    }
     let stream = std::os::minix::net::UnixStream::connect(SOCKET)
         .map_err(|e| format!("connect {SOCKET} failed: {e}"))?;
-    let conn = Connection::from_socket(stream).map_err(|e| format!("connection failed: {e:?}"))?;
+    Connection::from_socket(stream).map_err(|e| format!("connection failed: {e:?}"))
+}
+
+fn run() -> Result<(), String> {
+    let conn = connect()?;
     let (globals, mut queue) =
         registry_queue_init::<Client>(&conn).map_err(|e| format!("registry init failed: {e:?}"))?;
     let qh = queue.handle();

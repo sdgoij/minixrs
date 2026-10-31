@@ -2197,6 +2197,32 @@ file that matches neither the pin nor the edit is an error rather than a silent 
 found there and removed: a zero-size `BufferData` orphan in `renderer/gles/mod.rs` that the next
 line immediately overwrites.
 
+**The first boot, and what it found.** `just test-cosmic-comp-x86` starts the compositor from
+the shell and wants `fb: scanout src`, the fb server's line for the scan-out re-point, which
+cannot happen unless the socket bound, the seat was created, the output was registered and a
+frame was drawn and read back. Reaching it took four fixes, and only the last is in the fork's
+own code: `mknod`/`create`/`mkdir` carried an entry name in the spare bytes of the IPC message
+and truncated it at 28, so the settings store's `com.system76.CosmicSettings.Shortcuts`
+directory was created under a shortened name and the next lookup failed (`fix(fs)`); the seat's
+keymap needs xkb components the image does not ship, so the compositor splits the port's own
+compiled keymap into them under `/tmp/cosmic-xkb` and points `XKB_CONFIG_ROOT` there, the same
+route `tools/phase4-comp/src/keymap.rs` takes; Mesa reads `LIBGL_DRIVERS_PATH` and
+`EGL_PLATFORM` from libc's `environ`, not from Rust's environment; and the output was rendered
+before the shell had been told about it, so `init_backend` now registers and configures it first.
+The display has to be a `virtio-gpu`: a `bochs-display` answers `ENOTTY` to `FBIO_SCANOUT_SRC`.
+
+**Open: a fork from the compositor kills it.** With a kiosk command (`cosmic-comp /bin/echo`)
+the process disappears right after `Running "/bin/echo"`, with no panic, no exit status and no
+"Shutting down", and the shell prompt returns. Two prints placed either side of the spawn, one
+from inside `notify_ready` after it returns and one before the event loop, both stay silent, so
+the parent dies inside `Command::spawn` itself, before `fork` can return. A nonexistent program
+behaves the same, so the child's `exec` is not involved; without a kiosk command the compositor
+runs and presents frames. `wlcomp` forks from a dynamic binary and works, so what matters is
+what cosmic-comp has mapped when it forks: EGL, the framebuffer mapping, the offscreen target
+and the DSOs. The suspect is the VM side of `fork` for that address space (COW setup, or the
+child's teardown of a parent frame). Until it is fixed a client cannot be started as a kiosk
+child, and the gate stops at the frame.
+
 ---
 
 ## 7. Phased plan
