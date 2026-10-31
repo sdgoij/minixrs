@@ -75,30 +75,42 @@ def wait_for(pred, timeout):
         return pred()
 
 
-def type_line_and_wait(cmd, want, timeout, attempts=3):
+def type_line_and_wait(cmd, want, timeout, attempts=4):
     """Type `cmd` at the prompt and wait for `want`, retyping a line the guest never echoed.
 
     The echo is what says whether the line arrived, because this console mangles lines: CI
-    failed this gate with `sh: '/bin/wclient' not found` — a path nobody typed — and a local
+    failed this gate with `sh: '/bin/wclient' not found`, a path nobody typed, and a local
     run delivered `/bin/wlclient full` as `b/in/wllcient full`, with two pairs transposed. So
     "the client did not print PASS" alone cannot tell a client failure from a bad send. A line
     the guest never echoed whole is typed again; one that *was* echoed and did not pass is the
     client's own failure, and is reported rather than retried.
+
+    The echo check reads from one anchor taken before the first attempt, as `tools/smoke/feed.sh`
+    does, so a send that arrives late still counts and is not typed twice. What is anchored per
+    attempt is the prompt: the shell prints it before the bytes, so a prompt seen before this
+    attempt was typed says nothing about where this one has got to. Without that split a retry
+    reads the previous attempt's answer, sees its own echo, and reports a client failure before
+    the retyped line has run at all.
     """
     with lock:
         anchor = len(out)
     for _ in range(attempts):
+        with lock:
+            sent = len(out)
         send_paced(cmd)
-        wait_for(lambda: want in out or b"not found" in out[anchor:], timeout)
+        # Either the client answered, or the shell came back after running what it received.
+        # The prompt only follows the command's completion, so this returns on a mangled line
+        # too instead of spending the whole budget on it.
+        wait_for(lambda: want in out[anchor:] or b"# " in out[sent:], timeout)
         with lock:
             seen = bytes(out[anchor:])
         if want in seen:
             return True
         if cmd.encode() in seen:
             return False
-        # The line arrived truncated; the shell has printed the path it got and come back to a
-        # prompt, so the next attempt is typed after that answer rather than into the running one.
-        wait_for(lambda: b"# " in out[anchor:], 5)
+        # The line arrived truncated or not at all, so the shell printed the path it got and
+        # came back to a prompt. Type again after that answer rather than into a running one.
+        wait_for(lambda: b"# " in out[sent:], 5)
     return False
 
 
