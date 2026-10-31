@@ -930,6 +930,185 @@ pub fn fchdir(fd: i32) -> Result<(), MinixErr> {
     }
 }
 
+/// The current working directory, written into `buf` as an absolute pathname
+/// with a trailing NUL. Returns its length without the NUL.
+///
+/// VFS keeps a directory's vnode rather than its name, so the name is recovered
+/// by walking up: `stat` of `"."` and `".."` identifies the directory, a scan
+/// of `".."` finds which entry holds that inode, and `chdir("..")` moves up for
+/// the next round. Root is where the two stats agree. The walk finishes at the
+/// root and then re-descends the components it found, so the caller is left
+/// where it started even when the walk fails. Ported from MINIX's `__getcwd`.
+///
+/// The cwd is process state, so two threads calling this at once can cross,
+/// which is the property MINIX's own implementation has.
+pub fn getcwd(buf: &mut [u8]) -> Result<usize, MinixErr> {
+    #[cfg(not(target_os = "minix"))]
+    {
+        let _ = (buf, VFS_PROC_NR);
+        Err(MinixErr::ENOSYS)
+    }
+    #[cfg(target_os = "minix")]
+    {
+        // The path is built backwards, from the buffer's NUL upwards.
+        let end = buf.len().checked_sub(1).ok_or(MinixErr::from_i32(crate::ERANGE))?;
+        buf[end] = 0;
+        let mut cur = end;
+
+        let mut current = stat_bytes(b".")?;
+        loop {
+            let above = match stat_bytes(b"..") {
+                Ok(st) => st,
+                Err(e) => {
+                    recover(buf, cur)?;
+                    return Err(e);
+                }
+            };
+            if above.st_dev == current.st_dev && above.st_ino == current.st_ino {
+                break; // The parent is this directory, so this is the root.
+            }
+            let mut name = [0u8; NAME_MAX + 1];
+            let len = match entry_in_parent(&current, above.st_dev == current.st_dev, &mut name) {
+                Some(len) => len,
+                None => {
+                    recover(buf, cur)?;
+                    return Err(MinixErr::from_i32(crate::ENOENT));
+                }
+            };
+            cur = match prepend(buf, cur, &name[..len]) {
+                Some(next) => next,
+                None => {
+                    recover(buf, cur)?;
+                    return Err(MinixErr::from_i32(crate::ERANGE));
+                }
+            };
+            if let Err(e) = chdir(b"..") {
+                recover(buf, cur)?;
+                return Err(e);
+            }
+            current = above;
+        }
+
+        recover(buf, cur)?;
+        let start = if cur == end {
+            // Nothing was added, so the directory is the root itself.
+            if end == 0 {
+                return Err(MinixErr::from_i32(crate::ERANGE));
+            }
+            buf[end - 1] = b'/';
+            end - 1
+        } else {
+            cur
+        };
+        let len = end - start;
+        buf.copy_within(start..=end, 0);
+        Ok(len)
+    }
+}
+
+/// The longest single name the port stores, which is `struct dirent`'s
+/// `d_name` width.
+const NAME_MAX: usize = 255;
+
+/// The port's pathname ceiling (`unistd.h`'s `PATH_MAX`). No walk can build a
+/// longer result, so this is where the allocate-form retry stops.
+pub const PATH_MAX: usize = 4096;
+
+/// Prepend `name` and its `/` to the path being built downwards in `buf`,
+/// whose NUL sits at `nul`. `None` when it would overrun the buffer.
+fn prepend(buf: &mut [u8], nul: usize, name: &[u8]) -> Option<usize> {
+    let mut q = nul;
+    for &byte in name.iter().rev() {
+        q = q.checked_sub(1)?;
+        buf[q] = byte;
+    }
+    q = q.checked_sub(1)?;
+    buf[q] = b'/';
+    Some(q)
+}
+
+/// Undo the walk's `chdir("..")`s by re-descending the components built so far,
+/// leaving the process where it started.
+fn recover(buf: &mut [u8], start: usize) -> Result<(), MinixErr> {
+    let mut i = start;
+    while i < buf.len() && buf[i] != 0 {
+        // The component follows the `/` at `i`.
+        let comp_start = i + 1;
+        let mut j = comp_start;
+        while j < buf.len() && buf[j] != 0 && buf[j] != b'/' {
+            j += 1;
+        }
+        if j >= buf.len() {
+            return Err(MinixErr::from_i32(crate::ERANGE));
+        }
+        let slash = buf[j];
+        buf[j] = 0;
+        let outcome = chdir(&buf[comp_start..j]);
+        buf[j] = slash;
+        outcome?;
+        i = j;
+    }
+    Ok(())
+}
+
+/// Scan an open `".."` for the entry naming `want`, writing its name into
+/// `name` and returning the name's length.
+///
+/// Inode numbers are only comparable within one device, so when the parent is
+/// on a different one (the directory is a mount point) the entry is identified
+/// by an `lstat` of its joined path instead.
+fn entry_in_parent(want: &Stat, same_dev: bool, name: &mut [u8]) -> Option<usize> {
+    let fd = unsafe { open(b"..", O_RDONLY, 0) }.ok()?;
+    let result = scan_parent(fd, want, same_dev, name);
+    let _ = close(fd);
+    result
+}
+
+fn scan_parent(fd: i32, want: &Stat, same_dev: bool, name: &mut [u8]) -> Option<usize> {
+    // The VFS record: `d_fileno` u64 at 0, `d_reclen` u16 at 8, `d_namlen`
+    // u16 at 10, `d_type` at 12, and the name bytes at 13 without a terminator.
+    const NAME_OFF: usize = 13;
+    let mut buf = [0u8; 4096];
+    loop {
+        let filled = getdents(fd, &mut buf).ok()? as usize;
+        if filled == 0 {
+            return None;
+        }
+        let mut off = 0;
+        while off + NAME_OFF <= filled {
+            let reclen = usize::from(u16::from_ne_bytes([buf[off + 8], buf[off + 9]]));
+            if reclen == 0 || off + reclen > filled {
+                return None;
+            }
+            let namlen = usize::from(u16::from_ne_bytes([buf[off + 10], buf[off + 11]]));
+            let mut ino = [0u8; 8];
+            ino.copy_from_slice(&buf[off..off + 8]);
+            let ino = u64::from_ne_bytes(ino);
+            let len = namlen.min(NAME_MAX).min(reclen - NAME_OFF);
+            let entry = &buf[off + NAME_OFF..off + NAME_OFF + len];
+            off += reclen;
+            if entry == b"." || entry == b".." {
+                continue;
+            }
+            let found = if same_dev {
+                ino == want.st_ino
+            } else {
+                let mut joined = [0u8; 3 + NAME_MAX];
+                joined[..3].copy_from_slice(b"../");
+                joined[3..3 + len].copy_from_slice(entry);
+                match lstat_bytes(&joined[..3 + len]) {
+                    Ok(st) => st.st_dev == want.st_dev && st.st_ino == want.st_ino,
+                    Err(_) => false,
+                }
+            };
+            if found {
+                name[..len].copy_from_slice(entry);
+                return Some(len);
+            }
+        }
+    }
+}
+
 /// Rename a file (VFS_RENAME): name1 at 8/len at 16, name2 at 24/len at 32,
 /// the layout `do_rename` reads.
 pub fn rename(old: &[u8], new: &[u8]) -> Result<(), MinixErr> {
@@ -2008,5 +2187,29 @@ mod tests {
             let _ = f;
         }
         _check(truncate);
+    }
+
+    /// `prepend` writes downward from the end of the buffer, so the boundary it
+    /// must stop at is the buffer's own start: one byte past it would be a
+    /// write outside the caller's object.
+    #[test]
+    fn prepend_builds_the_path_backwards() {
+        // A 5-byte buffer holds "/etc": four characters and the terminator.
+        let mut buf = [0u8; 5];
+        buf[4] = 0;
+        let start = prepend(&mut buf, 4, b"etc").expect("5 bytes hold /etc");
+        assert_eq!(&buf[start..], b"/etc ");
+    }
+
+    /// One byte short of "/etc". The walk may leave the buffer half-written,
+    /// because it discovers the overrun as it reaches it, but it must not write
+    /// below the caller's buffer.
+    #[test]
+    fn prepend_refuses_to_overrun_the_buffer() {
+        let mut arena = [0u8; 8];
+        // Four guard bytes, then the four the caller offered.
+        arena[7] = 0;
+        assert_eq!(prepend(&mut arena[4..], 3, b"etc"), None);
+        assert_eq!(arena[..4], [0u8; 4], "wrote below the caller's buffer");
     }
 }
