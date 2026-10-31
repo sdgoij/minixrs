@@ -24,6 +24,12 @@ pub mod uds;
 pub mod vmem;
 pub mod wserver;
 
+/// Yield the CPU to another runnable thread (`SYS_thread_yield`).
+///
+/// Re-exported from the runtime so a caller that already depends on this crate
+/// (rustix's minix backend, for `sched_yield`) does not need both.
+pub use minix_rt::thread_yield;
+
 use core::cell::UnsafeCell;
 
 // Endpoint constants (from `minix/include/minix/endpoint.h`, `com.h`)
