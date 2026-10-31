@@ -84,11 +84,14 @@ jobs:
       # ~4.5 GiB of submodule history that the build never reads (`rust` ~1.0 GiB,
       # `src/llvm-project` ~3.4 GiB). x.py's own `update_submodule` leaves these
       # alone: it compares `rev-parse HEAD` with `ls-tree HEAD` and returns early
-      # when they match.
+      # when they match. `libc` is here because `rust/library` patches it to
+      # `../../libc`: x.py resolves that workspace before building anything, so
+      # an uninitialised submodule fails the build with "patch location ... does
+      # not contain packages matching `libc`".
       - name: Check out the submodules shallowly
         run: |
           set -euo pipefail
-          git submodule update --init --depth 1 rust coreutils
+          git submodule update --init --depth 1 rust coreutils libc
           git -C rust submodule update --init --depth 1 src/llvm-project library/backtrace
 
       - uses: extractions/setup-just@v4

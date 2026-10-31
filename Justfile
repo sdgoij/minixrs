@@ -62,19 +62,21 @@ ROOT := replace(justfile_directory(), "\\", "/")
 # image `test-linux` uses, so the two cannot drift apart.
 rust-channel := `sed -n 's/^channel = "\(.*\)"/\1/p' rust-toolchain.toml | tr -d '\r'`
 
-# Fetches the build-critical submodules (the rust fork and the uutils
-# coreutils source) when they're missing — `git submodule update --init` is a
-# no-op when they're already present and at the pinned commits — regenerates
-# `rust/config.toml` via `tools/rust-config.py` for the requested arch, then
-# runs x.py and builds the `/bin/hello` std smoke-test binary with
-# `tools/build-std-hello.py`.
+# Fetches the build-critical submodules (the rust fork, the uutils coreutils
+# source and the libc fork) when they're missing — `git submodule update
+# --init` is a no-op when they're already present and at the pinned commits.
+# `libc` is required rather than convenient: `rust/library` and `coreutils` both
+# `[patch.crates-io]` it to the sibling fork, so cargo cannot resolve either
+# workspace without it. Regenerates `rust/config.toml` via
+# `tools/rust-config.py` for the requested arch, then runs x.py and builds the
+# `/bin/hello` std smoke-test binary with `tools/build-std-hello.py`.
 # Note: per-arch runs rebuild only that arch's std — x.py prunes the other
 # arches from the stage1 sysroot — so `all` (the default) is the complete
 # setup. Incremental afterwards; the first run downloads the stage0
 # toolchain and CI LLVM (needs network).
 # Build the stage1 compiler + std + /bin/hello for a minix target (all by default).
 bootstrap target="all":
-    git submodule update --init rust coreutils
+    git submodule update --init rust coreutils libc
     python tools/rust-config.py {{target}}
     # `library/proc_macro` is built alongside std: x.py prunes the stage1
     # sysroot to the listed crates, and without libproc_macro a later host

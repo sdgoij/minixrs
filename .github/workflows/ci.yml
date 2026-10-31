@@ -408,12 +408,14 @@ jobs:
       # `rust` is the pin `just fetch-stage1` resolves the release from (and
       # supplies the workspace's path dependencies); `coreutils` is the multicall
       # the kernel embeds - on x86_64 only so far, every arch eventually, so it is
-      # cloned for all of them. Both shallow: the build reads none of the history.
+      # cloned for all of them; `libc` is the fork both patch their dependency
+      # graphs onto, so cargo cannot resolve either without it. All shallow: the
+      # build reads none of the history.
       - name: Check out the submodules
         run: |
           set -euo pipefail
           git config --global url."https://github.com/".insteadOf "git@github.com:"
-          git submodule update --init --depth 1 rust coreutils
+          git submodule update --init --depth 1 rust coreutils libc
 
       - uses: extractions/setup-just@v4
 
@@ -563,7 +565,7 @@ jobs:
         run: |
           set -euo pipefail
           git config --global url."https://github.com/".insteadOf "git@github.com:"
-          git submodule update --init --depth 1 rust coreutils
+          git submodule update --init --depth 1 rust coreutils libc
 
       - uses: extractions/setup-just@v4
 
@@ -697,7 +699,7 @@ jobs:
         run: |
           set -euo pipefail
           git config --global url."https://github.com/".insteadOf "git@github.com:"
-          git submodule update --init --depth 1 rust coreutils
+          git submodule update --init --depth 1 rust coreutils libc
 
       - uses: extractions/setup-just@v4
 

@@ -55,8 +55,9 @@
 # The emulator is not optional here either - the artifact boots userspace, so it is
 # subject to the same floor as the suites (`qemu-min-version`), which
 # `.github/actions/install-qemu` provides. Clang assembles the x86 trampoline, and
-# the `rust` + `coreutils` submodules are needed by the workspace and the multicall
-# (`build-x86` embeds it), all shallowly: none of that history is read.
+# the `rust`, `coreutils` and `libc` submodules are needed by the workspace and the
+# multicall (`build-x86` embeds it; both workspaces patch `libc` onto the sibling
+# fork), all shallowly: none of that history is read.
 
 name: boot images (called by minixrs)
 
@@ -148,7 +149,7 @@ jobs:
         run: |
           set -euo pipefail
           git config --global url."https://github.com/".insteadOf "git@github.com:"
-          git submodule update --init --depth 1 rust coreutils
+          git submodule update --init --depth 1 rust coreutils libc
 
       - uses: extractions/setup-just@v4
 

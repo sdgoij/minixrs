@@ -198,10 +198,17 @@ actually happened: wrapping the minix arm of `sys/exit.rs` in `unsafe { }` — t
 
 ## Never run the recipe's submodule step by hand
 
-`just bootstrap` starts with `git submodule update --init rust coreutils`. While the parent
+`just bootstrap` starts with `git submodule update --init rust coreutils libc`. While the parent
 still pins the *old* submodule commit, that detaches `rust/` onto it and undoes the rebase
 checkout. Skip it (submodules are already initialized) or let the operator update the
 parent's pointer first.
+
+`libc` is in that list for a reason that only surfaces mid-build: `rust/library` and
+`coreutils` both `[patch.crates-io]` it to the sibling fork at `../../libc`, so an
+uninitialised `libc/` fails dependency resolution with
+``patch location `/.../libc` does not contain packages matching `libc` `` before compiling
+anything. A rebase that touches the fork's `[patch.crates-io]` section has to keep that
+path entry pointing at a checked-out fork.
 
 ## Revalidate
 
