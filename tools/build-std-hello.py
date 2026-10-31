@@ -30,6 +30,7 @@ Prerequisites:
 
 from __future__ import annotations
 
+import os
 import pathlib
 import subprocess
 import sys
@@ -80,6 +81,24 @@ def build(target: str, lld: pathlib.Path) -> int:
 
     out = ROOT / "target" / out_dir / "release" / "hello"
     out.parent.mkdir(parents=True, exist_ok=True)
+
+    # std's backtrace machinery names `_Unwind_Backtrace` and `_Unwind_GetIP` on
+    # the unix family, and the port's stubs for them are in `minix-libc`
+    # (`crates/minix-libc/src/c_unwind.rs`). The rlib has to be built for the
+    # target and named on this link, or the two symbols stay undefined.
+    env = {**os.environ, "RUSTC": str(rustc)}
+    build_libc = [
+        "cargo", "build", "-p", "minix-libc", "--target", target, "--release",
+    ]
+    print("running:", " ".join(build_libc))
+    if subprocess.run(build_libc, env=env).returncode != 0:
+        print("error: minix-libc did not build", file=sys.stderr)
+        return 1
+    deps = ROOT / "target" / target / "release" / "deps"
+    rlibs = sorted(deps.glob("libminix_libc-*.rlib"), key=lambda p: p.stat().st_mtime)
+    if not rlibs:
+        print(f"error: no libminix_libc-*.rlib under {deps}", file=sys.stderr)
+        return 1
     # The same linker script the userland/server recipes use: it lays the
     # sections out page-aligned for the kernel exec loader and defines the
     # TLS block symbols (`__tls_start`/`__tdata_end`/`__tls_end`) the std
@@ -93,6 +112,10 @@ def build(target: str, lld: pathlib.Path) -> int:
         # The minix target specs ask rustc for a program named `lld` on PATH;
         # the toolchain's own LLD is not called that (see tools/lld.py).
         "-C", f"linker={lld}",
+        # `std-hello.rs` names the crate for exactly these symbols; rustc only
+        # hands the linker an rlib the local crate references.
+        "--extern", f"minix_libc={rlibs[-1]}",
+        "-L", f"dependency={deps}",
         "-o", str(out),
         str(SOURCE),
     ]

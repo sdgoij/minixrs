@@ -17,6 +17,12 @@
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
+// std's backtrace names `_Unwind_Backtrace`/`_Unwind_GetIP` on the unix family,
+// and `minix-libc` supplies them (`crates/minix-libc/src/c_unwind.rs`). rustc
+// only links an rlib the local crate names, so this reference is what puts the
+// stubs in the binary.
+use minix_libc as _;
+
 thread_local! {
     static TLS_HITS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
