@@ -91,7 +91,7 @@ jobs:
       - name: Check out the submodules shallowly
         run: |
           set -euo pipefail
-          git submodule update --init --depth 1 rust coreutils libc
+          git submodule update --init --depth 1 rust coreutils libc rustix
           git -C rust submodule update --init --depth 1 src/llvm-project library/backtrace
 
       - uses: extractions/setup-just@v4

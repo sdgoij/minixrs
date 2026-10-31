@@ -149,7 +149,7 @@ jobs:
         run: |
           set -euo pipefail
           git config --global url."https://github.com/".insteadOf "git@github.com:"
-          git submodule update --init --depth 1 rust coreutils libc
+          git submodule update --init --depth 1 rust coreutils libc rustix
 
       - uses: extractions/setup-just@v4
 
