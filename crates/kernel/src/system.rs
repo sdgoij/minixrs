@@ -4176,6 +4176,37 @@ pub unsafe fn do_exit_handler(caller: *mut Proc, _msg: &mut [u8; MESSAGE_SIZE]) 
     }
 }
 
+/// Terminate the process that took a general-protection fault in user mode.
+///
+/// A user-mode `#GP` cannot be retried and there is no handler to run, so the
+/// only answer is the one the C kernel's `exception()` gives: `cause_sig`, the
+/// same route SYS_EXIT takes. The `#GP` entry used to spin on `hlt` instead,
+/// which took the whole system down with one process's bad instruction
+/// (measured: cosmic-comp's heap walk after five forks, `.notes/wayland.md`).
+///
+/// Returns 0 when the caller must switch to another process, and -1 when the
+/// fault came from the kernel itself, which stays fatal.
+///
+/// # Safety
+///
+/// Must only be called from the `#GP` interrupt handler, with interrupts
+/// disabled.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn handle_user_gpf(cs: u64) -> i32 {
+    if cs & 3 != 3 {
+        return -1;
+    }
+    unsafe {
+        let rp = crate::ipc::current_proc();
+        if rp.is_null() {
+            return -1;
+        }
+        // SIGSEGV: MINIX's numbering, which is POSIX's without SIGKILL/SIGSTOP.
+        cause_sig((*rp).p_nr, 11);
+    }
+    0
+}
+
 /// Handle SYS_KILL: send a signal to a process.
 ///
 /// # Safety
@@ -6760,6 +6791,56 @@ mod tests {
                 flags & RtsFlags::SIGNALED.bits() != 0,
                 "do_exit should cause SIGABRT"
             );
+        }
+    }
+
+    #[test]
+    fn test_handle_user_gpf_signalizes_the_faulting_process() {
+        unsafe {
+            // Mirrors `vm.rs`'s fault-proc setup: a current process with no
+            // run-time flags, so `cause_sig` has somewhere to set SIGNALED.
+            crate::table::proc_init();
+            crate::hal::init_cpulocals();
+            let rp = crate::table::proc_addr(5);
+            (*rp).p_rts_flags.store(0, Ordering::Relaxed);
+            (*rp).p_misc_flags.store(0, Ordering::Relaxed);
+            (*rp).p_nr = 5;
+            (*rp).p_endpoint = 5;
+            (*rp).p_group = core::ptr::null_mut();
+            crate::ipc::set_current_proc(rp);
+
+            // 0x1B is a ring-3 code selector: the fault belongs to the process,
+            // so the handler must switch away (0) and pend a signal.
+            assert_eq!(handle_user_gpf(0x1B), 0);
+            assert!(
+                (*rp).p_rts_flags.load(Ordering::Relaxed) & RtsFlags::SIGNALED.bits() != 0,
+                "a user-mode #GP should deliver SIGSEGV"
+            );
+            assert_ne!((*rp).p_pending & (1u128 << 11), 0, "SIGSEGV should be pending");
+
+            crate::ipc::set_current_proc(core::ptr::null_mut());
+        }
+    }
+
+    #[test]
+    fn test_handle_user_gpf_kernel_fault_stays_fatal() {
+        unsafe {
+            // 0x08 is the ring-0 code selector: a kernel #GP is a kernel bug and
+            // must not be papered over by killing whatever process was current.
+            crate::table::proc_init();
+            crate::hal::init_cpulocals();
+            let rp = crate::table::proc_addr(6);
+            (*rp).p_rts_flags.store(0, Ordering::Relaxed);
+            (*rp).p_nr = 6;
+            crate::ipc::set_current_proc(rp);
+
+            assert_eq!(handle_user_gpf(0x08), -1);
+            assert_eq!(
+                (*rp).p_rts_flags.load(Ordering::Relaxed) & RtsFlags::SIGNALED.bits(),
+                0
+            );
+
+            crate::ipc::set_current_proc(core::ptr::null_mut());
         }
     }
 

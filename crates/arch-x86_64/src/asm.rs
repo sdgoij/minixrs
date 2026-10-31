@@ -760,7 +760,15 @@ pub unsafe extern "C" fn exception_db_entry() {
     );
 }
 
-/// General protection fault handler — prints 'G' and diagnostic info, then halts.
+/// General protection fault handler.
+///
+/// Prints the faulting frame, then asks the kernel whether it can be handled:
+/// a fault taken in **user mode** is a bug in the process, and the kernel
+/// delivers it SIGSEGV and switches away (`handle_user_gpf`); one taken in
+/// kernel mode is a bug in the kernel, and stays fatal.
+///
+/// It used to halt the CPU unconditionally, which meant a single user process's
+/// bad instruction stopped the whole system.
 #[unsafe(no_mangle)]
 #[unsafe(naked)]
 #[cfg(target_os = "minix")]
@@ -769,18 +777,49 @@ pub unsafe extern "C" fn exception_db_entry() {
 /// Must be called only during early boot on the BSP, before SMP is initialized.
 pub unsafe extern "C" fn exception_gpf_entry() {
     core::arch::naked_asm!(
+        // Conditional swapgs, as the page-fault entry does and for the same
+        // reason: the handlers below read CPU-local state through GS, and a
+        // fault taken from user mode still has the user's GS base. The faulting
+        // CS is at [rsp + 16] while the error code is still on the stack.
+        "test   qword ptr [rsp + 16], 3",
+        "jz     0f",
+        "swapgs",
+        "0:",
         // Pop error code into rbx, print 'G'
         "pop    rbx",
         "mov    dx, 0x3F8",
         "mov    al, 0x47",
         "out    dx, al",
-        // Call Rust handler with error_code (rdi) and frame_ptr (rsi)
-        // RSP points to iretq frame: [RIP, CS, RFLAGS, old_RSP, old_SS]
+        // Save CS before aligning the stack: the process is not resumed, so its
+        // registers are free to clobber. RSP points at the iretq frame:
+        // [RIP, CS, RFLAGS, ...], so CS is the second word.
+        "mov    r12, [rsp + 8]",
+        // Call the Rust printer with error_code (rdi) and frame_ptr (rsi), then
+        // the kernel's decision with CS (rdi). Round RSP down first: the SysV
+        // ABI wants it 16-byte aligned at the call, and the frame is no longer
+        // needed once it has been handed over.
         "mov    rdi, rbx",
         "mov    rsi, rsp",
+        "and    rsp, -16",
         "call   rust_gpf_handler",
-        // Spin with interrupts enabled (see #UD comment) — a userland #GP
-        // (e.g. hlt at CPL3) must not freeze the CPU.
+        "mov    rdi, r12",
+        "call   handle_user_gpf",
+        "test   rax, rax",
+        "jnz    1f",
+        // Handled: the faulting process is no longer runnable, so pick the next
+        // one and restore it. Same tail as the page-fault entry.
+        "call   pick_proc_raw",
+        "test   rax, rax",
+        "jz     2f",
+        "mov    rdi, rax",
+        "call   set_cpulocal_proc_asm",
+        "mov    rdi, rax",
+        "call   restore",
+        "2:",
+        "cli",
+        "hlt",
+        // Fatal (a kernel-mode fault, or no process to switch to): spin with
+        // interrupts enabled, so a #GP does not freeze the CPU outright.
         "1:",
         "sti",
         "hlt",

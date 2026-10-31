@@ -2211,17 +2211,29 @@ route `tools/phase4-comp/src/keymap.rs` takes; Mesa reads `LIBGL_DRIVERS_PATH` a
 before the shell had been told about it, so `init_backend` now registers and configures it first.
 The display has to be a `virtio-gpu`: a `bochs-display` answers `ENOTTY` to `FBIO_SCANOUT_SRC`.
 
-**Open: a fork from the compositor kills it.** With a kiosk command (`cosmic-comp /bin/echo`)
-the process disappears right after `Running "/bin/echo"`, with no panic, no exit status and no
-"Shutting down", and the shell prompt returns. Two prints placed either side of the spawn, one
-from inside `notify_ready` after it returns and one before the event loop, both stay silent, so
-the parent dies inside `Command::spawn` itself, before `fork` can return. A nonexistent program
-behaves the same, so the child's `exec` is not involved; without a kiosk command the compositor
-runs and presents frames. `wlcomp` forks from a dynamic binary and works, so what matters is
-what cosmic-comp has mapped when it forks: EGL, the framebuffer mapping, the offscreen target
-and the DSOs. The suspect is the VM side of `fork` for that address space (COW setup, or the
-child's teardown of a parent frame). Until it is fixed a client cannot be started as a kiosk
-child, and the gate stops at the frame.
+**Open: a fork of the compositor corrupts its heap.** With a kiosk command
+(`cosmic-comp /bin/echo`) the compositor dies right after `Running "/bin/echo"`. Two prints
+placed either side of the spawn, one from inside `notify_ready` after it returns and one
+before the event loop, both stay silent, so the death is inside `Command::spawn` itself,
+before `fork` can return. The kernel prints one `#GP` line at RIP `0x4681B33`, which in the
+binary is `movq 0x10(%rdi), %rdi` inside `std::sys::pal::minix::alloc::dealloc`: the free-list
+walk reads a non-canonical pointer, so the heap metadata is already corrupt. It is a fork
+effect and not a GL one, because without a kiosk command the same
+`Offscreen::create_buffer` runs fine, and with `-m 1024M` the failure moves two probes later,
+so the fork's copy of the address space is what is under pressure. `cow_setup_fork` copies
+every writable page and, when a copy cannot be allocated, falls back to aliasing the frame;
+a page that ends up shared that way is the first thing to check.
+
+**A user `#GP` no longer stops the machine.** The `#GP` entry printed its diagnostic and then
+spun on `hlt`, so the corruption above took the whole system down: the console went silent
+and the gate's "still running" check saw a prompt that no longer answered. It now does what
+the C kernel's `exception()` does: a ring-3 fault delivers SIGSEGV through `cause_sig` (the
+route VM already takes for a page fault it cannot resolve) and the scheduler switches away,
+while a ring-0 fault stays fatal. The entry also had to swap GS conditionally, as the
+page-fault entry does, or the handlers would read CPU-local state through the user's GS.
+With that change the same run prints one `#GP` line and the system keeps running with the
+compositor gone. What remains after it is the shell reprinting its prompt without a newline
+once its foreground child is killed by a signal, which needs its own look.
 
 ---
 
