@@ -1180,14 +1180,14 @@ pub unsafe extern "C" fn gethostname(name: *mut c_char, len: usize) -> c_int {
 #[cfg(target_os = "minix")]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn stat(path: *const c_char, buf: *mut c_void) -> c_int {
-    unsafe { stat_path_impl(minix_std::fs::stat, path, buf) }
+    unsafe { stat_path_impl(minix_std::fs::stat_bytes, path, buf) }
 }
 
 /// `lstat(2)`: file metadata for `path` (does not follow symlinks).
 #[cfg(target_os = "minix")]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn lstat(path: *const c_char, buf: *mut c_void) -> c_int {
-    unsafe { stat_path_impl(minix_std::fs::lstat, path, buf) }
+    unsafe { stat_path_impl(minix_std::fs::lstat_bytes, path, buf) }
 }
 
 /// `fstat(2)`: file metadata for an open descriptor.
@@ -1214,21 +1214,15 @@ pub unsafe extern "C" fn fstat(fd: c_int, buf: *mut c_void) -> c_int {
 /// least `size_of::<Stat>()` writable bytes.
 #[cfg(target_os = "minix")]
 pub(crate) unsafe fn stat_path_impl(
-    f: fn(&str) -> Result<minix_std::fs::Stat, minix_std::MinixErr>,
+    f: fn(&[u8]) -> Result<minix_std::fs::Stat, minix_std::MinixErr>,
     path: *const c_char,
     buf: *mut c_void,
 ) -> c_int {
     if path.is_null() || buf.is_null() {
         return fail(22); // EINVAL
     }
-    let s = unsafe { core::ffi::CStr::from_ptr(path) };
-    // VFS stat takes `&str` paths (C paths are byte strings, so non-UTF-8
-    // names are rejected for now).
-    let path_str = match core::str::from_utf8(s.to_bytes()) {
-        Ok(p) => p,
-        Err(_) => return fail(22), // EINVAL
-    };
-    match f(path_str) {
+    let path_bytes = unsafe { core::ffi::CStr::from_ptr(path) }.to_bytes();
+    match f(path_bytes) {
         Ok(st) => {
             unsafe { fill_c_stat(buf, &st) };
             0

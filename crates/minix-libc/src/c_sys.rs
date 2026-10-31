@@ -580,11 +580,7 @@ pub unsafe extern "C" fn statvfs(path: *const c_char, buf: *mut c_void) -> c_int
         return crate::fail(EINVAL);
     }
     let path_bytes = unsafe { core::ffi::CStr::from_ptr(path) }.to_bytes();
-    let path_str = match core::str::from_utf8(path_bytes) {
-        Ok(s) => s,
-        Err(_) => return crate::fail(EINVAL),
-    };
-    match minix_std::fs::statvfs(path_str) {
+    match minix_std::fs::statvfs_bytes(path_bytes) {
         Ok(st) => {
             unsafe {
                 core::ptr::copy_nonoverlapping(
@@ -1338,9 +1334,9 @@ pub unsafe extern "C" fn fstatat(
     }
     let path_bytes = unsafe { core::ffi::CStr::from_ptr(path) }.to_bytes();
     let stat_fn = if flags & AT_SYMLINK_NOFOLLOW != 0 {
-        minix_std::fs::lstat
+        minix_std::fs::lstat_bytes
     } else {
-        minix_std::fs::stat
+        minix_std::fs::stat_bytes
     };
     let result = unsafe {
         with_dirfd(dirfd, path_bytes, || {

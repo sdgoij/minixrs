@@ -791,16 +791,26 @@ pub fn fstat(fd: i32) -> Result<Stat, MinixErr> {
 /// `lstat` uses the same message layout as `stat`; only the call number
 /// differs.
 pub fn lstat(path: &str) -> Result<Stat, MinixErr> {
-    stat_impl(VFS_LSTAT, path)
+    lstat_bytes(path.as_bytes())
 }
 
 /// Get file status for a path.
 pub fn stat(path: &str) -> Result<Stat, MinixErr> {
+    stat_bytes(path.as_bytes())
+}
+
+/// `stat` for a path that need not be UTF-8 (VFS names are byte strings).
+pub fn stat_bytes(path: &[u8]) -> Result<Stat, MinixErr> {
     stat_impl(VFS_STAT, path)
 }
 
+/// `lstat` for a path that need not be UTF-8.
+pub fn lstat_bytes(path: &[u8]) -> Result<Stat, MinixErr> {
+    stat_impl(VFS_LSTAT, path)
+}
+
 /// Shared implementation of `stat`/`lstat`.
-fn stat_impl(call_nr: u32, path: &str) -> Result<Stat, MinixErr> {
+fn stat_impl(call_nr: u32, path: &[u8]) -> Result<Stat, MinixErr> {
     #[cfg(not(target_os = "minix"))]
     {
         let _ = (call_nr, path, VFS_PROC_NR);
@@ -840,6 +850,11 @@ pub struct Statvfs {
 
 /// Get filesystem statistics for a path.
 pub fn statvfs(path: &str) -> Result<Statvfs, MinixErr> {
+    statvfs_bytes(path.as_bytes())
+}
+
+/// `statvfs` for a path that need not be UTF-8.
+pub fn statvfs_bytes(path: &[u8]) -> Result<Statvfs, MinixErr> {
     #[cfg(not(target_os = "minix"))]
     {
         let _ = (path, VFS_PROC_NR);
