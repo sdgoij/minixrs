@@ -1,0 +1,17 @@
+[package]
+name = "cosmic-config-derive"
+version = "1.0.0" # the version cosmic-config's requirement resolves to
+description = "Derives CosmicConfigEntry for cosmic-config"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+publish = false
+# A path dependency of `crates/cosmic-config`, and so outside the root
+# workspace like the other stand-ins.
+
+[lib]
+proc-macro = true
+
+[dependencies]
+proc-macro2 = "1"
+quote = "1"
+syn = { version = "2", features = ["full"] }

@@ -1,0 +1,12 @@
+[package]
+name = "dirs"
+version = "6.0.0" # the version cosmic-config's requirement resolves to
+description = "The XDG base directories, read from the environment"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+publish = false
+# Consumed only through `[patch]` (or as a path dependency of `crates/cosmic-config`),
+# so it stays out of the root workspace like `crates/atomicwrites`.
+
+[lib]
+crate-type = ["rlib"]

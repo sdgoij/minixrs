@@ -1,0 +1,12 @@
+[package]
+name = "atomicwrites"
+version = "0.4.2" # the version cosmic-config's git requirement resolves to
+description = "Atomic file writes for minix: a rename over the target, or a hard link that refuses to"
+edition = "2024"
+license = "MIT"
+publish = false
+# This exists only to be patched into a foreign graph (`[patch.".../rust-atomicwrites"]`),
+# so it is excluded from the root workspace like `crates/errno` and `crates/tempfile`.
+
+[lib]
+crate-type = ["rlib"]

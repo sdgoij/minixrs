@@ -1,0 +1,31 @@
+[package]
+name = "cosmic-config"
+version = "1.0.0" # the version cosmic-comp's requirement resolves to
+description = "The cosmic settings store, over one RON document per application version"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+publish = false
+# A local replacement for the crate from the libcosmic repository, patched into
+# cosmic-comp's graph so the settings path does not reach `notify`, `notify`'s
+# inotify backend, or the rest of the upstream dependency set.
+
+[features]
+# `macro` is what every in-scope consumer asks for; the upstream `subscription`
+# and `dbus` features are not provided because the port has no D-Bus.
+default = ["macro"]
+macro = ["dep:cosmic-config-derive"]
+calloop = ["dep:calloop"]
+
+[dependencies]
+atomicwrites = { path = "../atomicwrites" }
+cosmic-config-derive = { path = "../cosmic-config-derive", optional = true }
+dirs = { path = "../dirs" }
+ron = "0.12"
+serde = "1"
+
+[dependencies.calloop]
+version = "0.14.4"
+optional = true
+
+[lib]
+crate-type = ["rlib"]

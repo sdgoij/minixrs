@@ -44,7 +44,7 @@ verified against this sha, so a moved default branch cannot change the build."""
 
 COSMIC_DIR = ROOT / "target" / "cosmic-comp"
 PROBE_DIR = ROOT / "target" / "cosmic-comp-probe"
-CARGO_TARGET = PROBE_DIR / f"target-{platform.system().lower()}"
+CARGO_TARGET = ROOT / "target" / f"cosmic-comp-target-{platform.system().lower()}"
 
 # Additional patches on top of the smithay probe's table. cosmic-comp pulls two
 # crates smithay does not name.
@@ -55,6 +55,16 @@ EXTRA_PATCHES = {
     # `libloading` is what `backend_egl` loads EGL with; its Unix half is
     # `cfg(unix)` and needs the target's `RTLD_*` values.
     "libloading": "../../rust_libloading",
+}
+
+# Patches of git dependencies are keyed by the repository URL, not
+# `crates-io`, so they go in their own tables.
+GIT_PATCHES = {
+    # The settings store writes through this crate, and the published one
+    # reaches rustix 0.38 (this tree forks 1.x).
+    "https://github.com/jackpot51/rust-atomicwrites": {
+        "atomicwrites": "../../crates/atomicwrites",
+    },
 }
 
 GENERATED = """\
@@ -77,6 +87,8 @@ cosmic-comp = {{ path = "../cosmic-comp", default-features = false }}
 [patch.crates-io]
 smithay = {{ path = "../smithay" }}
 {patches}
+
+{git_patches}
 """
 
 
@@ -131,6 +143,21 @@ def ensure_cosmic() -> None:
             die(f"cosmic-comp is at {head}, wanted {COSMIC_COMMIT}")
 
 
+def render_git_patches() -> str:
+    """Render the `[patch."<url>"]` tables for the forked git dependencies.
+
+    A git dependency is replaced through a table named after its repository, so
+    each one needs its own header; these land after the `crates-io` entries.
+    """
+    tables = []
+    for url, crates in GIT_PATCHES.items():
+        lines = [f'[patch."{url}"]']
+        lines.extend(f'{name} = {{ path = "{path}" }}'
+                     for name, path in crates.items())
+        tables.append("\n".join(lines))
+    return "\n\n".join(tables)
+
+
 def write_probe(smithay_tool) -> None:
     """Regenerate the patched workspace. Cheap, so it is always rewritten."""
     (PROBE_DIR / "src").mkdir(parents=True, exist_ok=True)
@@ -138,8 +165,9 @@ def write_probe(smithay_tool) -> None:
     patches.update(EXTRA_PATCHES)
     rendered = "\n".join(f'{name} = {{ path = "{path}" }}'
                          for name, path in patches.items())
-    (PROBE_DIR / "Cargo.toml").write_text(GENERATED.format(patches=rendered),
-                                          encoding="utf-8")
+    manifest = GENERATED.format(patches=rendered,
+                                git_patches=render_git_patches())
+    (PROBE_DIR / "Cargo.toml").write_text(manifest.rstrip() + "\n", encoding="utf-8")
     (PROBE_DIR / "src" / "lib.rs").write_text(
         "//! Pulls cosmic-comp into a minix build.\n", encoding="utf-8")
 

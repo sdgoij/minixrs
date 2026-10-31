@@ -27,9 +27,19 @@ exclude = [
     # The same shape, for `tempfile`: the published crate has no minix arm, and
     # smithay needs one function (`tempfile_in`) to hand a keymap to a client.
     "crates/tempfile",
+    # And for `atomicwrites`: the settings store writes through it, and the
+    # published crate reaches rustix 0.38, which this tree does not fork. The
+    # stand-in spells the same two moves with std.
+    "crates/atomicwrites",
     # And for `terminal_size`: it asks rustix's termios for the window size, which
     # the port's rustix fork does not serve. `clap`'s `wrap_help` pulls it in.
     "crates/terminal_size",
+    # The settings stack: `cosmic-config` is replaced together with its `dirs`
+    # source and its entry derive, so the whole set is a path patch into
+    # cosmic-comp's graph rather than a member of this one.
+    "crates/cosmic-config",
+    "crates/cosmic-config-derive",
+    "crates/dirs",
 ]
 
 members = [
