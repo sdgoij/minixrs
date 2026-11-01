@@ -205,8 +205,8 @@ pub fn query_meminfo() -> Option<(u64, u64)> {
 /// or a signal frame (the kernel's `cow_prepare_write`).
 ///
 /// The kernel keeps the ring; one call hands back one frame. A drain that runs
-/// late is harmless: the frame is not mapped by anyone, so the count only has to
-/// come down eventually, and an entry the kernel could not record (a full ring)
+/// late is harmless — the frame is not mapped by anyone, so the count only has to
+/// come down eventually — and an entry the kernel could not record (a full ring)
 /// leaves that frame allocated rather than double-freed.
 pub fn drain_cow_discards() {
     #[cfg(target_os = "minix")]
@@ -1898,8 +1898,10 @@ fn do_munmap(msg: &mut Message) -> i32 {
 
     // Find and remove the region at this address.
     let mut direct_region = false;
+    let mut unshared = false;
     unsafe {
         if let Some(vmp) = proc::vmproc_lookup(ep) {
+            unshared = vmp.vm_unshared;
             // Remove the region from tracking; close a file region's vmfd
             // once no other process's region references the same file.
             if let Some(removed) = vmp.vm_regions.remove(addr) {
@@ -1909,6 +1911,13 @@ fn do_munmap(msg: &mut Message) -> i32 {
                 direct_region = removed.flags & region::VR_DIRECT != 0;
             }
         }
+    }
+
+    // An address space whose fork sharing was never recorded cannot tell its own
+    // frames from a parent's (see `Vmproc::vm_unshared`): leak them rather than
+    // free one it does not own.
+    if unshared {
+        direct_region = true;
     }
 
     if !direct_region {
@@ -2739,8 +2748,15 @@ fn do_fork(msg: &mut Message) -> i32 {
     // is not set until the vmctl below. Nothing on wasm shares a frame (the
     // child's memory is a copy), so there is nothing to register.
     #[cfg(not(target_arch = "wasm32"))]
-    if child_cr3 != 0 {
-        let _ = unsafe { cow::cow_setup_fork(child_cr3, child_ep) };
+    if child_cr3 != 0 && unsafe { cow::cow_setup_fork(child_cr3, child_ep) } != 0 {
+        // Part of the child's page table could not be walked, so the frames it shares
+        // have no counts. The child still runs (a write fault on an untracked page
+        // copies it), but its teardown must not free frames it cannot prove are its
+        // own.
+        if let Some(vmp) = unsafe { proc::vmproc_lookup(child_ep) } {
+            vmp.vm_unshared = true;
+        }
+        cow::report_unregistered_fork();
     }
 
     // Pre-fault the message page of both sides. On aarch64 this is what lets

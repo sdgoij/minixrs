@@ -51,6 +51,12 @@ pub(crate) struct Vmproc {
     /// kernel-mode copies of the image (vircopy of user buffers, e.g.
     /// the shell's write buffer in rodata) from faulting on lazy pages.
     pub prefault_exec: bool,
+    /// This address space maps frames whose fork sharing could not be
+    /// recorded: `cow_setup_fork` could not reach part of the page table, so
+    /// the refcounts do not say which of its pages another process also maps.
+    /// A teardown then cannot tell its own frames from a parent's, and leaks
+    /// them rather than freeing one it does not own.
+    pub vm_unshared: bool,
 }
 
 /// Flags for Vmproc.vm_flags.
@@ -167,6 +173,7 @@ pub(crate) unsafe fn vmproc_alloc(ep: Endpoint) -> Option<&'static mut Vmproc> {
             vm_minor_page_fault: 0,
             vm_major_page_fault: 0,
             prefault_exec: false,
+            vm_unshared: false,
         };
         table[slot] = Some(vmp);
         table[slot].as_mut()
@@ -559,10 +566,19 @@ pub unsafe fn vm_destroy(ep: Endpoint) {
         // their frames are not returned to the allocator.
         let mut skip = [(0u64, 0u64); crate::vm::region::MAX_REGIONS];
         let mut n = 0usize;
-        for r in (*vmp).vm_regions.regions.iter().flatten() {
-            if r.flags & crate::vm::region::VR_DIRECT != 0 && n < crate::vm::region::MAX_REGIONS {
-                skip[n] = (r.vaddr, r.end());
-                n += 1;
+        if (*vmp).vm_unshared {
+            // The sharing of this address space's frames was never recorded (see
+            // `Vmproc::vm_unshared`), so the walk cannot tell this process's pages from
+            // one it forked from. Free the table pages and nothing else.
+            skip[0] = (0u64, u64::MAX);
+            n = 1;
+        } else {
+            for r in (*vmp).vm_regions.regions.iter().flatten() {
+                if r.flags & crate::vm::region::VR_DIRECT != 0 && n < crate::vm::region::MAX_REGIONS
+                {
+                    skip[n] = (r.vaddr, r.end());
+                    n += 1;
+                }
             }
         }
         let cr3 = vm_get_addrspace(ep);
@@ -611,15 +627,25 @@ pub(crate) unsafe fn free_exec_old_addrspace(ep: Endpoint) {
             // not the allocator's to reclaim).
             let mut skip = [(0u64, 0u64); crate::vm::region::MAX_REGIONS];
             let mut n = 0usize;
-            for r in (*vmp).vm_regions.regions.iter().flatten() {
-                if r.flags & crate::vm::region::VR_DIRECT != 0 && n < crate::vm::region::MAX_REGIONS
-                {
-                    skip[n] = (r.vaddr, r.end());
-                    n += 1;
+            if (*vmp).vm_unshared {
+                // Unrecorded sharing: leak the frames rather than guess (see
+                // `Vmproc::vm_unshared`).
+                skip[0] = (0u64, u64::MAX);
+                n = 1;
+            } else {
+                for r in (*vmp).vm_regions.regions.iter().flatten() {
+                    if r.flags & crate::vm::region::VR_DIRECT != 0
+                        && n < crate::vm::region::MAX_REGIONS
+                    {
+                        skip[n] = (r.vaddr, r.end());
+                        n += 1;
+                    }
                 }
             }
             free_address_space(old, &skip[..n]);
         }
+        // The exec'd image is a fresh address space: nothing in it is shared.
+        (*vmp).vm_unshared = false;
         (*vmp).vm_pml4_phys = 0;
     }
 }

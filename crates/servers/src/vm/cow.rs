@@ -156,6 +156,20 @@ fn in_direct_region(ep: i32, va: u64) -> bool {
     })
 }
 
+/// Say once that a fork could not register its shared frames, so a child that
+/// takes more room than it should is not silent about why.
+pub(crate) fn report_unregistered_fork() {
+    #[cfg(target_os = "minix")]
+    {
+        use core::sync::atomic::{AtomicBool, Ordering};
+        static SAID: AtomicBool = AtomicBool::new(false);
+        if !SAID.swap(true, Ordering::Relaxed) {
+            let msg = b"vm: a fork could not register its shared frames; its teardown will leak them\n";
+            unsafe { minix_rt::write(1, msg.as_ptr(), msg.len()) };
+        }
+    }
+}
+
 /// Say once that a shared page had to be copied because the refcount table does
 /// not cover its frame, so a fork that paid for it is not silent about why.
 fn report_untracked_share() {
