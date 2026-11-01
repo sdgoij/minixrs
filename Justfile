@@ -1152,6 +1152,21 @@ test-cosmic-comp-x86 boot-timeout="300": cosmic-comp-x86 boot-image-x86
     python tools/cosmic_probe.py qemu-system-x86_64 -nographic -m 512M -no-reboot -vga none -device virtio-gpu-pci,id=fb0 -device virtio-tablet-pci,display=fb0 -kernel target/images/x86_64-pc-minix/minix-x86-boot.elf -drive if=none,id=disk0,file=target/images/x86_64-pc-minix/disk.img,format=raw,cache=writethrough -device virtio-blk-pci,disable-legacy=on,drive=disk0 -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0
     @echo "cosmic-comp: the compositor bound its socket and put its first frame on the scan-out (x86_64)"
 
+# The client gate: `/bin/wlshm`, a stock `wayland-client` from the phase 4 probe, runs as the
+# compositor's kiosk child, which is how a compositor with no session manager starts its
+# clients. It has to arrive over `WAYLAND_DISPLAY`, commit two `wl_shm` frames and get the
+# first buffer back, so this covers the socket, the seat and the renderer end to end.
+#
+# `-m 1536M` is not slack: this port's `fork` copies the whole address space, so a compositor
+# this size cannot spawn a child in 512 MiB (`.notes/wayland.md`). The gate asserts that the
+# child and its frames arrived, not that the machine could afford them.
+test-cosmic-comp-client-x86 boot-timeout="360": cosmic-comp-x86 wlcomp-x86 boot-image-x86
+    @just _assert-qemu-version qemu-system-x86_64
+    M=target/mesa/x86; B=$(python tools/build-cosmic-comp.py x86 --path); E="/lib/libdrm.so.2=$M/lib/libdrm.so.2;/lib/libEGL.so.1=$M/lib/libEGL.so.1;/lib/libgbm.so.1=$M/lib/libgbm.so.1;/lib/libexpat.so.1=$M/lib/libexpat.so.1;/lib/libgallium-25.3.6.so=$M/lib/libgallium-25.3.6.so;/lib/libGLESv2.so.2=$M/lib/libGLESv2.so.2;/lib/libz.so.1=$M/lib/libz.so.1;/lib/swrast_dri.so=$M/lib/swrast_dri.so;/bin/cosmic-comp=$B;/bin/wlshm=target/x86_64-pc-minix/release/wlshm"; MINIXFS_EXTRA="$E" MINIXFS_BLOCKS=32768 cargo run -q -p boot-image --bin mkminixfs --release -- x86_64
+    @just mkfs-x86
+    python tools/cosmic_probe.py --client qemu-system-x86_64 -nographic -m 1536M -no-reboot -vga none -device virtio-gpu-pci,id=fb0 -device virtio-tablet-pci,display=fb0 -kernel target/images/x86_64-pc-minix/minix-x86-boot.elf -drive if=none,id=disk0,file=target/images/x86_64-pc-minix/disk.img,format=raw,cache=writethrough -device virtio-blk-pci,disable-legacy=on,drive=disk0 -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0
+    @echo "cosmic-comp: a stock wl_shm client composed through the compositor to the scan-out (x86_64)"
+
 # Phase 4d-3's gate (`.notes/wayland.md` 6.13): a `wl_seat` with a keyboard on the smithay
 # compositor, fed from the input server's ring through the port's own `InputBackend`. The host
 # injects `a` with QMP -- the serial console never reaches the input server -- and the stock

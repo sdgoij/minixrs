@@ -2211,27 +2211,33 @@ route `tools/phase4-comp/src/keymap.rs` takes; Mesa reads `LIBGL_DRIVERS_PATH` a
 before the shell had been told about it, so `init_backend` now registers and configures it first.
 The display has to be a `virtio-gpu`: a `bochs-display` answers `ENOTTY` to `FBIO_SCANOUT_SRC`.
 
-**Open: a fork of the compositor corrupts its heap.** With a kiosk command
-(`cosmic-comp /bin/echo`) the compositor dies right after `Running "/bin/echo"`. Two prints
-placed either side of the spawn, one from inside `notify_ready` after it returns and one
-before the event loop, both stay silent, so the death is inside `Command::spawn` itself,
-before `fork` can return. The kernel prints one `#GP` line at RIP `0x4681B33`, which in the
-binary is `movq 0x10(%rdi), %rdi` inside `std::sys::pal::minix::alloc::dealloc`: the free-list
-walk reads a non-canonical pointer, so the heap metadata is already corrupt. It is a fork
-effect and not a GL one, because without a kiosk command the same
-`Offscreen::create_buffer` runs fine, and with `-m 1024M` the failure moves two probes later,
-so the fork's copy of the address space is what is under pressure.
+**A fork of the compositor needed the memory its copy costs, and corrupts nothing now.** With a
+kiosk command (`cosmic-comp /bin/echo`) the compositor used to die right after
+`Running "/bin/echo"`. Two prints placed either side of the spawn never both ran, so the death
+was inside `Command::spawn` itself, before `fork` returned, and the kernel printed one `#GP` at
+RIP `0x4681B33`, which in the binary is `movq 0x10(%rdi), %rdi` inside
+`std::sys::pal::minix::alloc::dealloc`: the free-list walk read a non-canonical pointer, so the
+heap metadata was already corrupt.
 
-`crates/servers/src/vm/cow.rs` has two fallbacks that can hand a process a frame another
-process still owns, and both are reachable exactly when memory is short. `handle_cow_fault`'s
-"no PhysBlock for this page" arm copies, but when `vm_alloc_pages` fails it maps the shared
-frame **writable** in the faulting process instead (three such fallbacks), which is the
-mechanism that would let a forked child's write reach its parent's free list. And
-`cow_setup_fork`'s own out-of-memory arm aliases the frame but skips the alias when `pb_new`
-returns `None` (the table holds 16384 entries), leaving the child sharing a page with no
-reference recorded, so `free_user_frame` frees it as private when the child exits or execs.
-Which of the two fires first is not established yet; the next step is to make both sound (copy
-or fail the fault, never grant write on a possibly shared frame) and re-measure.
+Reading `crates/servers/src/vm/cow.rs` found the two ways that happened, both reachable only
+when memory is short. `handle_cow_fault`'s "no phys block for this page" arm copied, but when
+the copy could not be allocated it mapped the shared frame **writable** in the faulting
+process, so a forked child's write reached its parent's page. And `cow_setup_fork` aliased a
+frame it could not copy but skipped the alias when the phys-block table (16384 entries) was
+full, leaving the child sharing a page with no reference recorded, so the child's teardown
+freed the parent's still-mapped page. Both now do what the reference's `mem_cow` does: copy or
+fail. A fork that cannot record an alias gives the parent the copy instead, and the fault's
+caller turns the failure into SIGSEGV, which is what the kernel's `#GP` change now makes
+survivable.
+
+The table filling is the measurement that matters for the next step: at 512 MiB the first
+spawn exhausts it, because this port's `fork` copies the whole address space and the
+compositor's is large. With `-m 1536M` the spawn, the child's exit and the compositor's clean
+shutdown all happen, and `just test-cosmic-comp-client-x86` runs a stock `wl_shm` client as the
+kiosk child: it arrives over `WAYLAND_DISPLAY`, commits two frames and gets its buffer back.
+Making `fork` cheap (clear the write bit on both sides and copy lazily, as the reference's
+`mem_cow` expects) is what would let the same thing run in the 512 MiB the other gates use, and
+the phys-block table would then have to hold every writable page of the parent.
 
 **A user `#GP` no longer stops the machine.** The `#GP` entry printed its diagnostic and then
 spun on `hlt`, so the corruption above took the whole system down: the console went silent

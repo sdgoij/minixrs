@@ -1,7 +1,12 @@
 #!/usr/bin/env python3
 """The cosmic-comp bring-up gate: the compositor boots, binds its socket, presents a frame.
 
-    python tools/cosmic_probe.py <qemu command...>
+    python tools/cosmic_probe.py [--client] <qemu command...>
+
+With `--client`, the compositor is started with `/bin/wlshm` as its kiosk child instead, so a
+stock `wayland-client` has to reach it, commit two `wl_shm` frames and get the first buffer
+back. That is the end-to-end proof that the socket, the seat and the renderer serve a client,
+not just the scan-out.
 
 The image carries the compositor (`/bin/cosmic-comp`), the Mesa DSOs and the keymap it needs;
 this probe boots it, types the compositor at the shell and watches the console.
@@ -86,23 +91,26 @@ def seen_since(marker, start):
     return marker in out[start:]
 
 
-def type_command(cmd, attempts=4):
-    """Type `cmd` and retype it until the guest echoed the whole line.
+def type_command(cmd, attempts=5):
+    """Type `cmd` and retype it until the shell actually ran it.
 
-    This console drops bytes out of a burst, and a truncated line still *runs*:
-    measured, `/bin/cosmic-comp` arrived as `/bin/cosmic-com`, which the shell
-    reported as a missing program and which no later check could tell from the
-    compositor failing to start. The echo is the evidence that the whole line
-    landed, and it is per attempt, so a line the guest really did receive is not
-    typed twice.
+    This console drops bytes, and two separate symptoms need covering: a truncated
+    line echoes short, and (measured) a whole line can be echoed while the shell
+    still runs a name with a byte missing, which it reports as `not found`. The
+    echo plus the absence of that report is the evidence; both are per attempt, so
+    a line the guest really did receive is not typed twice.
     """
     for _ in range(attempts):
         mark = offset()
         send_paced(cmd)
-        if wait_for(lambda: seen_since(cmd.encode(), mark), 15):
+        wait_for(lambda: seen_since(cmd.encode(), mark), 15)
+        time.sleep(1.5)
+        with lock:
+            window = bytes(out[mark:])
+        if cmd.encode() in window and b"not found" not in window:
             return True
-        # Let the truncated line finish (it prints an error and a new prompt)
-        # before typing again.
+        # Let whatever ran finish (it prints an error and a new prompt) before
+        # typing again.
         wait_for(lambda: out[mark:].count(b"\n") >= 2, 15)
     return False
 
@@ -115,8 +123,12 @@ def tail(n=1600):
 def main(argv):
     global qemu
     if not argv:
-        print("usage: cosmic_probe.py <qemu command...>", file=sys.stderr)
+        print("usage: cosmic_probe.py [--client] <qemu command...>", file=sys.stderr)
         return 2
+
+    client = "--client" in argv
+    argv = [arg for arg in argv if arg != "--client"]
+    guest_command = "/bin/cosmic-comp /bin/wlshm" if client else "/bin/cosmic-comp"
 
     checks = []
 
@@ -142,7 +154,7 @@ def main(argv):
             return 1
 
         time.sleep(0.5)
-        typed = type_command("/bin/cosmic-comp")
+        typed = type_command(guest_command)
         check(typed, "the compositor's command reached the shell intact", "" if typed else tail())
         if not typed:
             return 1
@@ -156,16 +168,27 @@ def main(argv):
         if not framed:
             return 1
 
+        if client:
+            passed = wait_for(lambda: b"wlshm: PASS" in out, 120)
+            check(
+                passed,
+                "a stock wl_shm client connected, committed and got its buffer back",
+                "" if passed else tail(),
+            )
+
         # A compositor that died after presenting would pass the check above.
         time.sleep(QUIESCENCE)
         with lock:
             text = bytes(out)
-        for marker in (b"panicked", b"render failed", b"Presentation failed"):
+        for marker in (b"panicked", b"render failed", b"Presentation failed", b"G0000"):
             if marker in text:
-                check(False, "the compositor stayed up", marker.decode())
+                check(False, "nothing crashed", marker.decode())
                 break
         else:
-            check(True, f"the compositor is still running {QUIESCENCE}s after its first frame")
+            if client:
+                check(True, "nothing crashed, and the client's frames reached the compositor")
+            else:
+                check(True, f"the compositor is still running {QUIESCENCE}s after its first frame")
     finally:
         qemu.kill()
 
