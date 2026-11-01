@@ -476,6 +476,159 @@ pub unsafe fn vm_check_range(caller: *mut crate::proc::Proc, addr: u64, bytes: u
     }
 }
 
+/// Frames whose copy-on-write sharing the kernel ended itself.
+///
+/// The kernel has to write into a process's memory in places a page fault cannot
+/// resolve: it switches to the target's tables and stores, in the middle of a copy
+/// it cannot abandon and resume (a grant write, a message, a signal frame). A
+/// present, read-only user page there is a page shared with another process after a
+/// fork, so it is copied before the store, and the frame it was sharing goes on
+/// this ring for VM, which owns the reference counts, to dereference.
+const COW_DISCARDS: usize = 1024;
+
+struct DiscardRing {
+    frames: [u64; COW_DISCARDS],
+    /// Next slot to fill.
+    head: usize,
+    /// Next slot to take.
+    tail: usize,
+}
+
+struct DiscardCell(UnsafeCell<DiscardRing>);
+unsafe impl Sync for DiscardCell {}
+impl DiscardCell {
+    const fn new() -> Self {
+        Self(UnsafeCell::new(DiscardRing {
+            frames: [0; COW_DISCARDS],
+            head: 0,
+            tail: 0,
+        }))
+    }
+    fn get(&self) -> *mut DiscardRing {
+        self.0.get()
+    }
+}
+
+static COW_DISCARD_RING: DiscardCell = DiscardCell::new();
+
+/// Take one frame off the discard ring. VM drains it after a fork notification.
+pub fn cow_discard_pop() -> Option<u64> {
+    let ring = unsafe { &mut *COW_DISCARD_RING.get() };
+    if ring.head == ring.tail {
+        return None;
+    }
+    let frame = ring.frames[ring.tail];
+    ring.tail = (ring.tail + 1) % COW_DISCARDS;
+    Some(frame)
+}
+
+fn cow_discard_push(frame: u64) {
+    let ring = unsafe { &mut *COW_DISCARD_RING.get() };
+    let next = (ring.head + 1) % COW_DISCARDS;
+    if next == ring.tail {
+        // Full. Overwriting a record VM has not taken would lose a reference it
+        // still owes a dereference, so the frame is left allocated instead: this
+        // is the failure that leaks one page rather than the one that frees a
+        // frame twice.
+        return;
+    }
+    let was_empty = ring.head == ring.tail;
+    ring.frames[ring.head] = frame;
+    ring.head = next;
+    if was_empty {
+        // The same notification that tells VM a page fault is pending wakes it to
+        // drain this ring; a notification that arrives while VM is busy becomes a
+        // pending bit, so nothing is lost.
+        let _ = unsafe {
+            crate::ipc::mini_notify(arch_common::com::SYSTEM, arch_common::com::VM_PROC_NR)
+        };
+    }
+}
+
+/// Give `proc_nr` a private writable copy of every page in `[addr, addr+bytes)`
+/// that the kernel is about to write through a read-only mapping.
+///
+/// After a fork both processes map their writable pages read-only and share the
+/// frames (`vm_paging_fork`), and a kernel store through such a mapping reaches the
+/// frame the other process still maps. The write-protect bit is clear on x86, and on
+/// RISC-V and AArch64 a leaf's permissions bind supervisor accesses too, so this is
+/// broken here, before the copy, where the kernel still knows which process it is
+/// writing for: a fault in the middle of the copy could not be resumed in the
+/// right address space.
+///
+/// A page that is not present is left alone: the copy faults as it always did, and
+/// that failure is the caller's to report.
+///
+/// # Safety
+///
+/// `proc_nr` must name a live process; `addr` need not be valid (an unmapped page
+/// is skipped), but the caller must be the one about to write there.
+pub unsafe fn cow_prepare_write(proc_nr: i32, addr: u64, bytes: usize) -> i32 {
+    unsafe {
+        if bytes == 0 {
+            return 0;
+        }
+        let rp = crate::table::proc_addr(proc_nr);
+        if rp.is_null() {
+            return 0;
+        }
+        // A process with no table of its own (a kernel task, a boot process still
+        // on the boot tables) shares nothing copy-on-write.
+        let cr3 = (*rp).p_seg.p_cr3;
+        if cr3 == 0 {
+            return 0;
+        }
+
+        let end = addr.saturating_add(bytes as u64);
+        let mut va = addr & !(VM_PAGE_SIZE as u64 - 1);
+        while va < end {
+            if let Ok(result) = crate::pagetable::walk(cr3, va) {
+                let pte = result.pte_value;
+                // `walk` reports a 4KB leaf as level 1 (and a huge leaf one level
+                // up from where it lives). Only a 4KB leaf is a page a process
+                // shares copy-on-write: a block entry is the kernel's own identity
+                // map or a device block.
+                if result.level == 1
+                    && pte & crate::pagetable::PG_P != 0
+                    && crate::hal::pte_is_user(pte)
+                    && !crate::hal::pte_is_writable(pte)
+                {
+                    let r = break_cow(va, &result);
+                    if r != 0 {
+                        return r;
+                    }
+                }
+            }
+            va += VM_PAGE_SIZE as u64;
+        }
+        0
+    }
+}
+
+/// Replace the frame `result` maps with a private copy and stop sharing it.
+unsafe fn break_cow(va: u64, result: &crate::pagetable::PageWalkResult) -> i32 {
+    unsafe {
+        let old = result.pte_value;
+        let old_pa = crate::hal::pte_to_phys(old);
+        let new_pa = match crate::hal::alloc_phys_page() {
+            Some(pa) => pa,
+            None => return crate::ipc::ENOMEM,
+        };
+        core::ptr::copy_nonoverlapping(
+            crate::pagetable::frame_ptr(old_pa) as *const u8,
+            crate::pagetable::frame_ptr(new_pa),
+            VM_PAGE_SIZE,
+        );
+        // The writable bit, and every other attribute, comes from the entry being
+        // replaced; only the frame it points at changes.
+        let new_pte = crate::hal::pte_set_frame(crate::hal::pte_set_writable(old), new_pa);
+        core::ptr::write(result.pte_virt, new_pte);
+        crate::hal::tlb_flush_page(va);
+        cow_discard_push(old_pa);
+        0
+    }
+}
+
 /// Copy data between two address spaces using CR3 switching.
 ///
 /// Copies `bytes` from `src_proc`'s virtual address `src_addr` to
@@ -504,6 +657,15 @@ pub unsafe fn virtual_copy(
     unsafe {
         if bytes == 0 {
             return 0;
+        }
+
+        // A read-only destination page is a frame another process shares, and this
+        // copy cannot stop halfway through to take a fault for it.
+        if dst_proc >= 0 {
+            let broken = cow_prepare_write(dst_proc, dst_addr, bytes);
+            if broken != 0 {
+                return broken;
+            }
         }
 
         if let Some(copy) = crate::hal::CROSS_ADDRESS_SPACE_COPY {
@@ -666,6 +828,10 @@ pub unsafe fn read_from_proc(proc: i32, addr: u64, dst: *mut u8, bytes: usize) -
 /// `addr` must be valid for `proc`; `src` must have `bytes` readable bytes.
 pub unsafe fn write_to_proc(proc: i32, addr: u64, src: *const u8, bytes: usize) -> i32 {
     unsafe {
+        let broken = cow_prepare_write(proc, addr, bytes);
+        if broken != 0 {
+            return broken;
+        }
         if let Some(copy) = crate::hal::CROSS_ADDRESS_SPACE_COPY {
             return copy(
                 arch_common::safecopies::KERNEL_ADDRESS_SPACE,

@@ -750,6 +750,11 @@ pub const fn pte_is_writable(pte: u64) -> bool {
 pub const fn pte_set_writable(pte: u64) -> u64 {
     pte | pte_writable()
 }
+/// Replace the physical address of a leaf PTE, keeping every flag bit, including
+/// the ones above the low 12 that `build_pte` does not carry (NX).
+pub const fn pte_set_frame(pte: u64, pa: u64) -> u64 {
+    (pte & !0x000FFFFFFFFFF000) | (pa & 0x000FFFFFFFFFF000)
+}
 /// Whether a leaf PTE is user-accessible.
 pub const fn pte_is_user(pte: u64) -> bool {
     (pte & pte_user()) != 0
@@ -1547,6 +1552,13 @@ unsafe fn free_fork_tables(child: *mut u64) {
 
 /// Deep-copy user page table entries from parent to child for fork.
 /// Walks 4-level page tables (PML4 → PDPT → PD → PT).
+///
+/// Every writable user leaf ends up read-only in **both** tables, sharing the
+/// frame: the fork is copy-on-write, and the parent's own next store is the one
+/// that has to copy too, or it reaches the child's snapshot (`KNOWN_ISSUES.md`
+/// item 27). The caller flushes the TLB afterwards — a switch back to the same
+/// address space need not invalidate a stale writable entry.
+///
 /// Returns 0 on success, -12 (ENOMEM) on allocation failure. A failing call has already released
 /// every table it allocated, so the caller has nothing to unwind but the root page it allocated
 /// itself.
@@ -1599,7 +1611,7 @@ pub unsafe fn vm_paging_fork(parent_cr3: u64, child_cr3: u64, _msg: &mut [u8; 64
             if e4 & PG_P == 0 {
                 continue;
             }
-            let parent_p3 = fork_phys_ptr(e4 & PG_FRAME) as *const u64;
+            let parent_p3 = fork_phys_ptr(e4 & PG_FRAME);
             let child_p3_pa = match fresh_table() {
                 Some(p) => p,
                 None => {
@@ -1620,14 +1632,16 @@ pub unsafe fn vm_paging_fork(parent_cr3: u64, child_cr3: u64, _msg: &mut [u8; 64
                 // entry, which is what this did, was leaked outright.
                 if e3 & PG_PS != 0 {
                     let e = if e3 & PG_U != 0 && e3 & PG_RW != 0 {
-                        e3 & !PG_RW
+                        let cow = e3 & !PG_RW;
+                        core::ptr::write(parent_p3.add(l3), cow);
+                        cow
                     } else {
                         e3
                     };
                     core::ptr::write(child_p3.add(l3), e);
                     continue;
                 }
-                let parent_p2 = fork_phys_ptr(e3 & PG_FRAME) as *const u64;
+                let parent_p2 = fork_phys_ptr(e3 & PG_FRAME);
                 let child_p2_pa = match fresh_table() {
                     Some(p) => p,
                     None => {
@@ -1643,15 +1657,18 @@ pub unsafe fn vm_paging_fork(parent_cr3: u64, child_cr3: u64, _msg: &mut [u8; 64
                         continue;
                     }
                     if e2 & PG_PS != 0 {
-                        // 2MB page — COW-protect if user-writable.
-                        if e2 & PG_U != 0 && e2 & PG_RW != 0 {
-                            core::ptr::write(child_p2.add(l2), e2 & !PG_RW);
+                        // 2MB page — COW-protect both views if user-writable.
+                        let e = if e2 & PG_U != 0 && e2 & PG_RW != 0 {
+                            let cow = e2 & !PG_RW;
+                            core::ptr::write(parent_p2.add(l2), cow);
+                            cow
                         } else {
-                            core::ptr::write(child_p2.add(l2), e2);
-                        }
+                            e2
+                        };
+                        core::ptr::write(child_p2.add(l2), e);
                         continue;
                     }
-                    let parent_p1 = fork_phys_ptr(e2 & PG_FRAME) as *const u64;
+                    let parent_p1 = fork_phys_ptr(e2 & PG_FRAME);
                     let child_p1_pa = match fresh_table() {
                         Some(p) => p,
                         None => {
@@ -1662,13 +1679,23 @@ pub unsafe fn vm_paging_fork(parent_cr3: u64, child_cr3: u64, _msg: &mut [u8; 64
                     let child_p1 = fork_phys_ptr(child_p1_pa);
                     core::ptr::write(child_p2.add(l2), child_p1_pa | (e2 & !PG_FRAME));
                     // Copy 4KB PTEs and COW-protect user-writable entries.
+                    //
+                    // Every writable user leaf becomes read-only in **both**
+                    // processes, and that is what makes the fork lazy: leaving
+                    // the parent writable is what let its writes reach the
+                    // child's copy before the child made one (KNOWN_ISSUES item
+                    // 27). The decision is read from the child's just-copied
+                    // table, which is the parent's entry before any write here,
+                    // so two mappings of one frame both get the same answer.
                     core::ptr::copy_nonoverlapping(parent_p1, child_p1, 512);
                     for l1 in 0..512 {
-                        let e1 = core::ptr::read(parent_p1.add(l1));
+                        let e1 = core::ptr::read(child_p1.add(l1));
                         if e1 & PG_P == 0 || e1 & PG_U == 0 || e1 & PG_RW == 0 {
                             continue;
                         }
-                        core::ptr::write(child_p1.add(l1), e1 & !PG_RW);
+                        let cow = e1 & !PG_RW;
+                        core::ptr::write(child_p1.add(l1), cow);
+                        core::ptr::write(parent_p1.add(l1), cow);
                     }
                 }
             }

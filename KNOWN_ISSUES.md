@@ -1516,6 +1516,16 @@ are arch-specific, `[env]` is tooling/platform, not kernel.
     (`crates/servers/src/vm/cow.rs`, `crates/servers/src/vm/mod.rs`,
     `crates/userland/src/bin/forktest.rs`)
 
+    *Superseded (2026-11-01).* The eager per-page copy was the fix while the kernel had no way to
+    write through a read-only user page; it also made a fork cost its whole address space (a
+    compositor spawning a client copied 248 MiB, and could not do it at all in 512 MiB). The fork
+    is lazy now: both sides' writable leaves are cleared, `cow_setup_fork` only takes a reference
+    per shared frame, and the kernel breaks the copy itself before a grant, a message delivery or
+    a signal frame (`cow_prepare_write`, with the abandoned frame handed back to VM).
+    `/bin/forktest`'s third phase is the `vm_suspend`-less answer to the trade above: the child
+    never writes its `SINK` page, the kernel fills it with a file read, and the parent must still
+    see its fork-time page. `.notes/wayland.md` 4f has the whole shape.
+
 31. **A blocking `select`/`poll` on a pipe never wakes without a timeout (2026-09-28, FIXED).**
     The readiness engine (`crates/servers/src/vfs/select.rs`) asks `pipe_check` whether a pipe fd
     is ready, and a character device registers a late watch (`CDEV_SELECT`), but a pipe registered

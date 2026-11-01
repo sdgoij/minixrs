@@ -423,12 +423,19 @@ pub fn cache_len() -> usize {
 mod tests {
     use super::*;
 
+    /// A frame no other test uses. The refcount table is global and the suites
+    /// run in parallel, so the tests cannot share a frame.
+    fn frame() -> u64 {
+        use core::sync::atomic::{AtomicU64, Ordering};
+        static NEXT: AtomicU64 = AtomicU64::new(0x100000);
+        NEXT.fetch_add(0x1000, Ordering::Relaxed)
+    }
+
     #[test]
     fn test_insert_and_find() {
         let mut t = CacheTable::<8>::new();
         assert!(t.is_empty());
-        // phys=0 keeps pb_unref from calling vm_free_pages on host.
-        let pb = pb::pb_new(0).unwrap();
+        let pb = pb::pb_new(frame()).unwrap();
         t.insert_bydev(1, 0x1000, 42, 0x2000, 0x4000, pb);
         assert_eq!(t.len(), 1);
         assert_eq!(t.find_bydev(1, 0x1000, None, 0, false), Some((0x4000, pb)));
@@ -442,7 +449,7 @@ mod tests {
     #[test]
     fn test_find_restamps_inode() {
         let mut t = CacheTable::<8>::new();
-        let pb = pb::pb_new(0).unwrap();
+        let pb = pb::pb_new(frame()).unwrap();
         t.insert_bydev(1, 0x1000, 42, 0x2000, 0x4000, pb);
         // find with a different ino updates the identity.
         assert_eq!(
@@ -457,24 +464,24 @@ mod tests {
     #[test]
     fn test_insert_replaces_same_key() {
         let mut t = CacheTable::<8>::new();
-        let pb1 = pb::pb_new(0).unwrap();
-        let pb2 = pb::pb_new(0).unwrap();
+        let pb1 = pb::pb_new(frame()).unwrap();
+        let pb2 = pb::pb_new(frame()).unwrap();
         t.insert_bydev(1, 0x1000, 0, 0, 0x4000, pb1);
         t.insert_bydev(1, 0x1000, 0, 0, 0x5000, pb2);
         assert_eq!(t.len(), 1);
         assert_eq!(t.find_bydev(1, 0x1000, None, 0, false), Some((0x5000, pb2)));
         // The replacement released the cache's reference on the old frame
         // (back to the owner's 1) and took one on the new frame.
-        assert_eq!(pb::pb_get(pb1).map(|b| b.refcount), Some(1));
-        assert_eq!(pb::pb_get(pb2).map(|b| b.refcount), Some(2));
+        assert_eq!(pb::pb_count(pb1), 1);
+        assert_eq!(pb::pb_count(pb2), 2);
         // Dropping the owner reference frees the old frame; clearing the
         // cache frees the new one.
         pb::pb_unref(pb1);
-        assert!(pb::pb_get(pb1).is_none());
+        assert_eq!(pb::pb_count(pb1), 0);
         t.clear_bydev(1);
-        assert_eq!(pb::pb_get(pb2).map(|b| b.refcount), Some(1));
+        assert_eq!(pb::pb_count(pb2), 1);
         pb::pb_unref(pb2);
-        assert!(pb::pb_get(pb2).is_none());
+        assert_eq!(pb::pb_count(pb2), 0);
     }
 
     #[test]
@@ -482,7 +489,7 @@ mod tests {
         let mut t = CacheTable::<4>::new();
         let mut pbs = [0usize; 4];
         for (i, slot) in pbs.iter_mut().enumerate() {
-            let pb = pb::pb_new(0).unwrap();
+            let pb = pb::pb_new(frame()).unwrap();
             *slot = pb;
             t.insert_bydev(1, (i as u64) * 0x1000, 0, 0, (i as u64 + 1) * 0x1000, pb);
         }
@@ -490,14 +497,14 @@ mod tests {
         assert_eq!(t.find_bydev(1, 0, None, 0, true), Some((0x1000, pbs[0])));
         // Inserting a fifth entry evicts the LRU oldest: entry 1. The
         // eviction releases the cache's reference (back to the owner's 1).
-        let pb5 = pb::pb_new(0).unwrap();
+        let pb5 = pb::pb_new(frame()).unwrap();
         t.insert_bydev(1, 4 * 0x1000, 0, 0, 5 * 0x1000, pb5);
         assert_eq!(t.len(), 4);
         assert_eq!(t.find_bydev(1, 0, None, 0, false), Some((0x1000, pbs[0])));
         assert_eq!(t.find_bydev(1, 0x1000, None, 0, false), None);
-        assert_eq!(pb::pb_get(pbs[1]).map(|b| b.refcount), Some(1));
+        assert_eq!(pb::pb_count(pbs[1]), 1);
         pb::pb_unref(pbs[1]);
-        assert!(pb::pb_get(pbs[1]).is_none());
+        assert_eq!(pb::pb_count(pbs[1]), 0);
         assert_eq!(
             t.find_bydev(1, 4 * 0x1000, None, 0, false),
             Some((5 * 0x1000, pb5))
@@ -512,8 +519,8 @@ mod tests {
     #[test]
     fn test_clear_bydev_only_clears_that_dev() {
         let mut t = CacheTable::<8>::new();
-        let pb1 = pb::pb_new(0).unwrap();
-        let pb2 = pb::pb_new(0).unwrap();
+        let pb1 = pb::pb_new(frame()).unwrap();
+        let pb2 = pb::pb_new(frame()).unwrap();
         t.insert_bydev(1, 0x1000, 0, 0, 0x4000, pb1);
         t.insert_bydev(2, 0x1000, 0, 0, 0x5000, pb2);
         t.clear_bydev(1);
@@ -521,15 +528,15 @@ mod tests {
         assert_eq!(t.find_bydev(1, 0x1000, None, 0, false), None);
         assert_eq!(t.find_bydev(2, 0x1000, None, 0, false), Some((0x5000, pb2)));
         // Only the cleared dev's cache reference was released.
-        assert_eq!(pb::pb_get(pb1).map(|b| b.refcount), Some(1));
+        assert_eq!(pb::pb_count(pb1), 1);
         pb::pb_unref(pb1);
-        assert!(pb::pb_get(pb1).is_none());
-        assert_eq!(pb::pb_get(pb2).map(|b| b.refcount), Some(2));
+        assert_eq!(pb::pb_count(pb1), 0);
+        assert_eq!(pb::pb_count(pb2), 2);
         t.clear_bydev(2);
         assert!(t.is_empty());
-        assert_eq!(pb::pb_get(pb2).map(|b| b.refcount), Some(1));
+        assert_eq!(pb::pb_count(pb2), 1);
         pb::pb_unref(pb2);
-        assert!(pb::pb_get(pb2).is_none());
+        assert_eq!(pb::pb_count(pb2), 0);
     }
 
     #[test]
@@ -538,11 +545,11 @@ mod tests {
         // even though 0 is a real device number on this port. Nothing sends
         // VM_SETCACHEPAGE today; file pages go through `insert_byino`.
         let mut t = CacheTable::<8>::new();
-        let pb = pb::pb_new(0).unwrap();
+        let pb = pb::pb_new(frame()).unwrap();
         t.insert_bydev(0, 0x1000, 0, 0, 0x4000, pb);
         assert!(t.is_empty());
         // No reference was taken for the refused entry.
-        assert_eq!(pb::pb_get(pb).map(|b| b.refcount), Some(1));
+        assert_eq!(pb::pb_count(pb), 1);
         pb::pb_unref(pb);
     }
 
@@ -552,7 +559,7 @@ mod tests {
         // left the cache empty and every file page private. Refused instead are the
         // port's `NO_DEV` (0xffff) and C's `VMC_NO_INODE` (0).
         let mut t = CacheTable::<8>::new();
-        let pb = pb::pb_new(0).unwrap();
+        let pb = pb::pb_new(frame()).unwrap();
         t.insert_byino(0, 42, 0x1000, 0x4000, pb);
         assert_eq!(t.len(), 1);
         assert_eq!(t.find_byino(0, 42, 0x1000, false), Some((0x4000, pb)));
@@ -571,8 +578,8 @@ mod tests {
         // Two files on one device at the same file offset are different pages. The
         // device-offset form would have shared one entry between them.
         let mut t = CacheTable::<8>::new();
-        let pb1 = pb::pb_new(0).unwrap();
-        let pb2 = pb::pb_new(0).unwrap();
+        let pb1 = pb::pb_new(frame()).unwrap();
+        let pb2 = pb::pb_new(frame()).unwrap();
         t.insert_byino(0, 11, 0, 0x4000, pb1);
         t.insert_byino(0, 12, 0, 0x5000, pb2);
         assert_eq!(t.len(), 2);
@@ -593,8 +600,8 @@ mod tests {
         // form must find only its own entry. File entries store `NO_DEV_OFFSET`,
         // which no device offset can equal.
         let mut t = CacheTable::<8>::new();
-        let pb1 = pb::pb_new(0).unwrap();
-        let pb2 = pb::pb_new(0).unwrap();
+        let pb1 = pb::pb_new(frame()).unwrap();
+        let pb2 = pb::pb_new(frame()).unwrap();
         t.insert_byino(7, 11, 0x1000, 0x4000, pb1);
         t.insert_bydev(7, 0x1000, 11, 0x1000, 0x5000, pb2);
         assert_eq!(t.len(), 2);
@@ -607,7 +614,7 @@ mod tests {
 
     #[test]
     fn test_global_functions() {
-        let pb = pb::pb_new(0).unwrap();
+        let pb = pb::pb_new(frame()).unwrap();
         let before = cache_len();
         cache_insert_byino(0, 3, 0x1000, 0x4000, pb);
         assert_eq!(cache_len(), before + 1);

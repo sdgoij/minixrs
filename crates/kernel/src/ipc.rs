@@ -978,6 +978,14 @@ pub unsafe fn delivermsg(rp: *mut Proc) -> i32 {
             return OK;
         }
 
+        // The message buffer is a user page like any other: after a fork it can be
+        // read-only and shared with the process's sibling, and the store below
+        // happens with the target's tables loaded.
+        let broken = crate::vm::cow_prepare_write((*rp).p_nr, vir, MESSAGE_SIZE);
+        if broken != 0 {
+            return broken;
+        }
+
         // As in `copy_from_user`: with no page tables the kernel buffer and the
         // target's buffer are in different memories, so the HAL makes the copy.
         if let Some(copy) = crate::hal::CROSS_ADDRESS_SPACE_COPY {

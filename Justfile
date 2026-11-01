@@ -1157,14 +1157,15 @@ test-cosmic-comp-x86 boot-timeout="300": cosmic-comp-x86 boot-image-x86
 # clients. It has to arrive over `WAYLAND_DISPLAY`, commit two `wl_shm` frames and get the
 # first buffer back, so this covers the socket, the seat and the renderer end to end.
 #
-# `-m 1536M` is not slack: this port's `fork` copies the whole address space, so a compositor
-# this size cannot spawn a child in 512 MiB (`.notes/wayland.md`). The gate asserts that the
-# child and its frames arrived, not that the machine could afford them.
+# The client gate runs in the same 512 MiB the other desktop gates use. It could not: this
+# port's `fork` used to copy the whole address space, so a compositor this size could not spare
+# the 248 MiB a client spawn cost and the gate needed `-m 1536M` (`.notes/wayland.md`). The fork
+# is copy-on-write now, and what the gate asserts is that the child and its frames arrived.
 test-cosmic-comp-client-x86 boot-timeout="360": cosmic-comp-x86 wlcomp-x86 boot-image-x86
     @just _assert-qemu-version qemu-system-x86_64
     M=target/mesa/x86; B=$(python tools/build-cosmic-comp.py x86 --path); E="/lib/libdrm.so.2=$M/lib/libdrm.so.2;/lib/libEGL.so.1=$M/lib/libEGL.so.1;/lib/libgbm.so.1=$M/lib/libgbm.so.1;/lib/libexpat.so.1=$M/lib/libexpat.so.1;/lib/libgallium-25.3.6.so=$M/lib/libgallium-25.3.6.so;/lib/libGLESv2.so.2=$M/lib/libGLESv2.so.2;/lib/libz.so.1=$M/lib/libz.so.1;/lib/swrast_dri.so=$M/lib/swrast_dri.so;/bin/cosmic-comp=$B;/bin/wlshm=target/x86_64-pc-minix/release/wlshm"; MINIXFS_EXTRA="$E" MINIXFS_BLOCKS=32768 cargo run -q -p boot-image --bin mkminixfs --release -- x86_64
     @just mkfs-x86
-    python tools/cosmic_probe.py --client qemu-system-x86_64 -nographic -m 1536M -no-reboot -vga none -device virtio-gpu-pci,id=fb0 -device virtio-tablet-pci,display=fb0 -kernel target/images/x86_64-pc-minix/minix-x86-boot.elf -drive if=none,id=disk0,file=target/images/x86_64-pc-minix/disk.img,format=raw,cache=writethrough -device virtio-blk-pci,disable-legacy=on,drive=disk0 -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0
+    python tools/cosmic_probe.py --client qemu-system-x86_64 -nographic -m 512M -no-reboot -vga none -device virtio-gpu-pci,id=fb0 -device virtio-tablet-pci,display=fb0 -kernel target/images/x86_64-pc-minix/minix-x86-boot.elf -drive if=none,id=disk0,file=target/images/x86_64-pc-minix/disk.img,format=raw,cache=writethrough -device virtio-blk-pci,disable-legacy=on,drive=disk0 -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0
     @echo "cosmic-comp: a stock wl_shm client composed through the compositor to the scan-out (x86_64)"
 
 # Phase 4d-3's gate (`.notes/wayland.md` 6.13): a `wl_seat` with a keyboard on the smithay
@@ -1552,10 +1553,12 @@ test-arches:
     @just test-winprobe aarch64
 
 # Fork isolation, per arch: `tools/smoke/fork.tsv` runs `/bin/forktest`, which forks and checks
-# both directions of the copy - the child's write must not reach the parent, and the parent's
-# post-fork write must not reach a child that only reads that page. The second direction is what
-# catches a fork sharing frames instead of copying them, and it is per arch because each arch's
-# `vm_paging_fork` builds the COW mapping itself (aarch64's AP[2:1] encoding is its own).
+# all three directions of the copy - the child's write must not reach the parent, the parent's
+# post-fork write must not reach a child that only reads that page, and a *kernel* write into a
+# page the child never touched must not reach the parent either. That last one is the answer to
+# the trade item 27 records: the kernel cannot take a page fault in the middle of a copy, so it
+# breaks the copy itself (`cow_prepare_write`). Per arch because each arch's `vm_paging_fork`
+# builds the COW mapping itself (aarch64's AP[2:1] encoding is its own).
 #
 # `/bin/forktest` is a `BOOT_BINS` entry, so every image carries it, and this is the gate the
 # per-arch fork entries in `KNOWN_ISSUES.md` point at.

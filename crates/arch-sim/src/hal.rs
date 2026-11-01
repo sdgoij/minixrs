@@ -537,6 +537,11 @@ pub const fn pte_set_writable(pte: u64) -> u64 {
     pte | 0x2
 }
 
+/// Replace the physical address of a leaf PTE, keeping every flag bit.
+pub const fn pte_set_frame(pte: u64, pa: u64) -> u64 {
+    (pte & !pte_frame_mask()) | (pa & pte_frame_mask())
+}
+
 pub const fn pte_is_user(pte: u64) -> bool {
     pte & 0x4 != 0
 }

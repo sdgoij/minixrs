@@ -540,6 +540,12 @@ pub const fn pte_is_writable(pte: u64) -> bool {
 pub const fn pte_set_writable(pte: u64) -> u64 {
     pte | pte::PTE_W
 }
+/// Replace the physical address of a leaf PTE, keeping every flag bit. The PPN
+/// field holds the address shifted right by 12, so this is not a mask of the
+/// address itself.
+pub const fn pte_set_frame(pte: u64, pa: u64) -> u64 {
+    (pte & !pte::PTE_PPN_MASK) | ((pa >> 2) & pte::PTE_PPN_MASK)
+}
 /// Whether a leaf PTE is user-accessible.
 pub const fn pte_is_user(pte: u64) -> bool {
     (pte & pte::PTE_U) != 0
@@ -1291,6 +1297,12 @@ pub fn qemu_exit(code: u32) -> ! {
 
 /// Deep-copy user page table entries from parent to child for fork.
 /// Walks SV39 3-level page tables (L2 → L1 → L0).
+///
+/// Every writable user leaf ends up read-only in **both** tables, sharing the
+/// frame: the fork is copy-on-write, and the parent's own next store is the one
+/// that has to copy too, or it reaches the child's snapshot (`KNOWN_ISSUES.md`
+/// item 27). The caller flushes the TLB afterwards — writing `satp` back is not
+/// a fence, so a stale writable entry can survive the switch.
 /// Returns 0 on success, -12 (ENOMEM) on allocation failure.
 ///
 /// # Safety
@@ -1397,7 +1409,7 @@ pub unsafe fn vm_paging_fork(parent_cr3: u64, child_cr3: u64, _msg: &mut [u8; 64
                 continue;
             }
             let parent_l1_pa = pte_to_phys(e2);
-            let parent_l1 = phys_to_virt(parent_l1_pa) as *const u64;
+            let parent_l1 = phys_to_virt(parent_l1_pa) as *mut u64;
 
             for l1 in 0..512 {
                 let e1 = core::ptr::read(parent_l1.add(l1));
@@ -1408,17 +1420,21 @@ pub unsafe fn vm_paging_fork(parent_cr3: u64, child_cr3: u64, _msg: &mut [u8; 64
 
                 if l1_leaf {
                     if e1 & U != 0 && e1 & W != 0 {
+                        // COW-protect both views: the parent's write is what
+                        // would otherwise reach the child's snapshot before the
+                        // child copies the page (KNOWN_ISSUES item 27).
                         let cow = e1 & !W;
                         let child_l2e = core::ptr::read(child_root.add(l2));
                         let child_l1_pa = pte_to_phys(child_l2e);
                         if child_l1_pa != 0 {
                             core::ptr::write((phys_to_virt(child_l1_pa) as *mut u64).add(l1), cow);
                         }
+                        core::ptr::write(parent_l1.add(l1), cow);
                     }
                     continue;
                 }
                 let parent_l0_pa = pte_to_phys(e1);
-                let parent_l0 = phys_to_virt(parent_l0_pa) as *const u64;
+                let parent_l0 = phys_to_virt(parent_l0_pa) as *mut u64;
 
                 for l0 in 0..512 {
                     let e0 = core::ptr::read(parent_l0.add(l0));
@@ -1436,7 +1452,7 @@ pub unsafe fn vm_paging_fork(parent_cr3: u64, child_cr3: u64, _msg: &mut [u8; 64
                         core::ptr::write(child_l0_ptr, build_pte(pa, e0 & !PPN_MASK));
                         continue;
                     }
-                    // User writable 4KB page — COW in child only.
+                    // User writable 4KB page — COW-protect both views.
                     let cow_e0 = e0 & !W;
                     let child_l2e = core::ptr::read(child_root.add(l2));
                     let child_l1_pa = pte_to_phys(child_l2e);
@@ -1444,6 +1460,7 @@ pub unsafe fn vm_paging_fork(parent_cr3: u64, child_cr3: u64, _msg: &mut [u8; 64
                     let child_l0_pa = pte_to_phys(child_l1e);
                     let child_l0_ptr = (phys_to_virt(child_l0_pa) as *mut u64).add(l0);
                     core::ptr::write(child_l0_ptr, build_pte(pa, cow_e0 & !PPN_MASK));
+                    core::ptr::write(parent_l0.add(l0), build_pte(pa, cow_e0 & !PPN_MASK));
                 }
             }
         }

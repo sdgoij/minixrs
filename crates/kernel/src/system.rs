@@ -548,6 +548,9 @@ pub const VM_PAGING_MEMSTAT: i32 = 10;
 /// copy of the arch allocator is never initialized, so VM must query this
 /// to recognize alias leaves during teardown walks.
 pub const VM_PAGING_MEMINFO: i32 = 11;
+/// Hand VM one frame whose copy-on-write sharing the kernel ended itself, so it
+/// can drop the reference the abandoned mapping held. Empty ring answers count 0.
+pub const VM_PAGING_COW_DISCARD: i32 = 12;
 
 // Constants
 
@@ -5520,9 +5523,30 @@ pub unsafe fn do_vm_paging_handler(_caller: *mut Proc, msg: &mut [u8; MESSAGE_SI
                     crate::pagetable::free_pt_page(child_cr3);
                     msg_write_u64(msg, VM_PAGING_CR3_OFF, 0);
                 } else {
+                    // The fork made the parent's own writable leaves read-only,
+                    // in place. A switch back to the same address space need not
+                    // invalidate cached translations (writing RISC-V's `satp` is
+                    // not a fence), and a stale writable entry would let the
+                    // parent's next store reach the frame the child now shares.
+                    crate::hal::tlb_flush();
                     msg_write_u64(msg, VM_PAGING_CR3_OFF, child_cr3);
                 }
                 result
+            }
+            VM_PAGING_COW_DISCARD => {
+                // The kernel had to write through a read-only user page and gave
+                // the writer a private frame instead (see
+                // `crate::vm::cow_prepare_write`). VM owns the counts, so it drops
+                // the reference the replaced mapping held; COUNT_OFF says whether
+                // a frame came back and PA_OFF carries it.
+                match crate::vm::cow_discard_pop() {
+                    Some(frame) => {
+                        msg_write_u64(msg, VM_PAGING_PA_OFF, frame);
+                        msg_write_i32(msg, VM_PAGING_COUNT_OFF, 1);
+                    }
+                    None => msg_write_i32(msg, VM_PAGING_COUNT_OFF, 0),
+                }
+                OK
             }
             _ => crate::ipc::ENOSYS,
         }

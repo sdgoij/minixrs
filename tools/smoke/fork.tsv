@@ -1,17 +1,24 @@
 # The fork-isolation scenario, driven by `just test-fork <arch>`.
 #
-# `/bin/forktest` fills two separately aligned 4 KiB writable pages, forks, and checks both
-# directions of the copy. The child writes one page and verifies its own write, and the parent
-# verifies that write did not land in its view. Then the parent writes the other page while the
-# child only ever *reads* it, and the child checks that page still holds its fork-time contents
-# after a wait long enough for the parent's write to have happened.
+# `/bin/forktest` fills three separately aligned 4 KiB writable pages and forks. It checks three
+# directions of the copy:
 #
-# That second direction is the one this gate exists for: a page the child writes gets a private
-# copy either way, so only a read of a page the child never wrote shows a fork whose frames are
-# shared rather than copied (`KNOWN_ISSUES.md` item 27, in the direction nobody had tested).
+#   1. The child writes one page and verifies its own write; the parent verifies that write did
+#      not land in its view.
+#   2. The parent writes a second page while the child only ever *reads* it, and the child checks
+#      after a wait long enough for the parent's write to have happened that the page still holds
+#      its fork-time contents.
+#   3. The child never writes the third page at all: it has the *kernel* fill it with a file read,
+#      and the parent checks that its own view is unchanged. A fork that leaves both sides sharing
+#      a frame is caught by the kernel writing through the read-only mapping, which is the one
+#      writer that cannot take a page fault to resolve it.
+#
+# Direction 2 is the one this gate was built for: a page the child writes gets a private copy
+# either way, so only a read of a page the child never wrote shows a fork whose frames are shared
+# rather than copied (`KNOWN_ISSUES.md` item 27, in the direction nobody had tested).
 #
 # The expected line is the last one the program prints, and it is printed only after the parent
-# has waited for the child and checked its exit status - so a child that failed a phase, or one
+# has waited for the child and checked its exit status, so a child that failed a phase, or one
 # that hung, cannot produce it. A hung child leaves the parent in `waitpid` and the step
 # unanswered, which the harness reports as this step not answering.
 #

@@ -1,260 +1,396 @@
-//! Physical page reference-counting module.
+//! Reference counts for physical frames.
 //!
-//! Provides `PhysBlock` — a reference-counted physical page — and
-//! `PhysBlockTable`, a fixed-capacity table of `PhysBlock` entries.
-//! Multiple `VirRegion` entries (in the same or different processes)
-//! can share a `PhysBlock`, enabling Copy-on-Write (COW) after fork.
+//! One count byte per 4 KiB frame of the machine's physical window, indexed by
+//! page number. A frame's count tells a teardown whether the frame has another
+//! owner, and a write fault with more than one whether the writer has to copy it
+//! first (copy-on-write after a fork).
 //!
-//! The table holds up to 16384 entries, sized for the COW working set of
-//! the long-lived processes: every writable user page of a live process
-//! that has ever been forked keeps a refcount >= 1 entry (the process's
-//! own reference), so the table must hold the sum of those pages, not just
-//! the transient fork-shared ones. The reference design (pb.c) allocates
-//! phys blocks from a dynamic slab; a static table needs this headroom.
-//! Entries are never moved after allocation; the index returned by
-//! `pb_new` remains valid until `pb_unref` frees it.
+//! The counts do not live in VM's image: [`pb_init`] asks the kernel for the
+//! physical allocator's geometry, allocates the bytes, and maps them into VM's
+//! own address space. Until that runs (host tests, or a guest whose allocation
+//! failed) a small static table covers the low physical addresses.
+//!
+//! Every lookup is one array index. The previous table was 16384 entries with a
+//! linear scan, and `pb_find` ran on every write fault, so a process large
+//! enough to matter made page faults quadratic; the capacity was also a wall a
+//! single fork of a large process could reach. A frame outside the window is
+//! simply untracked, and every caller reads "untracked" as "private": the fork
+//! path copies such a page instead of sharing it, so "no count means no other
+//! owner" holds whether or not the window exists.
 
-/// A reference-counted physical page.
-#[derive(Debug, Clone, Copy)]
-pub struct PhysBlock {
-    /// Physical address (page-aligned).
-    pub phys: u64,
-    /// Number of references (> 1 means shared / COW-protected).
-    pub refcount: u8,
-}
+/// Size of a physical frame.
+const PAGE_SIZE: u64 = 4096;
 
-/// A fixed-capacity table of `PhysBlock` entries.
-pub struct PhysBlockTable {
-    blocks: [Option<PhysBlock>; 16384],
-    count: u16,
-}
-
-impl PhysBlockTable {
-    /// Create an empty table.
-    pub const fn new() -> Self {
-        Self {
-            blocks: [None; 16384],
-            count: 0,
-        }
-    }
-
-    /// Allocate a new `PhysBlock` for the given physical address.
-    /// Returns the index on success, `None` if the table is full.
-    pub fn alloc(&mut self, phys: u64) -> Option<usize> {
-        for (idx, slot) in self.blocks.iter_mut().enumerate() {
-            if slot.is_none() {
-                *slot = Some(PhysBlock { phys, refcount: 1 });
-                self.count += 1;
-                return Some(idx);
-            }
-        }
-        None
-    }
-
-    /// Increment the reference count of the block at `idx`.
-    /// Returns `true` if the block exists and was bumped.
-    /// Returns `false` if the slot is empty or `idx` is out of range.
-    pub fn reference(&mut self, idx: usize) -> bool {
-        match self.blocks.get_mut(idx).and_then(|s| s.as_mut()) {
-            Some(block) => {
-                block.refcount = block.refcount.saturating_add(1);
-                true
-            }
-            None => false,
-        }
-    }
-
-    /// Decrement the reference count of the block at `idx`.
-    ///
-    /// If the refcount reaches 0, the slot is freed and the physical page
-    /// is deallocated (via `kernel::vm::free_mem`).
-    pub fn unreference(&mut self, idx: usize) {
-        let block = match self.blocks.get_mut(idx).and_then(|s| s.as_mut()) {
-            Some(block) => block,
-            None => return,
-        };
-
-        if block.refcount > 1 {
-            block.refcount -= 1;
-            return;
-        }
-
-        // Refcount is 1 (only reference) — remove and free the physical page.
-        if let Some(block) = self.blocks[idx].take() {
-            self.count -= 1;
-            let pa = block.phys;
-            if pa != 0 {
-                crate::vm::vm_free_pages(pa, 1);
-            }
-        }
-    }
-
-    /// Get a shared reference to the block at `idx`.
-    pub fn get(&self, idx: usize) -> Option<&PhysBlock> {
-        self.blocks.get(idx).and_then(|s| s.as_ref())
-    }
-
-    /// Find a block by physical address. Returns the index if found.
-    pub fn find(&self, phys: u64) -> Option<usize> {
-        self.blocks.iter().position(|s| match s {
-            Some(b) => b.phys == phys,
-            None => false,
-        })
-    }
-
-    /// Return the number of active entries.
-    pub fn len(&self) -> u16 {
-        self.count
-    }
-
-    /// Return true if the table is empty.
-    pub fn is_empty(&self) -> bool {
-        self.count == 0
-    }
-}
-
-impl Default for PhysBlockTable {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-/// Global PhysBlock table, accessible from the single-threaded VM server.
 use core::cell::UnsafeCell;
 
-struct PbTableCell(UnsafeCell<PhysBlockTable>);
-unsafe impl Sync for PbTableCell {}
-impl PbTableCell {
-    const fn new() -> Self {
-        Self(UnsafeCell::new(PhysBlockTable::new()))
+/// Frames covered before [`pb_init`] runs, and on the host.
+const STATIC_FRAMES: usize = 8192;
+
+/// Refcounts for the frames of one physical window, indexed by page number.
+pub struct PhysRefs {
+    base_pfn: u64,
+    /// One count per frame from `base_pfn`; `len` bytes, all writable.
+    counts: *mut u8,
+    len: usize,
+}
+
+// Safety: VM is a single-threaded server and the only user of this type.
+unsafe impl Sync for PhysRefs {}
+
+impl PhysRefs {
+    /// A table over an already-mapped window of `frames` count bytes.
+    ///
+    /// # Safety
+    ///
+    /// `counts` must point to `frames` writable bytes that outlive the table.
+    pub const unsafe fn from_window(base_pfn: u64, counts: *mut u8, frames: usize) -> Self {
+        Self {
+            base_pfn,
+            counts,
+            len: frames,
+        }
     }
-    fn get(&self) -> *mut PhysBlockTable {
+
+    fn counts(&self) -> &[u8] {
+        // SAFETY: `counts` points at `len` bytes (see `from_window`).
+        unsafe { core::slice::from_raw_parts(self.counts, self.len) }
+    }
+
+    fn counts_mut(&mut self) -> &mut [u8] {
+        // SAFETY: as `counts`, and `&mut self` rules out aliasing through this
+        // table.
+        unsafe { core::slice::from_raw_parts_mut(self.counts, self.len) }
+    }
+
+    /// Index of `pfn` in the window, if it is covered.
+    fn index(&self, pfn: u64) -> Option<usize> {
+        let offset = pfn.checked_sub(self.base_pfn)?;
+        if offset < self.len as u64 {
+            Some(offset as usize)
+        } else {
+            None
+        }
+    }
+
+    fn slot_of(&self, phys: u64) -> Option<usize> {
+        self.index(phys / PAGE_SIZE)
+    }
+
+    /// Start tracking `phys` with a count of one, unless it is already tracked.
+    ///
+    /// Returns the handle (the frame's page number), or `None` if the frame is
+    /// outside the window; the caller then has to treat it as unshareable.
+    pub fn allocate(&mut self, phys: u64) -> Option<usize> {
+        let slot = self.slot_of(phys)?;
+        if self.counts()[slot] == 0 {
+            self.counts_mut()[slot] = 1;
+        }
+        Some((phys / PAGE_SIZE) as usize)
+    }
+
+    /// Add a reference to the frame `pfn` is the page number of.
+    ///
+    /// Returns false when the frame is not tracked (never allocated, already
+    /// released, or outside the window).
+    pub fn reference(&mut self, pfn: usize) -> bool {
+        let Some(slot) = self.index(pfn as u64) else {
+            return false;
+        };
+        let count = &mut self.counts_mut()[slot];
+        if *count == 0 {
+            return false;
+        }
+        *count = count.saturating_add(1);
+        true
+    }
+
+    /// Drop a reference, returning the frame to the allocator when it was the
+    /// last one.
+    pub fn unreference(&mut self, pfn: usize) {
+        let Some(slot) = self.index(pfn as u64) else {
+            return;
+        };
+        let count = &mut self.counts_mut()[slot];
+        if *count == 0 {
+            return;
+        }
+        *count -= 1;
+        if *count == 0 {
+            drop_frame((pfn as u64) * PAGE_SIZE);
+        }
+    }
+
+    /// Count for `pfn`, or 0 when the frame is untracked.
+    pub fn count(&self, pfn: usize) -> u8 {
+        self.index(pfn as u64).map_or(0, |slot| self.counts()[slot])
+    }
+
+    /// Handle for the frame at `phys`, if the table is tracking it.
+    pub fn find(&self, phys: u64) -> Option<usize> {
+        let slot = self.slot_of(phys)?;
+        if self.counts()[slot] == 0 {
+            None
+        } else {
+            Some((phys / PAGE_SIZE) as usize)
+        }
+    }
+
+    /// Number of frames the window covers.
+    pub fn capacity(&self) -> usize {
+        self.len
+    }
+}
+
+/// Return a frame whose last reference is gone to the allocator.
+#[cfg(target_os = "minix")]
+fn drop_frame(phys: u64) {
+    // Frame 0 is below every allocator window: it is never a user page.
+    if phys != 0 {
+        crate::vm::vm_free_pages(phys, 1);
+    }
+}
+
+/// Return a frame whose last reference is gone to the allocator.
+///
+/// The host has no allocator behind `vm_free_pages` (it is a kernel call), so
+/// there is nothing to release there; the count is cleared either way, which is
+/// what the host suites observe.
+#[cfg(not(target_os = "minix"))]
+fn drop_frame(_phys: u64) {}
+
+struct CountsCell(UnsafeCell<[u8; STATIC_FRAMES]>);
+unsafe impl Sync for CountsCell {}
+
+impl CountsCell {
+    const fn new() -> Self {
+        Self(UnsafeCell::new([0; STATIC_FRAMES]))
+    }
+}
+
+static STATIC_COUNTS: CountsCell = CountsCell::new();
+
+struct TableCell(UnsafeCell<PhysRefs>);
+unsafe impl Sync for TableCell {}
+
+impl TableCell {
+    const fn new() -> Self {
+        // SAFETY: the counts are this module's own static, which outlives the
+        // table, and nothing else writes them.
+        Self(UnsafeCell::new(unsafe {
+            PhysRefs::from_window(0, STATIC_COUNTS.0.get() as *mut u8, STATIC_FRAMES)
+        }))
+    }
+
+    fn get(&self) -> *mut PhysRefs {
         self.0.get()
     }
 }
 
-static PB_TABLE: PbTableCell = PbTableCell::new();
+static TABLE: TableCell = TableCell::new();
 
-/// Allocate a new PhysBlock. Returns the index, or `None` if full.
+/// Point the counts at the machine's physical window.
+///
+/// Asks the kernel for the allocator's geometry, takes the bytes the counts
+/// need from it, and maps them into VM's own address space at a scratch VA
+/// that is never released. Returns false, leaving the static table in place,
+/// when the kernel will not give them.
+pub fn pb_init(base: u64, usable: u64) -> bool {
+    #[cfg(target_os = "minix")]
+    {
+        use crate::vm::{vm_alloc_pages, vm_free_pages, vm_mappages};
+
+        let frames = (usable / PAGE_SIZE) as usize;
+        if frames == 0 {
+            return false;
+        }
+        // One count byte per frame, so the counts need `frames` bytes, in whole
+        // pages.
+        let pages = frames.div_ceil(PAGE_SIZE as usize);
+        let phys = vm_alloc_pages(pages);
+        if phys == 0 {
+            return false;
+        }
+        let flags = kernel::pagetable::MAP_USER | kernel::pagetable::MAP_WRITE;
+        let va = vm_mappages(phys, pages, flags);
+        if va == 0 {
+            vm_free_pages(phys, pages);
+            return false;
+        }
+        // SAFETY: the kernel just mapped `pages` frames at `va`, so `frames`
+        // bytes are writable there for as long as VM runs.
+        unsafe {
+            *TABLE.get() = PhysRefs::from_window(base / PAGE_SIZE, va as *mut u8, frames);
+        }
+        true
+    }
+    #[cfg(not(target_os = "minix"))]
+    {
+        let _ = (base, usable);
+        false
+    }
+}
+
+/// Start tracking `phys` with a count of one. Returns the handle, or `None`
+/// when the frame is outside the window.
 pub fn pb_new(phys: u64) -> Option<usize> {
-    unsafe { (*PB_TABLE.get()).alloc(phys) }
+    unsafe { (*TABLE.get()).allocate(phys) }
 }
 
-/// Increment the refcount of the block at `idx`.
-pub fn pb_ref(idx: usize) -> bool {
-    unsafe { (*PB_TABLE.get()).reference(idx) }
+/// Add a reference to the frame `pfn` is the page number of.
+pub fn pb_ref(pfn: usize) -> bool {
+    unsafe { (*TABLE.get()).reference(pfn) }
 }
 
-/// Decrement the refcount of the block at `idx`, freeing the physical
-/// page if the refcount reaches 0.
-pub fn pb_unref(idx: usize) {
-    unsafe { (*PB_TABLE.get()).unreference(idx) }
+/// Drop a reference, freeing the frame when it was the last one.
+pub fn pb_unref(pfn: usize) {
+    unsafe { (*TABLE.get()).unreference(pfn) }
 }
 
-/// Get a reference to the block at `idx`.
-pub fn pb_get(idx: usize) -> Option<&'static PhysBlock> {
-    unsafe { (*PB_TABLE.get()).get(idx) }
+/// Count for the frame `pfn` is the page number of, or 0 if untracked.
+pub fn pb_count(pfn: usize) -> u8 {
+    unsafe { (*TABLE.get()).count(pfn) }
 }
 
-/// Find a block by physical address. Returns the index, or `None`.
+/// Handle for the frame at `phys`, or `None` if it is not tracked.
 pub fn pb_find(phys: u64) -> Option<usize> {
-    unsafe { (*PB_TABLE.get()).find(phys) }
+    unsafe { (*TABLE.get()).find(phys) }
+}
+
+/// Number of frames the window covers.
+pub fn pb_capacity() -> usize {
+    unsafe { (*TABLE.get()).capacity() }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[test]
-    fn test_pb_new_and_get() {
-        let mut table = PhysBlockTable::new();
-        let idx = table.alloc(0x1000).unwrap();
-        let block = table.get(idx).unwrap();
-        assert_eq!(block.phys, 0x1000);
-        assert_eq!(block.refcount, 1);
+    fn table(base_pfn: u64, frames: usize, buf: &mut [u8]) -> PhysRefs {
+        assert!(buf.len() >= frames);
+        buf[..frames].fill(0);
+        // SAFETY: `buf` outlives the returned table in every test below.
+        unsafe { PhysRefs::from_window(base_pfn, buf.as_mut_ptr(), frames) }
     }
 
     #[test]
-    fn test_pb_ref_increments() {
-        let mut table = PhysBlockTable::new();
-        let idx = table.alloc(0x2000).unwrap();
-        assert!(table.reference(idx));
-        assert_eq!(table.get(idx).unwrap().refcount, 2);
-        assert!(table.reference(idx));
-        assert_eq!(table.get(idx).unwrap().refcount, 3);
+    fn a_new_frame_starts_with_one_reference() {
+        let mut buf = [0u8; 8];
+        let mut t = table(0, 8, &mut buf);
+        let idx = t.allocate(0x1000).unwrap();
+        assert_eq!(idx, 1, "the handle is the page number");
+        assert_eq!(t.count(idx), 1);
+        assert_eq!(t.find(0x1000), Some(1));
     }
 
     #[test]
-    fn test_pb_ref_invalid_index() {
-        let mut table = PhysBlockTable::new();
-        assert!(!table.reference(9999));
+    fn references_accumulate() {
+        let mut buf = [0u8; 8];
+        let mut t = table(0, 8, &mut buf);
+        let idx = t.allocate(0x2000).unwrap();
+        assert!(t.reference(idx));
+        assert!(t.reference(idx));
+        assert_eq!(t.count(idx), 3);
     }
 
     #[test]
-    fn test_pb_unref_decrements() {
-        let mut table = PhysBlockTable::new();
-        // Use phys=0 so unreference doesn't call free_mem on fake pages.
-        let idx = table.alloc(0).unwrap();
-        table.reference(idx);
-        assert_eq!(table.get(idx).unwrap().refcount, 2);
-        // Decrement once: still > 1
-        table.unreference(idx);
-        assert_eq!(table.get(idx).unwrap().refcount, 1);
-        // Decrement again: refcount becomes 0, entry freed
-        table.unreference(idx);
-        assert!(table.get(idx).is_none());
+    fn a_reference_to_an_untracked_frame_is_refused() {
+        let mut buf = [0u8; 8];
+        let mut t = table(0, 8, &mut buf);
+        assert!(!t.reference(3));
+        assert_eq!(t.count(3), 0);
     }
 
     #[test]
-    fn test_pb_find_by_phys() {
-        let mut table = PhysBlockTable::new();
-        table.alloc(0x1000);
-        let idx_b = table.alloc(0x2000).unwrap();
-        table.alloc(0x3000);
-        assert_eq!(table.find(0x2000), Some(idx_b));
-        assert_eq!(table.find(0x4000), None);
+    fn the_last_unreference_releases_the_frame() {
+        let mut buf = [0u8; 8];
+        let mut t = table(0, 8, &mut buf);
+        let idx = t.allocate(0x3000).unwrap();
+        assert!(t.reference(idx));
+        t.unreference(idx);
+        assert_eq!(t.count(idx), 1);
+        t.unreference(idx);
+        assert_eq!(t.count(idx), 0);
+        assert_eq!(t.find(0x3000), None);
     }
 
     #[test]
-    fn test_pb_table_full() {
-        let mut table = PhysBlockTable::new();
-        for i in 0..16384 {
-            let phys = (i as u64 + 1) * 0x1000;
-            assert!(table.alloc(phys).is_some(), "slot {} should accept", i);
+    fn unreferencing_an_untracked_frame_is_harmless() {
+        let mut buf = [0u8; 8];
+        let mut t = table(0, 8, &mut buf);
+        t.unreference(5);
+        t.unreference(600);
+        assert_eq!(t.count(5), 0);
+    }
+
+    #[test]
+    fn find_distinguishes_frames() {
+        let mut buf = [0u8; 8];
+        let mut t = table(0, 8, &mut buf);
+        t.allocate(0x1000);
+        let b = t.allocate(0x2000).unwrap();
+        t.allocate(0x3000);
+        assert_eq!(t.find(0x2000), Some(b));
+        assert_eq!(t.find(0x4000), None);
+    }
+
+    #[test]
+    fn the_count_saturates() {
+        let mut buf = [0u8; 8];
+        let mut t = table(0, 8, &mut buf);
+        let idx = t.allocate(0x5000).unwrap();
+        for _ in 0..u8::MAX as usize + 3 {
+            t.reference(idx);
         }
-        assert!(table.alloc(0xDEAD000).is_none());
+        assert_eq!(t.count(idx), u8::MAX);
     }
 
     #[test]
-    fn test_pb_refcount_saturation() {
-        let mut table = PhysBlockTable::new();
-        let idx = table.alloc(0x5000).unwrap();
-        // start at 1, each reference() adds 1 (saturating at 255)
-        for _ in 0..250 {
-            table.reference(idx);
-        }
-        // 1 + 250 = 251
-        assert_eq!(table.get(idx).unwrap().refcount, 251);
-        // Saturate at u8::MAX
-        for _ in 0..10 {
-            table.reference(idx);
-        }
-        assert_eq!(table.get(idx).unwrap().refcount, u8::MAX);
+    fn a_window_offset_by_its_base_address_is_indexed_the_same_way() {
+        // riscv64 and aarch64 hand VM a window that starts at the middle of
+        // physical memory, so the base page number moves with it.
+        let mut buf = [0u8; 4];
+        let mut t = table(0x80000, 4, &mut buf);
+        let base = 0x80000 * PAGE_SIZE;
+        assert_eq!(t.allocate(base), Some(0x80000));
+        assert_eq!(t.find(base), Some(0x80000));
+        assert_eq!(t.find(base + 0x1000), None);
+        assert_eq!(t.allocate(base - 0x1000), None, "below the window");
+        assert_eq!(t.allocate(base + 4 * 0x1000), None, "above the window");
+        assert_eq!(t.capacity(), 4);
     }
 
     #[test]
-    fn test_pb_global_functions() {
-        // Global functions should be callable without panicking.
-        // Use phys=0 to avoid kernel::vm::free_mem on unallocated pages.
-        let idx = pb_new(0).unwrap();
-        assert!(pb_get(idx).is_some());
-        assert!(pb_ref(idx));
-        pb_unref(idx);
-        // After one unref, refcount goes from 2 to 1 (still valid)
-        assert!(pb_get(idx).is_some());
-        pb_unref(idx);
-        // After second unref, entry should be freed
-        // (phys=0 means pageno=0, so free_mem is skipped)
-        assert!(pb_get(idx).is_none());
+    fn a_frame_already_tracked_is_not_reset_by_allocate() {
+        let mut buf = [0u8; 8];
+        let mut t = table(0, 8, &mut buf);
+        let idx = t.allocate(0x6000).unwrap();
+        t.reference(idx);
+        assert_eq!(t.allocate(0x6000), Some(idx));
+        assert_eq!(t.count(idx), 2, "a second owner, not a fresh count");
+    }
+
+    #[test]
+    fn the_global_table_tracks_and_releases() {
+        // Distinct frames: the global table is shared by every test in the
+        // binary, and the static window covers these page numbers.
+        let a = pb_new(0x10000).unwrap();
+        let b = pb_new(0x11000).unwrap();
+        assert_ne!(a, b);
+        assert!(pb_ref(a));
+        assert_eq!(pb_count(a), 2);
+        pb_unref(a);
+        assert_eq!(pb_count(a), 1);
+        pb_unref(a);
+        assert_eq!(pb_find(0x10000), None);
+        pb_unref(b);
+        assert_eq!(pb_find(0x11000), None);
+    }
+
+    #[test]
+    fn a_frame_outside_the_static_window_is_untracked() {
+        let beyond = (STATIC_FRAMES as u64 + 16) * PAGE_SIZE;
+        assert_eq!(pb_new(beyond), None);
+        assert_eq!(pb_find(beyond), None);
+        assert!(pb_capacity() >= STATIC_FRAMES);
     }
 }

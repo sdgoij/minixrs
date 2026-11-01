@@ -88,6 +88,8 @@ const VM_PAGING_FORK: i32 = 7;
 const VM_PAGING_WALK_PAGE: i32 = 8;
 const VM_PAGING_CLEAR: i32 = 9;
 const VM_PAGING_MEMSTAT: i32 = 10;
+const VM_PAGING_MEMINFO: i32 = 11;
+const VM_PAGING_COW_DISCARD: i32 = 12;
 
 /// Walk the page table identified by `cr3` at virtual address `va`
 /// and return the PTE value. Runs in ring 0 via kernel call so it can
@@ -162,6 +164,75 @@ pub fn vm_free_pages_query() -> i32 {
     #[cfg(not(target_os = "minix"))]
     {
         0 // host tests have no kernel to query
+    }
+}
+
+/// The kernel physical allocator's geometry: the base of its window and how
+/// many bytes above it are usable.
+///
+/// The per-process page tables are built from this window, and VM's own copy of
+/// the arch allocator is not the kernel's, so the aarch64 alias check and the
+/// frame refcount table both take it from the kernel.
+pub fn query_meminfo() -> Option<(u64, u64)> {
+    #[cfg(target_os = "minix")]
+    {
+        let mut msg = [0u8; 64];
+        msg[VM_PAGING_SUBCMD_OFF..VM_PAGING_SUBCMD_OFF + 4]
+            .copy_from_slice(&VM_PAGING_MEMINFO.to_le_bytes());
+        if minix_rt::kernel_call(VM_PAGING_CALL, &mut msg) != 0 {
+            return None;
+        }
+        let base = u64::from_le_bytes(
+            msg[VM_PAGING_CR3_OFF..VM_PAGING_CR3_OFF + 8]
+                .try_into()
+                .ok()?,
+        );
+        let usable = u64::from_le_bytes(
+            msg[VM_PAGING_VA_OFF..VM_PAGING_VA_OFF + 8]
+                .try_into()
+                .ok()?,
+        );
+        Some((base, usable))
+    }
+    #[cfg(not(target_os = "minix"))]
+    {
+        None // host tests have no kernel to query
+    }
+}
+
+/// Drop the references on frames whose copy-on-write sharing the kernel ended
+/// itself, when it had to write through a read-only page for a grant, a message
+/// or a signal frame (the kernel's `cow_prepare_write`).
+///
+/// The kernel keeps the ring; one call hands back one frame. A drain that runs
+/// late is harmless: the frame is not mapped by anyone, so the count only has to
+/// come down eventually, and an entry the kernel could not record (a full ring)
+/// leaves that frame allocated rather than double-freed.
+pub fn drain_cow_discards() {
+    #[cfg(target_os = "minix")]
+    loop {
+        let mut msg = [0u8; 64];
+        msg[VM_PAGING_SUBCMD_OFF..VM_PAGING_SUBCMD_OFF + 4]
+            .copy_from_slice(&VM_PAGING_COW_DISCARD.to_le_bytes());
+        if minix_rt::kernel_call(VM_PAGING_CALL, &mut msg) != 0 {
+            return;
+        }
+        let count = i32::from_le_bytes(
+            msg[VM_PAGING_COUNT_OFF..VM_PAGING_COUNT_OFF + 4]
+                .try_into()
+                .unwrap_or([0; 4]),
+        );
+        if count <= 0 {
+            return;
+        }
+        let frame = u64::from_le_bytes(
+            msg[VM_PAGING_PA_OFF..VM_PAGING_PA_OFF + 8]
+                .try_into()
+                .unwrap_or([0; 8]),
+        );
+        if let Some(pfn) = pb::pb_find(frame) {
+            pb::pb_unref(pfn);
+        }
     }
 }
 
@@ -644,38 +715,24 @@ pub fn vm_main() {
         let range = (0x0010_0000u64, 2048u64 * 4096);
         kernel::hal::init_phys_alloc(range.0, range.1);
     }
-    // On aarch64 the server-side copy of the arch allocator is never
-    // initialized (init_phys_alloc is a no-op), yet the teardown walks
-    // (free_address_space / free_user_range) consult the low-GB alias
-    // window to avoid freeing shared alias frames. The window is defined by
-    // the KERNEL's allocator (the per-process tables are built from it), so
-    // query it via kernel call 62 / VM_PAGING_MEMINFO and cache it.
-    #[cfg(all(target_os = "minix", target_arch = "aarch64"))]
-    {
-        const VM_PAGING_CALL: i32 = 62;
-        const VM_PAGING_MEMINFO: i32 = 11;
-        const VM_PAGING_SUBCMD_OFF: usize = 8;
-        const VM_PAGING_CR3_OFF: usize = 24;
-        const VM_PAGING_VA_OFF: usize = 32;
-        let mut msg = [0u8; 64];
-        msg[VM_PAGING_SUBCMD_OFF..VM_PAGING_SUBCMD_OFF + 4]
-            .copy_from_slice(&VM_PAGING_MEMINFO.to_le_bytes());
-        let r = minix_rt::kernel_call(VM_PAGING_CALL, &mut msg);
-        if r == 0 {
-            let base = u64::from_le_bytes(
-                msg[VM_PAGING_CR3_OFF..VM_PAGING_CR3_OFF + 8]
-                    .try_into()
-                    .unwrap_or([0; 8]),
-            );
-            let usable = u64::from_le_bytes(
-                msg[VM_PAGING_VA_OFF..VM_PAGING_VA_OFF + 8]
-                    .try_into()
-                    .unwrap_or([0; 8]),
-            );
-            kernel::hal::set_alias_window(base, usable);
-        }
+    // The kernel's allocator geometry is what the per-process tables are built
+    // from, and VM's own copy of the arch allocator is not authoritative: the
+    // teardown walks consult the window (aarch64's alias leaves), and the frame
+    // refcounts are sized from it.
+    let meminfo = query_meminfo();
+    #[cfg(target_arch = "aarch64")]
+    if let Some((base, usable)) = meminfo {
+        kernel::hal::set_alias_window(base, usable);
     }
+
     init_vm();
+
+    // The counts sit outside VM's image, in frames the kernel hands over. Without
+    // them the static table covers only the low physical addresses, and a frame
+    // beyond it is untracked (copied rather than shared at fork).
+    if let Some((base, usable)) = meminfo {
+        pb::pb_init(base, usable);
+    }
 
     #[cfg(target_os = "minix")]
     {
@@ -815,6 +872,10 @@ pub fn exec_bootproc() {
 /// Iterates all process slots to find pending page faults
 /// (stored by the kernel's #PF handler) and processes them.
 pub fn sef_signal_handler() {
+    // Frames the kernel abandoned when it broke a copy-on-write page for a write
+    // it had to perform itself (a grant, a message, a signal frame).
+    drain_cow_discards();
+
     // Process pending page faults by querying the kernel via
     // SYS_VMCTL(VMCTL_MEMREQ_GET). Iterate all active Vmproc
     // entries and check each one for pending fault data.
@@ -2664,54 +2725,50 @@ fn do_fork(msg: &mut Message) -> i32 {
     }
 
     // Set the child's CR3 via SYS_VMCTL(VMCTL_SETADDRSPACE).
-    // This also clears VMINHIBIT and enqueues the child.
-    if let Some(child_vmp) = unsafe { proc::vmproc_lookup(child_ep) } {
-        let child_cr3 = child_vmp.vm_pml4_phys;
-        if child_cr3 != 0 {
-            let _ = unsafe { minix_rt::sys_vmctl_set_addspace(child_ep, child_cr3) };
-        }
-        // COW bookkeeping: the fork left the child's writable pages sharing the
-        // parent's frames with the child's write bit cleared (aarch64 now
-        // included), so walk the tables and give the child a private copy of
-        // each one — or, for a frame that is genuinely shared (a MAP_SHARED file
-        // page, whose frame is the cache's), register it in the PhysBlock table
-        // instead.
-        // Nothing on wasm shares a frame — the child's memory is a copy, not a
-        // shared leaf — so there is nothing to register and no table to walk.
-        #[cfg(not(target_arch = "wasm32"))]
-        {
-            let child_cr3 = unsafe { proc::vm_get_addrspace(child_ep) };
-            let parent_cr3_val = unsafe { proc::vm_get_addrspace(parent_ep) };
-            if parent_cr3_val != 0 && child_cr3 != 0 {
-                let _ = unsafe { cow::cow_setup_fork(parent_cr3_val, child_cr3, child_ep) };
-            }
-        }
+    // This also clears VMINHIBIT and enqueues the child, so everything below
+    // that the child could observe has to happen first: the frames it shares
+    // have to be counted, and the kernel's fork reply has to land in a private
+    // writable page rather than a read-only shared frame (matches C's
+    // handle_memory_once after fork).
+    let child_cr3 = unsafe { proc::vmproc_lookup(child_ep) }.map_or(0, |vmp| vmp.vm_pml4_phys);
+
+    // The kernel left both processes' writable pages read-only and pointing at
+    // the parent's frames; a child that ran before they were counted could exit
+    // and have its teardown free frames the parent still maps. The child root is
+    // the one `vm_fork_pagetable` built (`vm_pml4_phys`), not the kernel's, which
+    // is not set until the vmctl below. Nothing on wasm shares a frame (the
+    // child's memory is a copy), so there is nothing to register.
+    #[cfg(not(target_arch = "wasm32"))]
+    if child_cr3 != 0 {
+        let _ = unsafe { cow::cow_setup_fork(child_cr3, child_ep) };
     }
 
-    // Handle memory for the message buffer — pre-fault COW pages so the
-    // kernel's fork-reply copy lands in a private writable page, not a
-    // read-only shared frame (matches C's handle_memory_once after fork).
-    // On aarch64 this is what lets virtual_copy write the child's msg page
-    // without faulting on the AP=11 COW leaf. ELF-only for the same reason as
-    // the COW setup above: on wasm the child's memory was copied whole, so the
-    // reply has somewhere writable to land already.
+    // Pre-fault the message page of both sides. On aarch64 this is what lets
+    // virtual_copy write the child's msg page without faulting on the AP=11 COW
+    // leaf; on every arch it is what keeps the fork reply out of a frame the
+    // other process still shares.
     #[cfg(not(target_arch = "wasm32"))]
-    if let Some(child_vmp) = unsafe { proc::vmproc_lookup(child_ep) } {
+    {
         const PAGE_SIZE: u64 = 4096;
-        let msg_va = msgaddr;
         let msg_end = msgaddr + 56;
-        let mut va = msg_va & !(PAGE_SIZE - 1);
-        while va < msg_end {
-            let _ = cow::handle_cow_fault(child_vmp, va);
-            va = va.wrapping_add(PAGE_SIZE);
+        if let Some(child_vmp) = unsafe { proc::vmproc_lookup(child_ep) } {
+            let mut va = msgaddr & !(PAGE_SIZE - 1);
+            while va < msg_end {
+                let _ = cow::handle_cow_fault(child_vmp, va);
+                va = va.wrapping_add(PAGE_SIZE);
+            }
         }
         if let Some(parent_vmp) = unsafe { proc::vmproc_lookup(parent_ep) } {
-            let mut va = msg_va & !(PAGE_SIZE - 1);
+            let mut va = msgaddr & !(PAGE_SIZE - 1);
             while va < msg_end {
                 let _ = cow::handle_cow_fault(parent_vmp, va);
                 va = va.wrapping_add(PAGE_SIZE);
             }
         }
+    }
+
+    if child_cr3 != 0 {
+        let _ = unsafe { minix_rt::sys_vmctl_set_addspace(child_ep, child_cr3) };
     }
 
     // Reply with child endpoint in m1i1 (matching C VMF_CHILD_ENDPOINT).
@@ -3375,7 +3432,7 @@ fn do_setcache(msg: &mut Message) -> i32 {
         // The page must be exclusively owned by the caller (C: "no
         // reasonable refcount"); the cache takes the second reference.
         let pb = match crate::vm::pb::pb_find(phys) {
-            Some(idx) if crate::vm::pb::pb_get(idx).is_some_and(|b| b.refcount == 1) => idx,
+            Some(idx) if crate::vm::pb::pb_count(idx) == 1 => idx,
             _ => return EFAULT,
         };
         cache::cache_insert_bydev(dev, off, ino, ino_off, phys, pb);

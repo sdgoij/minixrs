@@ -288,17 +288,17 @@ The trace grows huge (~100+ MB/min during a livelock). Stop it once the pattern 
     `kernel::hal::set_alias_window`. If a teardown walk starts freeing low-RAM frames
     (0x40cf7000..0x41xxxxxx, the boot-server text region), suspect this cache first.
 
-11. **AArch64 fork is COW, sharing frames via AP = read-only (child only).**
+11. **AArch64 fork is COW, and both sides' leaves go read-only.**
     `vm_paging_fork` (`crates/arch-aarch64/src/fork.rs`) walks PGD → PUD →
     PMD → PTE, deep-copies the table pages, then for each EL0-accessible
-    owned 4KB leaf writes the child's copy with AP[2:1] = `PTE_AP_RO`
-    (same frame, read-only) — the parent's PTE stays writable and
-    untouched. The shared low-GB alias/device-identity leaves (checked via
-    `alloc::is_alias_frame`, the same predicate `pte_user_owned` uses) are
-    shared verbatim like the unsplit 2 MiB alias blocks — never copied,
-    never COW'd. Writable-access is a 2-bit field (AP[2:1]), not a single
-    RW bit: `PG_RW == 0` on aarch64, so the shared COW code must use the
-    HAL helpers `pte_is_writable` / `pte_set_writable` / `pte_is_user`
+    owned 4KB leaf writes the same frame with AP[2:1] = `PTE_AP_RO` into both
+    the child's entry and the parent's -- the parent keeps writing only
+    after its own page is copied. The shared low-GB alias/device-identity
+    leaves (checked via `alloc::is_alias_frame`, the same predicate
+    `pte_user_owned` uses) are shared verbatim like the unsplit 2 MiB alias
+    blocks -- never copied, never COW'd. Writable-access is a 2-bit field
+    (AP[2:1]), not a single RW bit: `PG_RW == 0` on aarch64, so the shared
+    COW code must use the HAL helpers `pte_is_writable` / `pte_set_writable` / `pte_is_user`
     (and teardown's `pte_user_owned` recognizes AP=11 leaves so COW frames
     are unref'd, not leaked). VM's `cow_setup_fork` + the message-buffer
     prefault are active; the prefault resolves the child's COW'd msg page

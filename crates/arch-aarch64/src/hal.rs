@@ -589,6 +589,10 @@ pub const fn pte_is_writable(pte: u64) -> bool {
 pub const fn pte_set_writable(pte: u64) -> u64 {
     (pte & !crate::pte::PTE_AP_MASK) | crate::pte::PTE_AP_EL0_RW
 }
+/// Replace the physical address of a leaf PTE, keeping every attribute bit.
+pub const fn pte_set_frame(pte: u64, pa: u64) -> u64 {
+    (pte & !crate::pte::PTE_ADDR_MASK) | (pa & crate::pte::PTE_ADDR_MASK)
+}
 /// Set a leaf PTE read-only: AP[2:1] = 0b11 (EL1/0 RO), keep all other bits.
 pub const fn pte_set_readonly(pte: u64) -> u64 {
     (pte & !crate::pte::PTE_AP_MASK) | crate::pte::PTE_AP_RO

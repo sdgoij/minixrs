@@ -79,7 +79,7 @@ buffer cache does not hand pages to VM.
 | Exec pre-fault (non-exec regions) | `Vmproc::prefault_exec` (a flag in `vm/proc.rs`) + `Fault::for_prefault` (`vm/mod.rs`) | **implemented** (see §5, Bug-2 workaround) |
 | `file_size` = in-file end | `region.rs` + `start_file_page`/`finish_page` — bss pages zero-filled, last partial in-file page tail zeroed | **implemented** (see §5, Bug-3 fix) |
 | fdref / region teardown | `vm/mod.rs::fdref_close_if_unused` (FDCLOSE when the last region on a `(dev,ino,fd)` dies); `do_munmap` → `free_user_range`; `vm_destroy` clears regions | **implemented** |
-| fork of file-backed images | `vm/proc.rs::vm_clone` copies regions verbatim (fdref shared); the kernel's `vm_paging_fork` builds the child table sharing frames and clearing the child's write bit, and VM's `cow_setup_fork` (`vm/cow.rs`) registers the COW views | **implemented** |
+| fork of file-backed images | `vm/proc.rs::vm_clone` copies regions verbatim (fdref shared); the kernel's `vm_paging_fork` builds the child table sharing frames and clearing the write bit on **both** sides' writable leaves, and VM's `cow_setup_fork` (`vm/cow.rs`) takes a reference per shared frame (nothing is copied; the first write copies) | **implemented** |
 | 16 MiB exec caps | VFS header-only read; kernel no ELF bound | **removed** |
 
 ## 4. Architectural decision: who builds the exec'd address space

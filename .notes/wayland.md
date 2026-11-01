@@ -2230,24 +2230,49 @@ fail. A fork that cannot record an alias gives the parent the copy instead, and 
 caller turns the failure into SIGSEGV, which is what the kernel's `#GP` change now makes
 survivable.
 
-The table filling is the measurement that matters for the next step. The shell's fork of the
+The table filling is the measurement that drove the next step. The shell's fork of the
 compositor walks 527 writable pages; the compositor's own fork walks **63,586** of them, about
-248 MiB, against a 16384-entry table. That is the whole cost of a fork here: `cow_setup_fork`
-copies each of those pages for the child through three kernel calls, which is why the spawn takes
-minutes and needs the guest to have the room. `just test-cosmic-comp-client-x86` therefore runs a
+248 MiB, against a 16384-entry table. That was the whole cost of a fork here: `cow_setup_fork`
+copied each of those pages for the child through three kernel calls, which is why the spawn took
+minutes and needed the guest to have the room. `just test-cosmic-comp-client-x86` therefore ran a
 stock `wl_shm` client as the kiosk child only with `-m 1536M`.
 
-Making fork lazy, which is what would let the same gate run in the 512 MiB the others use, is not
-a one-line change, and it is worth writing down why before starting. The write bit has to be
-cleared on the *parent's* leaves as well as the child's (`crates/arch-*/src/hal.rs`
-`vm_paging_fork`), and every one of those 63,586 pages then needs a phys-block entry, so the table
-grows by an order of magnitude. Both of its operations are linear scans (`pb_find` on every write
-fault, `pb_new` on every fork), so at that size they become the hot path and the table needs an
-index, not just more slots. Two hazards come with the change: `VR_DIRECT` device pages must be
-exempt (today a fork would copy a device mapping into RAM, which nothing hits yet because the
-compositor hands the fb server an address rather than mapping it), and writes the *kernel* makes
-into a user buffer (every IPC reply) would start faulting on COW pages, which is why the fork path
-already pre-faults its own reply page.
+**The fork is copy-on-write now, and the gate runs in 512 MiB.** Four changes made it, and they
+answer each other:
+
+1. **Both sides' pages go read-only.** `vm_paging_fork` (`crates/arch-x86_64/src/hal.rs`,
+   `crates/arch-riscv64/src/hal.rs`, `crates/arch-aarch64/src/fork.rs`) clears the write bit on
+   the parent's writable user leaves as well as the child's, so the first store on either side is
+   the one that copies. The decision is read from the child's just-copied table, so two mappings
+   of one frame get the same answer. The kernel then flushes the TLB
+   (`do_vm_paging_handler`), because a switch back to the same address space need not invalidate
+   it and a stale writable entry would let the parent's store reach the shared frame.
+2. **VM registers instead of copying.** `cow_setup_fork` walks the child's tables once and takes
+   a reference per owned user leaf, which is what a teardown needs to know the frame has another
+   owner. Nothing is copied; the copy happens on the first write
+   (`handle_cow_fault`). `VR_DIRECT` device leaves are skipped (a device frame is nobody's to
+   free) and are made writable in place on fault, next to the `VR_SHARED` case that already did
+   that.
+3. **The counts are indexed by frame, not searched.** `crates/servers/src/vm/pb.rs` is one count
+   byte per 4 KiB frame of the machine's physical window, sized from the allocator geometry the
+   kernel reports (`VM_PAGING_MEMINFO`) and mapped into VM's own address space at boot. A lookup
+   is one array index instead of a linear scan, and there is no capacity wall: a fork of a 250 MiB
+   process needs 64k counts, and 131072 frames of RAM cost 128 KiB. A frame outside the window is
+   untracked, which every caller reads as "private" and resolves by copying, so the old
+   table-full behaviour is the degenerate case rather than a second path.
+4. **The kernel breaks the copy for its own writes.** A grant, a message delivery or a signal
+   frame is a store the kernel makes with the target's tables loaded, in the middle of a copy it
+   cannot abandon and resume; with write-protect clear on x86 it would silently reach the shared
+   frame, and on RISC-V/AArch64 it would fault where nothing can retry it. `cow_prepare_write`
+   (`crates/kernel/src/vm.rs`) runs before `virtual_copy`, `write_to_proc` and `delivermsg`: a
+   present, read-only user leaf is replaced by a private copy of its frame, and the frame the
+   mapping abandoned goes on a ring VM drains when the kernel notifies it
+   (`VM_PAGING_COW_DISCARD`), dropping that reference.
+
+`/bin/forktest` now covers the last of those: the child never writes its `SINK` page, the kernel
+fills it with a file read, and the parent checks afterwards that its own view is still the
+fork-time page. That check failed the first time it ran (the kernel's walk reported a 4 KiB leaf
+as level 1, not 0, so nothing was ever broken) and is the gate the change rests on.
 
 **A user `#GP` no longer stops the machine.** The `#GP` entry printed its diagnostic and then
 spun on `hlt`, so the corruption above took the whole system down: the console went silent

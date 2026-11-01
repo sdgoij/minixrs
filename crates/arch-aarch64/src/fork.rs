@@ -65,11 +65,16 @@ unsafe fn free_fork_tables(parent_root: *const u64, child_root: *mut u64) {
 }
 
 /// Build the child's page table for fork. Walks PGD -> PUD -> PMD -> PTE,
-/// giving the child its own copy of every table page, then COW-protects the
-/// child's view of each owned user 4KB page (same frame, AP = read-only) —
-/// the parent's PTE stays writable and untouched. Block mappings and kernel
-/// pages are shared verbatim so the child keeps the same access to the
-/// kernel identity map, device MMIO, and low-GB RAM alias as the parent.
+/// giving the child its own copy of every table page, then COW-protects each
+/// owned user 4KB page: the child maps the same frame read-only (AP = RO) and so
+/// does the parent, whose own write is what would otherwise reach the child's
+/// snapshot before the child copied the page (KNOWN_ISSUES item 27). Block
+/// mappings and kernel pages are shared verbatim so the child keeps the same
+/// access to the kernel identity map, device MMIO, and low-GB RAM alias as the
+/// parent.
+///
+/// The parent's TLB is not this function's to flush: the caller flushes after a
+/// successful fork, and the parent is not running until it is scheduled again.
 ///
 /// Returns 0 on success, -12 (ENOMEM) on allocation failure, with every table it allocated before
 /// the failure already released (`free_fork_tables`): the caller has nothing to unwind but the root
@@ -146,10 +151,9 @@ pub unsafe fn vm_paging_fork(parent_cr3: u64, child_cr3: u64, _msg: &mut [u8; 64
                         child_pt_pa | (pmd_e & PTE_ATTR_MASK),
                     );
 
-                    // COW-share each EL0-accessible user 4KB page: the
-                    // child maps the SAME frame read-only; the parent's PTE
-                    // is never modified. Kernel pages (AP = EL1 only) stay
-                    // shared verbatim.
+                    // COW-share each EL0-accessible user 4KB page: both
+                    // processes map the SAME frame read-only. Kernel pages
+                    // (AP = EL1 only) stay shared verbatim.
                     for pt_idx in 0..512 {
                         let pte = core::ptr::read(parent_pt.add(pt_idx));
                         if pte & PTE_VALID == 0 || pte & PTE_AP_MASK == 0 {
@@ -171,7 +175,9 @@ pub unsafe fn vm_paging_fork(parent_cr3: u64, child_cr3: u64, _msg: &mut [u8; 64
                             core::ptr::write(child_pt.add(pt_idx), pte);
                             continue;
                         }
-                        core::ptr::write(child_pt.add(pt_idx), (pte & !PTE_AP_MASK) | PTE_AP_RO);
+                        let cow = (pte & !PTE_AP_MASK) | PTE_AP_RO;
+                        core::ptr::write(child_pt.add(pt_idx), cow);
+                        core::ptr::write(parent_pt.add(pt_idx), cow);
                     }
                 }
             }
@@ -303,7 +309,7 @@ mod tests {
             let child_pte = pte_phys(rd(child_pmd, 0));
             assert_ne!(child_pte, pte, "child must have its own PTE table");
 
-            // User page: COW-shared — same frame, child read-only, parent RW.
+            // User page: COW-shared: same frame, read-only in both processes.
             let parent_user_pte = rd(pte, 0);
             let child_user_pte = rd(child_pte, 0);
             assert_eq!(
@@ -318,8 +324,8 @@ mod tests {
             );
             assert_eq!(
                 parent_user_pte & PTE_AP_MASK,
-                PTE_AP_EL0_RW,
-                "parent's user page stays writable"
+                PTE_AP_RO,
+                "the parent's user page is read-only too: its own write is what the child's copy is protected from"
             );
             assert_eq!(
                 child_user_pte & !PTE_AP_MASK,
@@ -430,7 +436,7 @@ mod tests {
             let child_pmd = pte_phys(rd(child_pud, 0));
             let child_pte = pte_phys(rd(child_pmd, 8));
 
-            // Real page: COW-shared — same frame, read-only in the child.
+            // Real page: COW-shared: same frame, read-only in both processes.
             let child_p0 = rd(child_pte, 0);
             let parent_p0 = rd(pte, 0);
             assert_eq!(
@@ -445,8 +451,8 @@ mod tests {
             );
             assert_eq!(
                 parent_p0 & PTE_AP_MASK,
-                PTE_AP_EL0_RW,
-                "real user page stays writable in the parent"
+                PTE_AP_RO,
+                "real user page is read-only in the parent too"
             );
             // Alias leaf: shared verbatim (same frame, same PTE).
             let child_p1 = rd(child_pte, 1);
