@@ -1153,6 +1153,21 @@ pub unsafe fn do_sdevio_handler(caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE])
                     return crate::ipc::EPERM;
                 }
 
+                // The string I/O below stores into the target's buffer with its
+                // tables loaded, so a read-only page there (a frame another process
+                // shares) has to be broken first: a fault in the middle of port I/O
+                // has nowhere to resume.
+                if _req_dir == arch_common::com::DIO_INPUT {
+                    let broken = crate::vm::cow_prepare_write(
+                        (*new_rp).p_nr,
+                        vir_buf,
+                        count as usize * _size as usize,
+                    );
+                    if broken != 0 {
+                        return broken;
+                    }
+                }
+
                 // Switch to destination address space
                 let boot_cr3 = crate::hal::boot_cr3();
                 if boot_cr3 != 0 {
@@ -1231,6 +1246,19 @@ pub unsafe fn do_sdevio_handler(caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE])
                 // Alignment check
                 if (abs_port as u32) & (_size as u32 - 1) != 0 {
                     return crate::ipc::EPERM;
+                }
+
+                // As in the safe form above: a store into the target's buffer needs
+                // the page private before the port I/O starts.
+                if _req_dir == arch_common::com::DIO_INPUT {
+                    let broken = crate::vm::cow_prepare_write(
+                        (*dest_rp).p_nr,
+                        vir_buf,
+                        count as usize * _size as usize,
+                    );
+                    if broken != 0 {
+                        return broken;
+                    }
                 }
 
                 // Switch to destination address space
@@ -1467,6 +1495,12 @@ pub unsafe fn kernel_call_finish(caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE]
                 // Copy only Message size (56 bytes), not MESSAGE_SIZE (64),
                 // to match the user's receive buffer which is a Message struct.
                 let copy_sz = core::mem::size_of::<arch_common::ipc::Message>().min(MESSAGE_SIZE);
+                // The reply is a kernel store into the caller's receive buffer, which
+                // after a fork can be a read-only page shared with the process's
+                // sibling.
+                if crate::vm::cow_prepare_write((*caller).p_nr, vir, copy_sz) != 0 {
+                    return;
+                }
                 // Same seam as `copy_from_user` and `delivermsg`: this is the
                 // kernel's buffer going to a user address, and on an arch whose
                 // address spaces are separate memories only the HAL can get it
