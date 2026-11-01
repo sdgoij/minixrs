@@ -2220,9 +2220,18 @@ binary is `movq 0x10(%rdi), %rdi` inside `std::sys::pal::minix::alloc::dealloc`:
 walk reads a non-canonical pointer, so the heap metadata is already corrupt. It is a fork
 effect and not a GL one, because without a kiosk command the same
 `Offscreen::create_buffer` runs fine, and with `-m 1024M` the failure moves two probes later,
-so the fork's copy of the address space is what is under pressure. `cow_setup_fork` copies
-every writable page and, when a copy cannot be allocated, falls back to aliasing the frame;
-a page that ends up shared that way is the first thing to check.
+so the fork's copy of the address space is what is under pressure.
+
+`crates/servers/src/vm/cow.rs` has two fallbacks that can hand a process a frame another
+process still owns, and both are reachable exactly when memory is short. `handle_cow_fault`'s
+"no PhysBlock for this page" arm copies, but when `vm_alloc_pages` fails it maps the shared
+frame **writable** in the faulting process instead (three such fallbacks), which is the
+mechanism that would let a forked child's write reach its parent's free list. And
+`cow_setup_fork`'s own out-of-memory arm aliases the frame but skips the alias when `pb_new`
+returns `None` (the table holds 16384 entries), leaving the child sharing a page with no
+reference recorded, so `free_user_frame` frees it as private when the child exits or execs.
+Which of the two fires first is not established yet; the next step is to make both sound (copy
+or fail the fault, never grant write on a possibly shared frame) and re-measure.
 
 **A user `#GP` no longer stops the machine.** The `#GP` entry printed its diagnostic and then
 spun on `hlt`, so the corruption above took the whole system down: the console went silent

@@ -60,6 +60,12 @@ def send_paced(cmd, per_byte_ms=20):
 
 
 def wait_for(pred, timeout):
+    """Wait until `pred` is true, or the timeout expires.
+
+    `pred` is called with the buffer's lock held, so it must not take the lock
+    itself: `lock` is a plain `Lock`, and re-entering it deadlocks the probe (which
+    is how a run once hung until its own kill timeout).
+    """
     deadline = time.time() + timeout
     while time.time() < deadline:
         with lock:
@@ -68,6 +74,37 @@ def wait_for(pred, timeout):
         time.sleep(0.05)
     with lock:
         return pred()
+
+
+def offset():
+    with lock:
+        return len(out)
+
+
+def seen_since(marker, start):
+    """Lock-free on purpose: called from a `wait_for` predicate, which holds the lock."""
+    return marker in out[start:]
+
+
+def type_command(cmd, attempts=4):
+    """Type `cmd` and retype it until the guest echoed the whole line.
+
+    This console drops bytes out of a burst, and a truncated line still *runs*:
+    measured, `/bin/cosmic-comp` arrived as `/bin/cosmic-com`, which the shell
+    reported as a missing program and which no later check could tell from the
+    compositor failing to start. The echo is the evidence that the whole line
+    landed, and it is per attempt, so a line the guest really did receive is not
+    typed twice.
+    """
+    for _ in range(attempts):
+        mark = offset()
+        send_paced(cmd)
+        if wait_for(lambda: seen_since(cmd.encode(), mark), 15):
+            return True
+        # Let the truncated line finish (it prints an error and a new prompt)
+        # before typing again.
+        wait_for(lambda: out[mark:].count(b"\n") >= 2, 15)
+    return False
 
 
 def tail(n=1600):
@@ -105,7 +142,10 @@ def main(argv):
             return 1
 
         time.sleep(0.5)
-        send_paced("/bin/cosmic-comp")
+        typed = type_command("/bin/cosmic-comp")
+        check(typed, "the compositor's command reached the shell intact", "" if typed else tail())
+        if not typed:
+            return 1
 
         framed = wait_for(lambda: FRAME_MARKER in out, FRAME_TIMEOUT)
         check(
