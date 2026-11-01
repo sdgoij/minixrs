@@ -167,7 +167,8 @@ pub(crate) unsafe fn cow_setup_fork(parent_cr3: u64, child_cr3: u64, child_ep: i
                         // SV39: PGD index 30, PMD 21, PTE 12 — the walk here
                         // iterates root, middle, leaf, so the leaf is this level.
                         let va = ((l4 as u64) << 30) | ((l3 as u64) << 21) | ((l2 as u64) << 12);
-                        if !is_shared_region(va) {
+                        let shared = is_shared_region(va);
+                        if !shared {
                             let new_phys = crate::vm::vm_alloc_pages(1);
                             if new_phys != 0
                                 && crate::vm::vm_copy_pages(phys, new_phys, 1) == 0
@@ -187,22 +188,7 @@ pub(crate) unsafe fn cow_setup_fork(parent_cr3: u64, child_cr3: u64, child_ep: i
                             // instead, so the frame is not freed while the
                             // parent still maps it.
                         }
-                        let pb_idx = match pb::pb_find(phys) {
-                            Some(idx) => {
-                                pb::pb_ref(idx);
-                                Some(idx)
-                            }
-                            None => pb::pb_new(phys),
-                        };
-                        let Some(pb_idx) = pb_idx else {
-                            continue;
-                        };
-                        match pb::pb_get(pb_idx) {
-                            Some(block) if block.refcount < 2 => {
-                                pb::pb_ref(pb_idx);
-                            }
-                            _ => {}
-                        }
+                        unsafe { track_shared_frame(phys, va, parent_cr3, e2, shared) };
                     }
                     continue;
                 }
@@ -264,7 +250,8 @@ pub(crate) unsafe fn cow_setup_fork(parent_cr3: u64, child_cr3: u64, child_ep: i
                         | ((l3 as u64) << 30)
                         | ((l2 as u64) << 21)
                         | ((l1 as u64) << 12);
-                    if !is_shared_region(va) {
+                    let shared = is_shared_region(va);
+                    if !shared {
                         let new_phys = crate::vm::vm_alloc_pages(1);
                         if new_phys != 0
                             && crate::vm::vm_copy_pages(phys, new_phys, 1) == 0
@@ -285,24 +272,7 @@ pub(crate) unsafe fn cow_setup_fork(parent_cr3: u64, child_cr3: u64, child_ep: i
                         // still maps it.
                     }
 
-                    // Set up PhysBlock with refcount=2
-                    let pb_idx = match pb::pb_find(phys) {
-                        Some(idx) => {
-                            pb::pb_ref(idx);
-                            Some(idx)
-                        }
-                        None => pb::pb_new(phys),
-                    };
-                    let Some(pb_idx) = pb_idx else {
-                        continue;
-                    };
-                    match pb::pb_get(pb_idx) {
-                        Some(block) if block.refcount < 2 => {
-                            pb::pb_ref(pb_idx);
-                        }
-                        _ => {}
-                    }
-                    let _ = pb_idx;
+                    unsafe { track_shared_frame(phys, va, parent_cr3, e1, shared) };
                 }
 
                 vm_unmappage(parent_p1_va);
@@ -317,6 +287,76 @@ pub(crate) unsafe fn cow_setup_fork(parent_cr3: u64, child_cr3: u64, child_ep: i
     vm_unmappage(parent_va);
     vm_unmappage(child_va);
     0
+}
+
+/// Record that `phys` is mapped by both the parent and the child after a fork.
+///
+/// A fork leaves the child's writable leaves read-only and pointing at the
+/// parent's frames, and it is this table that tells a teardown the frame has
+/// another owner: with no entry, `free_user_frame` treats the frame as private
+/// and returns the parent's still-mapped page to the allocator.
+///
+/// When the table is full there is no entry to make, so the fork has to give the
+/// frame a single owner another way. For an ordinary page that is the parent: it
+/// keeps writing through a private copy, the frame is left to the child alone,
+/// and the child's first write copies under `handle_cow_fault` (which refuses to
+/// hand a possibly shared frame out writable). A `MAP_SHARED` frame cannot be
+/// moved off the file cache that way, so there the page is left aliased and
+/// untracked, which is the one case this function cannot make sound.
+unsafe fn track_shared_frame(
+    phys: u64,
+    va: u64,
+    parent_cr3: u64,
+    parent_pte: u64,
+    shared_region: bool,
+) {
+    let pb_idx = match pb::pb_find(phys) {
+        Some(idx) => {
+            pb::pb_ref(idx);
+            Some(idx)
+        }
+        None => pb::pb_new(phys),
+    };
+    if let Some(pb_idx) = pb_idx {
+        if pb::pb_get(pb_idx).is_some_and(|block| block.refcount < 2) {
+            pb::pb_ref(pb_idx);
+        }
+        return;
+    }
+
+    if shared_region {
+        report_cow_table_full();
+        return;
+    }
+
+    // The table is full: give the copy to the parent instead. Its PTE is the
+    // writable one, so remapping it is enough to move the frontier, and the
+    // child keeps the frame it already has, still read-only.
+    let copy = crate::vm::vm_alloc_pages(1);
+    if copy != 0
+        && crate::vm::vm_copy_pages(phys, copy, 1) == 0
+        && crate::vm::vm_map_page_in(parent_cr3, va, copy, pte_set_writable(parent_pte)) == 0
+    {
+        return;
+    }
+    if copy != 0 {
+        crate::vm::vm_free_pages(copy, 1);
+    }
+    report_cow_table_full();
+}
+
+/// Say once that the COW table ran out, so a fork that had to give up is not
+/// silent about it.
+fn report_cow_table_full() {
+    #[cfg(target_os = "minix")]
+    {
+        use core::sync::atomic::{AtomicBool, Ordering};
+        static SAID: AtomicBool = AtomicBool::new(false);
+        if !SAID.swap(true, Ordering::Relaxed) {
+            let msg = b"vm: the COW phys-block table is full; a forked page could not be tracked\n";
+            unsafe { minix_rt::write(1, msg.as_ptr(), msg.len()) };
+        }
+    }
 }
 
 /// Handle a COW page fault for process `vmp` at `fault_addr`.
@@ -388,30 +428,34 @@ pub(crate) fn handle_cow_fault(vmp: &mut Vmproc, fault_addr: u64) -> i32 {
         None => {
             // No PhysBlock found for this COW page. This can happen when
             // cow_setup_fork couldn't map an intermediate page table page
-            // (vm_mappage returned 0). Allocate a private copy instead of
-            // just making the shared page writable — otherwise the first
-            // write corrupts the other process's data.
+            // (vm_mappage returned 0), or when its own allocation failed and
+            // the frame was left aliased without a block. Either way the frame
+            // may still belong to another process, so a private copy is the
+            // only sound answer: handing the frame out writable here is how a
+            // forked child's write reached its parent's heap
+            // (`.notes/wayland.md`, fork under memory pressure).
+            //
+            // The copy below is the reference's `mem_cow` (pb.c): allocate,
+            // copy, register; anything that fails returns the error and the
+            // caller turns it into SIGSEGV.
             let new_phys = crate::vm::vm_alloc_pages(1);
             if new_phys == 0 {
-                // Can't allocate — fall back to making shared page writable
-                crate::vm::vm_map_page_in(cr3, page_addr, phys_addr, pte_set_writable(pte_val));
-                return 0;
+                return -1;
             }
             let copy_result = crate::vm::vm_copy_pages(phys_addr, new_phys, 1);
             if copy_result != 0 {
                 crate::vm::vm_free_pages(new_phys, 1);
-                crate::vm::vm_map_page_in(cr3, page_addr, phys_addr, pte_set_writable(pte_val));
-                return 0;
+                return -1;
             }
             let map_result =
                 crate::vm::vm_map_page_in(cr3, page_addr, new_phys, pte_set_writable(pte_val));
             if map_result != 0 {
                 crate::vm::vm_free_pages(new_phys, 1);
-                crate::vm::vm_map_page_in(cr3, page_addr, phys_addr, pte_set_writable(pte_val));
-                return 0;
+                return -1;
             }
-            // No PhysBlock to track — the old shared page still belongs
-            // to the other process. The new page is the private copy.
+            // No PhysBlock for the old frame: it still belongs to whoever else
+            // maps it, and this process no longer does. The new page is the
+            // private copy.
             pb::pb_new(new_phys);
             return 0;
         }
