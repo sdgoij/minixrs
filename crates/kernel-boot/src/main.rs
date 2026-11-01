@@ -274,7 +274,7 @@ pub extern "C" fn kmain_body(magic: u32, info_ptr: u32) -> ! {
         // mem_upper + an E820-style map; the trampoline passes the pointer
         // through kmain). The identity map covers 0..32 GiB, so anything the
         // bootloader reports above that is capped away.
-        let (detected, mem_top, mmap) = build_memory_map(magic, info_ptr, kernel_end);
+        let (detected, _mem_top, mmap) = build_memory_map(magic, info_ptr, kernel_end);
         arch_x86_64::alloc::init_allocator(&mmap);
 
         // Report both the guest-detected RAM total and the usable
@@ -284,21 +284,14 @@ pub extern "C" fn kmain_body(magic: u32, info_ptr: u32) -> ! {
         // available regions instead of the region end.
         print_memory_banner(detected, mmap.total_available());
 
-        // Initialize the kernel::vm physical page allocator (separate bitmap
-        // from arch_x86_64::alloc). This allocator is used by kernel call 62
-        // (VM_PAGING_ALLOC) which VM servers use to allocate physical pages.
-        // Without this, vm_alloc_pages() returns 0 and every fork fails.
-        unsafe {
-            let kernel_end_page = kernel_end.div_ceil(4096);
-            let total_pages = (mem_top / 4096).max(kernel_end_page);
-            if kernel_end_page < total_pages {
-                let chunks = [kernel::vm::MemoryChunk {
-                    base: kernel_end_page,
-                    size: total_pages - kernel_end_page,
-                }];
-                kernel::vm::mem_init(&chunks);
-            }
-        }
+        // `kernel::vm`'s own bitmap is deliberately NOT initialised here. It is
+        // not what kernel call 62 allocates from (`do_vm_paging_handler` uses
+        // `hal::alloc_phys_contig`, as does every other frame user), and giving it
+        // the whole `[kernel_end, mem_top)` range meant two live allocators owned
+        // the same RAM: either could hand out a frame the other had already given
+        // to a page table or a process (`KNOWN_ISSUES` item 18). The only user is
+        // the in-kernel test suite, which carves itself a reserved chunk through
+        // `test_runner::init_vm_allocator`.
     }
     serial_write("allocator ready\r\n");
 

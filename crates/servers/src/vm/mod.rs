@@ -1805,11 +1805,14 @@ fn do_map_phys(msg: &mut Message) -> i32 {
 
 /// Handle VM_GETPHYS — translate virtual address to physical address.
 ///
-/// Validates endpoint, walks the page table to find the physical address,
-/// returns it in m1i1.
+/// The request carries the target at bytes 8..12 and the address at 16..24, and the answer is the
+/// physical address as a `u64` at bytes 8..16: the request's `addr` lands in `m1i3`+`m1i4` and the
+/// reply in `m1i1`+`m1i2`, which is the same convention `do_mmap` and `do_map_phys` use. Reading
+/// the address from `m1i2` (as this did) walked a field the caller never wrote, and replying with
+/// `pa as i32` truncated an address above 4 GiB ({@link KNOWN_ISSUES} item 41).
 fn do_get_phys(msg: &mut Message) -> i32 {
     let target = unsafe { msg.m_payload.m1.m1i1 };
-    let addr = unsafe { msg.m_payload.m1.m1i2 } as u64;
+    let addr = unsafe { u64::from_ne_bytes(msg.m_payload.raw[8..16].try_into().unwrap_or([0; 8])) };
 
     if !is_user_ep(target) {
         return EINVAL;
@@ -1821,10 +1824,13 @@ fn do_get_phys(msg: &mut Message) -> i32 {
     }
 
     // Walk the page table to get the physical address of the given
-    // virtual address (via the kernel).
+    // virtual address (via the kernel). An unmapped page answers 0, which is also
+    // what a caller reads as "no page here": frame 0 is never a user page.
     let pte = crate::vm::vm_walk_page(cr3, addr);
     let pa = pte & 0x000FFFFFFFFFF000;
-    msg.m_payload.m1.m1i1 = pa as i32;
+    unsafe {
+        msg.m_payload.raw[0..8].copy_from_slice(&pa.to_ne_bytes());
+    }
     OK
 }
 

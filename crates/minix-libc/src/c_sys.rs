@@ -525,12 +525,34 @@ pub extern "C" fn _Exit(status: c_int) -> ! {
     minix_std::process::exit(status);
 }
 
-/// Whether `fd` refers to the terminal. In the boot environment the standard
-/// descriptors are connected to the console.
+/// Is `fd` a terminal?
+///
+/// Answered from the descriptor itself, not from its number: a file or a pipe on
+/// fd 0..2 is not a terminal, and bash decides whether to be interactive from
+/// exactly this call. The console's descriptors are character devices, a pipe's
+/// vnode is `S_IFIFO` and a file's is `S_IFREG`. An ioctl is not the test here:
+/// VFS answers an ioctl it does not route with success, which is how `ls | cat`
+/// came to lay out columns.
+///
+/// A descriptor that cannot be `fstat`ed is not a terminal, and `errno` is set as
+/// POSIX requires.
 #[cfg(target_os = "minix")]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn isatty(fd: c_int) -> c_int {
-    if (0..=2).contains(&fd) { 1 } else { 0 }
+    match minix_std::fs::fstat(fd) {
+        Ok(st) => {
+            if st.st_mode & minix_std::fs::S_IFMT == minix_std::fs::S_IFCHR {
+                1
+            } else {
+                crate::set_errno(ENOTTY);
+                0
+            }
+        }
+        Err(_) => {
+            crate::set_errno(ENOTTY);
+            0
+        }
+    }
 }
 
 /// Duplicate a string into a fresh malloc'd buffer.

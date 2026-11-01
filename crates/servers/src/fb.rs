@@ -857,15 +857,17 @@ fn scanout_src(user_ep: i32, src: FbScanoutSrc) -> i32 {
     }
 }
 
-/// Resolve one page of `target`'s address space with `VM_GETPHYS`. The call takes a 32-bit address
-/// and answers with a 32-bit physical address, which this port's user addresses and a 256 MiB guest
-/// both fit; a 64-bit bulk form is a later VM call (`KNOWN_ISSUES` 41).
+/// Resolve one page of `target`'s address space with `VM_GETPHYS`.
+///
+/// The target travels at message bytes 8..12 and the address at 16..24; the answer is a `u64` at
+/// bytes 8..16. That is the same layout the VM server reads and writes, and the `u64` is why a
+/// scanout source above 4 GiB resolves at all.
 #[cfg(all(target_os = "minix", not(target_arch = "wasm32")))]
 fn vm_getphys(target: i32, va: u64) -> Option<u64> {
     let mut msg = [0u8; 64];
     msg[4..8].copy_from_slice(&(arch_common::com::VM_GETPHYS as i32).to_ne_bytes());
     msg[8..12].copy_from_slice(&target.to_ne_bytes());
-    msg[12..16].copy_from_slice(&((va as u32) as i32).to_ne_bytes());
+    msg[16..24].copy_from_slice(&va.to_ne_bytes());
     let r = unsafe {
         minix_rt::syscall2(
             minix_rt::SENDREC_CALL,
@@ -879,7 +881,8 @@ fn vm_getphys(target: i32, va: u64) -> Option<u64> {
     if i32::from_ne_bytes(msg[4..8].try_into().ok()?) != 0 {
         return None;
     }
-    Some((i32::from_ne_bytes(msg[8..12].try_into().ok()?) as u32) as u64)
+    let pa = u64::from_ne_bytes(msg[8..16].try_into().ok()?);
+    if pa == 0 { None } else { Some(pa) }
 }
 
 /// wasm has no device scanout to re-point.

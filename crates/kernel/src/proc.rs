@@ -11,7 +11,7 @@
 //! - `message` is an opaque 64-byte buffer (C `sizeof(message)` = 56 on
 //!   i386; 64 bytes rounds up for x86_64 alignment)
 
-use core::sync::atomic::AtomicU32;
+use core::sync::atomic::{AtomicU32, AtomicU64};
 
 use crate::hal;
 
@@ -393,6 +393,15 @@ pub struct Proc {
     pub p_tls: u64,
     /// User-space futex address this thread is blocked on (RtsFlags::FUTEX_WAIT).
     pub p_futex_addr: u64,
+    /// Program break (heap end) as `SYS_brk` last left it.
+    ///
+    /// Per process, not one number shared by the machine: the break is a property of
+    /// an address space, and the handler answered out of a global before this field
+    /// existed, so two processes growing their heaps each saw the other's
+    /// (`KNOWN_ISSUES` item 17). It starts at the HAL's heap base, is inherited by a
+    /// fork (the child has a copy of the parent's address space) and is reset by
+    /// exec.
+    pub p_brk: AtomicU64,
 }
 
 impl Default for Proc {
@@ -447,6 +456,7 @@ impl Default for Proc {
             p_join_waiter: core::ptr::null_mut(),
             p_tls: 0,
             p_futex_addr: 0,
+            p_brk: AtomicU64::new(0),
         }
     }
 }
@@ -527,8 +537,15 @@ impl Proc {
     }
 
     /// Check if the process slot is free.
+    ///
+    /// The test is the `SLOT_FREE` *bit*, as C's `get_free_proc` does
+    /// (`RTS_ISSET(rp, RTS_SLOT_FREE)`), not equality with it: an exited slot keeps
+    /// the flags it died with (`SLOT_FREE|P_STOP`, `SLOT_FREE|NO_ENDPOINT`), and an
+    /// equality test read those as occupied while the slot claimed to be free
+    /// (`KNOWN_ISSUES` item 13).
     pub fn is_empty(&self) -> bool {
-        self.p_rts_flags.load(core::sync::atomic::Ordering::Relaxed) == RtsFlags::SLOT_FREE.bits()
+        self.p_rts_flags.load(core::sync::atomic::Ordering::Relaxed) & RtsFlags::SLOT_FREE.bits()
+            != 0
     }
 
     /// Is this slot a non-main thread of its process?

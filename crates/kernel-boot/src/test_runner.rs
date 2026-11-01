@@ -17,15 +17,24 @@ const PG_FRAME: u64 = arch_x86_64::pte::PG_FRAME;
 
 /// Initialize the kernel VM allocator with a small memory pool (4MB at 4MB).
 /// Called once before any tests that need VM page allocation (map_page, etc.).
+/// Carve the VM pool out of the real allocator, so the two never own the same RAM.
+///
+/// The pool used to be a fixed 4 MiB at physical 4 MiB, which is inside the range
+/// `hal::alloc_phys_contig` hands out: a page table or a process frame allocated
+/// during the same run could land in the pool and be handed out twice
+/// (`KNOWN_ISSUES` item 18). Reserving it here makes the frames the arch allocator
+/// gave up belong to the pool alone.
 fn init_vm_allocator() {
     unsafe {
-        // 4MB at physical 4MB. base/size are in VM_PAGE_SIZE (4KB) units.
-        // 4MB = 0x400 pages, so base=0x400, size=0x400
-        let chunk = kernel::vm::MemoryChunk {
-            base: 0x400,
-            size: 0x400,
-        };
-        kernel::vm::mem_init(&[chunk]);
+        // 4 MiB, in VM_PAGE_SIZE (4 KB) units.
+        const POOL: usize = 0x400;
+        if let Some(base) = kernel::hal::alloc_phys_contig(POOL) {
+            let chunk = kernel::vm::MemoryChunk {
+                base: base / kernel::vm::VM_PAGE_SIZE as u64,
+                size: POOL as u64,
+            };
+            kernel::vm::mem_init(&[chunk]);
+        }
     }
 }
 
@@ -558,21 +567,38 @@ fn test_exec_setup_new_page_table() -> u32 {
 
 fn test_alloc_lower16mb() -> u32 {
     run("alloc_lower16mb", |t| unsafe {
-        // The test pool is at physical 4MB (0x400 pages * 4KB = 0x400000).
-        // 4MB is within the lower 16MB, so this should succeed.
+        // The pool is reserved from the real allocator, so where it sits is the
+        // machine's business: `PAF_LOWER16MB` is a filter, and the answer has to
+        // follow the pool rather than a fixed fixture address. An unconstrained
+        // allocation is first fit, so the lowest free page says which side of
+        // 16 MB the pool reaches; the constrained one must agree with it.
+        const SIXTEEN_MB: u64 = 16 * 1024 * 1024;
+        let probe = kernel::vm::alloc_mem(1, 0);
+        if probe == kernel::vm::NO_MEM {
+            t.assert(false, "the pool is empty");
+            return;
+        }
+        let probe_phys = probe * kernel::vm::VM_PAGE_SIZE as u64;
+        kernel::vm::free_mem(probe, 1);
+        let pool_reaches_low = probe_phys < SIXTEEN_MB;
+
         let page = kernel::vm::alloc_mem(1, kernel::vm::PAF_LOWER16MB);
-        t.assert(
-            page != kernel::vm::NO_MEM,
-            "alloc_mem with LOWER16MB should succeed from 4MB pool",
-        );
-
-        let phys = page * kernel::vm::VM_PAGE_SIZE as u64;
-        t.assert(
-            phys < 16 * 1024 * 1024,
-            "LOWER16MB alloc should be below 16MB",
-        );
-
-        kernel::vm::free_mem(page, 1);
+        if pool_reaches_low {
+            t.assert(
+                page != kernel::vm::NO_MEM,
+                "the pool has pages below 16MB, so LOWER16MB must succeed",
+            );
+            if page != kernel::vm::NO_MEM {
+                let phys = page * kernel::vm::VM_PAGE_SIZE as u64;
+                t.assert(phys < SIXTEEN_MB, "LOWER16MB alloc must be below 16MB");
+                kernel::vm::free_mem(page, 1);
+            }
+        } else {
+            t.assert(
+                page == kernel::vm::NO_MEM,
+                "the pool is entirely above 16MB, so LOWER16MB must be refused",
+            );
+        }
     })
 }
 

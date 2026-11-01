@@ -427,6 +427,12 @@ pub unsafe fn proc_init() {
                 RtsFlags::SLOT_FREE.bits(),
                 core::sync::atomic::Ordering::Relaxed,
             );
+            // A fresh address space has an untouched heap: `SYS_brk` reports this
+            // until the process moves it.
+            (*rp).p_brk.store(
+                crate::hal::user_heap_base(),
+                core::sync::atomic::Ordering::Relaxed,
+            );
         }
     }
 

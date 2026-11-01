@@ -12,7 +12,7 @@
 
 use arch_common::ipc::Message;
 use core::cell::UnsafeCell;
-use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicUsize, Ordering};
 
 /// Type for a basic syscall handler.
 /// Takes the current process and register arguments, returns a value.
@@ -40,11 +40,6 @@ static BASIC_SYSCALL_TABLE: BasicSyscallTable = BasicSyscallTable::new([None; NR
 fn syscall_table_ptr() -> *mut [Option<BasicSyscallFn>; NR_BASIC_SYSCALLS] {
     BASIC_SYSCALL_TABLE.get()
 }
-
-/// The break starts at the HAL's heap base: this is arch-independent code, and a
-/// hardcoded x86_64 address here made `brk(0)` report an address that
-/// `sys_brk_handler` itself would reject on any other arch.
-static CURRENT_BRK: AtomicU64 = AtomicU64::new(crate::hal::user_heap_base());
 
 /// Register a basic syscall handler.
 ///
@@ -639,14 +634,19 @@ unsafe fn sys_setfdvfs_handler(caller: *mut crate::proc::Proc, args: &[u64; 6]) 
 /// how the heap base came to be hardcoded in that suite in the first place.
 pub(crate) const BRK_WINDOW_SIZE: u64 = 0x100000;
 
-/// SYS_brk (13) — change data segment size.
+/// SYS_brk (36) — change data segment size.
 ///
-/// Simple bump allocator over the first `BRK_WINDOW_SIZE` bytes of the heap.
-unsafe fn sys_brk_handler(_caller: *mut crate::proc::Proc, args: &[u64; 6]) -> i64 {
+/// A bump over the first `BRK_WINDOW_SIZE` bytes of the heap. The break lives in the
+/// process (`Proc::p_brk`), so two processes moving their heaps cannot see each
+/// other's; the window is the HAL's heap base, not a fixed address.
+unsafe fn sys_brk_handler(caller: *mut crate::proc::Proc, args: &[u64; 6]) -> i64 {
+    if caller.is_null() {
+        return -5i64; // EINVAL: there is no address space to describe
+    }
     let new_brk = args[0];
     if new_brk == 0 {
         // Query current break
-        CURRENT_BRK.load(Ordering::Relaxed) as i64
+        unsafe { (*caller).p_brk.load(Ordering::Relaxed) as i64 }
     } else {
         // The window is the HAL's heap base, not a fixed address. Hardcoding
         // x86_64's 0x3FE0_0000 here rejected every other arch's addresses, and
@@ -654,7 +654,7 @@ unsafe fn sys_brk_handler(_caller: *mut crate::proc::Proc, args: &[u64; 6]) -> i
         // space has to actually exist — it rejected all of them.
         let heap_base = crate::hal::user_heap_base();
         if (heap_base..heap_base + BRK_WINDOW_SIZE).contains(&new_brk) {
-            CURRENT_BRK.store(new_brk, Ordering::Relaxed);
+            unsafe { (*caller).p_brk.store(new_brk, Ordering::Relaxed) };
             new_brk as i64
         } else {
             -12i64 // ENOMEM
@@ -1485,22 +1485,28 @@ mod tests {
     fn test_brk_query_returns_current() {
         unsafe {
             proc_init();
+            let rp = crate::table::proc_addr(0);
+            assert!(!rp.is_null());
+            (*rp).p_rts_flags.store(0, Ordering::Relaxed);
             let start = crate::hal::user_heap_base() + 0x1000;
-            CURRENT_BRK.store(start, Ordering::Relaxed);
+            (*rp).p_brk.store(start, Ordering::Relaxed);
             let args = [0u64, 0, 0, 0, 0, 0];
-            assert_eq!(sys_brk_handler(core::ptr::null_mut(), &args), start as i64);
+            assert_eq!(sys_brk_handler(rp, &args), start as i64);
         }
     }
 
     #[test]
     fn test_brk_set_valid() {
         unsafe {
+            proc_init();
+            let rp = crate::table::proc_addr(0);
+            assert!(!rp.is_null());
             let heap_base = crate::hal::user_heap_base();
             let target = heap_base + 0x2000;
-            CURRENT_BRK.store(heap_base, Ordering::Relaxed);
+            (*rp).p_brk.store(heap_base, Ordering::Relaxed);
             let args = [target, 0, 0, 0, 0, 0];
-            assert_eq!(sys_brk_handler(core::ptr::null_mut(), &args), target as i64);
-            assert_eq!(CURRENT_BRK.load(Ordering::Relaxed), target);
+            assert_eq!(sys_brk_handler(rp, &args), target as i64);
+            assert_eq!((*rp).p_brk.load(Ordering::Relaxed), target);
         }
     }
 
@@ -1508,12 +1514,14 @@ mod tests {
     fn test_brk_initial_value_is_inside_the_accepted_window() {
         unsafe {
             proc_init();
-            let reported = sys_brk_handler(core::ptr::null_mut(), &[0, 0, 0, 0, 0, 0]);
+            let rp = crate::table::proc_addr(0);
+            assert!(!rp.is_null());
+            let reported = sys_brk_handler(rp, &[0, 0, 0, 0, 0, 0]);
             assert!(reported >= 0, "brk query failed: {reported}");
             // Feeding the reported break straight back must not be rejected. A
             // hardcoded x86_64 break failed this on any other arch, because the
             // query answered with an address the setter's window excluded.
-            let echo = sys_brk_handler(core::ptr::null_mut(), &[reported as u64, 0, 0, 0, 0, 0]);
+            let echo = sys_brk_handler(rp, &[reported as u64, 0, 0, 0, 0, 0]);
             assert_eq!(echo, reported);
         }
     }
@@ -1521,6 +1529,9 @@ mod tests {
     #[test]
     fn test_brk_out_of_range() {
         unsafe {
+            proc_init();
+            let rp = crate::table::proc_addr(0);
+            assert!(!rp.is_null());
             // Exactly one byte past the window the handler accepts.
             let args = [
                 crate::hal::user_heap_base() + BRK_WINDOW_SIZE,
@@ -1530,7 +1541,25 @@ mod tests {
                 0,
                 0,
             ];
-            assert_eq!(sys_brk_handler(core::ptr::null_mut(), &args), -12);
+            assert_eq!(sys_brk_handler(rp, &args), -12);
+        }
+    }
+
+    #[test]
+    fn test_breaks_are_per_process() {
+        unsafe {
+            proc_init();
+            let a = crate::table::proc_addr(0);
+            let b = crate::table::proc_addr(1);
+            assert!(!a.is_null() && !b.is_null());
+            let base = crate::hal::user_heap_base();
+            let a_brk = base + 0x1000;
+            let b_brk = base + 0x3000;
+            assert_eq!(sys_brk_handler(a, &[a_brk, 0, 0, 0, 0, 0]), a_brk as i64);
+            assert_eq!(sys_brk_handler(b, &[b_brk, 0, 0, 0, 0, 0]), b_brk as i64);
+            // One process moving its heap must not move the other's.
+            assert_eq!(sys_brk_handler(a, &[0, 0, 0, 0, 0, 0]), a_brk as i64);
+            assert_eq!(sys_brk_handler(b, &[0, 0, 0, 0, 0, 0]), b_brk as i64);
         }
     }
 
@@ -1595,11 +1624,14 @@ mod tests {
     #[test]
     fn test_init_registers_brk() {
         unsafe {
+            proc_init();
+            let rp = crate::table::proc_addr(0);
+            assert!(!rp.is_null());
             let heap_base = crate::hal::user_heap_base();
-            CURRENT_BRK.store(heap_base, Ordering::Relaxed);
+            (*rp).p_brk.store(heap_base, Ordering::Relaxed);
             init_basic_syscalls();
             assert_eq!(
-                dispatch_basic_syscall(core::ptr::null_mut(), 36, &[0u64, 0, 0, 0, 0, 0]),
+                dispatch_basic_syscall(rp, 36, &[0u64, 0, 0, 0, 0, 0]),
                 heap_base as i64
             );
         }

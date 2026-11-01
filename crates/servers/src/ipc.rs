@@ -665,12 +665,12 @@ unsafe fn vm_unmap_stub(who: i32, addr: u64) -> Result<(), i32> {
 
 /// Stub: get physical address of a page.
 #[cfg(not(target_os = "minix"))]
-unsafe fn vm_getphys_stub(_who: i32, _addr: u64) -> i32 {
+unsafe fn vm_getphys_stub(_who: i32, _addr: u64) -> u64 {
     0
 }
 
 #[cfg(target_os = "minix")]
-unsafe fn vm_getphys_stub(who: i32, addr: u64) -> i32 {
+unsafe fn vm_getphys_stub(who: i32, addr: u64) -> u64 {
     vm_getphys(who, addr)
 }
 
@@ -711,10 +711,14 @@ pub unsafe fn vm_getrefcount(who: i32, addr: u64) -> u8 {
 
 /// Call the VM server to look up the physical address of a virtual address.
 ///
+/// `who` travels at message bytes 8..12 and the address at 16..24; the answer is a `u64` at bytes
+/// 8..16, the reply convention `do_mmap` uses. A page that is not mapped answers 0, which is also
+/// what a failed call returns: frame 0 is never a user page, so no caller loses an answer to it.
+///
 /// # Safety
 ///
 /// `who` must be a valid process endpoint; `addr` must be a valid mapped address.
-pub unsafe fn vm_getphys(who: i32, addr: u64) -> i32 {
+pub unsafe fn vm_getphys(who: i32, addr: u64) -> u64 {
     let vm_ep = 8; // VM_PROC_NR
     let mut msg = [0u8; MESSAGE_SIZE];
     msg_set_i32(
@@ -727,9 +731,9 @@ pub unsafe fn vm_getphys(who: i32, addr: u64) -> i32 {
 
     let r = sendrec(vm_ep, &mut msg);
     if r != 0 {
-        return r;
+        return 0;
     }
-    msg_i32(&msg, 24) // Reply in m1i4
+    msg_u64(&msg, 8)
 }
 
 // Semaphore operations
@@ -1253,7 +1257,7 @@ pub unsafe fn do_shmdt(msg: &mut [u8; MESSAGE_SIZE]) -> i32 {
         let _ = vm_unmap_stub(caller, addr);
 
         // Try to find the segment by physical address and update metadata.
-        let phys = vm_getphys_stub(caller, addr) as u64;
+        let phys = vm_getphys_stub(caller, addr);
         for i in 0..SHM_LIST_NR.load(Ordering::Relaxed) as usize {
             let shm = &mut *SHM_LIST.as_ptr().add(i);
             if shm.page == phys || phys == 0 {

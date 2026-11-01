@@ -3632,6 +3632,10 @@ pub unsafe fn do_exec_handler(caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE]) -
             old_mf2 & !crate::proc::MiscFlags::FPU_INITIALIZED.bits(),
             Ordering::Relaxed,
         );
+        // The new image starts with an untouched heap, whatever the old one grew to.
+        (*rp)
+            .p_brk
+            .store(crate::hal::user_heap_base(), Ordering::Relaxed);
         // Force reloading FPU if current process owns it
         crate::hal::release_fpu(rp as *mut core::ffi::c_void);
 
@@ -3727,7 +3731,10 @@ pub unsafe fn do_exec_load_handler(caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZ
             return r;
         }
 
-        let frame_slice = core::slice::from_raw_parts(crate::pagetable::frame_ptr(frame_base) as *const u8, frame_len as usize);
+        let frame_slice = core::slice::from_raw_parts(
+            crate::pagetable::frame_ptr(frame_base) as *const u8,
+            frame_len as usize,
+        );
 
         // Parse argv/envp out of the frame.
         let user_stack_top = crate::hal::user_stack_base() + crate::hal::user_stack_size() as u64;
@@ -5367,7 +5374,11 @@ pub unsafe fn do_vm_paging_handler(_caller: *mut Proc, msg: &mut [u8; MESSAGE_SI
                 // than each mapping site. Without it a fresh heap page carries the previous owner's
                 // words, which is what made every allocation-heavy tool die in `clap` on a pointer
                 // that appears nowhere in its binary.
-                core::ptr::write_bytes(crate::pagetable::frame_ptr(pa), 0, count as usize * crate::vm::VM_PAGE_SIZE);
+                core::ptr::write_bytes(
+                    crate::pagetable::frame_ptr(pa),
+                    0,
+                    count as usize * crate::vm::VM_PAGE_SIZE,
+                );
                 msg_write_u64(msg, VM_PAGING_PA_OFF, pa);
                 OK
             }
@@ -6874,7 +6885,11 @@ mod tests {
                 (*rp).p_rts_flags.load(Ordering::Relaxed) & RtsFlags::SIGNALED.bits() != 0,
                 "a user-mode #GP should deliver SIGSEGV"
             );
-            assert_ne!((*rp).p_pending & (1u128 << 11), 0, "SIGSEGV should be pending");
+            assert_ne!(
+                (*rp).p_pending & (1u128 << 11),
+                0,
+                "SIGSEGV should be pending"
+            );
 
             crate::ipc::set_current_proc(core::ptr::null_mut());
         }

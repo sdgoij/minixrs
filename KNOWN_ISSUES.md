@@ -11,12 +11,6 @@ are arch-specific, `[env]` is tooling/platform, not kernel.
 
 ## Cross-arch (`[all]`)
 
-1. **VM block cache is a stub (v2 perf work)** — `do_mapcache` /
-   `do_setcache` / `do_clearcache` are no-ops; every page fault allocates a
-   private page and reads go straight to VFS/MFS each time. No eviction/LRU
-   until the real cache lands. Correctness is fine; this is pure perf.
-   (.notes/filemmap.md §6)
-
 2. **MFS read-path I/O amplification ~3–6×** — large sequential reads issue
    ~3–6× more virtio-blk I/Os than the file's block count (cat ≈2.8×,
    mmapfd ≈5.6×, 33 MiB `/bin/bign` pre-fault ≈5.8×). Two candidate fixes
@@ -139,67 +133,6 @@ are arch-specific, `[env]` is tooling/platform, not kernel.
 10. **Userland `mmap(fd)` has no real consumer** — `mmapfd` is a test
     binary; exec remains the production user. (.notes/filemmap.md §6)
 
-13. **Free slots are left not-quite-free (2026-09-21, open, possibly benign).** An
-    exited child's slot is left holding `SLOT_FREE|P_STOP` (`rts=00000041`) or
-    `SLOT_FREE|NO_ENDPOINT` (`rts=00000101`), and `Proc::is_empty()` is *equality* with
-    `SLOT_FREE`, so such a slot reads as occupied while claiming to be free. `hangdump`
-    does not skip it, which made these look like wedged processes: every one of them sat
-    at `rip=0x1177dea`, which is `std::process::exit+0x1a` — simply the last instruction
-    each had executed. C's `get_free_proc` tests the *bit*
-    (`RTS_ISSET(rp, RTS_SLOT_FREE)`), so `is_empty` is the thing to reconcile; whether a
-    slot leaks because of it is not established.
-
-15. **`write_to_proc`/`read_from_proc` silently ignore their `proc` argument (2026-09-22, FIXED for
-    these two; `vm_memset`'s non-seam path still open).**
-    Both take a process number and a virtual address, but where the page tables are the kernel's to
-    walk (`CROSS_ADDRESS_SPACE_COPY` is `None` — x86_64, riscv64, aarch64; every hardware port)
-    they reduce to a bare `copy_nonoverlapping` through whatever address space is currently
-    loaded, so the copy happens in the *running* process's space at `addr` and `proc` participates
-    only on wasm. The precondition is therefore "the target is the current process", and nothing
-    says so: a caller that passes a third process's number gets no error, just a silent write into
-    the running process's memory at `addr` (or a kernel-mode fault where that address is
-    unmapped). Callers today are the exec-frame read (`do_exec_load_handler`), the grant-table
-    read in `grants.rs`'s `verify_grant` (the granter's `s_grant_pa` is physical, so it works only
-    because the identity map reaches it), and the devio/getmcontext/setmcontext copies, which
-    switch CR3 to the caller first — correct since the 2026-09-22 CR3-restore fix, and correct
-    *because* of it. Same family as that fix: a copy that is right only while the CPU happens to
-    be on the target's root, where being wrong means kernel data lands in some process's memory.
-    Fix by switching CR3 to `proc` for the copy as `delivermsg`/`virtual_copy` do, or by making
-    the "must be current" precondition explicit in the name and an assertion.
-
-    **Fixed in that direction (2026-09-22).** Both functions now read the target's `p_seg.p_cr3`
-    and, when it differs from the loaded root, switch for the copy and restore the caller's — the
-    shape `delivermsg` uses. It is a no-op wherever the caller already switched (devio, the
-    mcontext pair, the console read at `syscall.rs`, all of which pass `(*caller).p_nr`), and it
-    makes `grants.rs`'s `verify_grant` behave the way its own comment says C does ("`data_copy`,
-    which switches to the granter's page table"). Guarded on `boot_cr3() != 0`, so host tests and
-    pre-init keep the bare copy. Not covered: `vm_memset`'s non-seam path
-    (`kernel/src/vm.rs`, the `write_bytes` below the seam branch) still writes through the current
-    root while two of its three callers pass *another* process's number (`do_setgrant_handler`,
-    `system.rs`'s memset handler) — the same defect, and it should take the same switch.
-
-17. **The kernel's `brk` handler keeps one global `CURRENT_BRK` for a per-process quantity
-    (2026-09-22, open — possibly vestigial).** `syscall.rs`'s `CURRENT_BRK` is a process-global
-    `AtomicU64` used by `sys_brk_handler` (NR_BRK, registered as basic syscall 36) for both the query
-    and the update, so two processes growing their heap share one break and each sees the other's.
-    The port's userland goes through VM's `VM_BRK` instead (`do_brk` tracks `vm_region_top` per
-    `Vmproc`, and `.rules` says VM owns `brk`), so the kernel copy may be vestigial — but if anyone
-    calls it, it reports another process's break. Establish which of the two the port trusts; if the
-    handler is reachable, a `Proc`-resident break (or removal of the handler) is the fix.
-
-18. **Two physical page allocators are initialised over the same RAM (2026-09-22, latent).**
-    `kernel-boot/src/main.rs` feeds the *same* range to both: `arch_x86_64::alloc::init_allocator`
-    (the arch bitmap, lines ~304) and `kernel::vm::mem_init` (the MINIX bitmap, ~356) each get
-    `[kernel_end, mem_top)` minus the user stack/brk windows, so each believes the whole pool is free.
-    Nothing double-allocates today only because `vm::alloc_mem`'s callers are the test-only
-    `exec_setup_new_page_table` and the boot loader — but the comment claiming its purpose is
-    "used by kernel call 62 (VM_PAGING_ALLOC)" is stale: `do_vm_paging_handler` allocates from
-    `hal::alloc_phys_contig` (the arch allocator), which is also what `exec_elf_for_target` and
-    `boot_init` use. So the MINIX bitmap is effectively dead weight that must stay unused; anything
-    that starts calling `vm::alloc_mem` at run time hands out frames the arch allocator has already
-    handed to a process, with no ownership either side can see. Fix by initialising one allocator
-    (or by giving the two disjoint chunks), and delete the stale comment.
-
 20. **A name longer than 28 bytes cannot be created (2026-09-23, open — measured).**
     `create`, `mkdir` and `mknod` carry their single name *inside* the request, so the
     name is capped by the room left after the fixed fields: 28 bytes for
@@ -231,19 +164,6 @@ are arch-specific, `[env]` is tooling/platform, not kernel.
     `sys/paths/unix.rs::getcwd` (which calls `libc::getcwd` and grows on
     `ERANGE`); it needs the Rust fork and a stage1 rebuild, so it is not a change
     to make alongside libc work.
-
-26. **`isatty` answers 1 for any of fd 0..2 (2026-09-24, open).**
-    `crates/minix-libc/src/c_sys.rs` decides "is this a terminal" by the fd
-    *number* — `if (0..=2).contains(&fd) { 1 } else { 0 }` — so a C program
-    redirected into a file or a pipe is still told it is on a terminal. bash
-    uses exactly that to decide whether to be interactive, and coreutils tools
-    use it for colour and piping behaviour, so this is not cosmetic. The real
-    test is available and now used by `ls` (`crates/userland/src/lib.rs`):
-    `fstat` and check `S_IFCHR` — the console's descriptors are character
-    devices, a pipe's vnode is `S_IFIFO` (PFS creates it `I_NAMED_PIPE`) and a
-    file's is `S_IFREG`. The ioctl is *not* a test: VFS answers an ioctl it does
-    not route with `OK`, which is how `ls | cat` laid out columns before the
-    check above existed. (`crates/minix-libc/src/c_sys.rs`)
 
 28. **Cloned character devices are not visible through `fstat` (2026-09-27, open — a missing
     subsystem, not a stat bug).** MINIX gives every clone open its own *node*: VFS's
@@ -349,28 +269,6 @@ are arch-specific, `[env]` is tooling/platform, not kernel.
     deregisters before closing, and registers and waits in one process, so none of these bites
     it. (`crates/servers/src/vfs/epoll.rs`, `crates/servers/src/vfs/select.rs`,
     `crates/servers/src/vfs/call.rs`)
-
-41. **`VM_GETPHYS` puts the address and the reply in different fields on each side (2026-10-01,
-    open).** `crates/servers/src/ipc.rs`'s `vm_getphys` (`vm_getphys_stub`'s target arm) and
-    `do_get_phys` (`crates/servers/src/vm/mod.rs`) do not agree on the message:
-
-    - the caller writes `who` at message bytes 8..12 (`m1i1`) and the address at bytes 16..24
-      (`m1i3` + `m1i4`, through `msg_set_u64(&mut msg, 16, addr)`), then reads the reply from
-      bytes 24..28 (`m1i5`);
-    - `do_get_phys` reads the target from `m1i1` (which matches), the address from `m1i2`
-      (bytes 12..16 -- a field the caller never wrote), and replies in `m1i1`.
-
-    So the handler walks whatever the address slot happened to hold and the caller reads a field
-    the handler never writes. The value is truncated as well: `do_get_phys` does
-    `msg.m_payload.m1.m1i1 = pa as i32`, so a physical address above 4 GiB comes back wrong, and
-    above 2 GiB it is sign-extended -- the same trap the neighbouring `do_map_phys` guards
-    against by reading its field as `u32`. The right reply for an address is the convention
-    `do_mmap` already uses and `do_map_phys` was moved onto under `.notes/physmap.md` P5: a `u64` at
-    message bytes 8..16.
-
-    It is latent rather than live -- nothing calls `vm_getphys` except its own stub arm, and the
-    host arm returns 0 -- but it is a wrong answer rather than a missing feature, which is the
-    shape that survives longest. Fix it with the P5 reply convention when something needs it.
 
 ---
 
@@ -501,6 +399,53 @@ are arch-specific, `[env]` is tooling/platform, not kernel.
 # Resolved issues
 
 ## Cross-arch (`[all]`)
+
+1. **~~VM block cache is a stub~~ — FIXED (2026-11-01).** The entry was stale: `do_mapcache` maps the
+   cached blocks into the caller, `do_setcache` registers caller-owned pages with their own
+   reference, `do_clearcache` drops a device's entries, and `crates/servers/src/vm/cache.rs` is a
+   `CACHE_CAPACITY` (4096) LRU table the file-fault path (`start_file_page`) consults before asking
+   VFS for a page. What is still true is that `read(2)` does not go through it, because that is the
+   filesystem's own cache (item 2).
+
+13. **~~Free slots are left not-quite-free~~ — FIXED (2026-11-01).** `Proc::is_empty` tests the
+    `SLOT_FREE` bit, the way C's `get_free_proc` does (`RTS_ISSET`), instead of equality with it, so
+    a slot an exit left holding `SLOT_FREE|P_STOP` or `SLOT_FREE|NO_ENDPOINT` reads as free. Every
+    caller of `is_empty` follows it with an endpoint check, so the bit is the answer they wanted.
+
+15. **~~`write_to_proc`/`read_from_proc` silently ignore their `proc` argument~~ — FIXED
+    (2026-11-01).** Both switch CR3 to the target for the copy and restore the caller's
+    (2026-09-22), and the part that stayed open is fixed too: `vm_memset`'s only bare `write_bytes`
+    is the `KERNEL_ADDRESS_SPACE` arm, where the address really is the kernel's own, and every
+    process target goes through `write_to_proc` in 256-byte chunks.
+
+17. **~~The kernel's `brk` handler keeps one global `CURRENT_BRK`~~ — FIXED (2026-11-01).** The
+    break is per process (`Proc::p_brk`): `proc_init` starts every slot at the HAL's heap base,
+    `fork` inherits it with the rest of the `Proc`, `exec` resets it to the base, and the handler
+    reads and writes the caller's own field. Removing the handler was not an option: it is
+    reachable, `crates/wasm-procs` calls syscall 36 and the host grows the instance's memory in
+    response. New test `test_breaks_are_per_process`.
+
+18. **~~Two physical page allocators are initialised over the same RAM~~ — FIXED (2026-11-01).**
+    The x86 boot path no longer hands `kernel::vm::mem_init` the whole `[kernel_end, mem_top)`
+    range (and the stale comment claiming kernel call 62 used it is gone;
+    `do_vm_paging_handler` allocates from `hal::alloc_phys_contig`). The only remaining user, the
+    in-kernel test suite, reserves its pool through the arch allocator first
+    (`test_runner::init_vm_allocator`, and the same pattern in `kernel/src/tests.rs`), so the two
+    allocators are disjoint on every arch by construction. The test that pinned a fixed pool
+    address (`alloc_lower16mb`) now asserts that `PAF_LOWER16MB` follows wherever the pool ended up.
+
+26. **~~`isatty` answers 1 for any of fd 0..2~~ — FIXED (2026-11-01).** `crates/minix-libc`'s
+    `isatty` asks the descriptor instead of its number: `fstat` and `S_IFCHR`, with `ENOTTY` for a
+    regular file, a pipe, or a descriptor that cannot be `fstat`ed. bash's interactive decision and
+    coreutils' piping decisions see the truth now, so a redirected shell is no longer told it is on
+    a terminal.
+
+41. **~~`VM_GETPHYS` puts the address and the reply in different fields on each side~~ — FIXED
+    (2026-11-01).** One layout for all three sides (`servers/src/vm/mod.rs`'s `do_get_phys`,
+    `servers/src/ipc.rs::vm_getphys`, `servers/src/fb.rs`'s scanout path): target at bytes 8..12,
+    address at 16..24, and the physical address answered as a `u64` at 8..16, the convention
+    `do_mmap` and `do_map_phys` use. The reply is no longer truncated to 32 bits, and an unmapped
+    page answers 0, which is also what a failed call answers (frame 0 is never a user page).
 
 4. **~~VFS `do_fstat` never copies the `Stat` back~~ — FIXED.** The stat
    path now works end-to-end: VFS `do_stat`/`do_fstat`/`do_lstat` pass the
