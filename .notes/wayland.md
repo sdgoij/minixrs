@@ -2230,14 +2230,24 @@ fail. A fork that cannot record an alias gives the parent the copy instead, and 
 caller turns the failure into SIGSEGV, which is what the kernel's `#GP` change now makes
 survivable.
 
-The table filling is the measurement that matters for the next step: at 512 MiB the first
-spawn exhausts it, because this port's `fork` copies the whole address space and the
-compositor's is large. With `-m 1536M` the spawn, the child's exit and the compositor's clean
-shutdown all happen, and `just test-cosmic-comp-client-x86` runs a stock `wl_shm` client as the
-kiosk child: it arrives over `WAYLAND_DISPLAY`, commits two frames and gets its buffer back.
-Making `fork` cheap (clear the write bit on both sides and copy lazily, as the reference's
-`mem_cow` expects) is what would let the same thing run in the 512 MiB the other gates use, and
-the phys-block table would then have to hold every writable page of the parent.
+The table filling is the measurement that matters for the next step. The shell's fork of the
+compositor walks 527 writable pages; the compositor's own fork walks **63,586** of them, about
+248 MiB, against a 16384-entry table. That is the whole cost of a fork here: `cow_setup_fork`
+copies each of those pages for the child through three kernel calls, which is why the spawn takes
+minutes and needs the guest to have the room. `just test-cosmic-comp-client-x86` therefore runs a
+stock `wl_shm` client as the kiosk child only with `-m 1536M`.
+
+Making fork lazy, which is what would let the same gate run in the 512 MiB the others use, is not
+a one-line change, and it is worth writing down why before starting. The write bit has to be
+cleared on the *parent's* leaves as well as the child's (`crates/arch-*/src/hal.rs`
+`vm_paging_fork`), and every one of those 63,586 pages then needs a phys-block entry, so the table
+grows by an order of magnitude. Both of its operations are linear scans (`pb_find` on every write
+fault, `pb_new` on every fork), so at that size they become the hot path and the table needs an
+index, not just more slots. Two hazards come with the change: `VR_DIRECT` device pages must be
+exempt (today a fork would copy a device mapping into RAM, which nothing hits yet because the
+compositor hands the fb server an address rather than mapping it), and writes the *kernel* makes
+into a user buffer (every IPC reply) would start faulting on COW pages, which is why the fork path
+already pre-faults its own reply page.
 
 **A user `#GP` no longer stops the machine.** The `#GP` entry printed its diagnostic and then
 spun on `hlt`, so the corruption above took the whole system down: the console went silent
