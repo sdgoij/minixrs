@@ -1853,6 +1853,14 @@ check:
     @test -n "{{stage1-rustc}}" || (echo 'error: stage1 rustc not found — run `just bootstrap` first' >&2 && exit 1)
     RUSTC="{{stage1-rustc}}" cargo check -p kernel-boot --bin kernel-boot-riscv64 --features riscv64 --target riscv64gc-unknown-minix --release
 
+# Which repositories have commits their remote does not: the superproject and every
+# fork, each compared with its own upstream. Nested vendored submodules are skipped,
+# since those are never something this project pushes. `--fetch` refreshes the
+# remote-tracking refs first, `--commits` lists the subjects. Exits 1 when something
+# is waiting, which is why the recipe does not turn that into an error line.
+push-status *args:
+    -python tools/push-status.py {{args}}
+
 # Build the wasm system and stage the demo into `docs/`, the directory GitHub Pages serves.
 #
 # That is the whole publishing story for the browser demo: no CI, no server, no account — a
