@@ -12,7 +12,9 @@ use crate::vfs::consts::ENOSYS;
 #[cfg(target_os = "minix")]
 use crate::vfs::consts::{ENOMEM, PATH_MAX};
 #[cfg(target_os = "minix")]
-use crate::vfs::grant::{cpf_grant_direct, cpf_grant_magic, cpf_grant_magic_write, cpf_revoke};
+use crate::vfs::grant::{
+    cpf_grant_direct, cpf_grant_direct_rw, cpf_grant_magic, cpf_grant_magic_write, cpf_revoke,
+};
 use crate::vfs::types::{Lookup, LookupRes, NodeDetails, off_t};
 #[cfg(target_os = "minix")]
 use arch_common::safecopies::GRANT_INVALID;
@@ -681,15 +683,17 @@ pub unsafe fn req_lookup(
         // The path travels in a direct grant, the way the C's `req_lookup`
         // sends it: it can be `PATH_MAX` bytes, which the 56-byte message
         // cannot hold beside the two inodes, the two grants and the length.
+        // It is granted writable because the filesystem rewrites it when a
+        // symlink is followed or a mount is crossed, and VFS resumes from the
+        // remainder (C grants `CPF_READ | CPF_WRITE` for the same reason).
         // The grant is over VFS's own `l_path`, so `resolve` must outlive the
         // sendrec below (every caller holds it across the call).
         let path_len = resolve.l_path_len.min(PATH_MAX - 1);
-        let grant_path = cpf_grant_direct(
+        let grant_path = cpf_grant_direct_rw(
             arch_common::com::VFS_PROC_NR,
             fs_e,
             resolve.l_path.as_ptr() as u64,
             PATH_MAX,
-            false,
         );
         if grant_path < 0 {
             if grant_ucred >= 0 {
@@ -730,6 +734,13 @@ pub unsafe fn req_lookup(
             res.dev = r_u32(&msg, PAYLOAD_OFF + 16);
             res.inode_nr = r_u32(&msg, PAYLOAD_OFF + 20);
             res.mode = r_u32(&msg, PAYLOAD_OFF + 24);
+        } else if r == crate::vfs::consts::ESYMLINK {
+            // The filesystem stopped at a symlink whose target starts with
+            // '/', and rewrote the granted path in place. `offset` says where
+            // the remainder starts, `symloop` how many links it followed; the
+            // caller restarts from its root with what is left.
+            res.char_processed = r_i64(&msg, PAYLOAD_OFF).max(0) as usize;
+            res.symloop = r_u16(&msg, PAYLOAD_OFF + 32);
         }
 
         (r, res)

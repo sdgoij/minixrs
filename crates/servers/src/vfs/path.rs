@@ -21,9 +21,10 @@ pub const PATH_GET_VCHARD: u32 = 2;
 /// Return symlink contents as the vnode (do NOT follow).
 pub const PATH_RET_SYMLINK: u32 = 4;
 
-/// Maximum symlink recursion depth.
-#[allow(dead_code)]
-const MAX_SYMLINK_LOOPS: usize = 256;
+/// Symlinks followed before a lookup is refused with `ELOOP`. The same limit
+/// the filesystems apply (`_POSIX_SYMLOOP_MAX`), carried across the restarts an
+/// absolute symlink forces.
+const MAX_SYMLINK_LOOPS: u16 = 8;
 
 /// Result of a pathname resolution step.
 #[derive(Debug, Clone, Copy)]
@@ -155,6 +156,35 @@ unsafe fn advance_within(dirp: *mut Vnode, resolve: &Lookup, rfp: &Fproc) -> *mu
     }
 
     let (r, res) = lookup(dirp, resolve, rfp);
+    if r == crate::vfs::consts::ESYMLINK {
+        // The filesystem stopped at a symlink whose target starts with '/'
+        // and rewrote the granted path in place. C `lookup()` cuts the consumed
+        // prefix off and restarts from the process root, so the target is
+        // resolved against the root rather than against the directory that
+        // held the link.
+        let mut rem = *resolve;
+        let off = res.char_processed.min(PATH_MAX - 1);
+        let left = rem.l_path[off..]
+            .iter()
+            .position(|&b| b == 0)
+            .unwrap_or(PATH_MAX - 1 - off);
+        rem.l_path.copy_within(off..off + left, 0);
+        rem.l_path[left] = 0;
+        rem.l_path_len = left;
+
+        let symloop = resolve.l_symloop.saturating_add(res.symloop);
+        if symloop > MAX_SYMLINK_LOOPS {
+            unsafe { (*vfs_global()).err_code = ELOOP };
+            return null_mut();
+        }
+        rem.l_symloop = symloop;
+
+        let root = rfp.fp_rdir;
+        if root.is_null() {
+            return null_mut();
+        }
+        return advance(root, &rem, rfp);
+    }
     if r != OK {
         return null_mut();
     }

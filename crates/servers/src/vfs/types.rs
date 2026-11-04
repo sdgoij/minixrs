@@ -422,6 +422,10 @@ pub struct LookupRes {
     pub file_size: i64,
     pub dev: u32,
     pub result: i32,
+    /// For `ESYMLINK`: where in the rewritten path the remainder starts.
+    pub char_processed: usize,
+    /// For `ESYMLINK`: how many symlinks the filesystem followed.
+    pub symloop: u16,
 }
 
 /// Pathname resolution parameters — passed to eat_path/last_dir/advance.
@@ -436,6 +440,9 @@ pub struct Lookup {
     pub l_path_len: usize,
     pub l_uid: u16,
     pub l_gid: u16,
+    /// Symlinks followed so far, carried across the restarts an absolute
+    /// symlink forces (C `symloop` in `lookup()`).
+    pub l_symloop: u16,
     /// Output: pointer to resolved vnode (set by advance/lookup).
     pub l_vnode: *mut Vnode,
     /// Output: pointer to resolved vmnt (set by advance/lookup).
@@ -452,6 +459,7 @@ impl Default for Lookup {
             l_path_len: 0,
             l_uid: 0,
             l_gid: 0,
+            l_symloop: 0,
             l_vnode: core::ptr::null_mut(),
             l_vmp: core::ptr::null_mut(),
         }

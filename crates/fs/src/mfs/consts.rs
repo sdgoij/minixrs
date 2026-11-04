@@ -98,7 +98,7 @@ pub const ELOOP: i32 = 40;
 pub const ENAMETOOLONG: i32 = 36;
 pub const ENOTEMPTY: i32 = 39;
 pub const EXDEV: i32 = 18;
-pub const ESYMLINK: i32 = 100;
+pub const ESYMLINK: i32 = -303;
 pub const EENTERMOUNT: i32 = 101;
 pub const ELEAVEMOUNT: i32 = 102;
 

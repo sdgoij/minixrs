@@ -184,8 +184,7 @@ pub fn mfs_main() -> i32 {
                         i32::from_ne_bytes(raw[16..20].try_into().unwrap_or([0u8; 4]));
                     let path_len =
                         u32::from_ne_bytes(raw[20..24].try_into().unwrap_or([0u8; 4])) as usize;
-                    let grant_path =
-                        i32::from_ne_bytes(raw[24..28].try_into().unwrap_or([0u8; 4]));
+                    let grant_path = i32::from_ne_bytes(raw[24..28].try_into().unwrap_or([0u8; 4]));
 
                     (*mfs).lookup_dir_ino = dir_ino;
                     (*mfs).lookup_root_ino = root_ino;
@@ -251,6 +250,18 @@ pub fn mfs_main() -> i32 {
                     raw[16..20].copy_from_slice(&(*mfs).lookup_res_device.to_le_bytes());
                     raw[20..24].copy_from_slice(&(*mfs).lookup_res_inode.to_le_bytes());
                     raw[24..28].copy_from_slice(&((*mfs).lookup_res_mode as u32).to_le_bytes());
+                }
+            }
+
+            // A lookup that stopped at an absolute symlink answers with where
+            // VFS resumes: `offset` into the path it rewrote in the grant, and
+            // the symlink count for the loop limit (C `mess_fs_vfs_lookup`).
+            if req_nr == 26 && status == crate::mfs::consts::ESYMLINK {
+                unsafe {
+                    let mfs = glo::mfs_ptr();
+                    let raw = &mut (*mfs).m_out.m_payload.raw;
+                    raw[0..8].copy_from_slice(&(*mfs).lookup_res_offset.to_le_bytes());
+                    raw[32..34].copy_from_slice(&((*mfs).lookup_res_symloop as u16).to_le_bytes());
                 }
             }
 
@@ -374,7 +385,10 @@ mod tests {
 
         // A zeroed name length still leaves an empty, NUL-terminated name.
         let mut user_path = [b'x'; PATH_MAX];
-        assert_eq!(crate::block_io::load_entry_name(grant, path_len, &mut user_path), OK);
+        assert_eq!(
+            crate::block_io::load_entry_name(grant, path_len, &mut user_path),
+            OK
+        );
         assert_eq!(user_path[0], 0);
     }
 

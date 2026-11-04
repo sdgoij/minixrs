@@ -164,7 +164,7 @@ const ENAMETOOLONG: i32 = -36;
 /// C `errno.h`: `_SIGN 78`. The previous `-38` was Linux's value.
 const ENOSYS: i32 = -78;
 const ELOOP: i32 = -40;
-const ESYMLINK: i32 = -105;
+const ESYMLINK: i32 = -303;
 const ELEAVEMOUNT: i32 = -107;
 
 /// Mode type bits (match `crates/fs/src/mfs/consts.rs`).

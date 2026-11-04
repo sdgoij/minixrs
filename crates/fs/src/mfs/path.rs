@@ -248,6 +248,35 @@ pub fn fs_lookup() -> i32 {
                 if cp_offset < path_len && (*mfs).user_path[cp_offset] == b'/' {
                     put_inode(Some(dir_ip));
                     put_inode(Some(current_rip));
+                    (*mfs).lookup_res_offset = offset + cp_offset;
+                    (*mfs).lookup_res_symloop = symlinks;
+                    // C `fs_lookup`: the expanded path goes back through the
+                    // grant, because VFS restarts the lookup from its root with
+                    // whatever is left of it. The reply carries the offset and
+                    // the symlink count, not the path.
+                    #[cfg(target_os = "minix")]
+                    {
+                        // Read the rewritten path through raw pointers: taking a
+                        // reference to `(*mfs).user_path` would be an implicit
+                        // autoref of a raw-pointer dereference, which is denied
+                        // in this crate.
+                        let src = core::ptr::addr_of!((*mfs).user_path) as *const u8;
+                        let mut len = 0usize;
+                        while len < PATH_MAX && *src.add(len) != 0 {
+                            len += 1;
+                        }
+                        len += 1; // the NUL goes back with it
+                        let mut buf = [0u8; PATH_MAX];
+                        core::ptr::copy_nonoverlapping(src, buf.as_mut_ptr(), len);
+                        let r = crate::block_io::safecopy_to(
+                            arch_common::com::VFS_PROC_NR,
+                            (*mfs).lookup_grant_path,
+                            &buf[..len],
+                        );
+                        if r != OK {
+                            return r;
+                        }
+                    }
                     return ESYMLINK;
                 }
 

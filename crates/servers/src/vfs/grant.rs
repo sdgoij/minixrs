@@ -198,6 +198,15 @@ pub fn cpf_grant_direct(granter: i32, callee: i32, addr: u64, len: usize, write:
     VFS_GRANT_TABLE.cpf_grant_direct(granter, callee, addr, len, access)
 }
 
+/// Allocate a direct grant the callee may read *and* write.
+///
+/// A lookup's path is granted this way: the filesystem reads it, and rewrites
+/// it in place when it follows a symlink or crosses a mount (C `CPF_READ |
+/// CPF_WRITE`).
+pub fn cpf_grant_direct_rw(granter: i32, callee: i32, addr: u64, len: usize) -> i32 {
+    VFS_GRANT_TABLE.cpf_grant_direct(granter, callee, addr, len, CPF_READ | CPF_WRITE)
+}
+
 /// Revoke a previously allocated grant.
 pub fn cpf_revoke(grant_id: i32) {
     VFS_GRANT_TABLE.cpf_revoke(grant_id);
