@@ -10,9 +10,10 @@ Exit status is 1 when something needs a push (or a tree is dirty), so a release
 gate can call this.
 
 Usage:
-    python tools/push-status.py            # report, no network
+    python tools/push-status.py            # one line per repository to push
     python tools/push-status.py --fetch    # refresh remote-tracking refs first
-    python tools/push-status.py --commits  # also list the unpushed subjects
+    python tools/push-status.py --commits  # add the unpushed subjects
+    python tools/push-status.py --table    # every repository, clean ones included
 """
 
 import argparse
@@ -89,6 +90,9 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--fetch", action="store_true", help="fetch every repository first")
     parser.add_argument("--commits", action="store_true", help="list the unpushed commits")
+    parser.add_argument(
+        "--table", action="store_true", help="full table of every repository"
+    )
     args = parser.parse_args()
 
     paths = repositories(".")
@@ -107,32 +111,32 @@ def main():
         if info["dirty"]:
             dirty.append(path)
 
-    width = max(len(path) for path, _ in rows) + 2
-    print(f"{'repo':<{width}}{'branch':<24}{'ahead':>6}{'behind':>7}  tree")
-    for path, info in rows:
-        ahead = "-" if info["ahead"] is None else str(info["ahead"])
-        behind = "-" if info["behind"] is None else str(info["behind"])
-        tree = "dirty" if info["dirty"] else "clean"
-        upstream = "" if info["upstream"] else "  (no upstream)"
-        print(f"{path:<{width}}{info['branch']:<24}{ahead:>6}{behind:>7}  {tree}{upstream}")
+    if args.table:
+        width = max(len(path) for path, _ in rows) + 2
+        print(f"{'repo':<{width}}{'branch':<24}{'ahead':>6}{'behind':>7}  tree")
+        for path, info in rows:
+            ahead = "-" if info["ahead"] is None else str(info["ahead"])
+            behind = "-" if info["behind"] is None else str(info["behind"])
+            tree = "dirty" if info["dirty"] else "clean"
+            upstream = "" if info["upstream"] else "  (no upstream)"
+            print(
+                f"{path:<{width}}{info['branch']:<24}{ahead:>6}{behind:>7}  {tree}{upstream}"
+            )
+        if not args.fetch:
+            print("remote-tracking refs are as of the last fetch; pass --fetch to refresh them")
 
-    if not args.fetch:
-        print("\nremote-tracking refs are as of the last fetch; pass --fetch to refresh them")
+    if not args.table:
+        if needs_push:
+            for path, info in needs_push:
+                print(f"{path} {info['branch']} {info['ahead']}")
+                if args.commits:
+                    for subject in unpushed_subjects(path):
+                        print(f"  {subject}")
+        else:
+            print("nothing to push")
 
-    if needs_push:
-        print("\nneeds a push:")
-        for path, info in needs_push:
-            print(f"  {path} ({info['branch']}): {info['ahead']} commit(s)")
-            if args.commits:
-                for subject in unpushed_subjects(path):
-                    print(f"      {subject}")
-    else:
-        print("\nnothing to push")
-
-    if dirty:
-        print("\ndirty working trees:")
-        for path in dirty:
-            print(f"  {path}")
+    for path in dirty:
+        print(f"{path} dirty")
 
     return 1 if needs_push or dirty else 0
 
