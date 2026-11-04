@@ -1820,6 +1820,10 @@ pub fn do_lstat() -> i32 {
     let mut resolve = Lookup::default();
     resolve.l_path[..actual_len].copy_from_slice(&path_buf[..actual_len]);
     resolve.l_path_len = actual_len;
+    // C `lookup_init(&resolve, fullpath, PATH_RET_SYMLINK, ...)`: the lookup
+    // must stop at the link itself, or `lstat` is indistinguishable from
+    // `stat` and `symlink_metadata` reports the target.
+    resolve.l_flags = PATH_RET_SYMLINK;
     let vp = unsafe { path::eat_path(&resolve, fp) };
     if vp.is_null() {
         return ENOENT;
