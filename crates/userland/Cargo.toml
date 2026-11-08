@@ -17,6 +17,7 @@ minix-rt = { path = "../minix-rt" }
 minix-std = { path = "../minix-std" }
 minix-util = { path = "../minix-util" }
 render = { path = "../render" }
+ui = { path = "../ui" }
 wayland = { path = "../wayland" }
 
 # Binary targets — these are #![no_std] / #![no_main] embedded MINIX
@@ -410,6 +411,13 @@ test = false
 [[bin]]
 name = "wlpointer"
 path = "src/bin/wlpointer.rs"
+test = false
+
+# wldemo is the widget gate: one window with a text field, a list and a button,
+# driven by the keyboard, drawn by the software backend.
+[[bin]]
+name = "wldemo"
+path = "src/bin/wldemo.rs"
 test = false
 
 [[bin]]

@@ -2520,3 +2520,346 @@ fn run_dmabuf_gl() -> Result<(), i32> {
     let _ = uds::close_fd(conn);
     Ok(())
 }
+
+/// `/bin/wldemo` above is the real client; a host build only has to compile the
+/// binary, and the demo needs the minix device and socket layer.
+#[cfg(not(target_os = "minix"))]
+pub fn wl_demo(_args: &[&str]) -> i32 {
+    1
+}
+
+/// `/bin/wldemo`: the widget demo (`gui.md` milestone M4).
+///
+/// One window with a text field, a list and a button, drawn by the software
+/// backend and committed through the compositor. Every key that changes the form
+/// prints its state, so a probe can follow the interaction instead of guessing at
+/// sleeps, and Escape ends the client.
+#[cfg(target_os = "minix")]
+pub fn wl_demo(_args: &[&str]) -> i32 {
+    match run_demo() {
+        Ok(()) => {
+            write_out(b"wldemo: PASS\n");
+            0
+        }
+        Err(code) => code,
+    }
+}
+
+#[cfg(target_os = "minix")]
+const DEMO_WIDTH: i32 = 320;
+#[cfg(target_os = "minix")]
+const DEMO_HEIGHT: i32 = 240;
+/// US layout: the evdev code, the unshifted byte and the shifted one.
+///
+/// A table rather than a keymap because the demo needs printable ASCII and
+/// nothing else; the real client-side keymap is the XKB text the seat already
+/// serves. Which byte of a pair applies comes from the seat's `modifiers` event.
+#[cfg(target_os = "minix")]
+const DEMO_KEYS: &[(u32, u8, u8)] = &[
+    (2, b'1', b'!'),
+    (3, b'2', b'@'),
+    (4, b'3', b'#'),
+    (5, b'4', b'$'),
+    (6, b'5', b'%'),
+    (7, b'6', b'^'),
+    (8, b'7', b'&'),
+    (9, b'8', b'*'),
+    (10, b'9', b'('),
+    (11, b'0', b')'),
+    (12, b'-', b'_'),
+    (13, b'=', b'+'),
+    (16, b'q', b'Q'),
+    (17, b'w', b'W'),
+    (18, b'e', b'E'),
+    (19, b'r', b'R'),
+    (20, b't', b'T'),
+    (21, b'y', b'Y'),
+    (22, b'u', b'U'),
+    (23, b'i', b'I'),
+    (24, b'o', b'O'),
+    (25, b'p', b'P'),
+    (26, b'[', b'{'),
+    (27, b']', b'}'),
+    (30, b'a', b'A'),
+    (31, b's', b'S'),
+    (32, b'd', b'D'),
+    (33, b'f', b'F'),
+    (34, b'g', b'G'),
+    (35, b'h', b'H'),
+    (36, b'j', b'J'),
+    (37, b'k', b'K'),
+    (38, b'l', b'L'),
+    (39, b';', b':'),
+    (40, b'\'', b'"'),
+    (41, b'`', b'~'),
+    (43, b'\\', b'|'),
+    (44, b'z', b'Z'),
+    (45, b'x', b'X'),
+    (46, b'c', b'C'),
+    (47, b'v', b'V'),
+    (48, b'b', b'B'),
+    (49, b'n', b'N'),
+    (50, b'm', b'M'),
+    (51, b',', b'<'),
+    (52, b'.', b'>'),
+    (53, b'/', b'?'),
+];
+
+/// The widget key an evdev code names, with `shift` applied to printable bytes.
+#[cfg(target_os = "minix")]
+fn demo_key(code: u32, shift: bool) -> Option<ui::Key> {
+    Some(match code {
+        1 => ui::Key::Escape,
+        14 => ui::Key::Backspace,
+        15 => ui::Key::Tab,
+        28 => ui::Key::Enter,
+        57 => ui::Key::Char(b' '),
+        102 => ui::Key::Home,
+        103 => ui::Key::Up,
+        105 => ui::Key::Left,
+        106 => ui::Key::Right,
+        107 => ui::Key::End,
+        108 => ui::Key::Down,
+        _ => {
+            let (_, plain, capital) = *DEMO_KEYS.iter().find(|(key, _, _)| *key == code)?;
+            ui::Key::Char(if shift { capital } else { plain })
+        }
+    })
+}
+
+/// Print the form's state after a change.
+#[cfg(target_os = "minix")]
+fn demo_report(form: &ui::Form<'_, 3>) {
+    write_out(b"wldemo: focus=");
+    match form.focus() {
+        Some(index) => put_dec(index as u32),
+        None => write_out(b"-"),
+    }
+    write_out(b" field=\"");
+    if let Some(ui::Widget::Field(field)) = form.widget(0) {
+        write_out(field.text());
+    }
+    write_out(b"\" list=");
+    if let Some(ui::Widget::List(list)) = form.widget(1)
+        && let Some(selected) = list.selected()
+    {
+        put_dec(selected as u32);
+    } else {
+        write_out(b"-");
+    }
+    write_out(b" button=");
+    if let Some(ui::Widget::Button(button)) = form.widget(2) {
+        put_dec(button.activations());
+    }
+    write_out(b"\n");
+}
+
+#[cfg(target_os = "minix")]
+fn run_demo() -> Result<(), i32> {
+    use render::Rect;
+    use render::pass::Pass;
+    use render::soft::Software;
+    use render::text::Atlas;
+    use ui::{Button, Event as Input, Field, Form, Key, List, Theme, Widget};
+
+    const ITEMS: [&[u8]; 4] = [b"alpha", b"beta", b"gamma", b"delta"];
+
+    let output = Rect::new(0, 0, DEMO_WIDTH, DEMO_HEIGHT);
+    let mut form = Form::new(
+        [
+            Widget::Field(Field::new().placeholder(b"type here")),
+            Widget::List(List::new(&ITEMS)),
+            Widget::Button(Button::new(b"Apply")),
+        ],
+        Theme::DARK,
+    );
+    form.stack(Rect::new(8, 8, DEMO_WIDTH - 16, DEMO_HEIGHT - 16), 6);
+    let atlas = Atlas::from_bitmap_font(&crate::fbfont::FONT_8X16);
+
+    let conn = connect()?;
+    let mut client = Client::new();
+    let mut req = [0u8; 512];
+    let mut inbuf = MessageBuffer::new();
+    let mut chunk = [0u8; 512];
+
+    let registry = send_req(conn, &mut req, |q| client.get_registry(q))?;
+    let g = find_globals(conn, &client, &mut inbuf, &mut chunk)?;
+    if g.wm_base == 0 {
+        return Err(fail(140, b"wldemo: no xdg_wm_base global\n"));
+    }
+    let compositor = send_req(conn, &mut req, |q| {
+        client.bind(
+            registry,
+            g.compositor,
+            b"wl_compositor",
+            1,
+            Kind::Compositor,
+            q,
+        )
+    })?;
+    let shm = send_req(conn, &mut req, |q| {
+        client.bind(registry, g.shm, b"wl_shm", 1, Kind::Shm, q)
+    })?;
+    let seat = send_req(conn, &mut req, |q| {
+        client.bind(registry, g.seat, b"wl_seat", 1, Kind::Seat, q)
+    })?;
+    let wm_base = send_req(conn, &mut req, |q| {
+        client.bind(registry, g.wm_base, b"xdg_wm_base", 1, Kind::XdgWmBase, q)
+    })?;
+    send_req(conn, &mut req, |q| client.get_keyboard(seat, q))?;
+
+    let surface = send_req(conn, &mut req, |q| client.create_surface(compositor, q))?;
+    let xdg_surface = send_req(conn, &mut req, |q| {
+        client.get_xdg_surface(wm_base, surface, q)
+    })?;
+    let toplevel = send_req(conn, &mut req, |q| client.get_toplevel(xdg_surface, q))?;
+    send_req(conn, &mut req, |q| {
+        client.set_app_id(toplevel, b"minixrs.wldemo", q)
+    })?;
+    send_req(conn, &mut req, |q| client.commit(surface, q))?;
+
+    let (serial, _, _) = await_configure(
+        conn,
+        &client,
+        xdg_surface,
+        toplevel,
+        wm_base,
+        &mut inbuf,
+        &mut chunk,
+    )?;
+    send_req(conn, &mut req, |q| {
+        client.ack_configure(xdg_surface, serial, q)
+    })?;
+    let barrier = send_req(conn, &mut req, |q| client.sync(q))?;
+    await_callback(conn, &client, barrier, &mut inbuf, &mut chunk)?;
+
+    // The pool is the frame: the renderer writes into it, and the compositor
+    // reads it back out. The window is the pool's size, not the output's, which
+    // is what the widget layer needs to be a window rather than a screen.
+    let stride = DEMO_WIDTH * 4;
+    let size = stride * DEMO_HEIGHT;
+    let pool_fd = fs::memfd_create(0).map_err(|_| fail(141, b"wldemo: memfd_create failed\n"))?;
+    fs::truncate(pool_fd, size as i64).map_err(|_| fail(142, b"wldemo: truncate failed\n"))?;
+    let pool = unsafe {
+        vmem::mmap(
+            core::ptr::null_mut(),
+            size as usize,
+            vmem::PROT_READ | vmem::PROT_WRITE,
+            vmem::MAP_SHARED,
+            pool_fd,
+            0,
+        )
+    };
+    if pool == vmem::MAP_FAILED {
+        return Err(fail(143, b"wldemo: mmap of the pool failed\n"));
+    }
+    uds::send_fds(conn, &[pool_fd]).map_err(|_| fail(144, b"wldemo: send_fds failed\n"))?;
+    let pool_obj = send_req(conn, &mut req, |q| client.create_pool(shm, 0, size, q))?;
+    let buffer = send_req(conn, &mut req, |q| {
+        client.create_buffer(
+            pool_obj,
+            0,
+            DEMO_WIDTH,
+            DEMO_HEIGHT,
+            stride,
+            protocol::WL_SHM_FORMAT_XRGB8888,
+            q,
+        )
+    })?;
+    send_req(conn, &mut req, |q| client.attach(surface, buffer, 0, 0, q))?;
+
+    let pixels = unsafe {
+        core::slice::from_raw_parts_mut(pool.cast::<u32>(), (DEMO_WIDTH * DEMO_HEIGHT) as usize)
+    };
+    let mut soft = Software::new(output, DEMO_WIDTH as usize, pixels)
+        .map_err(|_| fail(145, b"wldemo: the renderer refused the pool\n"))?;
+    let atlas_texture = soft
+        .create_texture_rgba(atlas.width(), atlas.height(), atlas.pixels())
+        .map_err(|_| fail(146, b"wldemo: the atlas did not upload\n"))?;
+
+    // A frame is painted on change and committed when the previous one has been
+    // released; handling the release in this loop, rather than waiting for it,
+    // keeps a key that arrives mid-presentation from being swallowed. The loop
+    // has no idle timeout: a window waits for input, and a probe bounds the run.
+    let mut dirty = true;
+    let mut busy = false;
+    let mut shift = false;
+
+    write_out(b"wldemo: ready\n");
+    demo_report(&form);
+
+    loop {
+        if fill(conn, &mut inbuf, &mut chunk, 100) {
+            loop {
+                let msg = match inbuf.next() {
+                    Ok(Some(m)) => m,
+                    Ok(None) => break,
+                    Err(_) => return Err(fail(147, b"wldemo: bad frame\n")),
+                };
+                let h = Header::parse(msg).map_err(|_| fail(148, b"wldemo: bad header\n"))?;
+                let mut args = [Arg::Uint(0); MAX_ARGS];
+                let (_, kind, argc) = client
+                    .decode(msg, &mut args)
+                    .map_err(|_| fail(149, b"wldemo: undecodable event\n"))?;
+                let (opcode, object) = (h.opcode, h.object_id);
+                // `args` can borrow the buffer through a string argument, so every
+                // value this loop uses is copied out before the message is consumed.
+                let a0 = args[0].as_uint();
+                let mods = args[1].as_uint().unwrap_or(0);
+                let key_code = args[2].as_uint();
+                let key_state = args[3].as_uint();
+                inbuf.consume(h.size as usize);
+
+                match (kind, opcode) {
+                    (Kind::Keyboard, protocol::keyboard_ev::MODIFIERS) => {
+                        // The depressed mask is the second argument, and the server
+                        // sends this before the key that changed it.
+                        shift = mods & wayland::input::MOD_SHIFT != 0;
+                    }
+                    (Kind::Keyboard, protocol::keyboard_ev::KEY) if argc == 4 => {
+                        let code = key_code.unwrap_or(0);
+                        let pressed = key_state == Some(wayland::input::STATE_PRESSED);
+                        let Some(key) = demo_key(code, shift) else {
+                            continue;
+                        };
+                        if key == Key::Escape && pressed {
+                            let _ = unsafe { vmem::munmap(pool, size as usize) };
+                            let _ = uds::close_fd(conn);
+                            return Ok(());
+                        }
+                        let response = form.handle(Input::Key { key, pressed });
+                        if response.changed {
+                            demo_report(&form);
+                            dirty = true;
+                        }
+                    }
+                    (Kind::Buffer, protocol::buffer_ev::RELEASE) if object == buffer => {
+                        busy = false
+                    }
+                    (Kind::XdgSurface, protocol::xdg_surface_ev::CONFIGURE) => {
+                        send_req(conn, &mut req, |q| {
+                            client.ack_configure(xdg_surface, a0.unwrap_or(0), q)
+                        })?;
+                    }
+                    (Kind::XdgWmBase, protocol::xdg_wm_base_ev::PING) => {
+                        send_req(conn, &mut req, |q| client.pong(wm_base, a0.unwrap_or(0), q))?;
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        if dirty && !busy {
+            let mut pass = Pass::new(output);
+            form.paint(&mut pass, &atlas, atlas_texture);
+            soft.render(&pass)
+                .map_err(|_| fail(151, b"wldemo: the frame did not render\n"))?;
+            send_req(conn, &mut req, |q| {
+                client.damage(surface, 0, 0, DEMO_WIDTH, DEMO_HEIGHT, q)
+            })?;
+            send_req(conn, &mut req, |q| client.commit(surface, q))?;
+            dirty = false;
+            busy = true;
+        }
+    }
+}

@@ -1137,6 +1137,16 @@ test-wlpointer-x86: build-x86
     python tools/wlpointer_probe.py
     @echo "wlpointer: the focus followed the pointer between two windows (x86_64)"
 
+# wldemo: tools/wldemo_probe.py drives the widget layer — /bin/wldemo is one window with
+# a text field, a list and a button, and the keys it is sent have to type, move the
+# selection, fire the button and reach the client as its own state report.
+test-wldemo-x86: build-x86
+    mkdir -p target/images/x86_64-pc-minix
+    cp target/trampoline.elf target/images/x86_64-pc-minix/minix-x86.elf
+    @just _assert-qemu-version qemu-system-x86_64
+    python tools/wldemo_probe.py
+    @echo "wldemo: the field, the list and the button took their keys (x86_64)"
+
 
 # wlxd: /bin/wlxd drives the Phase 2d damage and cursor path — it damages a small
 # rectangle and checks the rest of the frame survives, then gives the pointer an

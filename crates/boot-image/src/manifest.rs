@@ -168,6 +168,9 @@ pub const BOOT_BINS: &[(&str, &str)] = &[
     // `/bin/wlpointer` is the pointer-follows-focus client: a full-output window under a
     // 64x64 one, and the keys that move with the pointer between them.
     ("/bin/wlpointer", "wlpointer"),
+    // `/bin/wldemo` is the widget client: a text field, a list and a button in one
+    // window, driven by the keyboard and drawn by the software backend.
+    ("/bin/wldemo", "wldemo"),
     // `/bin/wlxd` is the Wayland Phase 2d damage and cursor client: it damages part
     // of a frame and checks the rest survives, then gives the pointer an image.
     ("/bin/wlxd", "wlxd"),
