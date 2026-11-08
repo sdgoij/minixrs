@@ -1,7 +1,11 @@
-//! The GLES backend: surfaceless EGL, a pbuffer, and the solid-rect program.
+//! The GLES backend: surfaceless EGL, a pbuffer, and one textured-quad program.
 //!
 //! This is the translation of `tools/wlgl_render.c` into the [`Backend`] shape,
-//! with the triangle replaced by the rect and clear elements of the pass list.
+//! generalised from a triangle to the elements of the pass list. Every element
+//! is a quad with a texture: a solid color is the same shader with a 1x1 white
+//! texture, so rects and glyphs take one path and the window buffers of the next
+//! milestone need no new program.
+//!
 //! EGL is surfaceless because there is no window system underneath us: the
 //! compositor draws into its own buffer and presents that, exactly as the probe
 //! does (`tools/wlgl_render.c` is the reference, `.notes/wayland.md` §6.10
@@ -20,7 +24,7 @@ use core::ptr;
 
 use crate::backend::Backend;
 use crate::geom::Rect;
-use crate::pass::{Color, Element, Pass};
+use crate::pass::{Color, Element, Pass, TextureId};
 use crate::pixels::rgba_bottom_up_to_xrgb8888;
 
 type EglDisplay = *mut c_void;
@@ -50,6 +54,7 @@ const EGL_HEIGHT: Eglint = 0x3056;
 
 const GL_COLOR_BUFFER_BIT: u32 = 0x0000_4000;
 const GL_RGBA: Glenum = 0x1908;
+const GL_RGBA8: Glint = 0x8058;
 const GL_UNSIGNED_BYTE: Glenum = 0x1401;
 const GL_FLOAT: Glenum = 0x1406;
 const GL_VERTEX_SHADER: Glenum = 0x8B31;
@@ -64,21 +69,40 @@ const GL_SRC_ALPHA: Glenum = 0x0302;
 const GL_ONE_MINUS_SRC_ALPHA: Glenum = 0x0303;
 const GL_SCISSOR_TEST: Glenum = 0x0C11;
 const GL_RENDERER: Glenum = 0x1F01;
+const GL_TEXTURE_2D: Glenum = 0x0DE1;
+const GL_TEXTURE0: Glenum = 0x84C0;
+const GL_TEXTURE_MIN_FILTER: Glenum = 0x2801;
+const GL_TEXTURE_MAG_FILTER: Glenum = 0x2800;
+const GL_TEXTURE_WRAP_S: Glenum = 0x2802;
+const GL_TEXTURE_WRAP_T: Glenum = 0x2803;
+const GL_NEAREST: Glint = 0x2600;
+const GL_CLAMP_TO_EDGE: Glint = 0x812F;
+const GL_UNPACK_ALIGNMENT: Glenum = 0x0CF5;
 
 const GL_FALSE: Glboolean = 0;
+const VERTEX_STRIDE: Glsizei = 16;
+const UV_OFFSET: usize = 8;
 
 const VERTEX_SRC: &[u8] = b"#version 300 es\n\
 layout(location = 0) in vec2 a_pos;\n\
-void main() { gl_Position = vec4(a_pos, 0.0, 1.0); }\n\0";
+layout(location = 1) in vec2 a_uv;\n\
+out vec2 v_uv;\n\
+void main() { v_uv = a_uv; gl_Position = vec4(a_pos, 0.0, 1.0); }\n\0";
 
 const FRAGMENT_SRC: &[u8] = b"#version 300 es\n\
 precision mediump float;\n\
+in vec2 v_uv;\n\
+uniform sampler2D u_texture;\n\
 uniform vec4 u_color;\n\
 out vec4 fragColor;\n\
-void main() { fragColor = u_color; }\n\0";
+void main() { fragColor = texture(u_texture, v_uv) * u_color; }\n\0";
+
+const WHITE_PIXEL: [u8; 4] = [255, 255, 255, 255];
 
 unsafe extern "C" {
     fn setenv(name: *const c_char, value: *const c_char, overwrite: c_int) -> c_int;
+    fn open(path: *const c_char, flags: c_int, ...) -> c_int;
+    fn close(fd: c_int) -> c_int;
 
     fn eglGetDisplay(display_id: *mut c_void) -> EglDisplay;
     fn eglInitialize(display: EglDisplay, major: *mut Eglint, minor: *mut Eglint) -> u32;
@@ -151,6 +175,7 @@ unsafe extern "C" {
     fn glUseProgram(program: Gluint);
     fn glDeleteProgram(program: Gluint);
     fn glGetUniformLocation(program: Gluint, name: *const c_char) -> Glint;
+    fn glUniform1i(location: Glint, value: Glint);
     fn glUniform4f(location: Glint, x: f32, y: f32, z: f32, w: f32);
 
     fn glGenBuffers(count: Glsizei, buffers: *mut Gluint);
@@ -167,6 +192,24 @@ unsafe extern "C" {
         pointer: *const c_void,
     );
     fn glDrawArrays(mode: Glenum, first: Glint, count: Glsizei);
+
+    fn glGenTextures(count: Glsizei, textures: *mut Gluint);
+    fn glDeleteTextures(count: Glsizei, textures: *const Gluint);
+    fn glBindTexture(target: Glenum, texture: Gluint);
+    fn glActiveTexture(texture: Glenum);
+    fn glTexImage2D(
+        target: Glenum,
+        level: Glint,
+        internal: Glint,
+        width: Glsizei,
+        height: Glsizei,
+        border: Glint,
+        format: Glenum,
+        kind: Glenum,
+        pixels: *const c_void,
+    );
+    fn glTexParameteri(target: Glenum, name: Glenum, value: Glint);
+    fn glPixelStorei(name: Glenum, value: Glint);
 }
 
 /// Why a render call failed.
@@ -180,13 +223,15 @@ pub enum GlError {
     Scissor,
     /// The pass was built for a different output size.
     OutputMismatch,
-    /// The destination buffer is too small.
+    /// A destination buffer is too small for the image it must hold.
     OutputSize,
-    /// The element kind has no path in this backend yet.
-    Unsupported,
+    /// Texture data is shorter than the geometry it was given.
+    TextureSize,
+    /// A texture id does not name a texture this renderer owns.
+    Texture,
     /// `glGetError` returned nonzero.
     Gl(Glenum),
-    /// A shader or program could not be created.
+    /// A shader, program, buffer or texture could not be created.
     Object,
 }
 
@@ -199,11 +244,18 @@ impl core::fmt::Display for GlError {
             Self::Scissor => f.write_str("damage rectangle is outside the output"),
             Self::OutputMismatch => f.write_str("pass output size differs from the renderer's"),
             Self::OutputSize => f.write_str("destination buffer is too small"),
-            Self::Unsupported => f.write_str("element kind is not supported by the GL backend"),
+            Self::TextureSize => f.write_str("texture data is shorter than its geometry"),
+            Self::Texture => f.write_str("element names a texture this renderer does not own"),
             Self::Gl(code) => write!(f, "glGetError returned 0x{code:04x}"),
             Self::Object => f.write_str("GL refused to create an object"),
         }
     }
+}
+
+struct TextureObject {
+    name: Gluint,
+    width: u32,
+    height: u32,
 }
 
 /// A surfaceless GLES renderer with one pbuffer of the output size.
@@ -214,6 +266,8 @@ pub struct Gl {
     program: Gluint,
     vbo: Gluint,
     color: Glint,
+    textures: Vec<TextureObject>,
+    white: TextureId,
     output: Rect,
     readback: Vec<u8>,
 }
@@ -236,6 +290,16 @@ impl Gl {
             .ok_or(GlError::OutputSize)?;
 
         unsafe {
+            // The same driver choice the probe makes: the render node when there
+            // is one, software otherwise, so a guest without a GL device still
+            // gets a frame instead of an EGL failure.
+            setenv(c"LIBGL_DRIVERS_PATH".as_ptr(), c"/lib".as_ptr(), 1);
+            let node = open(c"/dev/dri/renderD128".as_ptr(), 2);
+            if node < 0 {
+                setenv(c"LIBGL_ALWAYS_SOFTWARE".as_ptr(), c"1".as_ptr(), 1);
+            } else {
+                close(node);
+            }
             setenv(c"EGL_PLATFORM".as_ptr(), c"surfaceless".as_ptr(), 1);
 
             let display = eglGetDisplay(ptr::null_mut());
@@ -320,9 +384,13 @@ impl Gl {
             }
 
             let color = glGetUniformLocation(program, c"u_color".as_ptr());
-            if color < 0 {
+            let sampler = glGetUniformLocation(program, c"u_texture".as_ptr());
+            if color < 0 || sampler < 0 {
                 return Err(GlError::Object);
             }
+            glUseProgram(program);
+            glUniform1i(sampler, 0);
+            glActiveTexture(GL_TEXTURE0);
 
             let mut vbo = 0;
             glGenBuffers(1, &mut vbo);
@@ -335,16 +403,21 @@ impl Gl {
                 return Err(GlError::Gl(error));
             }
 
-            Ok(Self {
+            let mut renderer = Self {
                 display,
                 context,
                 surface,
                 program,
                 vbo,
                 color,
+                textures: Vec::new(),
+                white: TextureId(0),
                 output,
                 readback: vec![0; pixels],
-            })
+            };
+            let white = renderer.create_texture_rgba(1, 1, &WHITE_PIXEL)?;
+            renderer.white = white;
+            Ok(renderer)
         }
     }
 
@@ -360,6 +433,59 @@ impl Gl {
         }
         // GL strings live for the context's lifetime, which is this object's.
         unsafe { CStr::from_ptr(name) }.to_str().ok()
+    }
+
+    /// Upload an RGBA8 image and return the id elements name it by.
+    pub fn create_texture_rgba(
+        &mut self,
+        width: u32,
+        height: u32,
+        pixels: &[u8],
+    ) -> Result<TextureId, GlError> {
+        if width == 0 || height == 0 {
+            return Err(GlError::OutputSize);
+        }
+        let required = usize::try_from(width)
+            .ok()
+            .and_then(|w| usize::try_from(height).ok().and_then(|h| w.checked_mul(h)))
+            .and_then(|n| n.checked_mul(4))
+            .ok_or(GlError::TextureSize)?;
+        if pixels.len() < required {
+            return Err(GlError::TextureSize);
+        }
+
+        unsafe {
+            let mut name = 0;
+            glGenTextures(1, &mut name);
+            if name == 0 {
+                return Err(GlError::Object);
+            }
+            glBindTexture(GL_TEXTURE_2D, name);
+            glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+            glTexImage2D(
+                GL_TEXTURE_2D,
+                0,
+                GL_RGBA8,
+                width as Glsizei,
+                height as Glsizei,
+                0,
+                GL_RGBA,
+                GL_UNSIGNED_BYTE,
+                pixels.as_ptr().cast(),
+            );
+            glBindTexture(GL_TEXTURE_2D, 0);
+
+            self.textures.push(TextureObject {
+                name,
+                width,
+                height,
+            });
+            Ok(TextureId((self.textures.len() - 1) as u32))
+        }
     }
 
     /// Draw `pass` into the pbuffer.
@@ -411,10 +537,22 @@ impl Gl {
         Ok(())
     }
 
-    unsafe fn draw_rect(&mut self, rect: Rect, color: Color) -> Result<(), GlError> {
+    unsafe fn draw_quad(
+        &mut self,
+        rect: Rect,
+        source: Rect,
+        texture: TextureId,
+        tint: Color,
+    ) -> Result<(), GlError> {
         let Some(rect) = rect.intersection(self.output) else {
             return Ok(());
         };
+        let Some(object) = self.textures.get(texture.0 as usize) else {
+            return Err(GlError::Texture);
+        };
+        if source.w <= 0 || source.h <= 0 {
+            return Ok(());
+        }
 
         let width = self.output.w as f32;
         let height = self.output.h as f32;
@@ -423,17 +561,31 @@ impl Gl {
         let y0 = 1.0 - 2.0 * rect.y as f32 / height;
         let y1 = 1.0 - 2.0 * rect.bottom() as f32 / height;
 
-        let vertices: [f32; 8] = [x0, y0, x1, y0, x0, y1, x1, y1];
+        let texture_width = object.width as f32;
+        let texture_height = object.height as f32;
+        let u0 = source.x as f32 / texture_width;
+        let v0 = source.y as f32 / texture_height;
+        let u1 = source.right() as f32 / texture_width;
+        let v1 = source.bottom() as f32 / texture_height;
+
+        let vertices: [f32; 16] = [
+            x0, y0, u0, v0, //
+            x1, y0, u1, v0, //
+            x0, y1, u0, v1, //
+            x1, y1, u1, v1,
+        ];
 
         unsafe {
             glUseProgram(self.program);
             glUniform4f(
                 self.color,
-                f32::from(color.r) / 255.0,
-                f32::from(color.g) / 255.0,
-                f32::from(color.b) / 255.0,
-                f32::from(color.a) / 255.0,
+                f32::from(tint.r) / 255.0,
+                f32::from(tint.g) / 255.0,
+                f32::from(tint.b) / 255.0,
+                f32::from(tint.a) / 255.0,
             );
+            glActiveTexture(GL_TEXTURE0);
+            glBindTexture(GL_TEXTURE_2D, object.name);
             glBindBuffer(GL_ARRAY_BUFFER, self.vbo);
             glBufferData(
                 GL_ARRAY_BUFFER,
@@ -442,7 +594,16 @@ impl Gl {
                 GL_STREAM_DRAW,
             );
             glEnableVertexAttribArray(0);
-            glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 0, ptr::null());
+            glEnableVertexAttribArray(1);
+            glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, VERTEX_STRIDE, ptr::null());
+            glVertexAttribPointer(
+                1,
+                2,
+                GL_FLOAT,
+                GL_FALSE,
+                VERTEX_STRIDE,
+                UV_OFFSET as *const c_void,
+            );
             glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
         }
         Ok(())
@@ -471,9 +632,20 @@ impl Backend for Gl {
                     );
                     glClear(GL_COLOR_BUFFER_BIT);
                 }
-                Element::Clear { color } => self.draw_rect(self.output, color)?,
-                Element::Rect { rect, color } => self.draw_rect(rect, color)?,
-                Element::Texture { .. } => return Err(GlError::Unsupported),
+                Element::Clear { color } => {
+                    let white = self.white;
+                    self.draw_quad(self.output, Rect::new(0, 0, 1, 1), white, color)?;
+                }
+                Element::Rect { rect, color } => {
+                    let white = self.white;
+                    self.draw_quad(rect, Rect::new(0, 0, 1, 1), white, color)?;
+                }
+                Element::Texture {
+                    rect,
+                    source,
+                    texture,
+                    ..
+                } => self.draw_quad(rect, source, texture, Color::WHITE)?,
             }
         }
         Ok(())
@@ -486,6 +658,9 @@ impl Drop for Gl {
         // usually exiting; the calls are still made so a compositor that replaces
         // its context does not leak the old one.
         unsafe {
+            for texture in &self.textures {
+                glDeleteTextures(1, &texture.name);
+            }
             glDeleteBuffers(1, &self.vbo);
             glDeleteProgram(self.program);
             eglMakeCurrent(
