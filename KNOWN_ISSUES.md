@@ -2127,6 +2127,13 @@ are arch-specific, `[env]` is tooling/platform, not kernel.
   the Justfile exports `MSYS2_ENV_CONV_EXCL` for every recipe, and
   `crates/kernel/build.rs` refuses a dest that is not `/bin/`, `/sbin/` or
   `/etc/`, naming the exclusion in its message.
+- **A probe predicate that ends in `\n` never matches the guest's console
+  (2026-11-08).** The serial console runs with `ONLCR`, so every `\n` a process
+  writes leaves the tty as `\r\n`. The first version of `tools/wldemo_probe.py`
+  waited for a whole line including its terminator and timed out against a log
+  that visibly contained that line. Match the content and not the newline (or
+  strip the `\r`), and expect the same from any check of a captured guest log
+  written on a Windows host, where the file keeps the CRLF.
 
   It has to be an `export` and not a per-line prefix, which is the second half
   of the trap: `just run` re-enters `just` (`run` → `run-x86`), and the value is
