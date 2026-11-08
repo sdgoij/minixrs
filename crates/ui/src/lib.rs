@@ -18,6 +18,7 @@ pub mod button;
 pub mod event;
 pub mod field;
 pub mod form;
+pub mod list;
 pub mod paint;
 pub mod theme;
 
@@ -25,5 +26,6 @@ pub use button::Button;
 pub use event::{Event, Key, Response};
 pub use field::Field;
 pub use form::{Form, Widget};
+pub use list::List;
 pub use paint::Painter;
 pub use theme::Theme;

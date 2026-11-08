@@ -12,12 +12,14 @@ use render::text::Atlas;
 use crate::button::Button;
 use crate::event::{Event, Key, Response};
 use crate::field::Field;
+use crate::list::List;
 use crate::{Painter, Theme};
 
 /// One widget of a window.
 pub enum Widget<'a> {
     Button(Button<'a>),
     Field(Field<'a>),
+    List(List<'a>),
 }
 
 impl<'a> Widget<'a> {
@@ -25,6 +27,7 @@ impl<'a> Widget<'a> {
         match self {
             Self::Button(button) => button.bounds(),
             Self::Field(field) => field.bounds(),
+            Self::List(list) => list.bounds(),
         }
     }
 
@@ -37,6 +40,7 @@ impl<'a> Widget<'a> {
         match self {
             Self::Button(_) => Button::height(theme),
             Self::Field(_) => Field::height(theme),
+            Self::List(list) => list.height(theme),
         }
     }
 
@@ -44,6 +48,7 @@ impl<'a> Widget<'a> {
         match self {
             Self::Button(button) => button.layout(bounds),
             Self::Field(field) => field.layout(bounds, theme),
+            Self::List(list) => list.layout(bounds, theme),
         }
     }
 
@@ -51,6 +56,7 @@ impl<'a> Widget<'a> {
         match self {
             Self::Button(button) => button.handle(event),
             Self::Field(field) => field.handle(event),
+            Self::List(list) => list.handle(event),
         }
     }
 
@@ -58,6 +64,7 @@ impl<'a> Widget<'a> {
         match self {
             Self::Button(button) => button.paint(painter, theme),
             Self::Field(field) => field.paint(painter, theme),
+            Self::List(list) => list.paint(painter, theme),
         }
     }
 }
@@ -228,7 +235,7 @@ mod tests {
     fn button<'a>(form: &'a Form<'static, 2>, index: usize) -> &'a Button<'static> {
         match form.widget(index).expect("the widget exists") {
             Widget::Button(button) => button,
-            Widget::Field(_) => panic!("widget {index} is not a button"),
+            Widget::Field(_) | Widget::List(_) => panic!("widget {index} is not a button"),
         }
     }
 
@@ -239,7 +246,7 @@ mod tests {
     fn field<'a>(form: &'a Form<'static, 2>, index: usize) -> &'a Field<'static> {
         match form.widget(index).expect("the widget exists") {
             Widget::Field(field) => field,
-            Widget::Button(_) => panic!("widget {index} is not a field"),
+            Widget::Button(_) | Widget::List(_) => panic!("widget {index} is not a field"),
         }
     }
 
@@ -298,6 +305,51 @@ mod tests {
 
         form.handle(key(Key::Enter, true));
         assert_eq!(button(&form, 1).activations(), 1);
+    }
+
+    #[test]
+    fn three_kinds_share_one_focus_order() {
+        const ITEMS: [&[u8]; 3] = [b"one", b"two", b"three"];
+        let mut form = Form::new(
+            [
+                Widget::Field(Field::new()),
+                Widget::List(List::new(&ITEMS)),
+                Widget::Button(Button::new(b"go")),
+            ],
+            Theme::DARK,
+        );
+        form.stack(Rect::new(0, 0, 160, 300), 4);
+        assert_eq!(form.focus(), Some(0));
+
+        // The field takes the byte.
+        form.handle(key(Key::Char(b'h'), true));
+
+        form.handle(key(Key::Tab, true));
+        assert_eq!(form.focus(), Some(1));
+        form.handle(key(Key::Down, true));
+
+        form.handle(key(Key::Tab, true));
+        assert_eq!(form.focus(), Some(2));
+        assert_eq!(form.handle(key(Key::Enter, true)), Response::ACTIVATED);
+
+        // Tab wraps to the field, and nothing was disturbed on the way.
+        form.handle(key(Key::Tab, true));
+        assert_eq!(form.focus(), Some(0));
+
+        let Widget::Field(field) = form.widget(0).unwrap() else {
+            panic!("widget 0 is not a field");
+        };
+        assert_eq!(field.text(), b"h");
+
+        let Widget::List(list) = form.widget(1).unwrap() else {
+            panic!("widget 1 is not a list");
+        };
+        assert_eq!(list.selected(), Some(1));
+
+        let Widget::Button(button) = form.widget(2).unwrap() else {
+            panic!("widget 2 is not a button");
+        };
+        assert_eq!(button.activations(), 1);
     }
 
     #[test]

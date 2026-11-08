@@ -8,6 +8,10 @@ use render::Color;
 /// is a fixed 8x16 cell, so a row is that cell plus the vertical padding, and a
 /// widget that needs a different height can say so at layout time. A real style
 /// engine can come later, when something asks for one.
+///
+/// There is no text colour: glyphs are drawn from the atlas, whose coverage is
+/// white, and the pass list has no per-element tint yet. A label is therefore
+/// white on whatever surface its widget painted underneath it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Theme {
     /// The window behind the widgets.
@@ -16,10 +20,6 @@ pub struct Theme {
     pub surface: Color,
     /// A widget under the pointer or held down.
     pub surface_active: Color,
-    /// Text and glyphs.
-    pub ink: Color,
-    /// Text that is present but not selectable, such as a field's placeholder.
-    pub ink_dim: Color,
     /// The focus ring and the selection bar.
     pub accent: Color,
     /// A widget's edge when it is not focused.
@@ -40,8 +40,6 @@ impl Theme {
         background: Color::rgba(0x10, 0x14, 0x18, 255),
         surface: Color::rgba(0x24, 0x2A, 0x31, 255),
         surface_active: Color::rgba(0x36, 0x40, 0x4A, 255),
-        ink: Color::rgba(0xD8, 0xDE, 0xE6, 255),
-        ink_dim: Color::rgba(0x7A, 0x84, 0x8E, 255),
         accent: Color::rgba(0x30, 0x80, 0xFF, 255),
         line: Color::rgba(0x44, 0x4C, 0x56, 255),
         border: 1,
