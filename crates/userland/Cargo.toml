@@ -432,6 +432,13 @@ name = "rc"
 path = "src/bin/rc.rs"
 test = false
 
+# session is the session manager: it waits for the shell's prompt and starts the
+# long-running programs in /etc/session.
+[[bin]]
+name = "session"
+path = "src/bin/session.rs"
+test = false
+
 [[bin]]
 name = "wlxd"
 path = "src/bin/wlxd.rs"

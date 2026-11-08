@@ -719,9 +719,10 @@ mod tests {
         let itable_off = (2 + imap_blocks as usize + zmap_blocks as usize) * BLOCK_SIZE;
 
         // Inode numbering: root(1) bin(2) sbin(3) etc(4) tmp(5) dev(6)
-        // devices(7), then BOOT_FILES rc(8) passwd(9) secret(10), then devices:
-        // tty00(11) tty01(12) null(13) console(14) ip(15) udp(16) tcp(17).
-        let console_ino = 14usize;
+        // devices(7), then BOOT_FILES rc(8) session(9) passwd(10) secret(11),
+        // then devices: tty00(12) tty01(13) null(14) console(15) ip(16) udp(17)
+        // tcp(18).
+        let console_ino = 15usize;
         let off = itable_off + (console_ino - 1) * INODE_SIZE;
         let mode = u16::from_le_bytes(image[off..off + 2].try_into().unwrap());
         let dev = u32::from_le_bytes(image[off + 24..off + 28].try_into().unwrap());
@@ -733,8 +734,8 @@ mod tests {
         assert_eq!(mode & 0o777, 0o600);
         assert_eq!(dev, 5u32 << 16, "console major 5 minor 0");
 
-        // /dev/tty00: major 3 minor 0 (inode 11 → slot 10).
-        let tty00_off = itable_off + 10 * INODE_SIZE;
+        // /dev/tty00: major 3 minor 0 (inode 12 → slot 11).
+        let tty00_off = itable_off + 11 * INODE_SIZE;
         let tty00_dev =
             u32::from_le_bytes(image[tty00_off + 24..tty00_off + 28].try_into().unwrap());
         assert_eq!(tty00_dev, 3u32 << 16);
@@ -917,10 +918,10 @@ mod tests {
         // alloc_bit never hands out an inode that already has table data.
         // The builder writes slot N-1 for inode N; walk the table. The
         // empty image has 8 dirs (root, bin, sbin, etc, tmp, dev, devices,
-        // dri) + 3 data files (rc, passwd, secret) + 19 devices (tty00, tty01, null,
+        // dri) + 4 data files (rc, session, passwd, secret) + 19 devices (tty00, tty01, null,
         // console, ip, udp, tcp, fb, kbd, the 8 pty nodes ttyp0-3/ptyp0-3, uds,
-        // and dri/renderD128) + the /link symlink = 31 inodes.
-        let n_inodes = 31usize;
+        // and dri/renderD128) + the /link symlink = 32 inodes.
+        let n_inodes = 32usize;
         for ino in 1..=n_inodes {
             assert_eq!(
                 (imap[ino / 8] >> (ino % 8)) & 1,
@@ -928,11 +929,11 @@ mod tests {
                 "inode {ino} must be marked in use at bit {ino}"
             );
         }
-        // And the next bit (inode 32) is free — the first allocatable inode.
+        // And the next bit (inode 33) is free — the first allocatable inode.
         assert_eq!(
-            imap[32 / 8] & (1 << (32 % 8)),
+            imap[33 / 8] & (1 << (33 % 8)),
             0,
-            "inode 32 must be free for the first create"
+            "inode 33 must be free for the first create"
         );
         let _ = itable_off;
     }

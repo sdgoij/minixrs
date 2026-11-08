@@ -7,12 +7,18 @@ window above it, both at the origin — and moves the absolute pointer.
 
 Near the top-left the pointer is over both, so the small window on top must take
 the focus; further out it is over only the big one, so the focus must come back.
-A key is injected at each place, and the connection that receives it is the
-window that actually holds the focus.
+A key is injected at the end, and the connection that receives it is the window
+that holds the focus at the pointer's final place.
+
+Neither connection's slot number is known up front: the session's panel is a
+client of the server too, and it takes whichever slot it connected on. So the
+gate tracks which slot each move ends on and asserts that they differ, then that
+moving back returns to the first.
 
 Exit 0 on success, 1 otherwise.
 """
 import json
+import re
 import socket
 import subprocess
 import sys
@@ -31,6 +37,8 @@ QEMU = [
     "-device", "virtio-net-pci,disable-legacy=on,netdev=net0",
     "-device", "virtio-tablet-pci,display=fb0",
 ]
+
+FOCUS = re.compile(rb"wlserver: focus -> slot (\d+)")
 
 lock = threading.Lock()
 out = bytearray()
@@ -74,6 +82,28 @@ def wait_for(pred, timeout):
         time.sleep(0.05)
     with lock:
         return pred()
+
+
+def focus_slots():
+    """Every focus handover reported so far, in order.
+
+    Reads without the lock, because a `wait_for` predicate already holds it and
+    the lock is not reentrant.
+    """
+    return [int(m.group(1)) for m in FOCUS.finditer(bytes(out))]
+
+
+def settle(seconds=2.0):
+    """The slot a move ended on, once its interpolation has finished.
+
+    A move arrives as one target position but is drawn as a short sweep, one step
+    per tick, so the handovers it causes arrive over about half a second and the
+    last of them names the window under the pointer's final place. Reading the
+    first handover instead would catch the sweep passing over an earlier window.
+    """
+    time.sleep(seconds)
+    slots = focus_slots()
+    return slots[-1] if slots else None
 
 
 def absolute(q, px, py):
@@ -143,33 +173,37 @@ def main():
 
     step(1, "the two windows are up", lambda: b"wlpointer: ready" in out)
 
-    FOCUS_PREFIX = b"wlserver: focus -> slot "
-
-    def focus_is(slot):
-        """The most recent focus report names `slot`."""
-        def pred():
-            at = out.rfind(FOCUS_PREFIX)
-            return at >= 0 and out[at + len(FOCUS_PREFIX):][:1] == bytes([0x30 + slot])
-        return pred
-
-    # Into the 64x64 window at the origin, then back out over the full-output
-    # one. Each move is interpolated, so assert the handover it causes before
-    # making the next one. A key injected right after a move is dropped by the
-    # guest's input ring, so the single key comes last and proves only where the
-    # focus ended up.
-    if ok:
-        absolute(q, 16, 16)
-    step(2, "the small window took the focus", focus_is(1))
+    # Out to the full-output window, into the 64x64 one, then out again. The
+    # pointer starts at the centre, over the big window only, and the small one
+    # holds the focus it asked for when it committed last, so the first move is
+    # also the one that proves the handover away from it.
+    below = None
     if ok:
         absolute(q, 400, 300)
-    step(3, "the big window took it back", focus_is(0))
+        below = settle()
+    step(2, "the big window alone holds the focus", lambda: below is not None)
+
+    top = None
+    if ok:
+        absolute(q, 16, 16)
+        top = settle()
+    step(3, "the small window took the focus", lambda: top is not None and top != below)
+
+    back = None
+    if ok:
+        absolute(q, 400, 300)
+        back = settle()
+    step(4, "the big window took it back", lambda: back == below)
+
+    # A key injected right after a move is dropped by the guest's input ring, so
+    # it comes last and proves only where the focus ended up.
     if ok:
         key(q, True)
         time.sleep(0.2)
         key(q, False)
-    step(4, "the key followed the pointer", lambda: b"wlpointer: key to A" in out)
+    step(5, "the key followed the pointer", lambda: b"wlpointer: key to A" in out)
 
-    step(5, "the client finished", lambda: b"wlpointer: PASS" in out, 20)
+    step(6, "the client finished", lambda: b"wlpointer: PASS" in out, 20)
 
     q.close()
     if not ok:

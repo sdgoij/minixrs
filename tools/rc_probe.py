@@ -1,17 +1,29 @@
 #!/usr/bin/env python3
-"""The rc step: `/etc/rc` runs at boot, before anything is typed.
+"""The session chain: `/etc/rc`, the shell's prompt, `/etc/session`.
 
-Boots x86 with the bochs display and, without sending a single command, waits for
-the line `/etc/rc` names. `/bin/rc` is what init execs: it reads the file, starts
-each line in the background, and then becomes the shell, so the line arriving on
-its own proves the whole chain (init, the list, the fork, the program).
+Boots x86 with the bochs display and types nothing at all. Three things have to
+happen on their own, in order:
+
+  * `/bin/rc` runs `/etc/rc`, which names the session manager;
+  * the manager waits for the shell's prompt, ends that line (the prompt is
+    printed without a newline) and reports what it started;
+  * the panel from `/etc/session` reaches its ready line, on a line of its own.
+
+The prompt check is the one that matters most: `# \n` is the shell's prompt
+followed by the manager's newline, which is what keeps every later program's
+first line from being glued onto the prompt.
 
 Exit 0 on success, 1 otherwise.
 """
 import subprocess
+import re
 import sys
 import threading
 import time
+
+# A prompt on a line of its own: `# `, ended by the session manager's newline. The
+# guest's tty turns `\n` into `\r\n`, so the terminator is optional in the match.
+PROMPT = re.compile(rb"^# *\r?$", re.M)
 
 QMP_PORT = 4476
 
@@ -68,8 +80,11 @@ def main():
             print("[%d] %s: FAIL" % (n, name), flush=True)
             ok = False
 
-    step(1, "the rc list ran at boot", lambda: b"rc: session" in out)
-    step(2, "the shell came up after it", lambda: b"# " in out, 30)
+    step(1, "the rc list started the session manager",
+         lambda: b"session: started 1" in out)
+    step(2, "the prompt line was ended before the session's output",
+         lambda: PROMPT.search(bytes(out)) is not None, 30)
+    step(3, "the session's panel came up", lambda: b"wlpanel: ready" in out, 60)
 
     if not ok:
         with lock:

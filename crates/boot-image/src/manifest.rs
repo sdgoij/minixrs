@@ -176,6 +176,9 @@ pub const BOOT_BINS: &[(&str, &str)] = &[
     ("/bin/wlpanel", "wlpanel"),
     // `/bin/rc` runs `/etc/rc` and then becomes the shell: what init execs.
     ("/bin/rc", "rc"),
+    // `/bin/session` is the session manager: the list that runs once the shell's
+    // prompt is out.
+    ("/bin/session", "session"),
     // `/bin/wlxd` is the Wayland Phase 2d damage and cursor client: it damages part
     // of a frame and checks the rest survives, then gives the pointer an image.
     ("/bin/wlxd", "wlxd"),
@@ -305,29 +308,35 @@ pub const WASM_MODULES: &[(&str, &str)] = &[
     ("/bin/ping", "program.async.wasm"),
 ];
 
-/// `/etc/rc`: what the session starts before the shell.
+/// `/etc/rc`: what runs before the shell exists.
 ///
-/// One command per line, split on spaces; `#` starts a comment. `/bin/rc` names
-/// each program directly, because this file is read before a shell exists.
-///
-/// The panel is not started here. A program that allocates produces no output when
-/// `rc` starts it: `/bin/wlpanel` never reaches its `ready` line, and one boot ran
-/// it and never gave the shell a prompt. `/bin/echo` from the same file is fine, so
-/// the difference is in what the child does, not in the fork. `KNOWN_ISSUES`
-/// records it; start session programs from the shell until it is understood.
-pub const RC: &[u8] = b"# /etc/rc: what the session starts before the shell.\n\
-#\n\
-# One command per line, split on spaces; a line starting with `#` is a comment.\n\
-# There is no shell syntax: /bin/rc names each program directly, because this\n\
-# file is read before a shell exists.\n\
-#\n\
-# A long-running program is not started here yet. Its first line of output lands\n\
-# on the shell's prompt, and a prompt with text after it is not a prompt; the\n\
-# list also caught a wedge when two `exec`s were in flight at once. Both are\n\
-# recorded in KNOWN_ISSUES, and both are what a session manager, started by the\n\
-# shell once the prompt is quiet, is for.\n\
-# /bin/wlpanel\n\
-/bin/echo rc: session\n";
+/// The only entry is the session manager, for two reasons measured on this port.
+/// A program started from here writes into a console whose prompt has not been
+/// printed yet, and one started while the shell prints it appends its first line
+/// to the prompt (`# wlpanel: ready`), which is not a prompt. And two `exec`s in
+/// flight at once wedge one of them, so the list deliberately asks for exactly one
+/// program, which then does the rest after the prompt is out.
+pub const RC: &[u8] = b"# /etc/rc: what runs before the shell exists.
+#
+# One command per line, split on spaces; `#` starts a comment. There is no shell
+# syntax: /bin/rc names each program directly, because this file is read before
+# a shell exists.
+#
+# The session manager waits for the shell's prompt and then starts /etc/session.
+/bin/session
+";
+
+/// `/etc/session`: what the session manager starts once the prompt is out.
+pub const SESSION: &[u8] = b"# /etc/session: what the session manager starts.
+#
+# One command per line, split on spaces; `#` starts a comment. The manager waits
+# for the shell's prompt and ends that line before it starts anything, so these
+# programs' first output lands on a line of its own.
+#
+# The panel is a strip anchored to the output's top-right, so the origin stays
+# free for the windows drawn there.
+/bin/wlpanel
+";
 
 /// Root-filesystem data files baked into the minixfs image: destination
 /// path, content, mode, uid, gid (binaries come from [`BOOT_BINS`]).
@@ -337,6 +346,7 @@ pub const RC: &[u8] = b"# /etc/rc: what the session starts before the shell.\n\
 /// `sha256("minix" || "test123")`.
 pub const BOOT_FILES: &[(&str, &[u8], u16, u16, u16)] = &[
     ("/etc/rc", RC, 0o644, 0, 0),
+    ("/etc/session", SESSION, 0o644, 0, 0),
     (
         "/etc/passwd",
         b"root::0:0:root:/:/bin/sh\n\
