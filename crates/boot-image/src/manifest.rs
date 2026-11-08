@@ -279,6 +279,39 @@ pub const BOOT_BINS: &[(&str, &str)] = &[
     ("/bin/waittest", "waittest"),
 ];
 
+/// What the initramfs carries: the processes the boot loader starts, by path.
+///
+/// The archive is not a filesystem. `kernel_boot` looks a path up in it to load that process
+/// and nothing else ever reads it, so an entry here that no boot process names is weight in
+/// every kernel image and in nothing else. That is why this is a short list and not
+/// [`BOOT_BINS`]: the rest of the userland, the device nodes and `/etc` are on the root
+/// filesystem, which VFS mounts before `init` runs.
+///
+/// It has to agree with `kernel_boot`'s `BOOT_PROCS_ALL` (`crates/kernel-boot/src/lib.rs`).
+/// A path the loader wants and this list lacks aborts the boot, naming the path.
+pub const INITRAMFS_BINS: &[&str] = &[
+    "/sbin/ds",
+    "/sbin/rs",
+    "/sbin/pm",
+    "/sbin/sched",
+    "/sbin/vfs",
+    "/sbin/vm",
+    "/sbin/ramdisk",
+    "/sbin/virtio_blk",
+    "/sbin/virtio_net",
+    "/sbin/net",
+    "/sbin/mfs",
+    "/sbin/pfs",
+    "/sbin/devman",
+    "/sbin/tty",
+    "/sbin/fb",
+    "/sbin/input",
+    "/sbin/wserver",
+    "/sbin/uds",
+    "/sbin/wlserver",
+    "/sbin/init",
+];
+
 /// Programs a **wasm32** image carries: destination path → module file name in the target's
 /// release directory.
 ///

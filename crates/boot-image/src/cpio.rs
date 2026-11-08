@@ -6,8 +6,6 @@
 
 use std::io::Write;
 
-use crate::manifest::DEVICES;
-
 /// A single CPIO newc entry.
 ///
 /// `mode` carries both the file-type bits and permissions, matching the
@@ -19,11 +17,13 @@ pub struct Entry {
     pub data: Vec<u8>,
 }
 
-/// Build the standard boot initramfs: the base directories, the boot binaries,
-/// the device nodes, and the trailer.
+/// Build the boot initramfs: the base directories, the boot processes, and the trailer.
 ///
 /// `bins` maps destination path → file content (already read from the
-/// per-target release directory).
+/// per-target release directory). Only the paths in [`manifest::INITRAMFS_BINS`] go in: the
+/// kernel looks a boot process up here by path before any filesystem is mounted, and nothing
+/// else reads the archive, so everything else the image ships belongs on the root filesystem.
+///
 pub fn standard_initramfs(bins: &[(&'static str, Vec<u8>)]) -> Vec<u8> {
     let mut entries = vec![
         Entry {
@@ -41,15 +41,9 @@ pub fn standard_initramfs(bins: &[(&'static str, Vec<u8>)]) -> Vec<u8> {
             mode: 0o040755,
             data: Vec::new(),
         },
-        Entry {
-            name: "/dev",
-            mode: 0o040755,
-            data: Vec::new(),
-        },
-        // `/lib` holds shared objects and `/libexec` the dynamic loader, both for
-        // the import of a program that names a `PT_INTERP` — the loader has to be
-        // reachable before the root filesystem is mounted, so the directories are
-        // part of the base layout rather than something the gate adds.
+        // `/lib` holds shared objects and `/libexec` the dynamic loader, for a boot process
+        // that ever names a `PT_INTERP`: the loader has to be reachable before the root
+        // filesystem is mounted. No boot process is dynamic today, so these are empty.
         Entry {
             name: "/lib",
             mode: 0o040755,
@@ -62,38 +56,21 @@ pub fn standard_initramfs(bins: &[(&'static str, Vec<u8>)]) -> Vec<u8> {
         },
     ];
     for (path, data) in bins {
+        if !carries(path) {
+            continue;
+        }
         entries.push(Entry {
             name: path,
             mode: 0o100755,
             data: data.clone(),
         });
     }
-    // `/etc/rc` and `/etc/session` are what `/bin/rc` and `/bin/session` read, and
-    // the first of those runs before a shell exists, so both belong in the initramfs
-    // even though the other data files are only in the root image.
-    entries.push(Entry {
-        name: "/etc",
-        mode: 0o040755,
-        data: Vec::new(),
-    });
-    entries.push(Entry {
-        name: "/etc/rc",
-        mode: 0o100644,
-        data: crate::manifest::RC.to_vec(),
-    });
-    entries.push(Entry {
-        name: "/etc/session",
-        mode: 0o100644,
-        data: crate::manifest::SESSION.to_vec(),
-    });
-    for &(path, mode, _major, _minor) in DEVICES {
-        entries.push(Entry {
-            name: path,
-            mode,
-            data: Vec::new(),
-        });
-    }
     build_cpio(&entries)
+}
+
+/// Whether the initramfs carries `path`: it carries the boot processes and nothing else.
+pub fn carries(path: &str) -> bool {
+    crate::manifest::INITRAMFS_BINS.contains(&path)
 }
 
 /// Serialize entries as a CPIO newc archive.
@@ -295,11 +272,44 @@ mod tests {
 
     #[test]
     fn standard_initramfs_has_trailer() {
-        let cpio = standard_initramfs(&[("/bin/echo", b"x".to_vec())]);
+        let cpio = standard_initramfs(&[("/sbin/init", b"x".to_vec())]);
         let tail = &cpio[cpio.len() - 0x200..];
         assert!(
             tail.windows(10).any(|w| w == b"TRAILER!!!"),
             "archive must end with the TRAILER!!! entry"
         );
+    }
+
+    fn names(cpio: &[u8], name: &[u8]) -> bool {
+        cpio.windows(name.len()).any(|w| w == name)
+    }
+
+    /// The archive is the loader's ELF store, so a binary it does not load is weight in the
+    /// kernel. `/bin/coreutils` alone is 6 MB, and it is on the root filesystem.
+    #[test]
+    fn the_initramfs_carries_the_boot_processes_and_nothing_else() {
+        let cpio = standard_initramfs(&[
+            ("/sbin/mfs", b"mfs-elf".to_vec()),
+            ("/bin/coreutils", b"coreutils-elf".to_vec()),
+            ("/bin/wlpanel", b"wlpanel-elf".to_vec()),
+        ]);
+        assert!(names(&cpio, b"/sbin/mfs"));
+        assert!(!names(&cpio, b"/bin/coreutils"));
+        assert!(!names(&cpio, b"/bin/wlpanel"));
+        assert!(!names(&cpio, b"/etc/rc"));
+    }
+
+    /// A path that is not a `BOOT_BINS` entry cannot be read from the release directory, so a
+    /// typo here would leave the loader without a boot process it aborts on.
+    #[test]
+    fn every_initramfs_entry_is_a_boot_bin() {
+        for path in crate::manifest::INITRAMFS_BINS {
+            assert!(
+                crate::manifest::BOOT_BINS
+                    .iter()
+                    .any(|(dest, _)| dest == path),
+                "{path} is not a BOOT_BINS destination"
+            );
+        }
     }
 }

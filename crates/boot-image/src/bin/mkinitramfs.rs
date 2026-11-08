@@ -49,6 +49,7 @@ fn main() -> ExitCode {
     }
 
     let cpio_bytes = cpio::standard_initramfs(&bins);
+    let carried = bins.iter().filter(|(dest, _)| cpio::carries(dest)).count();
 
     let cpio_path = workspace
         .join("target")
@@ -63,9 +64,8 @@ fn main() -> ExitCode {
         return ExitCode::FAILURE;
     }
     println!(
-        "initramfs.cpio: {} bytes, {} files",
-        cpio_bytes.len(),
-        bins.len()
+        "initramfs.cpio: {} bytes, {carried} boot processes",
+        cpio_bytes.len()
     );
     ExitCode::SUCCESS
 }

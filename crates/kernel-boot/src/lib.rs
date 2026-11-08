@@ -215,6 +215,10 @@ pub fn serial_putc(c: u8) {
 ///
 /// `const`, not `static`, so [`BOOT_PROC_SLOTS`] can be derived from it and the
 /// two cannot drift.
+///
+/// A path added or renamed here also has to be in `boot_image::manifest::INITRAMFS_BINS`,
+/// which is what the archive the loader reads is built from; without it the boot aborts
+/// naming the missing path, and with an extra there the kernel carries a binary nothing loads.
 const BOOT_PROCS_ALL: &[(&str, i32)] = &[
     ("/sbin/ds", DS_PROC_NR),           // Data Store (first, matches C order)
     ("/sbin/rs", RS_PROC_NR),           // Reincarnation Server

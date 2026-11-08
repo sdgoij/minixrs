@@ -1954,7 +1954,11 @@ fn test_elf_load_to_phys_pages(ctx: &mut TestCtx) {
     }
 }
 
-fn test_initramfs_all_executables_elf(ctx: &mut TestCtx) {
+/// Every boot process the loader starts is read out of the initramfs, so each one has to be a
+/// complete 64-bit `ET_EXEC` there. The archive is the loader's ELF store and nothing else:
+/// the rest of the userland is on the root filesystem, so a program outside this list is not
+/// this test's business.
+fn test_initramfs_boot_process_elfs(ctx: &mut TestCtx) {
     use crate::elf::parse_elf_header;
 
     let binaries = [
@@ -1969,19 +1973,15 @@ fn test_initramfs_all_executables_elf(ctx: &mut TestCtx) {
         "/sbin/mfs",
         "/sbin/pfs",
         "/sbin/ramdisk",
-        "/bin/sh",
-        "/bin/cat",
-        "/bin/echo",
-        "/bin/ls",
-        "/bin/mkdir",
-        "/bin/rm",
-        "/bin/cp",
-        "/bin/ln",
-        "/bin/chmod",
-        "/bin/sync",
-        "/sbin/mknod",
-        "/sbin/reboot",
-        "/sbin/fsck",
+        "/sbin/devman",
+        "/sbin/fb",
+        "/sbin/input",
+        "/sbin/virtio_blk",
+        "/sbin/virtio_net",
+        "/sbin/net",
+        "/sbin/wserver",
+        "/sbin/uds",
+        "/sbin/wlserver",
     ];
     for &name in &binaries {
         let found = crate::initramfs::find_initramfs_file(name);
@@ -2734,8 +2734,8 @@ pub fn run_all() -> u32 {
     total += run("irq_put_and_remove", test_irq_put_and_remove);
     total += run("elf_load_to_phys_pages", test_elf_load_to_phys_pages);
     total += run(
-        "initramfs_all_executables_elf",
-        test_initramfs_all_executables_elf,
+        "initramfs_boot_process_elfs",
+        test_initramfs_boot_process_elfs,
     );
     total += run("ipc_sendrec_roundtrip", test_ipc_sendrec_roundtrip);
     total += run("monotonic_timer_interval", test_monotonic_timer_interval);

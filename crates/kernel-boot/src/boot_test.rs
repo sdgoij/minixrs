@@ -107,14 +107,7 @@ pub unsafe fn run_boot_tests() {
     // from a process's CR3 a lookup above `0x1000000` reads that process's own text instead of the
     // archive (`KNOWN_ISSUES.md` item 38, where the mechanism is measured).
     failures += unsafe {
-        on_kernel_tables(|| {
-            test_initramfs_echo_exists()
-                + test_initramfs_echo_elf()
-                + test_initramfs_sh_exists()
-                + test_initramfs_boot_files()
-                + test_initramfs_pipetest_elf()
-                + test_dynamic_artifacts_present()
-        })
+        on_kernel_tables(|| test_initramfs_holds_every_boot_process() + test_initramfs_init_elf())
     };
 
     // K: PM MPROC page table walk
@@ -131,7 +124,11 @@ pub unsafe fn run_boot_tests() {
     // M1: The user window and the kernel's VAs overlap in neither direction (`.notes/physmap.md` P4).
     // All three arches hold it now: AArch64's and RISC-V's windows are the low 1 GiB, and x86's is
     // a band above its shrunk identity map.
-    #[cfg(any(target_arch = "aarch64", target_arch = "riscv64", target_arch = "x86_64"))]
+    #[cfg(any(
+        target_arch = "aarch64",
+        target_arch = "riscv64",
+        target_arch = "x86_64"
+    ))]
     {
         failures += test_user_and_kernel_mappings_do_not_overlap();
     }
@@ -1109,140 +1106,45 @@ unsafe fn test_vm_memset_targets_the_named_process() -> u32 {
     }
 }
 
-fn test_initramfs_echo_exists() -> u32 {
-    match kernel::initramfs::find_initramfs_file("/bin/echo") {
-        Some((data, _mode)) => {
-            serial_write("  OK /bin/echo exists, size=");
-            print_dec(data.len() as u32);
-            serial_write("\r\n");
-            0
-        }
-        None => {
-            serial_write("  FAIL: /bin/echo not found in initramfs\r\n");
-            1
-        }
-    }
-}
-
-fn test_initramfs_sh_exists() -> u32 {
-    match kernel::initramfs::find_initramfs_file("/bin/sh") {
-        Some((data, _mode)) => {
-            serial_write("  OK /bin/sh exists, size=");
-            print_dec(data.len() as u32);
-            serial_write("\r\n");
-            0
-        }
-        None => {
-            serial_write("  FAIL: /bin/sh not found\r\n");
-            1
-        }
-    }
-}
-
-fn test_initramfs_boot_files() -> u32 {
-    // Verify all boot-critical binaries exist in initramfs
-    let files = [
-        "/sbin/init",
-        "/bin/sh",
-        "/bin/echo",
-        "/sbin/pm",
-        "/sbin/vfs",
-        "/sbin/vm",
-        "/sbin/rs",
-        "/sbin/ds",
-        "/sbin/sched",
-        "/sbin/tty",
-        "/sbin/mfs",
-        "/sbin/pfs",
-        "/sbin/devman",
-        "/sbin/ramdisk",
-        "/sbin/virtio_blk",
-        // The PFS pipe smoke-test binary (pipe fstat/ftruncate/fchmod +
-        // FIFO data plane). Its guest run is /bin/pipetest; the wire
-        // formats it exercises are pinned by host tests.
-        "/bin/pipetest",
-    ];
+/// The archive is the loader's ELF store, so it holds exactly the processes the loader
+/// starts: every path in [`crate::boot_procs`] has to be findable there. Iterating that list
+/// rather than restating it is what keeps the test and the loader from disagreeing.
+fn test_initramfs_holds_every_boot_process() -> u32 {
     let mut failures: u32 = 0;
-    for &f in &files {
-        if kernel::initramfs::find_initramfs_file(f).is_none() {
+    for &(path, _) in crate::boot_procs() {
+        if kernel::initramfs::find_initramfs_file(path).is_none() {
             serial_write("  FAIL: missing ");
-            serial_write(f);
+            serial_write(path);
             serial_write("\r\n");
             failures += 1;
         }
     }
     if failures == 0 {
-        serial_write("  OK all boot files present\r\n");
+        serial_write("  OK every boot process is in the initramfs\r\n");
     }
     failures
 }
 
-/// The dynamic-linking artifacts an image carries must be there: the loader, the shared
-/// C library, and one C program linked against it.
-///
-/// They are not boot-critical — nothing the boot path execs carries `PT_INTERP` — so
-/// they are not in `test_initramfs_boot_files`'s list. They are checked here because
-/// they are `BOOT_BINS`: a `crates/boot-image/src/manifest.rs` entry the build did not
-/// produce would make an image that boots and cannot run its own dynamic program, which
-/// only shows up when something tries. The *behaviour* is `tools/smoke/dyn.tsv`'s
-/// `/bin/dynclib` step in the three `just test-dynlink-<arch>` gates.
-fn test_dynamic_artifacts_present() -> u32 {
-    let files = ["/libexec/ld.so", "/lib/libc.so", "/bin/dynclib"];
-    let mut failures: u32 = 0;
-    for &f in &files {
-        if kernel::initramfs::find_initramfs_file(f).is_none() {
-            serial_write("  FAIL: missing ");
-            serial_write(f);
-            serial_write("\r\n");
-            failures += 1;
-        }
-    }
-    if failures == 0 {
-        serial_write("  OK dynamic-linking artifacts present\r\n");
-    }
-    failures
-}
-
-/// The PFS pipe smoke test must be a valid ELF in the initramfs (not a
-/// truncated entry), mirroring the echo ELF check.
-fn test_initramfs_pipetest_elf() -> u32 {
-    let (data, _mode) = match kernel::initramfs::find_initramfs_file("/bin/pipetest") {
-        Some(d) => d,
-        None => return 1,
-    };
-    match kernel::elf::parse_elf_header(data) {
-        Ok(_) => {
-            serial_write("  OK /bin/pipetest is a valid ELF, size=");
-            print_dec(data.len() as u32);
-            serial_write("\r\n");
-            0
-        }
-        Err(_) => {
-            serial_write("  FAIL: /bin/pipetest is not a valid ELF\r\n");
-            1
-        }
-    }
-}
-
-fn test_initramfs_echo_elf() -> u32 {
+/// One boot process's ELF is parsed out of the archive, segment by segment: the loader reads
+/// these bytes, and a truncated entry or a bad header has to fail here rather than at a load.
+fn test_initramfs_init_elf() -> u32 {
     unsafe {
-        let (data, _mode) = match kernel::initramfs::find_initramfs_file("/bin/echo") {
+        let (data, _mode) = match kernel::initramfs::find_initramfs_file("/sbin/init") {
             Some(d) => d,
             None => return 1,
         };
         let ehdr = match kernel::elf::parse_elf_header(data) {
             Ok(e) => e,
             Err(_) => {
-                serial_write("  FAIL: /bin/echo bad ELF header\r\n");
+                serial_write("  FAIL: /sbin/init bad ELF header\r\n");
                 return 1;
             }
         };
-        serial_write("  OK /bin/echo ELF entry=0x");
+        serial_write("  OK /sbin/init ELF entry=0x");
         print_hex(ehdr.e_entry);
         serial_write(" phnum=");
         print_dec(ehdr.e_phnum as u32);
         serial_write("\r\n");
-        // Check PT_LOAD segments
         let phoff = ehdr.e_phoff as usize;
         let phnum = ehdr.e_phnum as usize;
         let phentsize = ehdr.e_phentsize as usize;
@@ -1266,7 +1168,7 @@ fn test_initramfs_echo_elf() -> u32 {
             serial_write("  FAIL: no PT_LOAD segments\r\n");
             return 1;
         }
-        serial_write("  OK /bin/echo PT_LOAD count=");
+        serial_write("  OK /sbin/init PT_LOAD count=");
         print_dec(load_count);
         serial_write("\r\n");
         0
@@ -1414,7 +1316,11 @@ fn test_boot_procs_page_tables() -> u32 {
 ///
 /// 2 MiB steps: every mapping the check is about is a 2 MB or 1 GB block, so this granularity cannot
 /// step over one.
-#[cfg(any(target_arch = "aarch64", target_arch = "riscv64", target_arch = "x86_64"))]
+#[cfg(any(
+    target_arch = "aarch64",
+    target_arch = "riscv64",
+    target_arch = "x86_64"
+))]
 fn test_user_and_kernel_mappings_do_not_overlap() -> u32 {
     unsafe {
         fn check(cr3: u64, label: &str) -> u32 {
