@@ -195,6 +195,7 @@ dependencies = [
  "minix-std",
  "minix-util",
  "net",
+ "render",
  "wayland",
 ]
 

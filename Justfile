@@ -1071,6 +1071,16 @@ test-wlshm-x86 boot-timeout="40": build-x86
     FEED_SCENARIO=tools/smoke/wlshm.tsv sh tools/smoke/feed.sh target/test-wlshm-x86.log {{boot-timeout}} qemu-system-x86_64 -nographic -m 256M -no-reboot -vga none -device bochs-display,id=fb0 -kernel target/images/x86_64-pc-minix/minix-x86.elf -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0 -device virtio-tablet-pci,display=fb0
     @echo "wlshm: wl_shm buffer committed and presented to /dev/fb (x86_64)"
 
+# wloverlap: the scene z-order gate. Two connections, two output-sized windows, and a
+# recommit by the lower one; the frame must still belong to the upper one.
+test-wloverlap-x86 boot-timeout="60": build-x86
+    mkdir -p target/images/x86_64-pc-minix
+    cp target/trampoline.elf target/images/x86_64-pc-minix/minix-x86.elf
+    @just _assert-qemu-version qemu-system-x86_64
+    FEED_SCENARIO=tools/smoke/wloverlap.tsv sh tools/smoke/feed.sh target/test-wloverlap-x86.log {{boot-timeout}} qemu-system-x86_64 -nographic -m 256M -no-reboot -vga none -device bochs-display,id=fb0 -kernel target/images/x86_64-pc-minix/minix-x86.elf -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0 -device virtio-tablet-pci,display=fb0
+    @just _assert-qemu-log target/test-wloverlap-x86.log "wloverlap: PASS"
+    @echo "wloverlap: the lower window's commit left the window above it intact (x86_64)"
+
 # wlkey: tools/wlkey_probe.py drives the Phase 1c input path and the Phase 2a
 # keymap — /bin/wlkey binds wl_seat's keyboard, resolves the `keymap` event's fd
 # and checks its bytes (.notes/wayland.md §6.12), commits a surface, and a key injected

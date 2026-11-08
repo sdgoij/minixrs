@@ -1,0 +1,10 @@
+# The `just test-wloverlap-x86` scenario: the scene z-order gate.
+#
+# Two connections each map an output-sized window, one red and one blue. The
+# server places every surface at the origin, so the scene order is the overlap:
+# blue is above red. The client then recommits the lower window. A per-commit
+# blit would paint red over blue; the scene composer redraws the list in order
+# and the frame must stay blue. The client reads the composited frame back from
+# /dev/fb and prints the line below only if it does.
+
+/bin/wloverlap	wloverlap: PASS

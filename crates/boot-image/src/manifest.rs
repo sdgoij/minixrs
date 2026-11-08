@@ -159,6 +159,9 @@ pub const BOOT_BINS: &[(&str, &str)] = &[
     // `/bin/wlx2` is the Wayland Phase 2c focus client: two connections, each with a
     // window, so the server has to keep per-surface focus and hand it over.
     ("/bin/wlx2", "wlx2"),
+    // `/bin/wloverlap` is the scene z-order client: two connections, two windows, and a
+    // recommit by the lower one that must leave the upper one intact.
+    ("/bin/wloverlap", "wloverlap"),
     // `/bin/wlxd` is the Wayland Phase 2d damage and cursor client: it damages part
     // of a frame and checks the rest survives, then gives the pointer an image.
     ("/bin/wlxd", "wlxd"),

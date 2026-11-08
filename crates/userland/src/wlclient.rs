@@ -847,6 +847,8 @@ struct Peer {
     keys: u32,
     last_key: u32,
     callbacks: u32,
+    /// The colour this peer fills its buffers with.
+    color: u32,
 }
 
 /// Connect one peer: bind the factories, make a keyboard (so an `enter` has
@@ -873,6 +875,7 @@ fn peer_connect() -> Result<Peer, i32> {
         keys: 0,
         last_key: 0,
         callbacks: 0,
+        color: COLOR,
     };
     let registry = send_req(conn, &mut p.req, |q| p.client.get_registry(q))?;
     let g = find_globals(conn, &p.client, &mut p.inbuf, &mut p.chunk)?;
@@ -1076,7 +1079,7 @@ fn peer_map_buffer(p: &mut Peer) -> Result<(), i32> {
         return Err(fail(77, b"wlx2: mmap of the pool failed\n"));
     }
     for i in 0..(w * h) as usize {
-        unsafe { core::ptr::write_volatile(pool.add(i * 4).cast::<u32>(), COLOR) };
+        unsafe { core::ptr::write_volatile(pool.add(i * 4).cast::<u32>(), p.color) };
     }
     uds::send_fds(conn, &[pool_fd]).map_err(|_| fail(78, b"wlx2: send_fds failed\n"))?;
     {
@@ -1173,6 +1176,98 @@ fn run_focus() -> Result<(), i32> {
     write_out(b"wlx2: key ");
     put_dec(peers[0].last_key);
     write_out(b" to A\n");
+    Ok(())
+}
+
+/// `/bin/wloverlap`: two connections, two windows, one z-order.
+///
+/// The server configures every toplevel to the output size and places every
+/// surface at the origin, so the scene order *is* the overlap. The second
+/// window paints over the first; then the first commits again, and the frame
+/// must still belong to the second. A per-commit blit paints red over it; the
+/// scene composer redraws the list in order.
+pub fn wl_overlap(_args: &[&str]) -> i32 {
+    match run_overlap() {
+        Ok(()) => {
+            write_out(b"wloverlap: PASS\n");
+            0
+        }
+        Err(code) => code,
+    }
+}
+
+const OVERLAP_RED: u32 = 0x00FF_0000;
+const OVERLAP_BLUE: u32 = 0x0000_00FF;
+
+fn run_overlap() -> Result<(), i32> {
+    let mut peers = [peer_connect()?, peer_connect()?];
+    peers[0].color = OVERLAP_RED;
+    peers[1].color = OVERLAP_BLUE;
+
+    wait_peers(&mut peers, 400, |p| {
+        p[0].configure.is_some()
+            && p[0].size.is_some()
+            && p[1].configure.is_some()
+            && p[1].size.is_some()
+    })?;
+
+    // Ack each configure, then commit in order: A first (bottom), B second (top).
+    for i in 0..2 {
+        let before = peers[i].callbacks;
+        peer_ack(&mut peers[i])?;
+        wait_peers(&mut peers, 400, |p| p[i].callbacks > before)?;
+        peer_map_buffer(&mut peers[i])?;
+    }
+    wait_peers(&mut peers, 400, |p| {
+        p[0].releases >= 1 && p[1].releases >= 1
+    })?;
+
+    check_overlap(OVERLAP_BLUE, b"wloverlap: the top window is not on top\n")?;
+    write_out(b"wloverlap: framed\n");
+
+    // The window at the bottom commits again. A per-commit blit would paint its
+    // buffer over the one above it; the scene must keep B in front.
+    let before = peers[0].releases;
+    peer_map_buffer(&mut peers[0])?;
+    wait_peers(&mut peers, 400, |p| p[0].releases > before)?;
+
+    check_overlap(
+        OVERLAP_BLUE,
+        b"wloverlap: a lower window painted over the top one\n",
+    )
+}
+
+/// Read the composited frame from `/dev/fb` and answer whether it is `wanted`.
+fn check_overlap(wanted: u32, message: &[u8]) -> Result<(), i32> {
+    let fd = unsafe { fs::open(b"/dev/fb", fs::O_RDWR, 0) }
+        .map_err(|_| fail(85, b"wloverlap: open /dev/fb failed\n"))?;
+    let fb = unsafe {
+        vmem::mmap(
+            core::ptr::null_mut(),
+            FB_MAP_LEN,
+            vmem::PROT_READ | vmem::PROT_WRITE,
+            vmem::MAP_SHARED,
+            fd,
+            0,
+        )
+    };
+    if fb == vmem::MAP_FAILED {
+        return Err(fail(86, b"wloverlap: mmap /dev/fb failed\n"));
+    }
+    // A point inside both windows: both buffers are the configured output size
+    // and the server places a surface at the origin.
+    let pixel = unsafe { core::ptr::read_volatile(fb.add((16 * FB_WIDTH + 16) * 4).cast::<u32>()) };
+    let _ = unsafe { vmem::munmap(fb, FB_MAP_LEN) };
+    let _ = fs::close(fd);
+
+    if pixel != wanted {
+        write_err(b"wloverlap: pixel 0x");
+        print_hex(pixel);
+        write_err(b", wanted 0x");
+        print_hex(wanted);
+        write_err(b"\n");
+        return Err(fail(87, message));
+    }
     Ok(())
 }
 

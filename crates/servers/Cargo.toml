@@ -24,6 +24,7 @@ minix-util = { path = "../minix-util" }
 drivers = { path = "../drivers" }
 fs = { path = "../fs" }
 libs = { path = "../libs" }
+render = { path = "../render" }
 
 # Binary targets — these are #![no_std] / #![no_main] embedded MINIX
 # server binaries that cannot run as host-native tests. Tests live in the lib target.

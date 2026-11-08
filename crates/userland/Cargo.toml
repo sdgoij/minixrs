@@ -391,6 +391,13 @@ name = "wlx2"
 path = "src/bin/wlx2.rs"
 test = false
 
+# wloverlap is the scene z-order gate: two connections, two windows, and a
+# recommit by the lower one that must not paint over the upper one.
+[[bin]]
+name = "wloverlap"
+path = "src/bin/wloverlap.rs"
+test = false
+
 [[bin]]
 name = "wlxd"
 path = "src/bin/wlxd.rs"

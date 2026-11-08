@@ -380,6 +380,13 @@ mod imp {
         format: u32,
         x: i32,
         y: i32,
+        /// The fd is a dma-buf (the GPU helper's job) rather than a `wl_shm` pool, which
+        /// the software composer can read directly.
+        dmabuf: bool,
+        /// Where the buffer starts inside a shm pool.
+        offset: i32,
+        /// How many bytes to map from `fd`.
+        size: usize,
     }
 
     /// The compositor's surface list (`.notes/wayland.md` §6.10, 3d-b-5c). `wlserver` has no
@@ -470,6 +477,11 @@ mod imp {
         /// per-commit present (D7: the GPU path degrades, it does not gate).
         fn compose_and_present(&mut self, scene: &Scene, fb: *mut u8) -> bool {
             if scene.len() < 2 {
+                return false;
+            }
+            // A shm surface is not a dma-buf: the helper imports what it is given on the
+            // render node, so a mixed scene is the software composer's.
+            if scene.iter().any(|e| !e.dmabuf) {
                 return false;
             }
             if self.conn < 0 {
@@ -630,6 +642,68 @@ mod imp {
         }
     }
 
+    /// Draw the whole scene bottom to top into the server's own framebuffer.
+    ///
+    /// This is what makes an occluded window's commit harmless: the committing
+    /// buffer is not blitted on its own, the scene is redrawn in order, so the
+    /// window above it is painted again over the part that overlaps.
+    ///
+    /// Only `wl_shm` surfaces: a dma-buf needs the render node and belongs to the
+    /// GPU helper, so a scene holding one falls back. `false` when the scene has
+    /// fewer than two surfaces or anything fails.
+    fn compose_scene(fb: *mut u8, scene: &Scene) -> bool {
+        if scene.len() < 2 || scene.iter().any(|e| e.dmabuf) {
+            return false;
+        }
+
+        let output = render::Rect::new(0, 0, XRES as i32, YRES as i32);
+        let pixels = unsafe { core::slice::from_raw_parts_mut(fb.cast::<u32>(), XRES * YRES) };
+        let Ok(mut software) = render::Software::new(output, XRES, pixels) else {
+            return false;
+        };
+        let mut pass = render::Pass::new(output);
+
+        for e in scene.iter() {
+            if e.width <= 0 || e.height <= 0 || e.stride < e.width.saturating_mul(4) || e.size == 0 {
+                continue;
+            }
+            let src = unsafe {
+                vmem::mmap(
+                    core::ptr::null_mut(),
+                    e.size,
+                    vmem::PROT_READ,
+                    vmem::MAP_SHARED,
+                    e.fd,
+                    0,
+                )
+            };
+            if src == vmem::MAP_FAILED {
+                return false;
+            }
+            let bytes = unsafe { core::slice::from_raw_parts(src, e.size) };
+            let texture = software.create_texture_from_bytes(
+                e.width as u32,
+                e.height as u32,
+                e.stride as usize,
+                e.offset.max(0) as usize,
+                bytes,
+            );
+            let _ = unsafe { vmem::munmap(src, e.size) };
+            let Ok(texture) = texture else {
+                return false;
+            };
+            pass.add(render::Element::Texture {
+                rect: render::Rect::new(e.x, e.y, e.width, e.height),
+                source: render::Rect::new(0, 0, e.width, e.height),
+                texture,
+                opaque: true,
+            });
+        }
+
+        let _ = fb_scanout(0, 0);
+        software.render(&pass).is_ok()
+    }
+
     /// Composite a commit onto the display and present it.
     ///
     /// Only the commit's damage is recomposited (2d): a client that names a small
@@ -647,6 +721,7 @@ mod imp {
         c: &Commit,
         ptr: (i32, i32),
         cursor: Option<CursorImage>,
+        scene: &Scene,
     ) {
         if c.dmabuf {
             if present_dmabuf(fb, dmabufs, node, c) {
@@ -655,6 +730,15 @@ mod imp {
                 }
                 fb_flush();
             }
+            return;
+        }
+        // Two or more shm surfaces: redraw the scene in order rather than blitting the
+        // committing buffer, which would paint a lower window over the one above it.
+        if compose_scene(fb, scene) {
+            if let Some(cur) = cursor {
+                blit_cursor(fb, pools, &cur, ptr);
+            }
+            fb_flush();
             return;
         }
         let Some(fd) = pools.fd_of(c.pool) else {
@@ -1162,9 +1246,25 @@ mod imp {
                 }
                 // 3d-b-5c: a dma-buf commit joins the scene. More than one surface is a frame the
                 // helper composes; a lone surface keeps the per-commit present (the fast path).
-                if commit.dmabuf
-                    && let Some(fd) = c.dmabufs.fd_of(commit.buffer)
-                {
+                if commit.dmabuf {
+                    if let Some(fd) = c.dmabufs.fd_of(commit.buffer) {
+                        scene.put(SceneEntry {
+                            slot,
+                            surface: commit.surface,
+                            fd,
+                            width: commit.width,
+                            height: commit.height,
+                            stride: commit.stride,
+                            format: commit.format,
+                            x: 0,
+                            y: 0,
+                            dmabuf: true,
+                            offset: 0,
+                            size: (commit.stride.max(0) as usize)
+                                * (commit.height.max(0) as usize),
+                        });
+                    }
+                } else if let Some(fd) = c.pools.fd_of(commit.pool) {
                     scene.put(SceneEntry {
                         slot,
                         surface: commit.surface,
@@ -1175,10 +1275,22 @@ mod imp {
                         format: commit.format,
                         x: 0,
                         y: 0,
+                        dmabuf: false,
+                        offset: commit.offset,
+                        size: commit.pool_size.max(0) as usize,
                     });
                 }
                 if !composer.compose_and_present(scene, fb) {
-                    present(fb, &c.pools, &c.dmabufs, c.node, &commit, ptr, cursor);
+                    present(
+                        fb,
+                        &c.pools,
+                        &c.dmabufs,
+                        c.node,
+                        &commit,
+                        ptr,
+                        cursor,
+                        scene,
+                    );
                 }
                 let _ = c.server.release_buffer(commit.buffer, &mut reply);
             }

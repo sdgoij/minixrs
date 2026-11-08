@@ -14,6 +14,7 @@
 //! Nothing here touches a file descriptor or a device, so the whole backend is
 //! host-tested against pixel buffers.
 
+use alloc::vec;
 use alloc::vec::Vec;
 
 use crate::backend::Backend;
@@ -104,6 +105,47 @@ impl<'a> Software<'a> {
             width,
             height,
             pixels: pixels[..required].to_vec(),
+        });
+        Ok(TextureId((self.textures.len() - 1) as u32))
+    }
+
+    /// Copy an `XRGB8888` image out of a byte buffer, honoring a row stride and a
+    /// start offset. This is the shape a `wl_shm` pool has: little-endian, four
+    /// bytes per pixel, and possibly a buffer that starts partway down a pool.
+    pub fn create_texture_from_bytes(
+        &mut self,
+        width: u32,
+        height: u32,
+        stride: usize,
+        offset: usize,
+        bytes: &[u8],
+    ) -> Result<TextureId, SoftError> {
+        if width == 0 || height == 0 {
+            return Err(SoftError::TextureSize);
+        }
+        let width = width as usize;
+        let height = height as usize;
+        if stride < width * 4 {
+            return Err(SoftError::TextureSize);
+        }
+
+        let mut pixels = vec![0u32; width * height];
+        for y in 0..height {
+            let row = offset + y * stride;
+            for x in 0..width {
+                let at = row + x * 4;
+                let Some(texel) = bytes.get(at..at + 4) else {
+                    return Err(SoftError::TextureSize);
+                };
+                pixels[y * width + x] =
+                    u32::from_le_bytes([texel[0], texel[1], texel[2], texel[3]]);
+            }
+        }
+
+        self.textures.push(SoftTexture {
+            width: width as u32,
+            height: height as u32,
+            pixels,
         });
         Ok(TextureId((self.textures.len() - 1) as u32))
     }
@@ -211,7 +253,6 @@ fn blend(destination: u32, color: Color) -> u32 {
 mod tests {
     use super::*;
     use crate::region::Region;
-    use alloc::vec;
 
     const OUTPUT: Rect = Rect::new(0, 0, 8, 8);
     const BLACK: u32 = 0x0000_0000;
@@ -411,6 +452,49 @@ mod tests {
         let mut software = renderer(&mut buffer);
         assert_eq!(
             software.create_texture(2, 2, &[RED]).err(),
+            Some(SoftError::TextureSize)
+        );
+    }
+
+    #[test]
+    fn a_byte_texture_honors_stride_and_offset() {
+        let mut buffer = buffer();
+        let mut software = renderer(&mut buffer);
+
+        // Two rows of two pixels with a 12-byte stride and a 4-byte starter
+        // offset: the image is at bytes 4..16 and 16..28.
+        let mut bytes = vec![0u8; 32];
+        bytes[4..8].copy_from_slice(&RED.to_le_bytes());
+        bytes[8..12].copy_from_slice(&GREEN.to_le_bytes());
+        bytes[16..20].copy_from_slice(&BLUE.to_le_bytes());
+        bytes[20..24].copy_from_slice(&BLACK.to_le_bytes());
+
+        let texture = software
+            .create_texture_from_bytes(2, 2, 12, 4, &bytes)
+            .expect("the image fits");
+        let mut pass = Pass::new(OUTPUT);
+        pass.add(Element::Texture {
+            rect: Rect::new(0, 0, 2, 2),
+            source: Rect::new(0, 0, 2, 2),
+            texture,
+            opaque: true,
+        });
+
+        software.render(&pass).unwrap();
+        assert_eq!(pixel(&buffer, 0, 0), RED);
+        assert_eq!(pixel(&buffer, 1, 0), GREEN);
+        assert_eq!(pixel(&buffer, 0, 1), BLUE);
+        assert_eq!(pixel(&buffer, 1, 1), BLACK);
+    }
+
+    #[test]
+    fn a_byte_texture_that_runs_off_the_end_is_refused() {
+        let mut buffer = buffer();
+        let mut software = renderer(&mut buffer);
+        assert_eq!(
+            software
+                .create_texture_from_bytes(2, 2, 8, 0, &[0u8; 12])
+                .err(),
             Some(SoftError::TextureSize)
         );
     }
