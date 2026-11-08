@@ -164,12 +164,18 @@ impl<'a> List<'a> {
                 inner.w,
                 self.row_height,
             );
-            if top + slot == self.selected {
+            let selected = top + slot == self.selected;
+            if selected {
                 painter.fill(row, theme.accent);
             }
-            // The glyphs come from the atlas, so their colour is the atlas's
-            // white; the bar goes underneath rather than over the label.
-            painter.text(item, Point::new(row.x + theme.padding, row.y + text_offset));
+            // The bar goes under the label, and the label is tinted for the
+            // surface it lands on.
+            let ink = if selected { theme.on_accent } else { theme.ink };
+            painter.text(
+                item,
+                Point::new(row.x + theme.padding, row.y + text_offset),
+                ink,
+            );
         }
     }
 }

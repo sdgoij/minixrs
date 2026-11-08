@@ -225,7 +225,7 @@ impl<'a> Software<'a> {
         }
     }
 
-    fn blit(&mut self, rect: Rect, source: Rect, texture: usize, area: Rect) {
+    fn blit(&mut self, rect: Rect, source: Rect, texture: usize, tint: Color, area: Rect) {
         if rect.w <= 0 || rect.h <= 0 || source.w <= 0 || source.h <= 0 {
             return;
         }
@@ -244,21 +244,28 @@ impl<'a> Software<'a> {
                 let u = source.x + (x - rect.x) * source.w / rect.w;
                 let u = u.clamp(0, texture_width - 1) as usize;
                 let texel = object.pixels[row + u];
-                let at = output_row + x as usize;
-                if object.alpha {
-                    let alpha = (texel >> 24) as u8;
-                    if alpha != 0 {
-                        let color = Color::rgba(
-                            (texel >> 16) as u8,
-                            (texel >> 8) as u8,
-                            texel as u8,
-                            alpha,
-                        );
-                        self.pixels[at] = blend(self.pixels[at], color);
-                    }
+                // The tint's alpha and the texel's coverage multiply, and an
+                // XRGB texel has no coverage of its own to contribute.
+                let coverage = if object.alpha {
+                    mul((texel >> 24) as u8, tint.a)
                 } else {
-                    self.pixels[at] = texel;
+                    tint.a
+                };
+                if coverage == 0 {
+                    continue;
                 }
+                let color = Color::rgba(
+                    mul((texel >> 16) as u8, tint.r),
+                    mul((texel >> 8) as u8, tint.g),
+                    mul(texel as u8, tint.b),
+                    coverage,
+                );
+                let at = output_row + x as usize;
+                self.pixels[at] = if coverage == 255 {
+                    pack(color)
+                } else {
+                    blend(self.pixels[at], color)
+                };
             }
         }
     }
@@ -283,6 +290,7 @@ impl Backend for Software<'_> {
                 rect,
                 source,
                 texture,
+                color,
                 ..
             } => {
                 if rect.intersection(area).is_none() {
@@ -291,7 +299,7 @@ impl Backend for Software<'_> {
                 if texture.0 as usize >= self.textures.len() {
                     return Err(SoftError::Texture);
                 }
-                self.blit(rect, source, texture.0 as usize, area);
+                self.blit(rect, source, texture.0 as usize, color, area);
             }
         }
         Ok(())
@@ -300,6 +308,11 @@ impl Backend for Software<'_> {
 
 fn pack(color: Color) -> u32 {
     (u32::from(color.r) << 16) | (u32::from(color.g) << 8) | u32::from(color.b)
+}
+
+/// `a * b / 255`, rounded: a channel times a tint channel.
+fn mul(a: u8, b: u8) -> u8 {
+    ((u32::from(a) * u32::from(b) + 127) / 255) as u8
 }
 
 fn blend(destination: u32, color: Color) -> u32 {
@@ -397,6 +410,7 @@ mod tests {
             rect: Rect::new(3, 4, 2, 1),
             source: Rect::new(0, 0, 2, 1),
             texture,
+            color: Color::WHITE,
             opaque: true,
         });
 
@@ -419,6 +433,7 @@ mod tests {
             rect: Rect::new(0, 0, 1, 1),
             source: Rect::new(0, 1, 1, 1),
             texture,
+            color: Color::WHITE,
             opaque: true,
         });
 
@@ -487,6 +502,7 @@ mod tests {
             rect: Rect::new(0, 0, 2, 1),
             source: Rect::new(0, 0, 2, 1),
             texture,
+            color: Color::WHITE,
             opaque: false,
         });
 
@@ -509,11 +525,77 @@ mod tests {
             rect: Rect::new(0, 0, 1, 1),
             source: Rect::new(0, 0, 1, 1),
             texture,
+            color: Color::WHITE,
             opaque: false,
         });
 
         software.render(&pass).unwrap();
         assert_eq!(pixel(&buffer, 0, 0), GREEN);
+    }
+
+    #[test]
+    fn a_tint_multiplies_the_texel() {
+        let mut buffer = buffer();
+        let mut software = renderer(&mut buffer);
+        let texture = software
+            .create_texture(1, 1, &[0x00FF_FFFF])
+            .expect("the texture fits");
+
+        let mut pass = Pass::new(OUTPUT);
+        pass.add(Element::Texture {
+            rect: Rect::new(0, 0, 1, 1),
+            source: Rect::new(0, 0, 1, 1),
+            texture,
+            color: Color::rgb(0xFF, 0, 0),
+            opaque: false,
+        });
+
+        software.render(&pass).unwrap();
+        assert_eq!(pixel(&buffer, 0, 0), RED);
+    }
+
+    #[test]
+    fn a_translucent_tint_blends_the_texel() {
+        let mut buffer = buffer();
+        let mut software = renderer(&mut buffer);
+        let texture = software
+            .create_texture(1, 1, &[0x00FF_FFFF])
+            .expect("the texture fits");
+
+        let mut pass = Pass::new(OUTPUT);
+        pass.add(Element::Texture {
+            rect: Rect::new(0, 0, 1, 1),
+            source: Rect::new(0, 0, 1, 1),
+            texture,
+            color: Color::rgba(0xFF, 0xFF, 0xFF, 128),
+            opaque: false,
+        });
+
+        software.render(&pass).unwrap();
+        assert_eq!(pixel(&buffer, 0, 0), 0x0080_8080);
+    }
+
+    #[test]
+    fn a_tint_alpha_multiplies_the_coverage() {
+        let mut buffer = buffer();
+        let mut software = renderer(&mut buffer);
+        let texture = software
+            .create_texture_rgba(1, 1, &[255, 255, 255, 128])
+            .expect("the texture fits");
+
+        let mut pass = Pass::new(OUTPUT);
+        pass.add(Element::Texture {
+            rect: Rect::new(0, 0, 1, 1),
+            source: Rect::new(0, 0, 1, 1),
+            texture,
+            color: Color::rgba(255, 255, 255, 128),
+            opaque: false,
+        });
+
+        software.render(&pass).unwrap();
+        // Half coverage through a half-alpha tint is a quarter of the way to
+        // white: 255 * 64 / 255 rounds to 64.
+        assert_eq!(pixel(&buffer, 0, 0), 0x0040_4040);
     }
 
     #[test]
@@ -539,6 +621,7 @@ mod tests {
             rect: Rect::new(0, 0, 1, 1),
             source: Rect::new(0, 0, 1, 1),
             texture: TextureId(7),
+            color: Color::WHITE,
             opaque: true,
         });
 
@@ -597,6 +680,7 @@ mod tests {
             rect: Rect::new(0, 0, 2, 2),
             source: Rect::new(0, 0, 2, 2),
             texture,
+            color: Color::WHITE,
             opaque: true,
         });
 

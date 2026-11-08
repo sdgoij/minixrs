@@ -488,8 +488,9 @@ mod tests {
                     Element::Texture {
                         texture,
                         opaque,
+                        color,
                         ..
-                    } if *texture == TEXTURE && !*opaque
+                    } if *texture == TEXTURE && !*opaque && *color == theme.ink
                 )
             })
             .count();

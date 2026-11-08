@@ -644,8 +644,9 @@ impl Backend for Gl {
                     rect,
                     source,
                     texture,
+                    color,
                     ..
-                } => self.draw_quad(rect, source, texture, Color::WHITE)?,
+                } => self.draw_quad(rect, source, texture, color)?,
             }
         }
         Ok(())

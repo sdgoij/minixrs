@@ -543,6 +543,7 @@ fn paint_gui(pool: *mut u8, width: i32, height: i32) -> Result<(), i32> {
             rect: glyph.rect,
             source: glyph.source,
             texture: atlas_texture,
+            color: Color::WHITE,
             opaque: false,
         });
     }

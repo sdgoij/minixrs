@@ -711,6 +711,7 @@ mod imp {
                 rect: render::Rect::new(e.x, e.y, e.width, e.height),
                 source: render::Rect::new(0, 0, e.width, e.height),
                 texture,
+                color: render::Color::WHITE,
                 opaque: true,
             });
         }

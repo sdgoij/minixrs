@@ -146,7 +146,7 @@ impl<'a> Button<'a> {
         );
         let x = inner.x + (inner.w - painter.measure(self.label)).max(0) / 2;
         let y = inner.y + (inner.h - painter.text_height()).max(0) / 2;
-        painter.text(self.label, Point::new(x, y));
+        painter.text(self.label, Point::new(x, y), theme.ink);
     }
 }
 

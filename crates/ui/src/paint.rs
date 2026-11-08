@@ -1,7 +1,7 @@
 //! Turning widgets into pass elements.
 
 use render::pass::{Color, Element, Pass, TextureId};
-use render::text::{layout_line, line_width, Atlas, FONT_HEIGHT};
+use render::text::{Atlas, FONT_HEIGHT, layout_line, line_width};
 use render::{Point, Rect};
 
 /// Where a widget's elements go.
@@ -55,13 +55,15 @@ impl<'a> Painter<'a> {
     /// One line of text with its top-left at `origin`.
     ///
     /// Glyphs are translucent, so every quad says `opaque: false`: the pixels
-    /// between the strokes must let the widget's surface show through.
-    pub fn text(&mut self, bytes: &[u8], origin: Point) {
+    /// between the strokes must let the widget's surface show through. The
+    /// colour tints the atlas, which is white, so it is the text colour.
+    pub fn text(&mut self, bytes: &[u8], origin: Point, color: Color) {
         for glyph in layout_line(self.atlas, bytes, origin, self.scale) {
             self.pass.add(Element::Texture {
                 rect: glyph.rect,
                 source: glyph.source,
                 texture: self.texture,
+                color,
                 opaque: false,
             });
         }

@@ -191,9 +191,9 @@ impl<'a> Field<'a> {
         );
 
         if self.len == 0 && !self.placeholder.is_empty() {
-            painter.text(self.placeholder, origin);
+            painter.text(self.placeholder, origin, theme.ink_dim);
         } else {
-            painter.text(&self.buffer[first..end], origin);
+            painter.text(&self.buffer[first..end], origin, theme.ink);
         }
 
         if self.focused {
@@ -243,6 +243,13 @@ mod tests {
 
     fn press(key: Key) -> Event {
         Event::Key { key, pressed: true }
+    }
+
+    /// Whether any glyph quad carries `color` as its tint.
+    fn has_tint(pass: &Pass, color: render::Color) -> bool {
+        pass.elements().iter().any(
+            |element| matches!(element, Element::Texture { color: tint, .. } if *tint == color),
+        )
     }
 
     #[test]
@@ -401,6 +408,7 @@ mod tests {
         field.paint(&mut painter, &THEME);
         let placeholder = glyphs(&pass);
         assert_eq!(placeholder, 4);
+        assert!(has_tint(&pass, THEME.ink_dim));
 
         field.handle(Event::Focus { focused: true });
         typed(&mut field, b"x");
@@ -408,5 +416,6 @@ mod tests {
         let mut painter = Painter::new(&mut pass, &atlas, TEXTURE, THEME.scale);
         field.paint(&mut painter, &THEME);
         assert_eq!(glyphs(&pass), 1);
+        assert!(has_tint(&pass, THEME.ink));
     }
 }

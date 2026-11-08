@@ -61,9 +61,13 @@ pub enum Element {
         rect: Rect,
         source: Rect,
         texture: TextureId,
-        /// Set only when every pixel the rectangle samples is opaque. A
-        /// translucent or unknown buffer must say `false`, or it will erase
-        /// what is underneath it from the damage plan.
+        /// What the sampled texel is multiplied by. [`Color::WHITE`] leaves the
+        /// texture as it is; anything else tints it, which is how the white
+        /// glyph atlas becomes text of a chosen colour.
+        color: Color,
+        /// Set only when every pixel the rectangle samples is opaque, the tint
+        /// included. A translucent or unknown buffer must say `false`, or it
+        /// will erase what is underneath it from the damage plan.
         opaque: bool,
     },
 }
@@ -83,7 +87,8 @@ impl Element {
     pub fn opaque_region(self, output: Rect) -> Region {
         let opaque = match self {
             Self::Clear { color } | Self::Rect { color, .. } => color.is_opaque(),
-            Self::Texture { opaque, .. } => opaque,
+            // A tinted texture is only as opaque as its tint.
+            Self::Texture { opaque, color, .. } => opaque && color.is_opaque(),
         };
         if opaque {
             self.bounds(output)
@@ -266,6 +271,7 @@ mod tests {
             rect: OUTPUT,
             source: Rect::new(0, 0, 64, 64),
             texture: TextureId(1),
+            color: Color::WHITE,
             opaque,
         };
 
@@ -278,6 +284,22 @@ mod tests {
         translucent_pass.add(solid(OUTPUT, Color::WHITE));
         translucent_pass.add(texture(false));
         assert_eq!(translucent_pass.plan().len(), 2);
+    }
+
+    #[test]
+    fn a_translucent_tint_leaves_the_element_below_damaged() {
+        let mut pass = Pass::new(OUTPUT);
+        pass.add(solid(OUTPUT, Color::WHITE));
+        pass.add(Element::Texture {
+            rect: OUTPUT,
+            source: Rect::new(0, 0, 64, 64),
+            texture: TextureId(1),
+            color: Color::rgba(255, 255, 255, 128),
+            // The caller believes the texels are opaque; the tint still is not.
+            opaque: true,
+        });
+
+        assert_eq!(pass.plan().len(), 2);
     }
 
     #[test]
