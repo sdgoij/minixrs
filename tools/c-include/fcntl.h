@@ -1,19 +1,24 @@
-/* Minimal fcntl.h for the minix OS — flags match minix/include/fcntl.h. */
+/* Minimal fcntl.h for the minix OS.
+ *
+ * The O_* values below predate the port's C clients and are not all the values in
+ * minix/include/fcntl.h; O_CREAT is 0x40 there rather than 0x200, and O_CLOEXEC is
+ * 0x10000 rather than 0x400000. They are written here in C octal, which is what the
+ * clients have always passed. */
 #ifndef _FCNTL_H
 #define _FCNTL_H
 
 #include <sys/types.h>
 
-#define O_RDONLY 0o00
-#define O_WRONLY 0o01
-#define O_RDWR 0o02
-#define O_CREAT 0o100
-#define O_EXCL 0o200
-#define O_TRUNC 0o1000
-#define O_APPEND 0o2000
-#define O_NONBLOCK 0o4000
+#define O_RDONLY 0
+#define O_WRONLY 01
+#define O_RDWR 02
+#define O_CREAT 0100
+#define O_EXCL 0200
+#define O_TRUNC 01000
+#define O_APPEND 02000
+#define O_NONBLOCK 04000
 /* MINIX has no O_CLOEXEC; define it as a bit open() ignores. */
-#define O_CLOEXEC 0o200000
+#define O_CLOEXEC 0200000
 
 /* fcntl commands (minix/include/fcntl.h). */
 #define F_DUPFD 0
