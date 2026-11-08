@@ -622,8 +622,12 @@ test-bash-x86 boot-timeout="40":
     FEED_SCENARIO=tools/smoke/bash.tsv sh tools/smoke/feed.sh target/test-bash-x86.log {{boot-timeout}} qemu-system-x86_64 -nographic -m 256M -no-reboot -vga none -device bochs-display,id=fb0 -kernel target/images/x86_64-pc-minix/minix-x86.elf -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0 -device virtio-tablet-pci,display=fb0
     @echo "bash: every step of tools/smoke/bash.tsv answered (x86_64)"
 
+# The riscv64 build's bash is the one that does not fit: with it in the embedded image the
+# default 16 MiB filesystem fails to build (`zone 4096 out of bounds`), and `MINIXFS_BLOCKS`
+# is the knob for exactly that (`crates/kernel/build.rs`). x86_64 and aarch64 still fit, so
+# they keep the default and their kernels stay as small as they were.
 test-bash-riscv64 boot-timeout="60":
-    MINIXFS_EXTRA='/bin/bash=target/bash/riscv64/bash' just build-riscv64
+    MINIXFS_EXTRA='/bin/bash=target/bash/riscv64/bash' MINIXFS_BLOCKS=8192 just build-riscv64
     @just _assert-qemu-version qemu-system-riscv64
     FEED_SCENARIO=tools/smoke/bash.tsv sh tools/smoke/feed.sh target/test-bash-riscv64.log {{boot-timeout}} qemu-system-riscv64 -machine virt -m 256M -nographic -global virtio-mmio.force-legacy=off -netdev user,id=net0 -device virtio-net-device,netdev=net0 -device virtio-gpu-device -device virtio-keyboard-device -kernel target/riscv64gc-unknown-minix/release/kernel-boot-riscv64
     @echo "bash: every step of tools/smoke/bash.tsv answered (riscv64)"
