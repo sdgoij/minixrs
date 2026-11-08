@@ -14,6 +14,7 @@
 
 use alloc::vec::Vec;
 
+use crate::backend::Backend;
 use crate::geom::Rect;
 use crate::region::Region;
 
@@ -181,6 +182,20 @@ impl Pass {
         ops.reverse();
         ops
     }
+
+    /// Hand the plan to a backend, one damage rectangle at a time.
+    ///
+    /// Draw order is the plan's order, bottom to top, and the rectangles of one
+    /// element arrive consecutively. A backend that clips to the rectangle it is
+    /// given will paint each pixel at most once per element.
+    pub fn submit<B: Backend>(&self, backend: &mut B) -> Result<(), B::Error> {
+        for op in self.plan() {
+            for scissor in op.damage.rects() {
+                backend.draw(op.element, scissor)?;
+            }
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -316,5 +331,90 @@ mod tests {
         let mut pass = Pass::with_damage(OUTPUT, Region::from_rect(Rect::new(0, 0, 10, 10)));
         pass.add_damage(Rect::new(0, 0, 20, 20));
         assert_eq!(pass.damage().area(), 400);
+    }
+
+    #[derive(Default)]
+    struct Recorder {
+        calls: Vec<(Element, Rect)>,
+    }
+
+    impl Backend for Recorder {
+        type Error = core::convert::Infallible;
+
+        fn draw(&mut self, element: &Element, scissor: Rect) -> Result<(), Self::Error> {
+            self.calls.push((*element, scissor));
+            Ok(())
+        }
+    }
+
+    fn recorded_area(recorder: &Recorder) -> i64 {
+        recorder.calls.iter().map(|call| call.1.area()).sum()
+    }
+
+    #[test]
+    fn submit_draws_bottom_to_top() {
+        let top = Rect::new(40, 40, 20, 20);
+        let mut pass = Pass::new(OUTPUT);
+        pass.add(Element::Clear {
+            color: Color::BLACK,
+        });
+        pass.add(solid(top, Color::WHITE));
+
+        let mut recorder = Recorder::default();
+        pass.submit(&mut recorder).unwrap();
+
+        assert!(recorder.calls.len() > 1);
+        assert_eq!(recorder.calls.last().unwrap().0, solid(top, Color::WHITE));
+        assert_eq!(recorded_area(&recorder), 10_000);
+    }
+
+    #[test]
+    fn submit_issues_one_call_per_damage_rect() {
+        let top = Rect::new(40, 40, 20, 20);
+        let mut pass = Pass::new(OUTPUT);
+        pass.add(solid(OUTPUT, Color::WHITE));
+        pass.add(solid(top, Color::BLACK));
+
+        let mut recorder = Recorder::default();
+        pass.submit(&mut recorder).unwrap();
+
+        // The bottom element's damage is the ring around the top one, which is
+        // four rectangles; the top element is one.
+        assert_eq!(recorder.calls.len(), 5);
+        assert_eq!(recorded_area(&recorder), 10_000);
+        assert_eq!(recorder.calls.last().unwrap().0, solid(top, Color::BLACK));
+
+        let rects: Vec<Rect> = recorder.calls.iter().map(|call| call.1).collect();
+        for (i, a) in rects.iter().enumerate() {
+            for b in &rects[i + 1..] {
+                // Nothing here is translucent, so a pixel drawn twice would be a
+                // bug rather than a blend.
+                assert_eq!(a.intersection(*b), None, "{a:?} overlaps {b:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn submit_skips_occluded_elements() {
+        let mut pass = Pass::new(OUTPUT);
+        pass.add(solid(OUTPUT, Color::WHITE));
+        pass.add(solid(OUTPUT, Color::BLACK));
+
+        let mut recorder = Recorder::default();
+        pass.submit(&mut recorder).unwrap();
+        assert_eq!(recorder.calls.len(), 1);
+        assert_eq!(recorder.calls[0].0, solid(OUTPUT, Color::BLACK));
+    }
+
+    #[test]
+    fn submit_without_damage_makes_no_calls() {
+        let mut pass = Pass::with_damage(OUTPUT, Region::new());
+        pass.add(Element::Clear {
+            color: Color::BLACK,
+        });
+
+        let mut recorder = Recorder::default();
+        pass.submit(&mut recorder).unwrap();
+        assert!(recorder.calls.is_empty());
     }
 }

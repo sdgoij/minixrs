@@ -15,10 +15,16 @@
 
 extern crate alloc;
 
+pub mod backend;
 pub mod geom;
 pub mod pass;
+pub mod pixels;
 pub mod region;
 
+#[cfg(target_os = "minix")]
+pub mod gl;
+
+pub use backend::Backend;
 pub use geom::{Point, Rect};
 pub use pass::{Color, DrawOp, Element, Pass, TextureId};
 pub use region::Region;
