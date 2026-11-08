@@ -1117,6 +1117,16 @@ test-wlfocus-x86: build-x86
     python tools/wlfocus_probe.py
     @echo "wlfocus: two clients, one focus, and the keys follow it (x86_64)"
 
+# wlmotion: tools/wlmotion_probe.py drives the pointer-interpolation path — /bin/wlmotion
+# maps a window, the host moves the absolute pointer in one event, and the client must
+# receive a stream of steps ending where the device landed.
+test-wlmotion-x86: build-x86
+    mkdir -p target/images/x86_64-pc-minix
+    cp target/trampoline.elf target/images/x86_64-pc-minix/minix-x86.elf
+    @just _assert-qemu-version qemu-system-x86_64
+    python tools/wlmotion_probe.py
+    @echo "wlmotion: the pointer moved in steps to where the device landed (x86_64)"
+
 
 # wlxd: /bin/wlxd drives the Phase 2d damage and cursor path — it damages a small
 # rectangle and checks the rest of the frame survives, then gives the pointer an

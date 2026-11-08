@@ -664,7 +664,8 @@ mod imp {
         let mut pass = render::Pass::new(output);
 
         for e in scene.iter() {
-            if e.width <= 0 || e.height <= 0 || e.stride < e.width.saturating_mul(4) || e.size == 0 {
+            if e.width <= 0 || e.height <= 0 || e.stride < e.width.saturating_mul(4) || e.size == 0
+            {
                 continue;
             }
             let src = unsafe {
@@ -957,18 +958,40 @@ mod imp {
     /// The pointer and modifier state carried between input batches.
     struct InputState {
         mods: input::Modifiers,
-        /// The pointer position in surface pixels, kept so a relative move has an
-        /// absolute place to land.
+        /// Where the pointer is drawn and reported.
         ptr: (i32, i32),
+        /// Where the device says the pointer should end up. The reported position
+        /// walks toward this one step per tick instead of jumping to it.
+        target: (i32, i32),
     }
 
     impl InputState {
         fn new() -> Self {
+            let centre = (XRES as i32 / 2, YRES as i32 / 2);
             Self {
                 mods: input::Modifiers::default(),
-                ptr: (XRES as i32 / 2, YRES as i32 / 2),
+                ptr: centre,
+                target: centre,
             }
         }
+    }
+
+    /// How far the pointer moves in one tick. At `TICK_MS` a full-width sweep is
+    /// just over half a second, which is the frame interpolation input needs.
+    const POINTER_STEP: i32 = 32;
+
+    /// Move the reported pointer one step toward the target.
+    ///
+    /// `true` when it moved, so the caller can emit a motion event for that step.
+    fn step_ptr(st: &mut InputState) -> bool {
+        let dx = st.target.0 - st.ptr.0;
+        let dy = st.target.1 - st.ptr.1;
+        if dx == 0 && dy == 0 {
+            return false;
+        }
+        st.ptr.0 += dx.clamp(-POINTER_STEP, POINTER_STEP);
+        st.ptr.1 += dy.clamp(-POINTER_STEP, POINTER_STEP);
+        true
     }
 
     /// Monotonic milliseconds, for the `time` field input events carry.
@@ -1063,26 +1086,26 @@ mod imp {
                         // QEMU normalises an absolute tablet to 0..0x7FFF.
                         let v = value.clamp(0, 0x7FFF) as i64;
                         if code == INPUT_GD_X {
-                            st.ptr.0 = (v * XRES as i64 / 0x8000) as i32;
+                            st.target.0 = (v * XRES as i64 / 0x8000) as i32;
                         } else if code == INPUT_GD_Y {
-                            st.ptr.1 = (v * YRES as i64 / 0x8000) as i32;
+                            st.target.1 = (v * YRES as i64 / 0x8000) as i32;
                         } else {
                             continue;
                         }
-                        motion(server, st, time, reply)
+                        true
                     }
                     INPUT_PAGE_GD => {
                         // Relative movement (a PS/2 mouse): accumulate, then clamp.
                         if code == INPUT_GD_X {
-                            st.ptr.0 += value;
+                            st.target.0 += value;
                         } else if code == INPUT_GD_Y {
-                            st.ptr.1 += value;
+                            st.target.1 += value;
                         } else {
                             continue;
                         }
-                        st.ptr.0 = st.ptr.0.clamp(0, XRES as i32 - 1);
-                        st.ptr.1 = st.ptr.1.clamp(0, YRES as i32 - 1);
-                        motion(server, st, time, reply)
+                        st.target.0 = st.target.0.clamp(0, XRES as i32 - 1);
+                        st.target.1 = st.target.1.clamp(0, YRES as i32 - 1);
+                        true
                     }
                     INPUT_PAGE_BUTTON => {
                         let button = if code == INPUT_BUTTON_1 {
@@ -1260,8 +1283,7 @@ mod imp {
                             y: 0,
                             dmabuf: true,
                             offset: 0,
-                            size: (commit.stride.max(0) as usize)
-                                * (commit.height.max(0) as usize),
+                            size: (commit.stride.max(0) as usize) * (commit.height.max(0) as usize),
                         });
                     }
                 } else if let Some(fd) = c.pools.fd_of(commit.pool) {
@@ -1282,14 +1304,7 @@ mod imp {
                 }
                 if !composer.compose_and_present(scene, fb) {
                     present(
-                        fb,
-                        &c.pools,
-                        &c.dmabufs,
-                        c.node,
-                        &commit,
-                        ptr,
-                        cursor,
-                        scene,
+                        fb, &c.pools, &c.dmabufs, c.node, &commit, ptr, cursor, scene,
                     );
                 }
                 let _ = c.server.release_buffer(commit.buffer, &mut reply);
@@ -1464,6 +1479,11 @@ mod imp {
             Some(c) => {
                 let mut reply = DispatchBuf::new(&mut c.out);
                 drain_input(&mut c.server, st, &mut reply);
+                // A long sweep arrives as a stream of motions: one step per tick,
+                // not one jump to wherever the device ended up.
+                if step_ptr(st) {
+                    motion(&mut c.server, st, now_ms(), &mut reply);
+                }
                 let n = reply.len();
                 if n > 0 {
                     let _ = uds::send(c.conn, &c.out[..n]);

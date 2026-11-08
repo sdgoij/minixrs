@@ -1271,6 +1271,160 @@ fn check_overlap(wanted: u32, message: &[u8]) -> Result<(), i32> {
     Ok(())
 }
 
+/// `/bin/wlmotion`: the pointer-interpolation gate.
+///
+/// One output-sized window, so the first commit gives the connection the focus
+/// and the pointer's events. The host then moves the absolute pointer across the
+/// output; the motions must arrive as a stream of steps rather than one jump, and
+/// the last one must be where the device landed.
+pub fn wl_motion(_args: &[&str]) -> i32 {
+    match run_motion() {
+        Ok(()) => {
+            write_out(b"wlmotion: PASS\n");
+            0
+        }
+        Err(code) => code,
+    }
+}
+
+fn run_motion() -> Result<(), i32> {
+    let conn = connect()?;
+    let mut client = Client::new();
+    let mut req = [0u8; 512];
+    let mut inbuf = MessageBuffer::new();
+    let mut chunk = [0u8; 512];
+
+    let registry = send_req(conn, &mut req, |q| client.get_registry(q))?;
+    let g = find_globals(conn, &client, &mut inbuf, &mut chunk)?;
+    let compositor = send_req(conn, &mut req, |q| {
+        client.bind(
+            registry,
+            g.compositor,
+            b"wl_compositor",
+            1,
+            Kind::Compositor,
+            q,
+        )
+    })?;
+    let shm = send_req(conn, &mut req, |q| {
+        client.bind(registry, g.shm, b"wl_shm", 1, Kind::Shm, q)
+    })?;
+    let seat = send_req(conn, &mut req, |q| {
+        client.bind(registry, g.seat, b"wl_seat", 1, Kind::Seat, q)
+    })?;
+    send_req(conn, &mut req, |q| client.get_pointer(seat, q))?;
+    let surface = send_req(conn, &mut req, |q| client.create_surface(compositor, q))?;
+
+    let stride = FB_WIDTH as i32 * 4;
+    let size = stride * FB_HEIGHT as i32;
+    let pool_fd = fs::memfd_create(0).map_err(|_| fail(110, b"wlmotion: memfd_create failed\n"))?;
+    fs::truncate(pool_fd, size as i64).map_err(|_| fail(111, b"wlmotion: ftruncate failed\n"))?;
+    let pool = unsafe {
+        vmem::mmap(
+            core::ptr::null_mut(),
+            size as usize,
+            vmem::PROT_READ | vmem::PROT_WRITE,
+            vmem::MAP_SHARED,
+            pool_fd,
+            0,
+        )
+    };
+    if pool == vmem::MAP_FAILED {
+        return Err(fail(112, b"wlmotion: mmap of the pool failed\n"));
+    }
+    fill_pool(pool, FB_WIDTH as i32 * FB_HEIGHT as i32, COLOR);
+    uds::send_fds(conn, &[pool_fd]).map_err(|_| fail(113, b"wlmotion: send_fds failed\n"))?;
+    let pool_obj = send_req(conn, &mut req, |q| client.create_pool(shm, 0, size, q))?;
+    let buffer = send_req(conn, &mut req, |q| {
+        client.create_buffer(
+            pool_obj,
+            0,
+            FB_WIDTH as i32,
+            FB_HEIGHT as i32,
+            stride,
+            protocol::WL_SHM_FORMAT_XRGB8888,
+            q,
+        )
+    })?;
+    send_req(conn, &mut req, |q| client.attach(surface, buffer, 0, 0, q))?;
+    send_req(conn, &mut req, |q| {
+        client.damage(surface, 0, 0, FB_WIDTH as i32, FB_HEIGHT as i32, q)
+    })?;
+    send_req(conn, &mut req, |q| client.commit(surface, q))?;
+    await_release(conn, &client, buffer, &mut inbuf, &mut chunk)?;
+
+    write_out(b"wlmotion: ready\n");
+
+    // Read until the first motions have arrived and then 400 ms of silence.
+    let mut steps = 0u32;
+    let mut last = (0i32, 0i32);
+    let mut quiet = 0u32;
+    for _ in 0..40 {
+        if !fill(conn, &mut inbuf, &mut chunk, 100) {
+            if steps > 0 {
+                quiet += 1;
+                if quiet >= 4 {
+                    break;
+                }
+            }
+            continue;
+        }
+        quiet = 0;
+        loop {
+            let msg = match inbuf.next() {
+                Ok(Some(m)) => m,
+                Ok(None) => break,
+                Err(_) => return Err(fail(114, b"wlmotion: bad frame\n")),
+            };
+            let h = match Header::parse(msg) {
+                Ok(h) => h,
+                Err(_) => return Err(fail(115, b"wlmotion: bad header\n")),
+            };
+            let mut args = [Arg::Uint(0); MAX_ARGS];
+            let (kind, argc) = match client.decode(msg, &mut args) {
+                Ok((_, k, n)) => (k, n),
+                Err(_) => return Err(fail(116, b"wlmotion: undecodable event\n")),
+            };
+            let is_motion = kind == Kind::Pointer && h.opcode == protocol::pointer_ev::MOTION;
+            let position = if is_motion && argc == 3 {
+                Some((
+                    args[1].as_int().unwrap_or(0) >> 8,
+                    args[2].as_int().unwrap_or(0) >> 8,
+                ))
+            } else {
+                None
+            };
+            inbuf.consume(h.size as usize);
+            if let Some(position) = position {
+                steps += 1;
+                last = position;
+            }
+        }
+    }
+
+    let _ = unsafe { vmem::munmap(pool, size as usize) };
+    let _ = uds::close_fd(conn);
+
+    if steps < 2 {
+        write_out(b"wlmotion: steps=");
+        put_dec(steps);
+        write_out(b" x=");
+        put_dec(last.0 as u32);
+        write_out(b" y=");
+        put_dec(last.1 as u32);
+        write_out(b"\n");
+        return Err(fail(117, b"wlmotion: the pointer did not move\n"));
+    }
+    write_out(b"wlmotion: steps=");
+    put_dec(steps);
+    write_out(b" x=");
+    put_dec(last.0 as u32);
+    write_out(b" y=");
+    put_dec(last.1 as u32);
+    write_out(b"\n");
+    Ok(())
+}
+
 /// Wait for the toplevel's `configure`, answering the server's `ping`.
 ///
 /// Returns the surface's configure serial and the size the toplevel was offered.

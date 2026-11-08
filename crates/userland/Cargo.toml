@@ -398,6 +398,13 @@ name = "wloverlap"
 path = "src/bin/wloverlap.rs"
 test = false
 
+# wlmotion is the pointer-interpolation gate: one window, an absolute move from
+# the host, and a stream of motion events that ends where the device landed.
+[[bin]]
+name = "wlmotion"
+path = "src/bin/wlmotion.rs"
+test = false
+
 [[bin]]
 name = "wlxd"
 path = "src/bin/wlxd.rs"

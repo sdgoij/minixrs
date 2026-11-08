@@ -162,6 +162,9 @@ pub const BOOT_BINS: &[(&str, &str)] = &[
     // `/bin/wloverlap` is the scene z-order client: two connections, two windows, and a
     // recommit by the lower one that must leave the upper one intact.
     ("/bin/wloverlap", "wloverlap"),
+    // `/bin/wlmotion` is the pointer-interpolation client: one window and a count of the
+    // motion events an absolute move from the host produces.
+    ("/bin/wlmotion", "wlmotion"),
     // `/bin/wlxd` is the Wayland Phase 2d damage and cursor client: it damages part
     // of a frame and checks the rest survives, then gives the pointer an image.
     ("/bin/wlxd", "wlxd"),
