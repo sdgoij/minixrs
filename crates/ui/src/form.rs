@@ -11,17 +11,20 @@ use render::text::Atlas;
 
 use crate::button::Button;
 use crate::event::{Event, Key, Response};
+use crate::field::Field;
 use crate::{Painter, Theme};
 
 /// One widget of a window.
 pub enum Widget<'a> {
     Button(Button<'a>),
+    Field(Field<'a>),
 }
 
 impl<'a> Widget<'a> {
     pub fn bounds(&self) -> Rect {
         match self {
             Self::Button(button) => button.bounds(),
+            Self::Field(field) => field.bounds(),
         }
     }
 
@@ -33,24 +36,28 @@ impl<'a> Widget<'a> {
     pub fn preferred_height(&self, theme: &Theme) -> i32 {
         match self {
             Self::Button(_) => Button::height(theme),
+            Self::Field(_) => Field::height(theme),
         }
     }
 
-    pub fn layout(&mut self, bounds: Rect) {
+    pub fn layout(&mut self, bounds: Rect, theme: &Theme) {
         match self {
             Self::Button(button) => button.layout(bounds),
+            Self::Field(field) => field.layout(bounds, theme),
         }
     }
 
     pub fn handle(&mut self, event: Event) -> Response {
         match self {
             Self::Button(button) => button.handle(event),
+            Self::Field(field) => field.handle(event),
         }
     }
 
     pub fn paint(&self, painter: &mut Painter<'_>, theme: &Theme) {
         match self {
             Self::Button(button) => button.paint(painter, theme),
+            Self::Field(field) => field.paint(painter, theme),
         }
     }
 }
@@ -103,7 +110,7 @@ impl<'a, const N: usize> Form<'a, N> {
         let mut y = area.y;
         for widget in self.widgets.iter_mut() {
             let height = widget.preferred_height(&theme);
-            widget.layout(Rect::new(area.x, y, area.w, height));
+            widget.layout(Rect::new(area.x, y, area.w, height), &theme);
             y += height + gap;
         }
     }
@@ -221,11 +228,32 @@ mod tests {
     fn button<'a>(form: &'a Form<'static, 2>, index: usize) -> &'a Button<'static> {
         match form.widget(index).expect("the widget exists") {
             Widget::Button(button) => button,
+            Widget::Field(_) => panic!("widget {index} is not a button"),
         }
     }
 
     fn bounds_of(form: &Form<'static, 2>, index: usize) -> Rect {
         form.widget(index).expect("the widget exists").bounds()
+    }
+
+    fn field<'a>(form: &'a Form<'static, 2>, index: usize) -> &'a Field<'static> {
+        match form.widget(index).expect("the widget exists") {
+            Widget::Field(field) => field,
+            Widget::Button(_) => panic!("widget {index} is not a field"),
+        }
+    }
+
+    /// A field above a button, the order Tab visits them in.
+    fn mixed() -> Form<'static, 2> {
+        let mut form = Form::new(
+            [
+                Widget::Field(Field::new().placeholder(b"name")),
+                Widget::Button(Button::new(b"OK")),
+            ],
+            Theme::DARK,
+        );
+        form.stack(AREA, 4);
+        form
     }
 
     fn focused(form: &Form<'static, 2>) -> [bool; 2] {
@@ -250,6 +278,39 @@ mod tests {
 
     fn key(key: Key, pressed: bool) -> Event {
         Event::Key { key, pressed }
+    }
+
+    #[test]
+    fn tab_leads_from_a_field_to_a_button_and_typing_stays_in_the_field() {
+        let mut form = mixed();
+        assert_eq!(form.focus(), Some(0));
+        for byte in b"hi" {
+            form.handle(key(Key::Char(*byte), true));
+        }
+        assert_eq!(field(&form, 0).text(), b"hi");
+
+        form.handle(key(Key::Tab, true));
+        assert_eq!(form.focus(), Some(1));
+
+        // The field is no longer focused, so the byte goes nowhere.
+        form.handle(key(Key::Char(b'x'), true));
+        assert_eq!(field(&form, 0).text(), b"hi");
+
+        form.handle(key(Key::Enter, true));
+        assert_eq!(button(&form, 1).activations(), 1);
+    }
+
+    #[test]
+    fn a_field_keeps_its_text_across_a_focus_round_trip() {
+        let mut form = mixed();
+        for byte in b"ab" {
+            form.handle(key(Key::Char(*byte), true));
+        }
+        form.handle(key(Key::Tab, true));
+        form.handle(key(Key::Tab, true));
+        assert_eq!(form.focus(), Some(0));
+        assert_eq!(field(&form, 0).text(), b"ab");
+        assert_eq!(field(&form, 0).cursor(), 2);
     }
 
     #[test]
