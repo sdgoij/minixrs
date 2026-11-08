@@ -270,6 +270,22 @@ are arch-specific, `[env]` is tooling/platform, not kernel.
     it. (`crates/servers/src/vfs/epoll.rs`, `crates/servers/src/vfs/select.rs`,
     `crates/servers/src/vfs/call.rs`)
 
+36. **The C header's `O_*` flags do not match MINIX's (2026-11-08).**
+    `tools/c-include/fcntl.h` defines the open flags as the values the C clients have used since
+    the header was added, not the values in `.refs/minix-3.3.0/sys/sys/fcntl.h`. Only the access
+    mode agrees (`O_RDONLY`, `O_WRONLY`, `O_RDWR` are 0, 1, 2); the rest alias unrelated MINIX
+    flags: `O_CREAT` 0x40 (MINIX `O_ASYNC`), `O_EXCL` 0x80 (`O_SYNC`), `O_TRUNC` 0x200
+    (`O_CREAT`), `O_APPEND` 0x400 (`O_TRUNC`), `O_NONBLOCK` 0x800 (`O_EXCL`), `O_CLOEXEC`
+    0x10000 (`O_DSYNC`). A C program that passes one gets a different operation than it asked
+    for; `cabi.c`'s `pipe2(O_NONBLOCK)` check is the visible consumer and is asking the kernel
+    for `O_EXCL`. The header stayed latent because it spelled these with Rust's `0o` literal
+    prefix, so no C compiler could expand the macros at all; `ctest.c`'s `open(..., O_RDONLY)`
+    turned that into a hard build failure and the syntax was fixed in `8d27b3809` without
+    changing any value. Fixing the values means taking MINIX's numbers and re-running the C
+    gates (`cabi`, `hello`/`ctest`, `gbmtest`, the EGL probes), because Mesa is compiled against
+    this include directory too. (`tools/c-include/fcntl.h`,
+    `.refs/minix-3.3.0/sys/sys/fcntl.h`)
+
 ---
 
 ## RISC-V (`[riscv]`)
