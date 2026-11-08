@@ -12,7 +12,7 @@ use crate::{
     regions, rm, set_redirect_fd, sync,
 };
 #[cfg(target_os = "minix")]
-use core::sync::atomic::{AtomicI32, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicI32, AtomicU32, AtomicUsize, Ordering};
 
 /// Sentinel for `exit` — must not overlap any valid exit status.
 #[allow(dead_code)]
@@ -86,6 +86,9 @@ pub fn sh(_args: &[&str]) -> i32 {
             // done` / `[pid] terminated (signal N)` reports appear in
             // order — prompt-time reaping is the pattern.
             reap_jobs();
+            // The count goes with the prompt: anything another writer takes the line for after
+            // this is a prompt the editor has to reprint.
+            LINE_TAKEN.store(line_taken(), Ordering::Relaxed);
             write_out(b"# ");
             let line_len = read_line(&mut ed, &mut buf);
             if line_len == LINE_EOF {
@@ -345,6 +348,26 @@ fn tty_write(s: &[u8]) {
 #[cfg(all(not(target_os = "minix"), test))]
 fn tty_write(_s: &[u8]) {}
 
+/// How many times another writer had taken the console line when the prompt was drawn. The
+/// editor compares it with the tty's count before acting on a byte: a program printing over the
+/// prompt pushes it up, and the prompt then has to be reprinted on the line the typing is on.
+#[cfg(target_os = "minix")]
+static LINE_TAKEN: AtomicU32 = AtomicU32::new(0);
+
+/// The tty's count of how many times another writer has taken the console line.
+///
+/// Zero when the request is refused, which is what a line that is not a console does (a pty
+/// slave never has its line taken): the editor then never redraws, which is right there.
+#[cfg(target_os = "minix")]
+fn line_taken() -> u32 {
+    let mut count: u32 = 0;
+    let arg = &mut count as *mut u32 as *mut u8;
+    if unsafe { minix_std::fs::ioctl(0, minix_std::termios::TIOCGTAKEN, arg) }.is_err() {
+        return 0;
+    }
+    count
+}
+
 /// Raw-mode line editor state (the shell's own echo/editing — the tty's
 /// canonical mode cannot do arrows or history).
 #[cfg(any(target_os = "minix", test))]
@@ -393,6 +416,18 @@ impl Editor {
         tty_write(&spaces);
         tty_write(b"\r");
         tty_write(b"# ");
+        tty_write(&self.line[..self.len]);
+        for _ in 0..(self.len - self.cur) {
+            tty_write(b"\x08");
+        }
+    }
+
+    /// Reprint the prompt and the line on a fresh row, for after another writer took the row
+    /// this one was on. The newline rather than a blank-and-return: the row the cursor is on
+    /// belongs to whatever was written there, and a fresh one needs no clearing.
+    #[cfg(target_os = "minix")]
+    fn reprint_line(&mut self) {
+        tty_write(b"\n# ");
         tty_write(&self.line[..self.len]);
         for _ in 0..(self.len - self.cur) {
             tty_write(b"\x08");
@@ -644,6 +679,14 @@ fn read_line(ed: &mut Editor, buf: &mut [u8]) -> usize {
             break;
         }
         let ch = b[0];
+        // Another writer may have taken the line since the prompt was drawn (the session's
+        // programs do, once at boot): the prompt has been pushed up and the cursor sits on a
+        // blank line, so reprint it with what has been typed before acting on this byte.
+        let taken = line_taken();
+        if taken != LINE_TAKEN.load(Ordering::Relaxed) {
+            LINE_TAKEN.store(taken, Ordering::Relaxed);
+            ed.reprint_line();
+        }
         if esc == 1 {
             esc = if ch == b'[' { 2 } else { 0 };
             continue;

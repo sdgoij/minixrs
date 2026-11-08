@@ -257,6 +257,10 @@ pub const TIOCGQSIZE: u32 = net::ioc_encode(0x4000_0000, b't', 129, core::mem::s
 pub const TIOCSCTTY: u32 = net::ioc_encode(0, b't', 97, 0);
 pub const TIOCGPGRP: u32 = net::ioc_encode(0x4000_0000, b't', 119, core::mem::size_of::<i32>());
 pub const TIOCSPGRP: u32 = net::ioc_encode(0x8000_0000, b't', 118, core::mem::size_of::<i32>());
+/// The port's own, not a NetBSD request: how many times another writer has taken the console
+/// line from the process that opened it (`Tty::tty_line_taken`). The shell's line editor reads
+/// it to know when its prompt has been pushed up and has to be reprinted.
+pub const TIOCGTAKEN: u32 = net::ioc_encode(0x4000_0000, b'T', 1, core::mem::size_of::<u32>());
 pub const KIOCBELL: u32 = 19;
 pub const KIOCSMAP: u32 = 20;
 pub const TIOCSFON: u32 = 21;
@@ -487,6 +491,10 @@ pub struct Tty {
     /// continuing it is how a program's output ends up inside the shell's prompt.
     pub tty_line_writer: u32,
     pub tty_line_open: bool,
+    /// How many times another writer has taken the line away from its owner, so the line
+    /// editor can reprint its prompt (`TIOCGTAKEN`). It holds the text typed so far; the tty
+    /// does not.
+    pub tty_line_taken: u32,
     /// 1 when LNEXT (^V) just seen, else 0.
     pub tty_escaped: u8,
     /// 1 when STOP (^S) just seen (stops output).
@@ -611,6 +619,7 @@ impl Tty {
             tty_reprint: 0,
             tty_line_writer: NONE,
             tty_line_open: false,
+            tty_line_taken: 0,
             tty_escaped: 0,
             tty_inhibited: 0,
             tty_pgrp: 0,
@@ -1758,6 +1767,9 @@ fn console_write(tp: &mut Tty, _try_only: i32) -> i32 {
     if starts_its_own_line(tp.tty_line_open, tp.tty_line_writer, writer) {
         console_emit(tp, b"\n");
         tp.tty_position = 0;
+        // The line editor watches this: what it was editing is now above the cursor, so it
+        // reprints the prompt and the text typed so far.
+        tp.tty_line_taken = tp.tty_line_taken.wrapping_add(1);
     }
     console_emit(tp, &tp.tty_writedata[..n]);
     tp.tty_line_open = !tp.tty_writedata[..n].ends_with(b"\n");
@@ -2491,6 +2503,9 @@ pub fn do_ioctl(
             tp.tty_pgrp = user_endpt as u32;
         }
         TIOCGPGRP | TIOCSPGRP => {}
+        TIOCGTAKEN => {
+            r = sys_safecopyto(endpt, grant, 0, &tp.tty_line_taken.to_ne_bytes());
+        }
         _ => {
             r = ENOTTY;
         }
@@ -4415,6 +4430,35 @@ mod tests {
         let termios = unsafe { core::ptr::read_unaligned(buf.as_ptr() as *const Termios) };
         assert_eq!(termios.c_lflag, 0xABCD_1234);
         assert_eq!(termios.c_cc[VEOF], 0x55);
+    }
+
+    #[test]
+    fn test_do_ioctl_tiocgtaken_reports_the_line_takeovers() {
+        // The line editor's redraw trigger: the count another writer bumps by taking the
+        // console line, read back through the grant like any other ioctl result.
+        let _lock = TestLockGuard::acquire();
+        tty_init(100);
+        unsafe {
+            core::ptr::write_bytes(HOST_GRANT_BUF.get() as *mut u8, 0, 512);
+        }
+
+        let tp = table_mut(0);
+        setup_tty(tp);
+        tp.tty_line_taken = 7;
+
+        let r = do_ioctl(
+            CONS_MINOR,
+            TIOCGTAKEN,
+            arch_common::com::VFS_PROC_NR,
+            1,
+            0,
+            123,
+            7,
+        );
+        assert_eq!(r, OK);
+        let buf = unsafe { &*HOST_GRANT_BUF.get() };
+        let count = unsafe { core::ptr::read_unaligned(buf.as_ptr() as *const u32) };
+        assert_eq!(count, 7);
     }
 
     #[test]

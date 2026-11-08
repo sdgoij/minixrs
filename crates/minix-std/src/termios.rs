@@ -90,6 +90,10 @@ pub const TIOCGWINSZ: u32 = ioc_encode(0x4000_0000, b't', 104, core::mem::size_o
 /// Set the terminal window size (NetBSD `TIOCSWINSZ`).
 pub const TIOCSWINSZ: u32 = ioc_encode(0x8000_0000, b't', 103, core::mem::size_of::<WinSize>());
 
+/// The port's own request, not NetBSD's: how many times another process has written over the
+/// console line this one was writing, so a line editor can reprint its prompt (`u32`).
+pub const TIOCGTAKEN: u32 = ioc_encode(0x4000_0000, b'T', 1, core::mem::size_of::<u32>());
+
 // Input flags (c_iflag) — matches the tty server.
 /// Signal on break.
 pub const IGNBRK: u32 = 0x0000_0001;
@@ -214,6 +218,7 @@ mod tests {
         assert_eq!(TIOCSPGRP, 0x8004_7476);
         assert_eq!(TIOCGWINSZ, 0x4008_7468);
         assert_eq!(TIOCSWINSZ, 0x8008_7467);
+        assert_eq!(TIOCGTAKEN, 0x4004_5401);
         assert_eq!(ECHO, 0x8);
         // The flags `cfmakeraw` clears and sets.
         assert_eq!(ICRNL | IXON, 0x300);

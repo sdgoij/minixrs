@@ -2184,13 +2184,20 @@ are arch-specific, `[env]` is tooling/platform, not kernel.
   no grant (the chunk is inline in `m2_l3`). The session manager keeps its delay
   for the `exec` overlap only.
 
-  What an interleaved write still costs: the prompt is pushed up and the command
-  typed at it appears on the line below by itself. That is what any console does
-  when a program writes over a prompt; without line editing in the tty it cannot be
-  redrawn. Gates: `tools/rc_probe.py`, which types nothing and looks for the start
-  line, the `# ` prompt as a line of its own, and the panel's ready line, plus every
-  tsv scenario, which needs the `# ` prompt.
-  (`crates/servers/src/tty.rs`, `crates/userland/src/rc.rs`,
+  What an interleaved write used to cost, the prompt being pushed up and the command
+typed at it left on its own line, is gone as well. The tty counts the takeovers
+(`tty_line_taken`, read with the port's own `TIOCGTAKEN`, group `T` rather than a
+NetBSD request). The shell stores the count when it draws the prompt and compares
+it before acting on each byte it reads; a change means the row it was editing now
+belongs to something else, so it reprints `# ` and the text typed so far on a fresh
+row. The first command after boot, typed while the session's two lines are on the
+screen, therefore still appears after its prompt.
+
+  Gates: `tools/rc_probe.py`, which types nothing and looks for the start line, the
+  `# ` prompt as a line of its own, and the panel's ready line, plus every tsv
+  scenario, which needs the `# ` prompt.
+  (`crates/servers/src/tty.rs`, `crates/userland/src/shell.rs`,
+  `crates/minix-std/src/termios.rs`, `crates/userland/src/rc.rs`,
   `crates/boot-image/src/manifest.rs`)
 - **A surface's pixels and its hit box came from two different places
   (2026-11-08, fixed).** The server works out where an anchored layer surface
