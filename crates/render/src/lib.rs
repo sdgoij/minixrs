@@ -20,6 +20,7 @@ pub mod geom;
 pub mod pass;
 pub mod pixels;
 pub mod region;
+pub mod soft;
 pub mod text;
 
 #[cfg(target_os = "minix")]
@@ -29,3 +30,4 @@ pub use backend::Backend;
 pub use geom::{Point, Rect};
 pub use pass::{Color, DrawOp, Element, Pass, TextureId};
 pub use region::Region;
+pub use soft::Software;
