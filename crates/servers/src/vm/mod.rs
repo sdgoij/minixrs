@@ -1337,7 +1337,8 @@ fn start_file_page(va: u64, fault: &Fault) -> PageOutcome {
     // The exec pre-fault may have mapped this page already (the faulting page lies in a
     // non-executable region it covered); skip it so the page isn't double-allocated. In the
     // plain demand-fault path only PROT faults arrive with a present page, which map as before.
-    if crate::vm::vm_walk_page(cr3, page_addr) & kernel::pagetable::PG_P != 0 {
+    let pte = crate::vm::vm_walk_page(cr3, page_addr);
+    if pte & kernel::pagetable::PG_P != 0 {
         // Unless VFS is still filling it. The frame that is present then is the placeholder below:
         // zero, and mapped without the user bit precisely so nothing may run it, so a present PTE
         // is not evidence the page is the file's yet. A thread that faults on it has to stay
@@ -1346,7 +1347,23 @@ fn start_file_page(va: u64, fault: &Fault) -> PageOutcome {
         if crate::vm::vfs_request::page_pending(ep, page_addr) {
             return PageOutcome::Pending;
         }
-        return PageOutcome::Done;
+        // A finished file page is always mapped with the user bit (`finish_page`), so a present
+        // page without it is a placeholder whose fill is gone: the fill failed, or its request
+        // could not be sent, and the release path that should have taken the placeholder away did
+        // not. Answering `Done` here makes the fault unrepairable: the thread retries the same
+        // instruction, faults identically, and VM clears the fault again, for as long as the
+        // process lives. Measured on x86: two worker threads at the entry of a `.text` page never
+        // touched by the main thread, ~6000 faults a second, the process suspended behind a
+        // pending SIGSEGV its main thread could not receive because it was blocked in a join.
+        // Drop the orphan and fill the page for real; the fault then resolves or kills.
+        if !kernel::hal::pte_is_user(pte) {
+            if crate::vm::vm_unmap_page_in(cr3, page_addr) != 0 {
+                kill_faulting(ep);
+                return PageOutcome::Killed;
+            }
+        } else {
+            return PageOutcome::Done;
+        }
     }
 
     // Extract the fields we need up front so the region borrow ends before the request: the
@@ -1543,7 +1560,15 @@ fn finish_page(state: &PageState, tail_zero: bool) -> bool {
     if state.exec {
         pt_flags |= kernel::pagetable::MAP_EXEC;
     }
-    let _ = crate::vm::vm_map_page_in(state.fault.cr3, state.page_addr, state.pa, pt_flags);
+    if crate::vm::vm_map_page_in(state.fault.cr3, state.page_addr, state.pa, pt_flags) != 0 {
+        // The process cannot be given this page. Leaving the fill placeholder in place would
+        // leave the instruction it is stuck on faulting forever, with no request behind it to
+        // ever finish the page, so release both the mapping and the frame and end the process.
+        let _ = crate::vm::vm_unmap_page_in(state.fault.cr3, state.page_addr);
+        crate::vm::vm_free_pages(state.pa, 1);
+        kill_faulting(state.fault.ep);
+        return false;
+    }
 
     // Track the frame so teardown frees it when the last mapping goes away. Only pages with a
     // PhysBlock can be cached: teardown frees untracked frames outright, so caching one would
