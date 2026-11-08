@@ -482,6 +482,11 @@ pub struct Tty {
     pub tty_position: i32,
     /// 1 when echoed input messed up, else 0.
     pub tty_reprint: u8,
+    /// Endpoint that opened the console line now on screen, and whether that line is still
+    /// open (no terminator yet). A line belongs to whoever opened it: a second writer
+    /// continuing it is how a program's output ends up inside the shell's prompt.
+    pub tty_line_writer: u32,
+    pub tty_line_open: bool,
     /// 1 when LNEXT (^V) just seen, else 0.
     pub tty_escaped: u8,
     /// 1 when STOP (^S) just seen (stops output).
@@ -512,12 +517,11 @@ pub struct Tty {
     /// Set when sigchar released the pending read; do_read replies EINTR.
     pub tty_read_intr: bool,
 
-    /// Process that made the write call, or NONE.
+    /// Process that made the write call, or NONE. This is the writer's own endpoint, not
+    /// VFS's: it is what tells one writer from another on a shared console.
     pub tty_outcaller: u32,
     /// ID of suspended write request.
     pub tty_outid: u32,
-    /// Grant where write data comes from.
-    pub tty_outgrant: u32,
     /// Number of chars yet to be output.
     pub tty_outleft: usize,
     /// Number of chars output so far.
@@ -605,6 +609,8 @@ impl Tty {
             tty_break_off: tty_devnop,
             tty_position: 0,
             tty_reprint: 0,
+            tty_line_writer: NONE,
+            tty_line_open: false,
             tty_escaped: 0,
             tty_inhibited: 0,
             tty_pgrp: 0,
@@ -619,7 +625,6 @@ impl Tty {
             tty_read_intr: false,
             tty_outcaller: NONE,
             tty_outid: 0,
-            tty_outgrant: 0,
             tty_outleft: 0,
             tty_outcum: 0,
             tty_outreply: NONE,
@@ -1729,6 +1734,13 @@ fn console_read(tp: &mut Tty, _try_only: i32) -> i32 {
 /// The screen is fed from the same bytes, in the same order, so what the display shows and what
 /// the host's terminal pane shows are the same stream: the screen is the console's *own* record of
 /// it (M5b, `console.rs`), not a second source of truth.
+///
+/// A write from a process that is not the one that opened the line on screen starts on a line of
+/// its own. The shell's prompt has no terminator (`# `, cursor after it, the editor echoing what
+/// is typed), so a program printing while it is up would otherwise continue that line: the
+/// console reads `wlpanel: ready pid=# 23`, and `# ` is no longer a prompt to anything watching.
+/// The shell's own writes, the prompt and the echo of what is typed, come from one endpoint, so
+/// they are untouched; everything else is pushed to the next line.
 fn console_write(tp: &mut Tty, _try_only: i32) -> i32 {
     if tp.tty_writecount == 0 {
         return 0;
@@ -1742,14 +1754,32 @@ fn console_write(tp: &mut Tty, _try_only: i32) -> i32 {
             .filter(|&&c| c == b'\n')
             .count() as i32;
     }
-    unsafe { minix_rt::write(1, tp.tty_writedata.as_ptr(), n) };
-    show_on_screen(tp, n);
+    let writer = tp.tty_outcaller;
+    if starts_its_own_line(tp.tty_line_open, tp.tty_line_writer, writer) {
+        console_emit(tp, b"\n");
+        tp.tty_position = 0;
+    }
+    console_emit(tp, &tp.tty_writedata[..n]);
+    tp.tty_line_open = !tp.tty_writedata[..n].ends_with(b"\n");
+    tp.tty_line_writer = writer;
     tp.tty_writeidx = 0;
     tp.tty_writecount = 0;
     tp.tty_outleft = 0;
     tp.tty_outcum = 0;
     tp.tty_outcaller = NONE;
     1
+}
+
+/// Whether a write by `writer` has to start a line of its own: the line on screen is still open
+/// and somebody else opened it.
+fn starts_its_own_line(open: bool, owner: u32, writer: u32) -> bool {
+    open && owner != writer
+}
+
+/// Put `bytes` on the console, and on the console's screen where the arch has one.
+fn console_emit(tp: &Tty, bytes: &[u8]) {
+    unsafe { minix_rt::write(1, bytes.as_ptr(), bytes.len()) };
+    show_on_screen(tp, bytes);
 }
 
 /// Console echo hook — write a single echoed byte to the serial console, and to the screen.
@@ -1759,8 +1789,10 @@ fn console_write(tp: &mut Tty, _try_only: i32) -> i32 {
 /// LF→CRLF mapping applies to echoed newlines.
 fn console_echo(tp: &mut Tty, c: i32) {
     let byte = (c & 0xFF) as u8;
-    unsafe { minix_rt::write(1, &raw const byte, 1) };
-    show_on_screen(tp, 1);
+    console_emit(tp, &[byte]);
+    // The echo continues the line the line discipline's writer opened, so only the
+    // terminator matters: an echoed newline closes it.
+    tp.tty_line_open = byte != b'\n';
 }
 
 /// Feed the console's screen the bytes this line just put on the console.
@@ -1772,15 +1804,15 @@ fn console_echo(tp: &mut Tty, c: i32) {
 /// port, where `wserver` composes one and the host's display shows it. On the hardware arches the
 /// console's cells are the VGA plane's, and the driver's own `write` puts them there.
 #[cfg(target_arch = "wasm32")]
-fn show_on_screen(tp: &Tty, n: usize) {
+fn show_on_screen(tp: &Tty, bytes: &[u8]) {
     if (tp.tty_minor as usize) >= NR_CONS || tp.tty_minor != get_console_line() {
         return;
     }
-    crate::console::output(&tp.tty_writedata[..n]);
+    crate::console::output(bytes);
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-fn show_on_screen(_tp: &Tty, _n: usize) {}
+fn show_on_screen(_tp: &Tty, _bytes: &[u8]) {}
 
 // PTY lines — slave hooks and master CDEV handlers
 //
@@ -2226,11 +2258,16 @@ pub fn do_read(
 }
 
 /// do_write — write to a TTY line.
+///
+/// `reply_to` is who to answer (VFS); `user` is the process that wrote, which VFS sends in
+/// `m2_i3` and matches the reply by. The tty keeps them apart because they mean different
+/// things: the reply goes to VFS, and the console line belongs to the process.
+#[allow(clippy::too_many_arguments)]
 pub fn do_write(
     minor: DevMinor,
     _position: Position,
-    endpt: Endpoint,
-    grant: CpGrantId,
+    reply_to: Endpoint,
+    user: Endpoint,
     size: usize,
     flags: i32,
     id: CDevId,
@@ -2249,10 +2286,9 @@ pub fn do_write(
     }
 
     // Copy message parameters to the tty structure.
-    tp.tty_outcaller = endpt as u32;
+    tp.tty_outcaller = user as u32;
     tp.tty_outid = id;
-    tp.tty_outgrant = grant;
-    tp.tty_outreply = endpt as u32;
+    tp.tty_outreply = reply_to as u32;
     tp.tty_outreply_n = size;
     tp.tty_outsuspended = true;
     tp.tty_outleft = size;
@@ -2980,7 +3016,6 @@ unsafe fn handle_cdev_request(
         }
         CDEV_WRITE => {
             let flags = unsafe { msg.m_payload.m2.m2i2 };
-            let grant = unsafe { msg.m_payload.m2.m2i3 as u32 };
             let position = unsafe { msg.m_payload.m2.m2l1 as u64 };
             let count = unsafe { msg.m_payload.m2.m2l2 as usize };
             // Copy inline write data from m2_l3, the last 8 payload bytes
@@ -2996,6 +3031,10 @@ unsafe fn handle_cdev_request(
                 }
                 return pty_master_write(idx, &data[..copy_len]);
             }
+            // `m2_i3` carries the *writer's* endpoint, as it does for a read: VFS puts the
+            // user process there and matches the reply by it. The chunk itself is inline
+            // (m2_l3), so there is no grant on this path at all.
+            let user = unsafe { msg.m_payload.m2.m2i3 };
             {
                 let tp_mut = line2tty(minor).unwrap();
                 unsafe {
@@ -3005,7 +3044,7 @@ unsafe fn handle_cdev_request(
                 tp_mut.tty_writeidx = 0;
                 tp_mut.tty_writecount = copy_len;
             }
-            do_write(minor, position, who_e, grant, copy_len, flags, grant)
+            do_write(minor, position, who_e, user, copy_len, flags, user as u32)
         }
         CDEV_IOCTL => {
             // Grant-based ioctl arg protocol (matches VFS cdev_io):
@@ -3880,6 +3919,17 @@ mod tests {
 
         assert_eq!(icount, 1);
         assert_eq!(tp.tty_position, 0);
+    }
+
+    #[test]
+    fn a_second_writer_does_not_continue_an_open_line() {
+        // The shell's prompt and the echo of what is typed are one writer on one line.
+        assert!(!starts_its_own_line(true, 7, 7));
+        // A program printing while the prompt is up starts a line of its own, so the
+        // prompt is not continued into `# wlpanel: ready`.
+        assert!(starts_its_own_line(true, 7, 9));
+        // A line with its terminator is nobody's: either writer may start the next one.
+        assert!(!starts_its_own_line(false, 7, 9));
     }
 
     #[test]

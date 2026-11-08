@@ -86,13 +86,7 @@ pub fn sh(_args: &[&str]) -> i32 {
             // done` / `[pid] terminated (signal N)` reports appear in
             // order — prompt-time reaping is the pattern.
             reap_jobs();
-            // The prompt is a line of its own, terminator included, and this is why: the
-            // console is shared with the session's programs, which write whenever they
-            // have something to say. A prompt left open on the line would have their
-            // output land inside it (`wlpanel: ready pid=# 23`), and a prompt with text
-            // after it is not a prompt to anything reading the console. Written in one
-            // call, so nothing can be interleaved into the prompt itself either.
-            write_out(b"# \n");
+            write_out(b"# ");
             let line_len = read_line(&mut ed, &mut buf);
             if line_len == LINE_EOF {
                 // ^D at an empty prompt: exit the shell.
@@ -389,16 +383,16 @@ impl Editor {
         self.cur = n;
     }
 
-    /// Blank the current row and redraw the line, positioning the display
-    /// cursor at the editor cursor. The blank is `SCR_COLS - 1` wide so it
-    /// never wraps in wterm (exactly 80 spaces would push the 80th cell onto
-    /// the next row). The prompt is on the row above, so the line is the
-    /// whole row here.
+    /// Blank the current row and redraw the prompt + line, positioning the
+    /// display cursor at the editor cursor. The blank is `SCR_COLS - 1` wide
+    /// so it never wraps in wterm (exactly 80 spaces would push the 80th
+    /// cell onto the next row).
     fn redraw_line(&mut self) {
         let spaces = [b' '; SCR_COLS - 1];
         tty_write(b"\r");
         tty_write(&spaces);
         tty_write(b"\r");
+        tty_write(b"# ");
         tty_write(&self.line[..self.len]);
         for _ in 0..(self.len - self.cur) {
             tty_write(b"\x08");
@@ -537,6 +531,7 @@ impl Editor {
         tty_write(b"\r");
         tty_write(&spaces);
         tty_write(b"\r");
+        tty_write(b"# ");
         self.len = 0;
         self.cur = 0;
     }

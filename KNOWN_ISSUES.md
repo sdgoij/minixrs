@@ -2169,15 +2169,28 @@ are arch-specific, `[env]` is tooling/platform, not kernel.
   (`wlpanel: ready pid=# 23`, every write a separate syscall), `test-fbmmap` lost
   its prompt, and the console was garbage.
 
-  What holds is the shell ending its own prompt line: `sh` writes `# \n` in one
-  call, and the editor (`redraw_line`, `kill_line`) no longer reprints the prompt
-  because the edit line no longer contains it. With the prompt closed by its
-  writer, a program's line can land before it or after it and the prompt is intact
-  either way. The session manager keeps its delay for the `exec` overlap only.
-  Gates: `tools/rc_probe.py`, which types nothing and waits for the start line, the
-  `# ` prompt on a line of its own, and the panel's ready line, plus every tsv
-  scenario, which needs the `# ` prompt.
-  (`crates/userland/src/shell.rs`, `crates/userland/src/rc.rs`,
+  What holds is the tty keeping a line to its writer. Every console line has an
+  owner: the process that opened it and left it without a terminator. A write from
+  another process starts on a line of its own, so the shell's prompt stays `# ` with
+  the cursor after it, the editor's echo of what is typed shares the shell's
+  endpoint and is untouched, and the panel's line is pushed down. The prompt stays
+  inline, which is the only shape a CLI has.
+
+  That needed a wire fix as well: VFS sends the *writer's* endpoint in `m2_i3` of a
+  `CDEV_WRITE` (the same field a read carries a reader in, and the id VFS matches
+  the reply by), but `do_write` stored the *sender*, which is VFS for every write,
+  so all writers looked alike and nothing could tell them apart. `tty_outcaller`
+  is the process now; `tty_outgrant` went with it, because the write path carries
+  no grant (the chunk is inline in `m2_l3`). The session manager keeps its delay
+  for the `exec` overlap only.
+
+  What an interleaved write still costs: the prompt is pushed up and the command
+  typed at it appears on the line below by itself. That is what any console does
+  when a program writes over a prompt; without line editing in the tty it cannot be
+  redrawn. Gates: `tools/rc_probe.py`, which types nothing and looks for the start
+  line, the `# ` prompt as a line of its own, and the panel's ready line, plus every
+  tsv scenario, which needs the `# ` prompt.
+  (`crates/servers/src/tty.rs`, `crates/userland/src/rc.rs`,
   `crates/boot-image/src/manifest.rs`)
 - **A surface's pixels and its hit box came from two different places
   (2026-11-08, fixed).** The server works out where an anchored layer surface
