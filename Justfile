@@ -825,6 +825,26 @@ test-wlgl-x86 boot-timeout="60": wlgl-x86 boot-image-x86
     @just _assert-qemu-log target/test-wlgl-x86.log "wlgl: PASS"
     @echo "wlgl: a GL surface rendered on the render node, committed through the compositor, and read back from /dev/fb (x86_64)"
 
+# gui: build /bin/gui, the in-house renderer client (`gui.md` milestone M1). Like /bin/wlgl it
+# is a dynamic image that loads Mesa, but the GL half is the `render` crate rather than a C
+# object, and it draws a pass (clear, quad, glyph quads) instead of a triangle.
+gui-x86: userland-x86 dynlib-x86
+    python tools/build-mesa.py x86 --stage
+    @test -f target/mesa/x86/lib/libEGL.so.1 || (echo 'gui: no Mesa DSOs — run `just build-mesa x86 --build` first' >&2; exit 1)
+    python tools/build-gui.py x86
+    @echo "gui: /bin/gui built and the Mesa DSOs staged (x86_64)"
+
+# The M1 gate: the in-house renderer draws a quad and a line of text into a wl_shm pool,
+# /sbin/wlserver presents it, and the client checks /dev/fb. The guest has no GL device, so
+# Mesa takes softpipe and the gate runs headless, like `test-gltriangle-x86`.
+test-gui-x86 boot-timeout="120": gui-x86 boot-image-x86
+    @just _assert-qemu-version qemu-system-x86_64
+    M=target/mesa/x86; E="/lib/libdrm.so.2=$M/lib/libdrm.so.2;/lib/libEGL.so.1=$M/lib/libEGL.so.1;/lib/libgbm.so.1=$M/lib/libgbm.so.1;/lib/libexpat.so.1=$M/lib/libexpat.so.1;/lib/libgallium-25.3.6.so=$M/lib/libgallium-25.3.6.so;/lib/libGLESv2.so.2=$M/lib/libGLESv2.so.2;/lib/libz.so.1=$M/lib/libz.so.1;/lib/swrast_dri.so=$M/lib/swrast_dri.so;/bin/gui=$M/bin/gui"; MINIXFS_EXTRA="$E" MINIXFS_BLOCKS=16384 cargo run -q -p boot-image --bin mkminixfs --release -- x86_64
+    @just mkfs-x86
+    FEED_SCENARIO=tools/smoke/gui.tsv sh tools/smoke/feed.sh target/test-gui-x86.log {{boot-timeout}} qemu-system-x86_64 -nographic -m 512M -no-reboot -vga none -device bochs-display,id=fb0 -kernel target/images/x86_64-pc-minix/minix-x86-boot.elf -drive if=none,id=disk0,file=target/images/x86_64-pc-minix/disk.img,format=raw,cache=writethrough -device virtio-blk-pci,disable-legacy=on,drive=disk0 -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0 -device virtio-tablet-pci,display=fb0
+    @just _assert-qemu-log target/test-gui-x86.log "gui: PASS"
+    @echo "gui: a quad and a line of text from the in-house renderer, presented through the compositor, and read back from /dev/fb (x86_64)"
+
 # gbmtest: build /bin/gbmtest, the GBM create/export probe (§6.10 stage 3d-b-3). It links
 # `libgbm` and `libdrm` and includes the GBM/libdrm headers from the source checkouts, so it
 # is built from `just build-mesa x86 --build` like the DSOs are.

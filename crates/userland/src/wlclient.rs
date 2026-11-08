@@ -481,6 +481,125 @@ fn check_triangle(fb: *const u32) -> Result<(), i32> {
     Ok(())
 }
 
+// ---- /bin/gui: the in-house renderer client (gui.md M1) ----
+
+#[cfg(target_os = "minix")]
+const GUI_WIDTH: i32 = 256;
+#[cfg(target_os = "minix")]
+const GUI_HEIGHT: i32 = 64;
+/// XRGB8888 for the quad (R=0x30, G=0x80, B=0xFF).
+#[cfg(target_os = "minix")]
+const GUI_QUAD_COLOR: u32 = 0x0030_80FF;
+#[cfg(target_os = "minix")]
+const GUI_TEXT_COLOR: u32 = 0x00FF_FFFF;
+
+/// `/bin/gui`: draw a background, a quad and one line of text with the in-house
+/// renderer, present through `/sbin/wlserver`, and check `/dev/fb`.
+#[cfg(target_os = "minix")]
+pub fn wl_gui(_args: &[&str]) -> i32 {
+    match run_gui() {
+        Ok(()) => {
+            write_out(b"gui: PASS\n");
+            0
+        }
+        Err(code) => code,
+    }
+}
+
+#[cfg(target_os = "minix")]
+fn run_gui() -> Result<(), i32> {
+    present(b"gui: ", GUI_WIDTH, GUI_HEIGHT, paint_gui, check_gui)
+}
+
+#[cfg(target_os = "minix")]
+fn paint_gui(pool: *mut u8, width: i32, height: i32) -> Result<(), i32> {
+    use render::gl::Gl;
+    use render::pass::{Color, Element, Pass};
+    use render::text::{Atlas, layout_line};
+    use render::{Point, Rect};
+
+    let mut gl = Gl::new(width, height).map_err(|_| fail(50, b"gui: the GL context failed\n"))?;
+    if let Some(name) = gl.renderer_name() {
+        write_out(b"gui: GL_RENDERER=");
+        write_out(name.as_bytes());
+        write_out(b"\n");
+    }
+
+    let atlas = Atlas::from_bitmap_font(&crate::fbfont::FONT_8X16);
+    let atlas_texture = gl
+        .create_texture_rgba(atlas.width(), atlas.height(), atlas.pixels())
+        .map_err(|_| fail(51, b"gui: the glyph atlas did not upload\n"))?;
+
+    let mut pass = Pass::new(Rect::new(0, 0, width, height));
+    pass.add(Element::Clear {
+        color: Color::BLACK,
+    });
+    pass.add(Element::Rect {
+        rect: Rect::new(width / 4, height / 2, width / 2, height / 2),
+        color: Color::rgba(0x30, 0x80, 0xFF, 255),
+    });
+    for glyph in layout_line(&atlas, b"Hello, minix", Point::new(8, 8), 1) {
+        pass.add(Element::Texture {
+            rect: glyph.rect,
+            source: glyph.source,
+            texture: atlas_texture,
+            opaque: false,
+        });
+    }
+
+    gl.render(&pass)
+        .map_err(|_| fail(52, b"gui: the frame did not render\n"))?;
+
+    let dst = unsafe { core::slice::from_raw_parts_mut(pool, (width * height * 4) as usize) };
+    gl.read_into(dst)
+        .map_err(|_| fail(53, b"gui: the readback failed\n"))
+}
+
+#[cfg(target_os = "minix")]
+fn check_gui(fb: *const u32) -> Result<(), i32> {
+    let background = unsafe { core::ptr::read_volatile(fb) };
+    let quad_x = GUI_WIDTH as usize / 2;
+    let quad_y = (GUI_HEIGHT / 2 + GUI_HEIGHT / 4) as usize;
+    let quad = unsafe { core::ptr::read_volatile(fb.add(quad_y * FB_WIDTH + quad_x)) };
+    if background != 0 || quad != GUI_QUAD_COLOR {
+        write_err(b"gui: background is 0x");
+        print_hex(background);
+        write_err(b", quad 0x");
+        print_hex(quad);
+        write_err(b"\n");
+        return Err(fail(54, b"gui: the quad did not reach /dev/fb\n"));
+    }
+
+    // The atlas is drawn 1:1, so any inked pixel of 'H' must hold the text colour
+    // at the same place the font table says the ink is.
+    let glyph = crate::fbfont::FONT_8X16[(b'H' - 0x20) as usize];
+    let Some((column, row)) = first_ink(&glyph) else {
+        return Err(fail(55, b"gui: the font has no ink\n"));
+    };
+    let x = 8 + column;
+    let y = 8 + row;
+    let pixel = unsafe { core::ptr::read_volatile(fb.add(y * FB_WIDTH + x)) };
+    if pixel != GUI_TEXT_COLOR {
+        write_err(b"gui: text pixel is 0x");
+        print_hex(pixel);
+        write_err(b"\n");
+        return Err(fail(56, b"gui: the text did not reach /dev/fb\n"));
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "minix")]
+fn first_ink(glyph: &[u8; 16]) -> Option<(usize, usize)> {
+    for (row, bits) in glyph.iter().enumerate() {
+        for column in 0..8 {
+            if bits & (0x80 >> column) != 0 {
+                return Some((column, row));
+            }
+        }
+    }
+    None
+}
+
 /// Print a `u32` as eight lowercase hex digits.
 fn print_hex(v: u32) {
     const HEX: &[u8; 16] = b"0123456789abcdef";

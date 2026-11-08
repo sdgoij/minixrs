@@ -16,6 +16,7 @@ workspace = true
 minix-rt = { path = "../minix-rt" }
 minix-std = { path = "../minix-std" }
 minix-util = { path = "../minix-util" }
+render = { path = "../render" }
 wayland = { path = "../wayland" }
 
 # Binary targets — these are #![no_std] / #![no_main] embedded MINIX

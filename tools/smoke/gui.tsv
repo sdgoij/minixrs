@@ -1,0 +1,14 @@
+# The `just test-gui-x86` scenario: /bin/gui draws a background, a quad and one
+# line of text with the in-house renderer, presents the frame through
+# /sbin/wlserver, and reads it back from /dev/fb. `gui.md` milestone M1's gate.
+#
+#   FEED_SCENARIO=tools/smoke/gui.tsv sh tools/smoke/feed.sh <log> <timeout> <qemu command…>
+#
+# The client, the Mesa DSOs and their dependencies are injected into the disk
+# image by the recipe, and the guest gets no GL device, so Mesa takes softpipe:
+# the gate runs on a headless machine the way the gltriangle gate does. The line
+# it must print is the whole gate: EGL initialised, the atlas uploaded, the pass
+# rendered and read back into the pool, the compositor presented it, and the
+# pixels in /dev/fb are the ones the client drew.
+
+/bin/gui	gui: PASS
