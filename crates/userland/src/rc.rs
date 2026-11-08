@@ -33,15 +33,30 @@ pub fn rc(_args: &[&str]) -> i32 {
     exec_shell();
 }
 
-/// Read `/etc/rc`. A missing file (an image from before this existed, or a
-/// filesystem without one) reads as empty, so the boot still reaches a shell.
+/// Read `/etc/rc`.
+///
+/// A boot process starts before every server behind it is in its loop: the first
+/// open of a regular file can fail or race the filesystem coming up, and the next
+/// one succeed. The attempts spin and yield in between, and a file that is never
+/// readable is reported rather than silently skipped, because a shell without the
+/// session's list looks exactly like a working boot.
 fn read_rc(text: &mut [u8; MAX_RC]) -> usize {
-    let Ok(fd) = (unsafe { minix_std::fs::open(RC_PATH, minix_std::fs::O_RDONLY, 0) }) else {
-        return 0;
-    };
-    let n = minix_rt::read(fd, text);
-    let _ = minix_std::fs::close(fd);
-    if n > 0 { n as usize } else { 0 }
+    for attempt in 0..32 {
+        if let Ok(fd) = unsafe { minix_std::fs::open(RC_PATH, minix_std::fs::O_RDONLY, 0) } {
+            let n = minix_rt::read(fd, text);
+            let _ = minix_std::fs::close(fd);
+            return if n > 0 { n as usize } else { 0 };
+        }
+        for _ in 0..50_000 {
+            core::hint::spin_loop();
+        }
+        // A syscall to another server is what lets that server run.
+        if attempt % 4 == 3 {
+            let _ = minix_std::process::getpid();
+        }
+    }
+    crate::write_err(b"rc: /etc/rc could not be read\n");
+    0
 }
 
 fn trim(line: &[u8]) -> &[u8] {

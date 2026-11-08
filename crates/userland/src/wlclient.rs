@@ -2226,6 +2226,17 @@ fn run_extra() -> Result<(), i32> {
         return Err(fail(175, b"wlxe: the panel covered more than its size\n"));
     }
 
+    // The base window commits again: a toplevel's later commit must not paint over a
+    // layer surface, which is what keeps a panel above the windows it launches.
+    send_req(conn, &mut req, |q| {
+        client.damage(surface, 0, 0, width, height, q)
+    })?;
+    send_req(conn, &mut req, |q| client.commit(surface, q))?;
+    await_release(conn, &client, buffer, &mut inbuf, &mut chunk)?;
+    if read_px(fb, panel_x + 4, 4) != PANEL_COLOR {
+        return Err(fail(182, b"wlxe: the window painted over the panel\n"));
+    }
+
     let _ = unsafe { vmem::munmap(pool, size as usize) };
     let _ = unsafe { vmem::munmap(pmap, psize as usize) };
     let _ = unsafe { vmem::munmap(umap, usize_ as usize) };
@@ -2902,6 +2913,11 @@ pub fn wl_panel(_args: &[&str]) -> i32 {
 
 #[cfg(target_os = "minix")]
 const PANEL_HEIGHT: i32 = 32;
+/// How wide the panel is. It holds one launcher today, so it is a strip anchored
+/// to the output's right edge rather than a bar across the top: a full-width bar
+/// would cover the top-left corner, where a window at the origin draws.
+#[cfg(target_os = "minix")]
+const PANEL_WIDTH: i32 = 200;
 /// The launcher button's width inside the panel.
 #[cfg(target_os = "minix")]
 const PANEL_BUTTON_WIDTH: i32 = 72;
@@ -2980,9 +2996,8 @@ fn run_panel() -> Result<(), i32> {
     send_req(conn, &mut req, |q| client.get_pointer(seat, q))?;
     send_req(conn, &mut req, |q| client.get_keyboard(seat, q))?;
 
-    // The panel spans the output's width at the top. The height is the one row
-    // the widget layer needs plus its padding, so the surface and the widget tree
-    // agree without a second measurement.
+    // The panel is a strip at the top-right. Placement is the anchor's job, so the
+    // surface's own coordinates start at zero and the pointer arrives in them.
     let surface = send_req(conn, &mut req, |q| client.create_surface(compositor, q))?;
     let panel = send_req(conn, &mut req, |q| {
         client.get_layer_surface(
@@ -2995,12 +3010,12 @@ fn run_panel() -> Result<(), i32> {
         )
     })?;
     send_req(conn, &mut req, |q| {
-        client.set_layer_size(panel, FB_WIDTH as u32, PANEL_HEIGHT as u32, q)
+        client.set_layer_size(panel, PANEL_WIDTH as u32, PANEL_HEIGHT as u32, q)
     })?;
     send_req(conn, &mut req, |q| {
         client.set_anchor(
             panel,
-            protocol::LAYER_ANCHOR_TOP | protocol::LAYER_ANCHOR_LEFT,
+            protocol::LAYER_ANCHOR_TOP | protocol::LAYER_ANCHOR_RIGHT,
             q,
         )
     })?;

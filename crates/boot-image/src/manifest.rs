@@ -310,19 +310,19 @@ pub const WASM_MODULES: &[(&str, &str)] = &[
 /// One command per line, split on spaces; `#` starts a comment. `/bin/rc` names
 /// each program directly, because this file is read before a shell exists.
 ///
-/// The panel is not started here yet. Every surface is placed at the output's
-/// origin, so a top panel would cover any window there, and the compositor gates
-/// (`wlshm`, `wlxe`, `gui`) read pixels at the origin. The line is here, ready,
-/// for when surfaces can be placed or a session manager owns the layout.
+/// The panel is not started here. A program that allocates produces no output when
+/// `rc` starts it: `/bin/wlpanel` never reaches its `ready` line, and one boot ran
+/// it and never gave the shell a prompt. `/bin/echo` from the same file is fine, so
+/// the difference is in what the child does, not in the fork. `KNOWN_ISSUES`
+/// records it; start session programs from the shell until it is understood.
 pub const RC: &[u8] = b"# /etc/rc: what the session starts before the shell.\n\
 #\n\
 # One command per line, split on spaces; a line starting with `#` is a comment.\n\
 # There is no shell syntax: /bin/rc names each program directly, because this\n\
 # file is read before a shell exists.\n\
 #\n\
-# The panel waits for surface placement: every surface is at the origin today,\n\
-# so a top panel would cover any window there and the gates that read pixels at\n\
-# the origin. Uncomment it when a surface can be placed where it asked to be.\n\
+# A program that allocates does not run when started from here yet: see\n\
+# KNOWN_ISSUES. The panel is waiting for that, or for the session manager.\n\
 # /bin/wlpanel\n\
 /bin/echo rc: session\n";
 

@@ -464,6 +464,14 @@ mod imp {
         fn iter(&self) -> impl Iterator<Item = &SceneEntry> {
             self.entries[..self.n].iter().filter_map(|e| e.as_ref())
         }
+
+        /// Where a surface's top-left sits, or the origin when it is not in the
+        /// scene (a surface that committed nothing yet has nowhere else to be).
+        fn origin(&self, slot: usize, surface: u32) -> (i32, i32) {
+            self.iter()
+                .find(|e| e.slot == slot && e.surface == surface)
+                .map_or((0, 0), |e| (e.x, e.y))
+        }
     }
 
     /// The topmost scene entry under a point, if any.
@@ -1164,16 +1172,25 @@ mod imp {
         }
     }
 
-    /// Emit a pointer move at the tracked position.
+    /// Emit a pointer move at the tracked position, relative to `origin`.
+    ///
+    /// `wl_pointer.motion` carries surface-local coordinates, so a window placed
+    /// away from the output's origin sees the pointer where it is inside *itself*.
     fn motion(
         server: &mut Server,
         st: &InputState,
+        origin: (i32, i32),
         time: u32,
         reply: &mut DispatchBuf<'_>,
     ) -> bool {
         // 24.8 fixed point, which is what `wl_pointer.motion` carries.
         server
-            .send_pointer_motion(time, st.ptr.0 << 8, st.ptr.1 << 8, reply)
+            .send_pointer_motion(
+                time,
+                (st.ptr.0 - origin.0) << 8,
+                (st.ptr.1 - origin.1) << 8,
+                reply,
+            )
             .is_ok()
     }
 
@@ -1484,7 +1501,7 @@ mod imp {
             }
             if let Some((slot, surface)) = want {
                 move_focus(&mut clients, &mut focus, slot, surface);
-                point_at(&mut clients, slot, &istate);
+                point_at(&mut clients, slot, &istate, scene.origin(slot, surface));
             }
 
             // The window under the pointer owns the focus once the pointer moves over
@@ -1492,8 +1509,14 @@ mod imp {
             // gate sees each handover: a key injected right after a move is dropped by
             // the guest's input ring, so a client cannot prove two focus changes with
             // two keys.
-            if pump_input(&mut clients, &mut idle, &mut idle_out, focus, &mut istate)
-                && let Some((slot, surface)) = hit_test(&scene, istate.ptr.0, istate.ptr.1)
+            if pump_input(
+                &mut clients,
+                &mut idle,
+                &mut idle_out,
+                focus,
+                &mut istate,
+                focus.map_or((0, 0), |(slot, surface)| scene.origin(slot, surface)),
+            ) && let Some((slot, surface)) = hit_test(&scene, istate.ptr.0, istate.ptr.1)
                 && focus != Some((slot, surface))
             {
                 let mut line = [0u8; 40];
@@ -1503,7 +1526,7 @@ mod imp {
                 push(&mut line, &mut at, b"\n");
                 report(&line[..at]);
                 move_focus(&mut clients, &mut focus, slot, surface);
-                point_at(&mut clients, slot, &istate);
+                point_at(&mut clients, slot, &istate, scene.origin(slot, surface));
             }
         }
     }
@@ -1543,10 +1566,15 @@ mod imp {
     /// without one and `motion` is only emitted when the pointer moves. A client
     /// that takes the focus on the last step of a move would otherwise believe
     /// the pointer is at (0, 0) and read the next click at the wrong place.
-    fn point_at(clients: &mut [Option<Client>; MAX_CLIENTS], slot: usize, st: &InputState) {
+    fn point_at(
+        clients: &mut [Option<Client>; MAX_CLIENTS],
+        slot: usize,
+        st: &InputState,
+        origin: (i32, i32),
+    ) {
         if let Some(c) = clients[slot].as_mut() {
             let mut reply = DispatchBuf::new(&mut c.out);
-            if motion(&mut c.server, st, now_ms(), &mut reply) {
+            if motion(&mut c.server, st, origin, now_ms(), &mut reply) {
                 let n = reply.len();
                 if n > 0 {
                     let _ = uds::send(c.conn, &c.out[..n]);
@@ -1566,6 +1594,7 @@ mod imp {
         idle_out: &mut [u8],
         focus: Option<(usize, u32)>,
         st: &mut InputState,
+        origin: (i32, i32),
     ) -> bool {
         match focus
             .and_then(|(slot, _)| clients.get_mut(slot))
@@ -1578,7 +1607,7 @@ mod imp {
                 // not one jump to wherever the device ended up.
                 let moved = step_ptr(st);
                 if moved {
-                    motion(&mut c.server, st, now_ms(), &mut reply);
+                    motion(&mut c.server, st, origin, now_ms(), &mut reply);
                 }
                 let n = reply.len();
                 if n > 0 {

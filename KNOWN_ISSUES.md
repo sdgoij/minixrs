@@ -2128,12 +2128,28 @@ are arch-specific, `[env]` is tooling/platform, not kernel.
   `crates/kernel/build.rs` refuses a dest that is not `/bin/`, `/sbin/` or
   `/etc/`, naming the exclusion in its message.
 - **A probe predicate that ends in `\n` never matches the guest's console
-  (2026-11-08).** The serial console runs with `ONLCR`, so every `\n` a process
+  (2026-11-08).** The serial console runs with ONLCR, so every `\n` a process
   writes leaves the tty as `\r\n`. The first version of `tools/wldemo_probe.py`
   waited for a whole line including its terminator and timed out against a log
   that visibly contained that line. Match the content and not the newline (or
   strip the `\r`), and expect the same from any check of a captured guest log
   written on a Windows host, where the file keeps the CRLF.
+- **A program the `/etc/rc` list starts before the shell produces no output when
+  it allocates (2026-11-08, open, not diagnosed).** `/bin/rc` forks each line and
+  then execs `/bin/sh`. `/bin/echo rc: session` runs and its line appears, but
+  `/bin/wlpanel` never reaches its `wlpanel: ready` line, and one boot that had it
+  in the list never printed the shell prompt either, so `rc` sometimes does not
+  get as far as the shell. Nothing is reported by either side: no fork error, no
+  `rc: /etc/rc could not be read`, no client failure line. The same panel run from
+  the shell works, and so does `/bin/wldemo`, which also allocates, so the
+  difference is not allocation by itself but where in the boot it happens. Both of
+  `rc`'s children are forked from the process `init` exec'd, so the suspects are
+  `brk` and the address-space side of `fork` when the parent descends from a boot
+  process (`pm::do_fork` copies the mproc entry and calls nothing on VM's side).
+  The rc list therefore starts only `/bin/echo`; session programs stay commented
+  until this is understood, and a session manager, which runs as a normal process
+  started by the shell, is the way around it. (`crates/userland/src/rc.rs`,
+  `crates/boot-image/src/manifest.rs`)
 
   It has to be an `export` and not a per-line prefix, which is the second half
   of the trap: `just run` re-enters `just` (`run` → `run-x86`), and the value is
