@@ -35,10 +35,15 @@ What we keep and build on:
 - The in-house Wayland server (`/sbin/wlserver`) and `crates/wayland`.
 - `wl_shm` and dmabuf buffer passing, already exercised by the existing clients.
 - The EGL / GLES composition probes as the reference for the render path:
-  `tools/egl_bo_probe.c`, `tools/compose_probe.c`, `tools/wlcompose_render.c`,
+  `tools/wlgl_render.c`, `tools/wlcompose_render.c`,
   `tools/wldmabufgl_render.c`.
 - The input server (`/sbin/input`) and `/dev/fb`.
 - Mesa (MIT). Nothing else is load-bearing.
+
+Hyprland was measured as the remaining candidate and is not a base either:
+`src/` is twice the size of `cosmic-comp`, in C++26, on a larger Linux-only
+dependency set. Its licence and its layering make it the better reference,
+and `.notes/hyprland.md` records what to take from it.
 
 ## 2. Layers and who owns them
 
@@ -118,3 +123,26 @@ the last milestone because it is where the unbounded work lives.
 - Whether the panel speaks `layer-shell` or a private protocol on our server.
 - Whether the default present path is `wl_shm` or dmabuf, and what that means
   for clients that ship both.
+
+## 9. Reference implementations
+
+Hyprland is the design reference, not a base: commit `a8d9a4e`, measurements
+and reasoning in `.notes/hyprland.md`. Four pieces of it are BSD-3-Clause and
+worth translating or copying:
+
+- **Render pass list and damage regions** (`src/render/pass/`, 1,553 lines).
+  Elements accumulate per frame; `simplify()` walks them in reverse,
+  subtracting each one's opaque region from the damage and dropping the
+  rest. Adopt the shape at M1. Draw order decided ad hoc gets rewritten at
+  M2, which is the rework the gates exist to prevent.
+- **Renderer interfaces** (`src/render/{Texture,Framebuffer,Renderbuffer}.hpp`,
+  `ElementRenderer.hpp`): texture, framebuffer and element-renderer traits,
+  so the scene is independent of GLES calls.
+- **Layout algorithms** (`src/layout/algorithm/`, 7,207 lines; dwindle 868,
+  master 1,399, monocle 295, floating 311): one tiled and one floating
+  algorithm per space behind a small interface, which maps onto two traits.
+- **GLSL ES 3.00 shaders** (`src/render/shaders/glsl/`): shadow, border,
+  rounding, and the quad and texture pair. Their includes are resolved by
+  glslang, so ours need a textual resolver instead.
+
+Provenance goes in the file that takes the code, as with `.refs/minix-3.3.0`.

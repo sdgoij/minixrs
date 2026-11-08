@@ -13,6 +13,7 @@ tools/wasm-browser/build/
 # only, so they are ignored rather than committed.
 .refs/wayland/
 .refs/wayland-protocols/
+.refs/hyprland/
 
 # The published demo is the one place build output *is* committed: GitHub Pages serves `docs/`
 # straight out of the repository, so `just publish-wasm` stages the artifacts there on purpose
