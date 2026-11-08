@@ -2170,6 +2170,18 @@ are arch-specific, `[env]` is tooling/platform, not kernel.
   nothing at all and waits for the start line, the `# ` prompt on a line of its
   own, and the panel's ready line.
   (`crates/userland/src/rc.rs`, `crates/boot-image/src/manifest.rs`)
+- **A surface's pixels and its hit box came from two different places
+  (2026-11-08, fixed).** The server works out where an anchored layer surface
+  sits (`wayland::server::place`) and the scene carries it, which is what
+  `hit_test` and the focus used. `present` did not read it: a shm commit that was
+  not the whole output was blitted at its damage rectangle's own origin, so every
+  such commit landed at (0, 0). A toplevel is at the origin, so no window gate
+  could see it, and `tools/wlpanel_probe.py` clicked the output's right edge and
+  got an answer from a panel drawn in the top-left corner. `present` and
+  `present_dmabuf` now take the surface's place and offset the blit by it, and
+  the panel probe reads the display itself (a QMP screendump: the strip at the
+  right edge, the boot pattern's red still at the origin) so the two cannot part
+  again. (`crates/servers/src/wlserver.rs`)
 - `[env]` `just test-boot-riscv64`/`test-qemu-riscv64` (and the aarch64
   equivalents) overwrote the normal kernel binary via the shared cargo
   output path, so a later `just build-riscv64` could report "Finished"

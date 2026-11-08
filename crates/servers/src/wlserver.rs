@@ -393,8 +393,9 @@ mod imp {
 
     /// The compositor's surface list (`.notes/wayland.md` §6.10, 3d-b-5c). `wlserver` has no
     /// other scene: a commit lands here, and the list is what the helper is asked to compose.
-    /// Every surface is placed at the output's origin — the port has no placement model yet (2e
-    /// accepts anchors and geometry and ignores them), and 3d-b-5's gate needs none.
+    /// Each entry carries the place the server worked out for the surface: a layer surface lands
+    /// on the edges it anchored to, and every other surface at the output's origin, because there
+    /// is no window placement policy yet. Both the composited path and a plain blit use it.
     struct Scene {
         entries: [Option<SceneEntry>; MAX_SCENE],
         n: usize,
@@ -749,6 +750,12 @@ mod imp {
     /// buffer, so it is never left stale. The pointer's cursor image, if a client set
     /// one, is then drawn over the frame.
     ///
+    /// `origin` is where the surface sits in the scene, and it is what places the blit:
+    /// a toplevel is at the output's origin, but an anchored layer surface is not, and
+    /// painting it at (0, 0) would put the panel in the wrong corner. Only the scanout
+    /// fast path below ignores it, because a buffer that is the whole output is the
+    /// frame whatever the surface asked for.
+    ///
     /// Each pool is mapped read-only for as long as its copy takes: the client owns
     /// those frames, and this process only reads them.
     fn present(
@@ -757,12 +764,13 @@ mod imp {
         dmabufs: &Pools,
         node: i32,
         c: &Commit,
+        origin: (i32, i32),
         ptr: (i32, i32),
         cursor: Option<CursorImage>,
         scene: &Scene,
     ) {
         if c.dmabuf {
-            if present_dmabuf(fb, dmabufs, node, c) {
+            if present_dmabuf(fb, dmabufs, node, c, origin) {
                 if let Some(cur) = cursor {
                     blit_cursor(fb, pools, &cur, ptr);
                 }
@@ -827,8 +835,8 @@ mod imp {
             // No damage named: take the whole buffer rather than risk staleness.
             None => {
                 let dst = Destination {
-                    x: 0,
-                    y: 0,
+                    x: origin.0,
+                    y: origin.1,
                     width: XRES as i32,
                     height: YRES as i32,
                 };
@@ -840,8 +848,8 @@ mod imp {
             Some(dmg) => {
                 if let Some((part, x, y)) = full.damage_slice(dmg) {
                     let dst = Destination {
-                        x,
-                        y,
+                        x: origin.0 + x,
+                        y: origin.1 + y,
                         width: XRES as i32,
                         height: YRES as i32,
                     };
@@ -870,7 +878,13 @@ mod imp {
     /// Anything but a full-output plane is read through the mapping and blitted, the `wl_shm`
     /// fallback and the only honest answer for a partial frame. Returns whether the frame
     /// reached the display.
-    fn present_dmabuf(fb: *mut u8, dmabufs: &Pools, node: i32, c: &Commit) -> bool {
+    fn present_dmabuf(
+        fb: *mut u8,
+        dmabufs: &Pools,
+        node: i32,
+        c: &Commit,
+        origin: (i32, i32),
+    ) -> bool {
         if node < 0 {
             report(b"wlserver: a dmabuf commit with no render node\n");
             return false;
@@ -930,8 +944,8 @@ mod imp {
         };
         let bytes = unsafe { core::slice::from_raw_parts(src, len) };
         let dst = Destination {
-            x: 0,
-            y: 0,
+            x: origin.0,
+            y: origin.1,
             width: XRES as i32,
             height: YRES as i32,
         };
@@ -1352,7 +1366,15 @@ mod imp {
                 }
                 if !composer.compose_and_present(scene, fb) {
                     present(
-                        fb, &c.pools, &c.dmabufs, c.node, &commit, ptr, cursor, scene,
+                        fb,
+                        &c.pools,
+                        &c.dmabufs,
+                        c.node,
+                        &commit,
+                        scene.origin(slot, commit.surface),
+                        ptr,
+                        cursor,
+                        scene,
                     );
                 }
                 let _ = c.server.release_buffer(commit.buffer, &mut reply);

@@ -12,9 +12,14 @@ The app's window covers the left of the output and the panel is on the right, so
 the second click is a plain repeat. The pointer also owns the keyboard focus, so
 leaving it over the panel and pressing Escape ends the panel.
 
+The panel's placement is checked on the display, not only through the protocol: a
+QMP screendump has to show the strip at the right edge with the boot pattern's red
+still at the origin.
+
 Exit 0 on success, 1 otherwise.
 """
 import json
+import os
 import socket
 import subprocess
 import sys
@@ -115,6 +120,45 @@ def key(q, name, down):
     })
 
 
+SCREEN = "target/wlpanel.ppm"
+
+
+def screendump(q):
+    """One frame as `(width, height, pixels)`, or `None`.
+
+    QEMU answers `screendump` before the file is complete, so the read waits on the
+    size the PPM header promises rather than on a sleep.
+    """
+    try:
+        os.unlink(SCREEN)
+    except OSError:
+        pass
+    if qmp_cmd(q, {"execute": "screendump", "arguments": {"filename": SCREEN}}) is None:
+        return None
+    deadline = time.time() + 10
+    while time.time() < deadline:
+        try:
+            with open(SCREEN, "rb") as f:
+                data = f.read()
+        except OSError:
+            data = b""
+        parts = data.split(b"\n", 3)
+        if len(parts) == 4 and parts[0] == b"P6":
+            dims = parts[1].split()
+            if len(dims) == 2:
+                w, h = int(dims[0]), int(dims[1])
+                if len(parts[3]) >= w * h * 3:
+                    return w, h, parts[3]
+        time.sleep(0.05)
+    return None
+
+
+def pxat(screen, x, y):
+    w, _h, px = screen
+    off = (y * w + x) * 3
+    return tuple(px[off:off + 3])
+
+
 def main():
     global qemu
     qemu = subprocess.Popen(QEMU, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
@@ -155,6 +199,27 @@ def main():
         # and a plain `threading.Lock` cannot be taken twice.
         return bytes(out).count(needle)
 
+    # Where the panel's frame lands, checked on the display rather than through the
+    # protocol: the server blits a commit at the surface's place in the scene, so the
+    # strip has to appear at the output's right edge. A server that painted every
+    # commit at (0, 0) put the panel in the top-left corner, where the pointer gates
+    # could not see it (they hit-test the scene's geometry, not the pixels) and the
+    # boot pattern's red was gone from the origin.
+    boot_red = (255, 0, 0)
+    boot_blue = (0, 0, 255)
+    painted = False
+    for _ in range(10):
+        if not ok:
+            break
+        screen = screendump(q)
+        if screen is not None:
+            painted = (pxat(screen, 0, 0) == boot_red
+                       and pxat(screen, OUT_W - PANEL_W + 150, 16) != boot_blue)
+            if painted:
+                break
+        time.sleep(0.5)
+    step(2, "the panel is drawn at the output's right edge", lambda: painted)
+
     # The session starts the panel, so nothing is typed here. Into the launcher
     # button, which is 4..76 by 4..28 in panel coordinates: the panel is 200 wide
     # at the output's right edge, so the click lands at 1024 - 200 + 20.
@@ -163,9 +228,9 @@ def main():
         time.sleep(1.0)
         click(q, True)
         click(q, False)
-    step(2, "the launcher took the click",
+    step(3, "the launcher took the click",
          lambda: count(b"wlpanel: launch") >= 1)
-    step(3, "the launcher started the app", lambda: b"wldemo: ready" in out)
+    step(4, "the launcher started the app", lambda: b"wldemo: ready" in out)
 
     # The app's window covers the left of the output; the panel is on the right.
     # Moving a little and clicking again must still reach the launcher.
@@ -174,16 +239,16 @@ def main():
         time.sleep(1.0)
         click(q, True)
         click(q, False)
-    step(4, "a second click reached the panel again",
+    step(5, "a second click reached the panel again",
          lambda: count(b"wlpanel: launch") >= 2)
-    step(5, "the second app started", lambda: count(b"wldemo: ready") >= 2)
+    step(6, "the second app started", lambda: count(b"wldemo: ready") >= 2)
 
     # The app the second click started took the focus when it mapped.
     if ok:
         key(q, "esc", True)
         time.sleep(0.1)
         key(q, "esc", False)
-    step(6, "the second app finished", lambda: count(b"wldemo: PASS") >= 1, 20)
+    step(7, "the second app finished", lambda: count(b"wldemo: PASS") >= 1, 20)
 
     # Nothing is focused now; a small move over the panel is what hands it back.
     if ok:
@@ -192,7 +257,7 @@ def main():
         key(q, "esc", True)
         time.sleep(0.1)
         key(q, "esc", False)
-    step(7, "the panel finished", lambda: b"wlpanel: PASS" in out, 20)
+    step(8, "the panel finished", lambda: b"wlpanel: PASS" in out, 20)
 
     q.close()
     if not ok:
