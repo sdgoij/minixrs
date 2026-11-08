@@ -174,6 +174,8 @@ pub const BOOT_BINS: &[(&str, &str)] = &[
     // `/bin/wlpanel` is the session panel: a layer surface across the top of the
     // output with a launcher button.
     ("/bin/wlpanel", "wlpanel"),
+    // `/bin/rc` runs `/etc/rc` and then becomes the shell: what init execs.
+    ("/bin/rc", "rc"),
     // `/bin/wlxd` is the Wayland Phase 2d damage and cursor client: it damages part
     // of a frame and checks the rest survives, then gives the pointer an image.
     ("/bin/wlxd", "wlxd"),
@@ -303,6 +305,27 @@ pub const WASM_MODULES: &[(&str, &str)] = &[
     ("/bin/ping", "program.async.wasm"),
 ];
 
+/// `/etc/rc`: what the session starts before the shell.
+///
+/// One command per line, split on spaces; `#` starts a comment. `/bin/rc` names
+/// each program directly, because this file is read before a shell exists.
+///
+/// The panel is not started here yet. Every surface is placed at the output's
+/// origin, so a top panel would cover any window there, and the compositor gates
+/// (`wlshm`, `wlxe`, `gui`) read pixels at the origin. The line is here, ready,
+/// for when surfaces can be placed or a session manager owns the layout.
+pub const RC: &[u8] = b"# /etc/rc: what the session starts before the shell.\n\
+#\n\
+# One command per line, split on spaces; a line starting with `#` is a comment.\n\
+# There is no shell syntax: /bin/rc names each program directly, because this\n\
+# file is read before a shell exists.\n\
+#\n\
+# The panel waits for surface placement: every surface is at the origin today,\n\
+# so a top panel would cover any window there and the gates that read pixels at\n\
+# the origin. Uncomment it when a surface can be placed where it asked to be.\n\
+# /bin/wlpanel\n\
+/bin/echo rc: session\n";
+
 /// Root-filesystem data files baked into the minixfs image: destination
 /// path, content, mode, uid, gid (binaries come from [`BOOT_BINS`]).
 ///
@@ -310,6 +333,7 @@ pub const WASM_MODULES: &[(&str, &str)] = &[
 /// (`sha256(salt || password)` hex, see `minix-std/src/passwd.rs`):
 /// `sha256("minix" || "test123")`.
 pub const BOOT_FILES: &[(&str, &[u8], u16, u16, u16)] = &[
+    ("/etc/rc", RC, 0o644, 0, 0),
     (
         "/etc/passwd",
         b"root::0:0:root:/:/bin/sh\n\

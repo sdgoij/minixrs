@@ -21,6 +21,9 @@ use core::sync::atomic::{AtomicI32, Ordering};
 /// server's text rendering).
 pub mod fbfont;
 
+/// The session's first steps before the shell, from `/etc/rc` — `/bin/rc`.
+pub mod rc;
+
 /// The `wl_shm` client gate — `/bin/wlclient` (`.notes/wayland.md` Phase 1b).
 pub mod wlclient;
 
@@ -3304,6 +3307,22 @@ pub fn errstr(err: i32) -> &'static [u8] {
 }
 
 /// init — first userspace process.
+/// `execve(path, [path], no environment)` for a boot path that does not return.
+///
+/// Returns the negated errno, which only happens when the image did not start.
+#[cfg(target_os = "minix")]
+unsafe fn exec_one(path: &core::ffi::CStr) -> i64 {
+    let argv: [*const u8; 2] = [path.as_ptr().cast(), core::ptr::null()];
+    unsafe {
+        minix_rt::execve(
+            path.as_ptr().cast(),
+            path.to_bytes_with_nul().len(),
+            argv.as_ptr(),
+            core::ptr::null(),
+        ) as i64
+    }
+}
+
 pub fn init(_args: &[&str]) -> i32 {
     // Print boot banner
     write_out(b"init: booting MINIX/Rust\n");
@@ -3357,20 +3376,19 @@ pub fn init(_args: &[&str]) -> i32 {
         }
     }
 
-    // Build argv: ["/bin/sh", null]
+    // The session starts with `/bin/rc`, which runs whatever `/etc/rc` names
+    // and then becomes the shell. An image without it (a root filesystem from an
+    // older build) is still bootable: the shell is what is tried next.
     #[cfg(target_os = "minix")]
-    let argv: [*const u8; 2] = [c"/bin/sh".as_ptr() as *const u8, core::ptr::null()];
-    #[cfg(target_os = "minix")]
-    let ret = unsafe {
-        minix_rt::execve(
-            c"/bin/sh".as_ptr() as *const u8,
-            c"/bin/sh".to_bytes_with_nul().len(),
-            argv.as_ptr(),
-            core::ptr::null(),
-        ) as i64
+    let ret = {
+        let mut ret = unsafe { exec_one(c"/bin/rc") };
+        if ret < 0 {
+            ret = unsafe { exec_one(c"/bin/sh") };
+        }
+        ret
     };
     #[cfg(not(target_os = "minix"))]
-    let ret = -38i64; // ENOSYS on host
+    let ret = -38i64; // ENOSYS on the host build
     // If exec fails, print error and loop.
     write_err(b"init: exec failed: err=");
     let err = -ret as i32;

@@ -68,6 +68,18 @@ pub fn standard_initramfs(bins: &[(&'static str, Vec<u8>)]) -> Vec<u8> {
             data: data.clone(),
         });
     }
+    // `/etc/rc` is what `/bin/rc` reads before a shell exists, so it belongs in
+    // the initramfs even though the other data files are only in the root image.
+    entries.push(Entry {
+        name: "/etc",
+        mode: 0o040755,
+        data: Vec::new(),
+    });
+    entries.push(Entry {
+        name: "/etc/rc",
+        mode: 0o100644,
+        data: crate::manifest::RC.to_vec(),
+    });
     for &(path, mode, _major, _minor) in DEVICES {
         entries.push(Entry {
             name: path,

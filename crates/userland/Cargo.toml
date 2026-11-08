@@ -426,6 +426,12 @@ name = "wlpanel"
 path = "src/bin/wlpanel.rs"
 test = false
 
+# rc is what init execs: it runs /etc/rc's commands and then becomes the shell.
+[[bin]]
+name = "rc"
+path = "src/bin/rc.rs"
+test = false
+
 [[bin]]
 name = "wlxd"
 path = "src/bin/wlxd.rs"

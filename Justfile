@@ -1157,6 +1157,15 @@ test-wlpanel-x86: build-x86
     python tools/wlpanel_probe.py
     @echo "wlpanel: the launcher took a click on the layer surface (x86_64)"
 
+# rc: tools/rc_probe.py boots and types nothing. `/etc/rc`'s commands must appear
+# on their own, which is the whole chain from init to the program they name.
+test-rc-x86: build-x86
+    mkdir -p target/images/x86_64-pc-minix
+    cp target/trampoline.elf target/images/x86_64-pc-minix/minix-x86.elf
+    @just _assert-qemu-version qemu-system-x86_64
+    python tools/rc_probe.py
+    @echo "rc: /etc/rc's commands ran at boot before the shell (x86_64)"
+
 
 # wlxd: /bin/wlxd drives the Phase 2d damage and cursor path — it damages a small
 # rectangle and checks the rest of the frame survives, then gives the pointer an
