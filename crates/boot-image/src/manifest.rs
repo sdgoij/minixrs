@@ -165,6 +165,9 @@ pub const BOOT_BINS: &[(&str, &str)] = &[
     // `/bin/wlmotion` is the pointer-interpolation client: one window and a count of the
     // motion events an absolute move from the host produces.
     ("/bin/wlmotion", "wlmotion"),
+    // `/bin/wlpointer` is the pointer-follows-focus client: a full-output window under a
+    // 64x64 one, and the keys that move with the pointer between them.
+    ("/bin/wlpointer", "wlpointer"),
     // `/bin/wlxd` is the Wayland Phase 2d damage and cursor client: it damages part
     // of a frame and checks the rest survives, then gives the pointer an image.
     ("/bin/wlxd", "wlxd"),

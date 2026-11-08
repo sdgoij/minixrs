@@ -1127,6 +1127,16 @@ test-wlmotion-x86: build-x86
     python tools/wlmotion_probe.py
     @echo "wlmotion: the pointer moved in steps to where the device landed (x86_64)"
 
+# wlpointer: tools/wlpointer_probe.py drives pointer-follows-focus — /bin/wlpointer maps
+# a full-output window under a 64x64 one, and moving the pointer between them must move
+# the focus and the keys with it.
+test-wlpointer-x86: build-x86
+    mkdir -p target/images/x86_64-pc-minix
+    cp target/trampoline.elf target/images/x86_64-pc-minix/minix-x86.elf
+    @just _assert-qemu-version qemu-system-x86_64
+    python tools/wlpointer_probe.py
+    @echo "wlpointer: the focus followed the pointer between two windows (x86_64)"
+
 
 # wlxd: /bin/wlxd drives the Phase 2d damage and cursor path — it damages a small
 # rectangle and checks the rest of the frame survives, then gives the pointer an

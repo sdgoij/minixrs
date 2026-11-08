@@ -1057,6 +1057,11 @@ fn peer_map_buffer(p: &mut Peer) -> Result<(), i32> {
     let (w, h) = p
         .size
         .ok_or_else(|| fail(73, b"wlx2: no configured size\n"))?;
+    peer_present(p, w, h)
+}
+
+/// Present a buffer of the given size on one peer's surface, at its origin.
+fn peer_present(p: &mut Peer, w: i32, h: i32) -> Result<(), i32> {
     if w <= 0 || h <= 0 {
         return Err(fail(74, b"wlx2: the server configured no size\n"));
     }
@@ -1422,6 +1427,70 @@ fn run_motion() -> Result<(), i32> {
     write_out(b" y=");
     put_dec(last.1 as u32);
     write_out(b"\n");
+    Ok(())
+}
+
+/// `/bin/wlpointer`: the pointer-follows-focus gate.
+///
+/// Two connections: a full-output window below and a 64x64 window above it, both
+/// at the origin. The pointer is inside the small one near the top-left and over
+/// only the big one further out, so moving between those two points must move the
+/// focus, and the keys must follow it.
+pub fn wl_pointer(_args: &[&str]) -> i32 {
+    match run_pointer() {
+        Ok(()) => {
+            write_out(b"wlpointer: PASS\n");
+            0
+        }
+        Err(code) => code,
+    }
+}
+
+const POINTER_A: u32 = 0x00FF_0000;
+const POINTER_B: u32 = 0x0000_00FF;
+const POINTER_W: i32 = 64;
+const POINTER_H: i32 = 64;
+
+fn run_pointer() -> Result<(), i32> {
+    let mut peers = [peer_connect()?, peer_connect()?];
+    peers[0].color = POINTER_A;
+    peers[1].color = POINTER_B;
+
+    wait_peers(&mut peers, 400, |p| {
+        p[0].configure.is_some()
+            && p[0].size.is_some()
+            && p[1].configure.is_some()
+            && p[1].size.is_some()
+    })?;
+
+    for i in 0..2 {
+        let before = peers[i].callbacks;
+        peer_ack(&mut peers[i])?;
+        wait_peers(&mut peers, 400, |p| p[i].callbacks > before)?;
+    }
+
+    // A full-output window at the bottom, a 64x64 one at the top. Both start at
+    // the origin: the server has no placement model, and this gate needs none,
+    // only two different extents.
+    peer_present(&mut peers[0], FB_WIDTH as i32, FB_HEIGHT as i32)?;
+    peer_present(&mut peers[1], POINTER_W, POINTER_H)?;
+    wait_peers(&mut peers, 400, |p| {
+        p[0].releases >= 1 && p[1].releases >= 1
+    })?;
+    write_out(b"wlpointer: ready\n");
+
+    // The pointer starts at the centre, over the big window only. The probe moves it
+    // into the small one and then back out before the key, so the key must land on
+    // the big window; the server reports both focus changes on the serial console.
+    let (a0, b0) = (peers[0].keys, peers[1].keys);
+    wait_peers(&mut peers, 800, |p| p[0].keys + p[1].keys > a0 + b0)?;
+    if peers[1].keys != b0 {
+        return Err(fail(120, b"wlpointer: the key stayed on the top window\n"));
+    }
+    if peers[0].keys == a0 {
+        return Err(fail(121, b"wlpointer: no key reached the window below\n"));
+    }
+    write_out(b"wlpointer: key to A\n");
     Ok(())
 }
 

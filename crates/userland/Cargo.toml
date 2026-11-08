@@ -405,6 +405,13 @@ name = "wlmotion"
 path = "src/bin/wlmotion.rs"
 test = false
 
+# wlpointer is the pointer-follows-focus gate: a full-output window under a small
+# one, and keys that must follow the pointer between them.
+[[bin]]
+name = "wlpointer"
+path = "src/bin/wlpointer.rs"
+test = false
+
 [[bin]]
 name = "wlxd"
 path = "src/bin/wlxd.rs"

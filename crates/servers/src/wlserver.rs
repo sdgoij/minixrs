@@ -4,8 +4,8 @@
 //! a committed buffer to `/dev/fb`. The protocol itself is `crates/wayland`
 //! (pure, host-tested); this is the loop around it: accept clients, poll them all
 //! together, decode their requests, answer them, and composite a commit onto the
-//! display. It arbitrates a single focus between them, so input goes to the surface
-//! that last mapped a window (2c). It also serves
+//! display. It arbitrates a single focus between them: a surface's first commit
+//! takes it, and from then on the window under the pointer holds it (2c). It also serves
 //! the seat's keymap — [`KEYMAP_XKB`] into a `memfd`, handed to a client's keyboard
 //! by `SCM_RIGHTS` (`.notes/wayland.md` §6.12).
 //!
@@ -450,6 +450,20 @@ mod imp {
         fn iter(&self) -> impl Iterator<Item = &SceneEntry> {
             self.entries[..self.n].iter().filter_map(|e| e.as_ref())
         }
+    }
+
+    /// The topmost scene entry under a point, if any.
+    ///
+    /// The list runs bottom to top, so the last match is the one the pointer is
+    /// over. An entry with no area is not a target.
+    fn hit_test(scene: &Scene, x: i32, y: i32) -> Option<(usize, u32)> {
+        let mut hit = None;
+        for e in scene.iter() {
+            if x >= e.x && y >= e.y && x < e.x + e.width && y < e.y + e.height {
+                hit = Some((e.slot, e.surface));
+            }
+        }
+        hit
     }
 
     /// The socket `/bin/wlcompose serve` binds (`.notes/wayland.md` §6.10, 3d-b-5).
@@ -1446,23 +1460,56 @@ mod imp {
                 }
             }
             if let Some((slot, surface)) = want {
-                if let Some(old) = focus.map(|(s, _)| s).filter(|s| *s != slot)
-                    && let Some(c) = clients[old].as_mut()
-                {
-                    let mut reply = DispatchBuf::new(&mut c.out);
-                    let _ = c.server.set_focus(0, &mut reply);
-                    flush(c.conn, &reply);
-                }
-                if let Some(c) = clients[slot].as_mut() {
-                    let mut reply = DispatchBuf::new(&mut c.out);
-                    let _ = c.server.set_focus(surface, &mut reply);
-                    flush(c.conn, &reply);
-                }
-                focus = Some((slot, surface));
+                move_focus(&mut clients, &mut focus, slot, surface);
             }
 
-            pump_input(&mut clients, focus, &mut istate);
+            // The pointer is over the window it is over: moving it into another one
+            // hands the focus there, with the leave/enter pair that goes with it. The
+            // console line is how the gate sees each handover: a key injected right
+            // after a move is dropped by the guest's input ring, so the client cannot
+            // prove two focus changes with two keys.
+            if pump_input(&mut clients, focus, &mut istate)
+                && let Some((slot, surface)) = hit_test(&scene, istate.ptr.0, istate.ptr.1)
+                && focus != Some((slot, surface))
+            {
+                let mut line = [0u8; 40];
+                let mut at = 0usize;
+                push(&mut line, &mut at, b"wlserver: focus -> slot ");
+                push_dec(&mut line, &mut at, slot as u32);
+                push(&mut line, &mut at, b"\n");
+                report(&line[..at]);
+                move_focus(&mut clients, &mut focus, slot, surface);
+            }
         }
+    }
+
+    /// Give the input focus to a surface, telling whichever connection held it.
+    ///
+    /// A surface's first commit asks for focus, and moving the pointer over a
+    /// different window asks again; both go through here so the handover has one
+    /// path.
+    fn move_focus(
+        clients: &mut [Option<Client>; MAX_CLIENTS],
+        focus: &mut Option<(usize, u32)>,
+        slot: usize,
+        surface: u32,
+    ) {
+        if *focus == Some((slot, surface)) {
+            return;
+        }
+        if let Some(old) = (*focus).map(|(s, _)| s).filter(|s| *s != slot)
+            && let Some(c) = clients[old].as_mut()
+        {
+            let mut reply = DispatchBuf::new(&mut c.out);
+            let _ = c.server.set_focus(0, &mut reply);
+            flush(c.conn, &reply);
+        }
+        if let Some(c) = clients[slot].as_mut() {
+            let mut reply = DispatchBuf::new(&mut c.out);
+            let _ = c.server.set_focus(surface, &mut reply);
+            flush(c.conn, &reply);
+        }
+        *focus = Some((slot, surface));
     }
 
     /// Turn queued input into events for the focused connection — or, with nothing
@@ -1471,7 +1518,7 @@ mod imp {
         clients: &mut [Option<Client>; MAX_CLIENTS],
         focus: Option<(usize, u32)>,
         st: &mut InputState,
-    ) {
+    ) -> bool {
         match focus
             .and_then(|(slot, _)| clients.get_mut(slot))
             .and_then(|c| c.as_mut())
@@ -1481,17 +1528,20 @@ mod imp {
                 drain_input(&mut c.server, st, &mut reply);
                 // A long sweep arrives as a stream of motions: one step per tick,
                 // not one jump to wherever the device ended up.
-                if step_ptr(st) {
+                let moved = step_ptr(st);
+                if moved {
                     motion(&mut c.server, st, now_ms(), &mut reply);
                 }
                 let n = reply.len();
                 if n > 0 {
                     let _ = uds::send(c.conn, &c.out[..n]);
                 }
+                moved
             }
             None => {
                 let mut batch = [0u8; 48];
                 while fetch_input(&mut batch).is_some() {}
+                false
             }
         }
     }
