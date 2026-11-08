@@ -6,10 +6,14 @@
 //! pass list and the same damage rules over plain memory, which is enough for
 //! the window-server milestone: two surfaces, correct overlap, no corruption.
 //!
-//! Textures are `XRGB8888` and therefore opaque. The high byte of a client's
-//! `wl_shm` buffer is not alpha, and treating it as such would make every window
-//! transparent; the alpha-capable path belongs to the GL backend and the glyph
-//! atlas.
+//! Textures are `XRGB8888` and therefore opaque, unless they were made with
+//! [`Software::create_texture_rgba`], whose texels carry their own alpha and are
+//! blended over the destination. The high byte of a client's `wl_shm` buffer is
+//! not alpha, and treating it as such would make every window transparent; that
+//! is why the two formats are separate constructors rather than one flag. The
+//! alpha path is what the glyph atlas needs (its coverage *is* alpha), and it
+//! belongs here rather than only in the GL backend so a client with no Mesa can
+//! still draw text.
 //!
 //! Nothing here touches a file descriptor or a device, so the whole backend is
 //! host-tested against pixel buffers.
@@ -49,6 +53,9 @@ struct SoftTexture {
     width: u32,
     height: u32,
     pixels: Vec<u32>,
+    /// Texels are `RGBA8888` and blend over the destination; otherwise they are
+    /// `XRGB8888` and overwrite it.
+    alpha: bool,
 }
 
 /// A renderer over a caller-owned `XRGB8888` buffer.
@@ -105,6 +112,47 @@ impl<'a> Software<'a> {
             width,
             height,
             pixels: pixels[..required].to_vec(),
+            alpha: false,
+        });
+        Ok(TextureId((self.textures.len() - 1) as u32))
+    }
+
+    /// Copy an `RGBA8888` image, four bytes per texel, and return the id elements
+    /// name it by.
+    ///
+    /// The alpha byte is coverage, so elements naming this texture must declare
+    /// `opaque: false` unless every texel is known to be opaque: the damage plan
+    /// uses that flag, not the pixels.
+    pub fn create_texture_rgba(
+        &mut self,
+        width: u32,
+        height: u32,
+        pixels: &[u8],
+    ) -> Result<TextureId, SoftError> {
+        if width == 0 || height == 0 {
+            return Err(SoftError::TextureSize);
+        }
+        let required = (width as usize)
+            .checked_mul(height as usize)
+            .ok_or(SoftError::TextureSize)?;
+        if pixels.len() < required * 4 {
+            return Err(SoftError::TextureSize);
+        }
+
+        let texels = pixels[..required * 4]
+            .chunks_exact(4)
+            .map(|texel| {
+                u32::from(texel[3]) << 24
+                    | u32::from(texel[0]) << 16
+                    | u32::from(texel[1]) << 8
+                    | u32::from(texel[2])
+            })
+            .collect();
+        self.textures.push(SoftTexture {
+            width,
+            height,
+            pixels: texels,
+            alpha: true,
         });
         Ok(TextureId((self.textures.len() - 1) as u32))
     }
@@ -146,6 +194,7 @@ impl<'a> Software<'a> {
             width: width as u32,
             height: height as u32,
             pixels,
+            alpha: false,
         });
         Ok(TextureId((self.textures.len() - 1) as u32))
     }
@@ -194,7 +243,22 @@ impl<'a> Software<'a> {
             for x in area.x..area.right() {
                 let u = source.x + (x - rect.x) * source.w / rect.w;
                 let u = u.clamp(0, texture_width - 1) as usize;
-                self.pixels[output_row + x as usize] = object.pixels[row + u];
+                let texel = object.pixels[row + u];
+                let at = output_row + x as usize;
+                if object.alpha {
+                    let alpha = (texel >> 24) as u8;
+                    if alpha != 0 {
+                        let color = Color::rgba(
+                            (texel >> 16) as u8,
+                            (texel >> 8) as u8,
+                            texel as u8,
+                            alpha,
+                        );
+                        self.pixels[at] = blend(self.pixels[at], color);
+                    }
+                } else {
+                    self.pixels[at] = texel;
+                }
             }
         }
     }
@@ -408,6 +472,62 @@ mod tests {
 
         software.render(&pass).unwrap();
         assert_eq!(pixel(&buffer, 0, 0), 0x0080_8080);
+    }
+
+    #[test]
+    fn an_alpha_texture_blends_its_coverage() {
+        let mut buffer = buffer();
+        let mut software = renderer(&mut buffer);
+        let texture = software
+            .create_texture_rgba(2, 1, &[255, 255, 255, 128, 255, 255, 255, 0])
+            .expect("the texture fits");
+
+        let mut pass = Pass::new(OUTPUT);
+        pass.add(Element::Texture {
+            rect: Rect::new(0, 0, 2, 1),
+            source: Rect::new(0, 0, 2, 1),
+            texture,
+            opaque: false,
+        });
+
+        software.render(&pass).unwrap();
+        // Half coverage over black is the midpoint; no coverage leaves it alone.
+        assert_eq!(pixel(&buffer, 0, 0), 0x0080_8080);
+        assert_eq!(pixel(&buffer, 1, 0), BLACK);
+    }
+
+    #[test]
+    fn an_alpha_texture_writes_an_opaque_texel_whole() {
+        let mut buffer = vec![BLUE; 64];
+        let mut software = renderer(&mut buffer);
+        let texture = software
+            .create_texture_rgba(1, 1, &[0, 255, 0, 255])
+            .expect("the texture fits");
+
+        let mut pass = Pass::new(OUTPUT);
+        pass.add(Element::Texture {
+            rect: Rect::new(0, 0, 1, 1),
+            source: Rect::new(0, 0, 1, 1),
+            texture,
+            opaque: false,
+        });
+
+        software.render(&pass).unwrap();
+        assert_eq!(pixel(&buffer, 0, 0), GREEN);
+    }
+
+    #[test]
+    fn an_rgba_texture_shorter_than_its_geometry_is_refused() {
+        let mut buffer = buffer();
+        let mut software = renderer(&mut buffer);
+        assert_eq!(
+            software.create_texture_rgba(2, 2, &[0u8; 12]).err(),
+            Some(SoftError::TextureSize)
+        );
+        assert_eq!(
+            software.create_texture_rgba(0, 1, &[]).err(),
+            Some(SoftError::TextureSize)
+        );
     }
 
     #[test]
