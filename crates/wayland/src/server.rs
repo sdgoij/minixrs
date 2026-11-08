@@ -135,6 +135,9 @@ pub struct Commit {
     pub dmabuf: bool,
     /// The plane's layout modifier (`hi<<32|lo`), meaningful only when `dmabuf`.
     pub modifier: u64,
+    /// The surface is a `zwlr_layer_surface_v1` (non-zero), which draws above the
+    /// toplevel windows whatever order they committed in.
+    pub layer: bool,
 }
 
 impl Commit {
@@ -797,6 +800,7 @@ impl Server {
                 damage: s.damage,
                 dmabuf: true,
                 modifier: b.modifier,
+                layer: s.layer != 0,
             });
         }
         let pool = self.obj(b.pool)?;
@@ -814,6 +818,7 @@ impl Server {
             damage: s.damage,
             dmabuf: false,
             modifier: 0,
+            layer: s.layer != 0,
         })
     }
 

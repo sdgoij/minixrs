@@ -373,6 +373,8 @@ mod imp {
     struct SceneEntry {
         slot: usize,
         surface: u32,
+        /// A layer surface, which draws above every toplevel.
+        layer: bool,
         fd: i32,
         width: i32,
         height: i32,
@@ -413,7 +415,9 @@ mod imp {
 
         /// Add the entry for a surface, or replace the one already there. An existing surface
         /// keeps its place, so the order the helper draws in is the order surfaces first
-        /// committed — the later a surface appeared, the higher it is.
+        /// committed — the later a surface appeared, the higher it is. Layer surfaces are the
+        /// exception: they go after every toplevel, because a panel is not a window that a
+        /// later commit may cover.
         fn put(&mut self, e: SceneEntry) {
             for i in 0..self.n {
                 if let Some(x) = self.entries[i]
@@ -424,10 +428,20 @@ mod imp {
                     return;
                 }
             }
-            if self.n < MAX_SCENE {
-                self.entries[self.n] = Some(e);
-                self.n += 1;
+            if self.n == MAX_SCENE {
+                return;
             }
+            let at = if e.layer {
+                self.n
+            } else {
+                self.entries[..self.n]
+                    .iter()
+                    .position(|x| x.is_some_and(|x| x.layer))
+                    .unwrap_or(self.n)
+            };
+            self.entries.copy_within(at..self.n, at + 1);
+            self.entries[at] = Some(e);
+            self.n += 1;
         }
 
         /// Drop every surface belonging to `slot`, so a client that goes away takes its windows
@@ -1289,6 +1303,7 @@ mod imp {
                         scene.put(SceneEntry {
                             slot,
                             surface: commit.surface,
+                            layer: commit.layer,
                             fd,
                             width: commit.width,
                             height: commit.height,
@@ -1305,6 +1320,7 @@ mod imp {
                     scene.put(SceneEntry {
                         slot,
                         surface: commit.surface,
+                        layer: commit.layer,
                         fd,
                         width: commit.width,
                         height: commit.height,
@@ -1471,11 +1487,11 @@ mod imp {
                 point_at(&mut clients, slot, &istate);
             }
 
-            // The pointer is over the window it is over: moving it into another one
-            // hands the focus there, with the leave/enter pair that goes with it. The
-            // console line is how the gate sees each handover: a key injected right
-            // after a move is dropped by the guest's input ring, so the client cannot
-            // prove two focus changes with two keys.
+            // The window under the pointer owns the focus once the pointer moves over
+            // it: that is what decides where a click goes. The console line is how a
+            // gate sees each handover: a key injected right after a move is dropped by
+            // the guest's input ring, so a client cannot prove two focus changes with
+            // two keys.
             if pump_input(&mut clients, &mut idle, &mut idle_out, focus, &mut istate)
                 && let Some((slot, surface)) = hit_test(&scene, istate.ptr.0, istate.ptr.1)
                 && focus != Some((slot, surface))

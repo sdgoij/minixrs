@@ -2092,8 +2092,66 @@ fn run_extra() -> Result<(), i32> {
     })?;
     await_decoration(conn, &client, decoration, &mut inbuf, &mut chunk)?;
 
+    // A popup: positioner-sized at 8x8, over the base window. The panel is not up
+    // yet, so this is the popup over the window alone.
+    let popup_surface = send_req(conn, &mut req, |q| client.create_surface(compositor, q))?;
+    let popup_xdg = send_req(conn, &mut req, |q| {
+        client.get_xdg_surface(wm_base, popup_surface, q)
+    })?;
+    let positioner = send_req(conn, &mut req, |q| client.create_positioner(wm_base, q))?;
+    send_req(conn, &mut req, |q| {
+        client.set_positioner_size(positioner, POPUP_W, POPUP_H, q)
+    })?;
+    send_req(conn, &mut req, |q| {
+        client.get_popup(popup_xdg, xdg_surface, positioner, q)
+    })?;
+    send_req(conn, &mut req, |q| client.commit(popup_surface, q))?;
+    let popup_serial =
+        await_popup_configure(conn, &client, popup_xdg, wm_base, &mut inbuf, &mut chunk)?;
+    send_req(conn, &mut req, |q| {
+        client.ack_configure(popup_xdg, popup_serial, q)
+    })?;
+    let barrier = send_req(conn, &mut req, |q| client.sync(q))?;
+    await_callback(conn, &client, barrier, &mut inbuf, &mut chunk)?;
+
+    let ustride = POPUP_W * 4;
+    let usize_ = ustride * POPUP_H;
+    let ufd = fs::memfd_create(0).map_err(|_| fail(176, b"wlxe: popup memfd failed\n"))?;
+    fs::truncate(ufd, usize_ as i64).map_err(|_| fail(177, b"wlxe: popup truncate failed\n"))?;
+    let umap = map_pool(ufd, usize_, 178, b"wlxe: mmap of the popup pool failed\n")?;
+    fill_pool(umap, POPUP_W * POPUP_H, POPUP_COLOR);
+    uds::send_fds(conn, &[ufd]).map_err(|_| fail(179, b"wlxe: popup send_fds failed\n"))?;
+    let upool = send_req(conn, &mut req, |q| client.create_pool(shm, 0, usize_, q))?;
+    let ubuf = send_req(conn, &mut req, |q| {
+        client.create_buffer(
+            upool,
+            0,
+            POPUP_W,
+            POPUP_H,
+            ustride,
+            protocol::WL_SHM_FORMAT_XRGB8888,
+            q,
+        )
+    })?;
+    send_req(conn, &mut req, |q| {
+        client.attach(popup_surface, ubuf, 0, 0, q)
+    })?;
+    send_req(conn, &mut req, |q| {
+        client.damage(popup_surface, 0, 0, POPUP_W, POPUP_H, q)
+    })?;
+    send_req(conn, &mut req, |q| client.commit(popup_surface, q))?;
+    await_release(conn, &client, ubuf, &mut inbuf, &mut chunk)?;
+    if read_px(fb, 4, 4) != POPUP_COLOR {
+        return Err(fail(180, b"wlxe: the popup is not on /dev/fb\n"));
+    }
+    if read_px(fb, 4, POPUP_H + 4) != BASE_COLOR {
+        return Err(fail(181, b"wlxe: the popup covered more than its size\n"));
+    }
+
     // A panel: a layer surface, 200x32, anchored top. It is placed at the output's
-    // origin, so it must cover the top-left pixel and leave the rows below it alone.
+    // origin. A top-layer surface draws above windows and their popups whatever order
+    // they committed in, so it must cover the popup's corner and leave the rows below
+    // its own height alone.
     let panel_surface = send_req(conn, &mut req, |q| client.create_surface(compositor, q))?;
     let panel = send_req(conn, &mut req, |q| {
         client.get_layer_surface(
@@ -2153,66 +2211,10 @@ fn run_extra() -> Result<(), i32> {
     send_req(conn, &mut req, |q| client.commit(panel_surface, q))?;
     await_release(conn, &client, pbuf, &mut inbuf, &mut chunk)?;
     if read_px(fb, 4, 4) != PANEL_COLOR {
-        return Err(fail(174, b"wlxe: the panel is not on /dev/fb\n"));
+        return Err(fail(174, b"wlxe: the panel is not over the popup\n"));
     }
     if read_px(fb, 4, PANEL_H + 8) != BASE_COLOR {
         return Err(fail(175, b"wlxe: the panel covered more than its size\n"));
-    }
-
-    // A popup: positioner-sized at 8x8, over the base window. Drawn after the panel,
-    // so it must cover the panel's top-left corner and no more.
-    let popup_surface = send_req(conn, &mut req, |q| client.create_surface(compositor, q))?;
-    let popup_xdg = send_req(conn, &mut req, |q| {
-        client.get_xdg_surface(wm_base, popup_surface, q)
-    })?;
-    let positioner = send_req(conn, &mut req, |q| client.create_positioner(wm_base, q))?;
-    send_req(conn, &mut req, |q| {
-        client.set_positioner_size(positioner, POPUP_W, POPUP_H, q)
-    })?;
-    send_req(conn, &mut req, |q| {
-        client.get_popup(popup_xdg, xdg_surface, positioner, q)
-    })?;
-    send_req(conn, &mut req, |q| client.commit(popup_surface, q))?;
-    let popup_serial =
-        await_popup_configure(conn, &client, popup_xdg, wm_base, &mut inbuf, &mut chunk)?;
-    send_req(conn, &mut req, |q| {
-        client.ack_configure(popup_xdg, popup_serial, q)
-    })?;
-    let barrier = send_req(conn, &mut req, |q| client.sync(q))?;
-    await_callback(conn, &client, barrier, &mut inbuf, &mut chunk)?;
-
-    let ustride = POPUP_W * 4;
-    let usize_ = ustride * POPUP_H;
-    let ufd = fs::memfd_create(0).map_err(|_| fail(176, b"wlxe: popup memfd failed\n"))?;
-    fs::truncate(ufd, usize_ as i64).map_err(|_| fail(177, b"wlxe: popup truncate failed\n"))?;
-    let umap = map_pool(ufd, usize_, 178, b"wlxe: mmap of the popup pool failed\n")?;
-    fill_pool(umap, POPUP_W * POPUP_H, POPUP_COLOR);
-    uds::send_fds(conn, &[ufd]).map_err(|_| fail(179, b"wlxe: popup send_fds failed\n"))?;
-    let upool = send_req(conn, &mut req, |q| client.create_pool(shm, 0, usize_, q))?;
-    let ubuf = send_req(conn, &mut req, |q| {
-        client.create_buffer(
-            upool,
-            0,
-            POPUP_W,
-            POPUP_H,
-            ustride,
-            protocol::WL_SHM_FORMAT_XRGB8888,
-            q,
-        )
-    })?;
-    send_req(conn, &mut req, |q| {
-        client.attach(popup_surface, ubuf, 0, 0, q)
-    })?;
-    send_req(conn, &mut req, |q| {
-        client.damage(popup_surface, 0, 0, POPUP_W, POPUP_H, q)
-    })?;
-    send_req(conn, &mut req, |q| client.commit(popup_surface, q))?;
-    await_release(conn, &client, ubuf, &mut inbuf, &mut chunk)?;
-    if read_px(fb, 4, 4) != POPUP_COLOR {
-        return Err(fail(180, b"wlxe: the popup is not on /dev/fb\n"));
-    }
-    if read_px(fb, 4, POPUP_H + 4) != PANEL_COLOR {
-        return Err(fail(181, b"wlxe: the popup covered more than its size\n"));
     }
 
     let _ = unsafe { vmem::munmap(pool, size as usize) };

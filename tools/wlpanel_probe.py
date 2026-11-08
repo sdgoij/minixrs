@@ -4,11 +4,12 @@
 Boots x86 with a QMP socket and the bochs display, waits for `/sbin/wlserver`,
 runs `/bin/wlpanel` — a `zwlr_layer_shell_v1` surface across the top of the
 output with one button — moves the absolute pointer into that button, clicks it,
-and expects the client's launch line.
+and expects the client's launch line and then the app's.
 
-The pointer starts at the centre of the output, so moving into the panel is also
-what gives it the focus: the click only reaches it if the server hit-tested the
-layer surface and told the new owner where the pointer is.
+The second click is the layer-order check: the app's window covers the panel, so
+a click at the same place only reaches the launcher if a layer surface outranks a
+toplevel in the scene. The pointer also owns the keyboard focus, so the final
+Escape ends the panel.
 
 Exit 0 on success, 1 otherwise.
 """
@@ -147,6 +148,11 @@ def main():
 
     step(1, "the panel is up", lambda: b"wlpanel: ready" in out)
 
+    def count(needle):
+        # No lock here: `wait_for` already holds it while it calls its predicate,
+        # and a plain `threading.Lock` cannot be taken twice.
+        return bytes(out).count(needle)
+
     # Into the launcher button, which is 4..76 by 4..28 in panel coordinates. A
     # press outside it would not grab, and the release would go nowhere, so the
     # launch line is what proves the pointer's position reached the panel.
@@ -155,25 +161,38 @@ def main():
         time.sleep(1.0)
         click(q, True)
         click(q, False)
-    step(2, "the launcher took the click", lambda: b"wlpanel: launch" in out)
+    step(2, "the launcher took the click",
+         lambda: count(b"wlpanel: launch") >= 1)
     step(3, "the launcher started the app", lambda: b"wldemo: ready" in out)
 
-    # The app takes the focus when it maps, so the next Escape goes to it.
+    # The app's 320x240 window covers the panel. Moving within the panel and
+    # clicking again must still reach the launcher, which only happens if a layer
+    # surface outranks a toplevel in the scene: the move re-reads what is under the
+    # pointer, and the app is not it.
+    if ok:
+        absolute(q, 30, 16)
+        time.sleep(1.0)
+        click(q, True)
+        click(q, False)
+    step(4, "a second click reached the panel through the app",
+         lambda: count(b"wlpanel: launch") >= 2)
+    step(5, "the second app started", lambda: count(b"wldemo: ready") >= 2)
+
+    # The app the second click started took the focus when it mapped.
     if ok:
         key(q, "esc", True)
         time.sleep(0.1)
         key(q, "esc", False)
-    step(4, "the app finished", lambda: b"wldemo: PASS" in out, 20)
+    step(6, "the second app finished", lambda: count(b"wldemo: PASS") >= 1, 20)
 
-    # With the app gone nothing is focused, so moving the pointer over the panel
-    # is what hands it the focus again.
+    # Nothing is focused now; a small move over the panel is what hands it back.
     if ok:
-        absolute(q, 30, 16)
+        absolute(q, 40, 16)
         time.sleep(1.0)
         key(q, "esc", True)
         time.sleep(0.1)
         key(q, "esc", False)
-    step(5, "the panel finished", lambda: b"wlpanel: PASS" in out, 20)
+    step(7, "the panel finished", lambda: b"wlpanel: PASS" in out, 20)
 
     q.close()
     if not ok:
