@@ -2148,10 +2148,11 @@ fn run_extra() -> Result<(), i32> {
         return Err(fail(181, b"wlxe: the popup covered more than its size\n"));
     }
 
-    // A panel: a layer surface, 200x32, anchored top. It is placed at the output's
-    // origin. A top-layer surface draws above windows and their popups whatever order
-    // they committed in, so it must cover the popup's corner and leave the rows below
-    // its own height alone.
+    // A panel: a layer surface, 200x32, anchored to the top-*right* of the output.
+    // Placement is the anchors' job, so it must land at the output's width minus
+    // its own and stay exactly that size. A top-layer surface draws above windows
+    // and their popups whatever order they committed in, so the popup at the
+    // origin must stay visible beside it.
     let panel_surface = send_req(conn, &mut req, |q| client.create_surface(compositor, q))?;
     let panel = send_req(conn, &mut req, |q| {
         client.get_layer_surface(
@@ -2167,7 +2168,11 @@ fn run_extra() -> Result<(), i32> {
         client.set_layer_size(panel, PANEL_W as u32, PANEL_H as u32, q)
     })?;
     send_req(conn, &mut req, |q| {
-        client.set_anchor(panel, protocol::LAYER_ANCHOR_TOP, q)
+        client.set_anchor(
+            panel,
+            protocol::LAYER_ANCHOR_TOP | protocol::LAYER_ANCHOR_RIGHT,
+            q,
+        )
     })?;
     send_req(conn, &mut req, |q| client.commit(panel_surface, q))?;
     let (p_serial, p_w, p_h) = await_layer_configure(conn, &client, panel, &mut inbuf, &mut chunk)?;
@@ -2210,10 +2215,14 @@ fn run_extra() -> Result<(), i32> {
     })?;
     send_req(conn, &mut req, |q| client.commit(panel_surface, q))?;
     await_release(conn, &client, pbuf, &mut inbuf, &mut chunk)?;
-    if read_px(fb, 4, 4) != PANEL_COLOR {
-        return Err(fail(174, b"wlxe: the panel is not over the popup\n"));
+    let panel_x = FB_WIDTH as i32 - PANEL_W;
+    let landed = read_px(fb, panel_x + 4, 4) == PANEL_COLOR && read_px(fb, 4, 4) == POPUP_COLOR;
+    if !landed {
+        return Err(fail(174, b"wlxe: the panel is not where it anchored\n"));
     }
-    if read_px(fb, 4, PANEL_H + 8) != BASE_COLOR {
+    let no_wider = read_px(fb, panel_x - 4, 4) == BASE_COLOR
+        && read_px(fb, panel_x + 4, PANEL_H + 8) == BASE_COLOR;
+    if !no_wider {
         return Err(fail(175, b"wlxe: the panel covered more than its size\n"));
     }
 

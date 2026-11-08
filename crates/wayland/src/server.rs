@@ -61,6 +61,8 @@ pub struct Obj {
     pub surface: u32,
     /// `wl_surface`: the `zwlr_layer_surface_v1` bound to it (0 = none) (2e).
     pub layer: u32,
+    /// `zwlr_layer_surface_v1`: the edge bits it asked to be anchored to (2e).
+    pub anchor: u32,
     /// `xdg_surface`: a `configure` has gone out (2b).
     pub configured: bool,
     /// `xdg_surface`: the client has acked the latest `configure`.
@@ -99,6 +101,7 @@ impl Obj {
             xdg_surface: 0,
             surface: 0,
             layer: 0,
+            anchor: 0,
             configured: false,
             acked: false,
             configure_serial: 0,
@@ -138,6 +141,10 @@ pub struct Commit {
     /// The surface is a `zwlr_layer_surface_v1` (non-zero), which draws above the
     /// toplevel windows whatever order they committed in.
     pub layer: bool,
+    /// Where the surface's top-left sits in the output: the anchors a layer
+    /// surface asked for, or the origin.
+    pub x: i32,
+    pub y: i32,
 }
 
 impl Commit {
@@ -152,6 +159,29 @@ impl Commit {
             pool_size: self.pool_size,
         }
     }
+}
+
+/// Where a layer surface's top-left sits in the output.
+///
+/// An axis with neither end anchored is centred, which is what the protocol asks
+/// for and what keeps an unanchored panel on screen. An edge is clamped to the
+/// origin, so a surface wider than the output does not start off-screen.
+fn place(anchor: u32, w: i32, h: i32, out_w: i32, out_h: i32) -> (i32, i32) {
+    let x = if anchor & protocol::LAYER_ANCHOR_LEFT != 0 {
+        0
+    } else if anchor & protocol::LAYER_ANCHOR_RIGHT != 0 {
+        out_w - w
+    } else {
+        (out_w - w) / 2
+    };
+    let y = if anchor & protocol::LAYER_ANCHOR_TOP != 0 {
+        0
+    } else if anchor & protocol::LAYER_ANCHOR_BOTTOM != 0 {
+        out_h - h
+    } else {
+        (out_h - h) / 2
+    };
+    (x.max(0), y.max(0))
 }
 
 /// A cursor image a client handed the pointer: the surface's buffer, and where its
@@ -666,9 +696,15 @@ impl Server {
                 }
                 Ok(())
             }
-            // Anchors, margins, exclusive zones and keyboard interactivity have
-            // nothing to act on while a layer surface is placed at the output's
-            // origin: accepted and ignored (2e).
+            (Kind::LayerSurface, protocol::layer_surface_req::SET_ANCHOR) => {
+                let edges = arg(n, &args, 0)?;
+                if let Some(o) = self.obj_mut(object_id) {
+                    o.anchor = edges;
+                }
+                Ok(())
+            }
+            // Margins, exclusive zones and keyboard interactivity have nothing to
+            // act on: placement is the anchors' (2e).
             (Kind::LayerSurface, _) => Ok(()),
             (
                 Kind::DecorationManager,
@@ -783,6 +819,7 @@ impl Server {
     fn commit_of(&self, surface: u32) -> Option<Commit> {
         let s = self.obj(surface)?;
         let b = self.obj(s.attached)?;
+        let (x, y) = self.surface_origin(s);
         if b.dmabuf {
             // A linux-dmabuf plane has no pool: its pixels are the descriptor `b`
             // recorded when its params set was created (3d-b-4).
@@ -801,6 +838,8 @@ impl Server {
                 dmabuf: true,
                 modifier: b.modifier,
                 layer: s.layer != 0,
+                x,
+                y,
             });
         }
         let pool = self.obj(b.pool)?;
@@ -819,7 +858,30 @@ impl Server {
             dmabuf: false,
             modifier: 0,
             layer: s.layer != 0,
+            x,
+            y,
         })
+    }
+
+    /// Where a surface's top-left sits.
+    ///
+    /// A layer surface is placed by the edges it anchored to; everything else is
+    /// at the origin, which is all a toplevel has until there is a placement
+    /// policy.
+    fn surface_origin(&self, s: &Obj) -> (i32, i32) {
+        if s.layer == 0 {
+            return (0, 0);
+        }
+        let Some(layer) = self.obj(s.layer) else {
+            return (0, 0);
+        };
+        place(
+            layer.anchor,
+            layer.width,
+            layer.height,
+            self.width,
+            self.height,
+        )
     }
 
     /// Turn a params object's added plane into a `wl_buffer` (3d-b-4). Returns whether the
@@ -1438,6 +1500,32 @@ fn error(
 mod tests {
     use super::*;
     use crate::wire::{Header, MessageBuffer, Writer};
+
+    #[test]
+    fn an_anchored_layer_surface_lands_on_the_edge_it_asked_for() {
+        use crate::protocol::{
+            LAYER_ANCHOR_BOTTOM, LAYER_ANCHOR_LEFT, LAYER_ANCHOR_RIGHT, LAYER_ANCHOR_TOP,
+        };
+
+        assert_eq!(
+            place(LAYER_ANCHOR_TOP | LAYER_ANCHOR_LEFT, 200, 32, 1024, 768),
+            (0, 0)
+        );
+        assert_eq!(
+            place(LAYER_ANCHOR_TOP | LAYER_ANCHOR_RIGHT, 200, 32, 1024, 768),
+            (824, 0)
+        );
+        assert_eq!(place(LAYER_ANCHOR_TOP, 200, 32, 1024, 768), (412, 0));
+        assert_eq!(
+            place(LAYER_ANCHOR_BOTTOM | LAYER_ANCHOR_LEFT, 200, 32, 1024, 768),
+            (0, 736)
+        );
+        // Neither end anchored on an axis centres it.
+        assert_eq!(place(LAYER_ANCHOR_LEFT, 200, 32, 1024, 768), (0, 368));
+        // A surface wider than the output stays at the origin, and an axis with
+        // no anchor is still centred.
+        assert_eq!(place(LAYER_ANCHOR_RIGHT, 2000, 32, 1024, 768), (0, 368));
+    }
 
     /// Run the server over a buffer of request messages and collect the events.
     fn run(s: &mut Server, requests: &[u8]) -> [u8; 2048] {
