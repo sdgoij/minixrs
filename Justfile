@@ -1147,9 +1147,11 @@ test-wldemo-x86: build-x86
     python tools/wldemo_probe.py
     @echo "wldemo: the field, the list and the button took their keys (x86_64)"
 
-# wlpanel: tools/wlpanel_probe.py drives the session panel — /bin/wlpanel maps a
-# layer surface across the top of the output, and a click inside its launcher button
-# has to reach it with the pointer's position.
+# wlpanel: tools/wlpanel_probe.py drives the session panel, which is the session's own
+# first program: `/etc/rc` starts `/bin/session`, it waits for the shell's prompt and
+# starts `/etc/session`, and `/bin/wlpanel` maps a 200x32 layer strip at the output's
+# top-right. A click inside its launcher button has to reach it and start an app. This
+# is the shell milestone's gate, together with `test-rc-x86`'s chain.
 test-wlpanel-x86: build-x86
     mkdir -p target/images/x86_64-pc-minix
     cp target/trampoline.elf target/images/x86_64-pc-minix/minix-x86.elf
@@ -1157,8 +1159,9 @@ test-wlpanel-x86: build-x86
     python tools/wlpanel_probe.py
     @echo "wlpanel: the launcher took a click on the layer surface (x86_64)"
 
-# rc: tools/rc_probe.py boots and types nothing. `/etc/rc`'s commands must appear
-# on their own, which is the whole chain from init to the program they name.
+# rc: tools/rc_probe.py boots and types nothing. `/etc/rc` names the session manager,
+# which waits for the shell's prompt, ends that line and starts `/etc/session`, so the
+# chain from init to the session's first program has to happen on its own.
 test-rc-x86: build-x86
     mkdir -p target/images/x86_64-pc-minix
     cp target/trampoline.elf target/images/x86_64-pc-minix/minix-x86.elf
