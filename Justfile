@@ -1219,7 +1219,12 @@ probe-dso-share-riscv64: dynlink-riscv64
     @just _assert-qemu-version qemu-system-riscv64
     python tools/dso_share_probe.py --arch riscv64
 
-image-riscv64 boot-timeout="15": build-riscv64
+# riscv64's bash is the one that does not fit the default embedded filesystem: the release
+# injects it (`MINIXFS_EXTRA`) and the image is embedded in the kernel, where 16 MiB is full
+# before bash goes in, so the build panics with `zone 4096 out of bounds`. The image is built
+# at the system images' 32 MiB instead; the other arches' bash fits and they keep 16 MiB.
+image-riscv64 boot-timeout="15":
+    MINIXFS_BLOCKS="${MINIXFS_BLOCKS:-8192}" just build-riscv64
     mkdir -p target/images/riscv64gc-unknown-minix
     cp target/riscv64gc-unknown-minix/release/kernel-boot-riscv64 target/images/riscv64gc-unknown-minix/minix-riscv64.elf
     @just _assert-qemu-version qemu-system-riscv64
