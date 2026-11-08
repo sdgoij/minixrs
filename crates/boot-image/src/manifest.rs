@@ -321,8 +321,11 @@ pub const RC: &[u8] = b"# /etc/rc: what the session starts before the shell.\n\
 # There is no shell syntax: /bin/rc names each program directly, because this\n\
 # file is read before a shell exists.\n\
 #\n\
-# A program that allocates does not run when started from here yet: see\n\
-# KNOWN_ISSUES. The panel is waiting for that, or for the session manager.\n\
+# A long-running program is not started here yet. Its first line of output lands\n\
+# on the shell's prompt, and a prompt with text after it is not a prompt; the\n\
+# list also caught a wedge when two `exec`s were in flight at once. Both are\n\
+# recorded in KNOWN_ISSUES, and both are what a session manager, started by the\n\
+# shell once the prompt is quiet, is for.\n\
 # /bin/wlpanel\n\
 /bin/echo rc: session\n";
 

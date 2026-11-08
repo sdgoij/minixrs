@@ -6,8 +6,9 @@ runs `/bin/wlpanel` — a `zwlr_layer_shell_v1` strip at the output's right edge
 with one button — moves the absolute pointer into that button, clicks it, and
 expects the client's launch line and then the app's.
 
-The panel is run from the shell rather than from `/etc/rc`: a program that
-allocates does not start from the rc list yet (see `KNOWN_ISSUES`).
+The panel is run from the shell rather than from `/etc/rc`: a long-running client
+started by the rc list lands its first line on the shell's prompt and the list
+caught a wedge when two `exec`s were in flight at once (see `KNOWN_ISSUES`).
 
 The app's window covers the left of the output and the panel is on the right, so
 the second click is a plain repeat. The pointer also owns the keyboard focus, so
@@ -158,10 +159,9 @@ def main():
         # and a plain `threading.Lock` cannot be taken twice.
         return bytes(out).count(needle)
 
-    # The session starts nothing but `/bin/echo` (see `KNOWN_ISSUES`), so the panel
-    # is the one this probe ran. Into the launcher button, which is 4..76 by 4..28
-    # in panel coordinates: the panel is 200 wide at the output's right edge, so the
-    # click lands at 1024 - 200 + 20.
+    # Into the launcher button, which is 4..76 by 4..28 in panel coordinates: the
+    # panel is 200 wide at the output's right edge, so the click lands at
+    # 1024 - 200 + 20.
     if ok:
         absolute(q, OUT_W - PANEL_W + 20, 16)
         time.sleep(1.0)

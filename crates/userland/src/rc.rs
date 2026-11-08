@@ -87,14 +87,35 @@ fn start(line: &[u8]) {
     let path = &buf[path_start..path_end];
     match unsafe { process::fork() } {
         Ok(0) => {
-            let _ = process::exec(path, &argv[..argc], &[]);
+            if process::exec(path, &argv[..argc], &[]).is_err() {
+                crate::write_err(b"rc: exec failed: ");
+                crate::write_err(path);
+                crate::write_err(b"\n");
+            }
             process::exit(127);
         }
-        Ok(_) => {}
+        Ok(pid) => settle(pid),
         Err(_) => crate::write_err(b"rc: fork failed\n"),
     }
 }
 
+/// Let a child finish its `exec` before the next line, or before this process
+/// execs the shell.
+///
+/// PM and VFS each serve one request at a time, and two `exec`s in flight can
+/// wedge one of them: with one child in the list the child's line appeared and
+/// the shell prompt sometimes did not; with an empty list every boot reached the
+/// prompt. A short program is reaped here, which removes the overlap outright. A
+/// long-running one does not exit, so it gets the same handful of yields and is
+/// left running, which is the case a session manager has to own instead.
+fn settle(pid: i32) {
+    for _ in 0..64 {
+        if process::waitpid(pid, process::WNOHANG).is_ok() {
+            return;
+        }
+        let _ = process::getpid();
+    }
+}
 /// Split the first `n` bytes into space-separated tokens, each NUL-terminated in
 /// place, and record where each starts. Returns how many there are and the range
 /// of the first one (the path needs a length, not a terminator).

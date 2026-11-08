@@ -2134,22 +2134,22 @@ are arch-specific, `[env]` is tooling/platform, not kernel.
   that visibly contained that line. Match the content and not the newline (or
   strip the `\r`), and expect the same from any check of a captured guest log
   written on a Windows host, where the file keeps the CRLF.
-- **A program the `/etc/rc` list starts before the shell produces no output when
-  it allocates (2026-11-08, open, not diagnosed).** `/bin/rc` forks each line and
-  then execs `/bin/sh`. `/bin/echo rc: session` runs and its line appears, but
-  `/bin/wlpanel` never reaches its `wlpanel: ready` line, and one boot that had it
-  in the list never printed the shell prompt either, so `rc` sometimes does not
-  get as far as the shell. Nothing is reported by either side: no fork error, no
-  `rc: /etc/rc could not be read`, no client failure line. The same panel run from
-  the shell works, and so does `/bin/wldemo`, which also allocates, so the
-  difference is not allocation by itself but where in the boot it happens. Both of
-  `rc`'s children are forked from the process `init` exec'd, so the suspects are
-  `brk` and the address-space side of `fork` when the parent descends from a boot
-  process (`pm::do_fork` copies the mproc entry and calls nothing on VM's side).
-  The rc list therefore starts only `/bin/echo`; session programs stay commented
-  until this is understood, and a session manager, which runs as a normal process
-  started by the shell, is the way around it. (`crates/userland/src/rc.rs`,
-  `crates/boot-image/src/manifest.rs`)
+- **A program the `/etc/rc` list starts writes on top of the shell's prompt
+  (2026-11-08, open, worked around).** `/bin/rc` forks each line and then execs
+  `/bin/sh`. `/bin/wlpanel` starts, and its first line of output
+  (`wlpanel: ready`) arrives after the shell has printed its prompt but before
+  it has printed a newline, so the console shows `# wlpanel: ready`. A prompt
+  with text after it is not a prompt: `tools/smoke/feed.sh` waits for a line
+  that is exactly `# `, so every tsv gate refuses such a boot as "no prompt",
+  and that is how this surfaced. The same boot also exposed a start race that is
+  mitigated but not explained: with the panel as the first line, two boots
+  produced no panel output at all, and 16 `getpid` round trips between forks
+  (`rc::settle`) made six of six boots start it. PM and VFS each run one request
+  at a time, so a child still inside `exec` when `rc` forks again is the likely
+  loser. The panel is therefore commented out of the list and started from the
+  shell; the fix for both halves is a session manager that owns the terminal and
+  starts clients when nothing else is writing, or an exec handshake in `rc`.
+  (`crates/userland/src/rc.rs`, `crates/boot-image/src/manifest.rs`)
 
   It has to be an `export` and not a per-line prefix, which is the second half
   of the trap: `just run` re-enters `just` (`run` → `run-x86`), and the value is
