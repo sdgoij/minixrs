@@ -2127,29 +2127,6 @@ are arch-specific, `[env]` is tooling/platform, not kernel.
   the Justfile exports `MSYS2_ENV_CONV_EXCL` for every recipe, and
   `crates/kernel/build.rs` refuses a dest that is not `/bin/`, `/sbin/` or
   `/etc/`, naming the exclusion in its message.
-- **A probe predicate that ends in `\n` never matches the guest's console
-  (2026-11-08).** The serial console runs with ONLCR, so every `\n` a process
-  writes leaves the tty as `\r\n`. The first version of `tools/wldemo_probe.py`
-  waited for a whole line including its terminator and timed out against a log
-  that visibly contained that line. Match the content and not the newline (or
-  strip the `\r`), and expect the same from any check of a captured guest log
-  written on a Windows host, where the file keeps the CRLF.
-- **A program the `/etc/rc` list starts writes on top of the shell's prompt
-  (2026-11-08, open, worked around).** `/bin/rc` forks each line and then execs
-  `/bin/sh`. `/bin/wlpanel` starts, and its first line of output
-  (`wlpanel: ready`) arrives after the shell has printed its prompt but before
-  it has printed a newline, so the console shows `# wlpanel: ready`. A prompt
-  with text after it is not a prompt: `tools/smoke/feed.sh` waits for a line
-  that is exactly `# `, so every tsv gate refuses such a boot as "no prompt",
-  and that is how this surfaced. The same boot also exposed a start race that is
-  mitigated but not explained: with the panel as the first line, two boots
-  produced no panel output at all, and 16 `getpid` round trips between forks
-  (`rc::settle`) made six of six boots start it. PM and VFS each run one request
-  at a time, so a child still inside `exec` when `rc` forks again is the likely
-  loser. The panel is therefore commented out of the list and started from the
-  shell; the fix for both halves is a session manager that owns the terminal and
-  starts clients when nothing else is writing, or an exec handshake in `rc`.
-  (`crates/userland/src/rc.rs`, `crates/boot-image/src/manifest.rs`)
 
   It has to be an `export` and not a per-line prefix, which is the second half
   of the trap: `just run` re-enters `just` (`run` → `run-x86`), and the value is
@@ -2163,6 +2140,36 @@ are arch-specific, `[env]` is tooling/platform, not kernel.
   exclusion prefix from the start; those are removed, because `tools/mkfs.rs`
   reads no environment at all — it copies the assembled image — so the prefix
   never did anything and its comment described the wrong half of the build.
+- **A probe predicate that ends in `\n` never matches the guest's console
+  (2026-11-08).** The serial console runs with ONLCR, so every `\n` a process
+  writes leaves the tty as `\r\n`. The first version of `tools/wldemo_probe.py`
+  waited for a whole line including its terminator and timed out against a log
+  that visibly contained that line. Match the content and not the newline (or
+  strip the `\r`), and expect the same from any check of a captured guest log
+  written on a Windows host, where the file keeps the CRLF.
+- **A program the `/etc/rc` list starts writes on top of the shell's prompt
+  (2026-11-08, resolved by the session manager).** `/bin/rc` forks each line and
+  then execs `/bin/sh`. `/bin/wlpanel` started from that list, and its first line
+  of output (`wlpanel: ready`) arrived after the shell had printed its prompt but
+  before it printed a newline, so the console showed `# wlpanel: ready`. A prompt
+  with text after it is not a prompt: `tools/smoke/feed.sh` waits for a line that
+  is exactly `# `, so every tsv gate refused such a boot as "no prompt", and that
+  is how it surfaced. The same boot also exposed a start race: with the panel as
+  the list's first line, two boots produced no panel output at all, and 16
+  `getpid` round trips between forks (`rc::settle`) made six of six boots start
+  it. PM and VFS each run one request at a time, so a child still inside `exec`
+  when `rc` forks again is the likely loser; that half is mitigated, not
+  explained.
+
+  Both halves are answered by `/bin/session`. `/etc/rc`'s only entry starts it;
+  it waits for the prompt (`PROMPT_WAIT` `getpid` round trips, so the pause is a
+  real yield to PM), writes the newline the shell did not, and only then runs
+  `/etc/session`, forking one line at a time with `settle` between them. Its own
+  `exec`s therefore never overlap the shell's, and every program it starts has
+  its first line on a line of its own. Gate: `tools/rc_probe.py`, which types
+  nothing at all and waits for the start line, the `# ` prompt on a line of its
+  own, and the panel's ready line.
+  (`crates/userland/src/rc.rs`, `crates/boot-image/src/manifest.rs`)
 - `[env]` `just test-boot-riscv64`/`test-qemu-riscv64` (and the aarch64
   equivalents) overwrote the normal kernel binary via the shared cargo
   output path, so a later `just build-riscv64` could report "Finished"
