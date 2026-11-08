@@ -20,6 +20,7 @@ pub mod geom;
 pub mod pass;
 pub mod pixels;
 pub mod region;
+pub mod text;
 
 #[cfg(target_os = "minix")]
 pub mod gl;

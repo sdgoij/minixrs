@@ -14,5 +14,8 @@ workspace = true
 
 [dependencies]
 
+[dev-dependencies]
+minix-std = { path = "../minix-std" }
+
 [lints]
 workspace = true

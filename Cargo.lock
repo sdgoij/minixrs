@@ -178,6 +178,9 @@ dependencies = [
 [[package]]
 name = "render"
 version = "0.1.0"
+dependencies = [
+ "minix-std",
+]
 
 [[package]]
 name = "servers"
