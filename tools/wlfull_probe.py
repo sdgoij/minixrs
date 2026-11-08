@@ -10,6 +10,12 @@ and the serial log must carry the fb server's `fb: scanout src` line proving the
 
 The QEMU line uses `virtio-gpu-pci` as the display, with no `bochs-display`: the re-point is a
 virtio-gpu capability, so the output device has to *be* the virtio-gpu one (D11).
+
+The session starts `/bin/wlpanel` before anything is typed, and a panel is a second surface:
+with two in the scene the server composes the frame into its own buffer instead of handing the
+client's buffer to the scanout, which is the path this gate exists to measure. So the probe
+ends the panel first, by the pid its ready line reports (moving a pointer onto it would need a
+pointer device, and riscv64/aarch64 are booted with none), and goes on once the shell is back.
 """
 import json
 import os
@@ -73,6 +79,36 @@ def wait_for(pred, timeout):
         time.sleep(0.05)
     with lock:
         return pred()
+
+
+def key(s, name, down):
+    """One key press, through whichever input device QEMU routes it to.
+
+    No `device` is named: the guest reads virtio-input devices, and on every arch this gate
+    runs on one is present (the tablet on x86, a keyboard on riscv64/aarch64), which is what
+    makes the key reach the guest's input server at all.
+    """
+    return qmp_cmd(s, {"execute": "input-send-event",
+                       "arguments": {"events": [
+                           {"type": "key",
+                            "data": {"key": {"type": "qcode", "data": name}, "down": down}}
+                       ]}})
+
+
+def run_line(cmd, timeout=15):
+    """Type one shell command and wait for the shell to come back to its prompt.
+
+    The prompt is printed before the bytes are read, so the echo contains `# ` too; the wait
+    starts from the echoed command, and the prompt after *that* is the shell's next one.
+    """
+    with lock:
+        sent = len(out)
+    send_paced(cmd)
+    if not wait_for(lambda: cmd.encode() in out[sent:], timeout):
+        return False
+    with lock:
+        at = bytes(out).rfind(cmd.encode())
+    return wait_for(lambda: b"# " in out[at:], timeout)
 
 
 def type_line_and_wait(cmd, want, timeout, attempts=4):
@@ -179,17 +215,51 @@ def main():
     q = socket.create_connection(("127.0.0.1", 4447), timeout=5)
     qmp_cmd(q, {"execute": "qmp_capabilities"})
 
-    # Baseline: the fb server's boot RGB pattern, so we know the display is live before the client.
+    # The session's panel is a second surface, and two surfaces is what takes the composed
+    # path instead of the scanout, which is the path this gate exists to measure. The panel is
+    # ended the way anything the session started can be, by naming the process it reported:
+    # moving the pointer onto it would need a pointer device, and riscv64/aarch64 have none.
+    if not wait_for(lambda: b"wlpanel: ready pid=" in out, 60):
+        print("NO PANEL", file=sys.stderr)
+        q.close()
+        qemu.kill()
+        sys.exit(1)
+    with lock:
+        banner = bytes(out)
+    at = banner.rfind(b"wlpanel: ready pid=")
+    fields = banner[at:].split(b"\n", 1)[0]
+    try:
+        panel_pid = int(fields.split(b"=", 1)[1])
+    except (IndexError, ValueError):
+        panel_pid = 0
+    if panel_pid <= 0:
+        print("THE PANEL NAMED NO PID", file=sys.stderr)
+        q.close()
+        qemu.kill()
+        sys.exit(1)
+    if not run_line("kill %d" % panel_pid):
+        print("THE PANEL COULD NOT BE KILLED", file=sys.stderr)
+        q.close()
+        qemu.kill()
+        sys.exit(1)
+    # The server drops the surface when the connection closes, which it notices on its next
+    # poll; the client below is what proves whether it did (the scanout line, or its absence).
+    time.sleep(1.0)
+
+    # Baseline: the display is live and does not hold the client's frame yet. The fb server's
+    # boot pattern used to be the marker, but the panel paints inside it (and its strip is
+    # still on screen after it leaves, since nothing repaints), so what is asserted here is
+    # the property the final check needs: the magenta below is the client's, not something
+    # that was already up.
+    magenta = bytes([255, 0, 255])
     base = screendump(q)
     if base is None:
         print("BASELINE SCREENDUMP FAILED", file=sys.stderr)
         q.close()
         qemu.kill()
         sys.exit(1)
-    base_ok = (pxat(base, 0, 0) == bytes([255, 0, 0])
-               and pxat(base, 512, 100) == bytes([0, 255, 0])
-               and pxat(base, 1023, 767) == bytes([0, 0, 255]))
-    print("baseline rgb: %s" % base_ok, flush=True)
+    base_ok = pxat(base, 512, 384) != magenta and pxat(base, 0, 0) != magenta
+    print("baseline centre %s corner %s" % (pxat(base, 512, 384), pxat(base, 0, 0)), flush=True)
     if not base_ok:
         print("BASELINE RGB MISMATCH", file=sys.stderr)
         q.close()
@@ -219,8 +289,8 @@ def main():
         qemu.kill()
         sys.exit(1)
     # The pool is magenta: 0x00FF00FF little-endian is B=FF,G=00,R=FF -> RGB (255,0,255).
-    centre = pxat(shot, 512, 384) == bytes([255, 0, 255])
-    corner = pxat(shot, 0, 0) == bytes([255, 0, 255])
+    centre = pxat(shot, 512, 384) == magenta
+    corner = pxat(shot, 0, 0) == magenta
     print("after commit: centre magenta=%s, corner magenta=%s" % (centre, corner), flush=True)
 
     q.close()

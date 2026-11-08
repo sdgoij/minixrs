@@ -3078,7 +3078,12 @@ fn run_panel() -> Result<(), i32> {
     // no coordinates, so this is where the click is read from.
     let (mut px, mut py) = (0, 0);
 
-    write_out(b"wlpanel: ready\n");
+    // The line names the process, so a session manager (or a gate) can signal it: a
+    // panel whose pointer input is unavailable has no other way to be dismissed.
+    let pid = minix_std::process::getpid().map_or(0, |(pid, _)| pid as u32);
+    write_out(b"wlpanel: ready pid=");
+    put_dec(pid);
+    write_out(b"\n");
 
     loop {
         if fill(conn, &mut inbuf, &mut chunk, 100) {
