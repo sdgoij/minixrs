@@ -3080,10 +3080,16 @@ fn run_panel() -> Result<(), i32> {
 
     // The line names the process, so a session manager (or a gate) can signal it: a
     // panel whose pointer input is unavailable has no other way to be dismissed.
+    // Built in one buffer and written once: the console is shared, and a line built
+    // from two writes can be split by another writer (measured: the shell's prompt
+    // landed between `pid=` and the number).
     let pid = minix_std::process::getpid().map_or(0, |(pid, _)| pid as u32);
-    write_out(b"wlpanel: ready pid=");
-    put_dec(pid);
-    write_out(b"\n");
+    let mut banner = [0u8; 40];
+    let mut at = 0usize;
+    crate::append(&mut banner, &mut at, b"wlpanel: ready pid=");
+    crate::append(&mut banner, &mut at, crate::Decimal::of(pid).bytes());
+    crate::append(&mut banner, &mut at, b"\n");
+    write_out(&banner[..at]);
 
     loop {
         if fill(conn, &mut inbuf, &mut chunk, 100) {

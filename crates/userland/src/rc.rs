@@ -32,10 +32,11 @@ const MAX_LIST: usize = 4096;
 const MAX_LINE: usize = 128;
 /// The most arguments one line may name.
 const MAX_ARGS: usize = 8;
-/// How many scheduler round trips the session manager waits for the shell's prompt
-/// before it starts anything. Each `getpid` is a `SENDREC` to PM, so this is a
-/// real pause, and it is what puts the session's output on its own line instead of
-/// on the end of the prompt.
+/// How many scheduler round trips the session manager waits before it starts its
+/// list. Each `getpid` is a `SENDREC` to PM, so this is a real pause, and it is
+/// there for the `exec` overlap rather than for the console: `rc` forks this
+/// process and then execs the shell, and a second `exec` in flight at the same
+/// time can wedge PM or VFS (see `settle`).
 const PROMPT_WAIT: usize = 400;
 
 pub fn rc(_args: &[&str]) -> i32 {
@@ -43,19 +44,26 @@ pub fn rc(_args: &[&str]) -> i32 {
     exec_shell();
 }
 
-/// The session manager: wait for the prompt, start the list, reap for ever.
+/// The session manager: wait for `rc` to hand over to the shell, start the list,
+/// reap for ever.
 pub fn session(_args: &[&str]) -> i32 {
     for _ in 0..PROMPT_WAIT {
         let _ = process::getpid();
     }
-    // The shell printed its prompt without a newline. End that line, so what
-    // follows is a line of its own and the prompt stays a prompt.
-    crate::write_out(b"\n");
 
     let started = run_list(SESSION_PATH, b"session");
-    crate::write_out(b"session: started ");
-    crate::write_out(crate::Decimal::of(started as u32).bytes());
-    crate::write_out(b"\n");
+    // One write, so a line a program reports cannot be split by another writer
+    // sharing the console.
+    let mut line = [0u8; 32];
+    let mut at = 0usize;
+    crate::append(&mut line, &mut at, b"session: started ");
+    crate::append(
+        &mut line,
+        &mut at,
+        crate::Decimal::of(started as u32).bytes(),
+    );
+    crate::append(&mut line, &mut at, b"\n");
+    crate::write_out(&line[..at]);
 
     loop {
         // Reap whatever exits. A session's programs are long-lived, so this is

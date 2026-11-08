@@ -2148,28 +2148,37 @@ are arch-specific, `[env]` is tooling/platform, not kernel.
   strip the `\r`), and expect the same from any check of a captured guest log
   written on a Windows host, where the file keeps the CRLF.
 - **A program the `/etc/rc` list starts writes on top of the shell's prompt
-  (2026-11-08, resolved by the session manager).** `/bin/rc` forks each line and
-  then execs `/bin/sh`. `/bin/wlpanel` started from that list, and its first line
-  of output (`wlpanel: ready`) arrived after the shell had printed its prompt but
-  before it printed a newline, so the console showed `# wlpanel: ready`. A prompt
-  with text after it is not a prompt: `tools/smoke/feed.sh` waits for a line that
-  is exactly `# `, so every tsv gate refused such a boot as "no prompt", and that
-  is how it surfaced. The same boot also exposed a start race: with the panel as
-  the list's first line, two boots produced no panel output at all, and 16
-  `getpid` round trips between forks (`rc::settle`) made six of six boots start
-  it. PM and VFS each run one request at a time, so a child still inside `exec`
-  when `rc` forks again is the likely loser; that half is mitigated, not
-  explained.
+  (2026-11-08, fixed in the shell).** `/bin/rc` forks each line and then execs
+  `/bin/sh`. `/bin/wlpanel` started from that list, and its first line of output
+  (`wlpanel: ready`) arrived after the shell had printed its prompt but before it
+  printed a newline, so the console showed `# wlpanel: ready`. A prompt with text
+  after it is not a prompt: `tools/smoke/feed.sh` waits for a line that is exactly
+  `# `, so every tsv gate refused such a boot as "no prompt", and that is how it
+  surfaced. The same boot also exposed a start race: with the panel as the list's
+  first line, two boots produced no panel output at all, and 16 `getpid` round
+  trips between forks (`rc::settle`) made six of six boots start it. PM and VFS
+  each run one request at a time, so a child still inside `exec` when `rc` forks
+  again is the likely loser; that half is mitigated, not explained.
 
-  Both halves are answered by `/bin/session`. `/etc/rc`'s only entry starts it;
-  it waits for the prompt (`PROMPT_WAIT` `getpid` round trips, so the pause is a
-  real yield to PM), writes the newline the shell did not, and only then runs
-  `/etc/session`, forking one line at a time with `settle` between them. Its own
-  `exec`s therefore never overlap the shell's, and every program it starts has
-  its first line on a line of its own. Gate: `tools/rc_probe.py`, which types
-  nothing at all and waits for the start line, the `# ` prompt on a line of its
-  own, and the panel's ready line.
-  (`crates/userland/src/rc.rs`, `crates/boot-image/src/manifest.rs`)
+  The first fix was a session manager (`/bin/session`) that waits for the prompt,
+  writes the newline the shell did not, and only then starts `/etc/session`. That
+  is a race, not a fix: the manager's own delay makes the newline arrive at some
+  arbitrary moment after the prompt, and the *programs* keep writing whenever they
+  have something to say, so their lines can still land inside a prompt. Measured
+  on riscv64: the panel's ready line was split by the shell's next prompt
+  (`wlpanel: ready pid=# 23`, every write a separate syscall), `test-fbmmap` lost
+  its prompt, and the console was garbage.
+
+  What holds is the shell ending its own prompt line: `sh` writes `# \n` in one
+  call, and the editor (`redraw_line`, `kill_line`) no longer reprints the prompt
+  because the edit line no longer contains it. With the prompt closed by its
+  writer, a program's line can land before it or after it and the prompt is intact
+  either way. The session manager keeps its delay for the `exec` overlap only.
+  Gates: `tools/rc_probe.py`, which types nothing and waits for the start line, the
+  `# ` prompt on a line of its own, and the panel's ready line, plus every tsv
+  scenario, which needs the `# ` prompt.
+  (`crates/userland/src/shell.rs`, `crates/userland/src/rc.rs`,
+  `crates/boot-image/src/manifest.rs`)
 - **A surface's pixels and its hit box came from two different places
   (2026-11-08, fixed).** The server works out where an anchored layer surface
   sits (`wayland::server::place`) and the scene carries it, which is what

@@ -5,13 +5,13 @@ Boots x86 with the bochs display and types nothing at all. Three things have to
 happen on their own, in order:
 
   * `/bin/rc` runs `/etc/rc`, which names the session manager;
-  * the manager waits for the shell's prompt, ends that line (the prompt is
-    printed without a newline) and reports what it started;
+  * the shell prints its prompt as a line of its own, and the manager reports what
+    it started, without either landing inside the other;
   * the panel from `/etc/session` reaches its ready line, on a line of its own.
 
-The prompt check is the one that matters most: `# \n` is the shell's prompt
-followed by the manager's newline, which is what keeps every later program's
-first line from being glued onto the prompt.
+The prompt check is the one that matters most: a prompt with text after it is not
+a prompt to anything reading the console, and the shell's own terminator is what
+keeps that true however many programs share the console.
 
 Exit 0 on success, 1 otherwise.
 """
@@ -82,7 +82,7 @@ def main():
 
     step(1, "the rc list started the session manager",
          lambda: b"session: started 1" in out)
-    step(2, "the prompt line was ended before the session's output",
+    step(2, "the prompt is a line of its own",
          lambda: PROMPT.search(bytes(out)) is not None, 30)
     step(3, "the session's panel came up", lambda: b"wlpanel: ready" in out, 60)
 
