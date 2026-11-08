@@ -1,0 +1,22 @@
+[package]
+name = "ui"
+version = "0.1.0"
+description = "Widget model: layout, focus, hit testing and painting"
+
+[package.edition]
+workspace = true
+
+[package.rust-version]
+workspace = true
+
+[package.license]
+workspace = true
+
+[dependencies]
+render = { path = "../render" }
+
+[dev-dependencies]
+minix-std = { path = "../minix-std" }
+
+[lints]
+workspace = true

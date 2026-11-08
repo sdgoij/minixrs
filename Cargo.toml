@@ -48,6 +48,7 @@ members = [
     "crates/net",
     "crates/render",
     "crates/servers",
+    "crates/ui",
     "crates/userland",
     "crates/wayland",
 ]

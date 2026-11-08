@@ -200,6 +200,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "ui"
+version = "0.1.0"
+dependencies = [
+ "minix-std",
+ "render",
+]
+
+[[package]]
 name = "userland"
 version = "0.1.0"
 dependencies = [
