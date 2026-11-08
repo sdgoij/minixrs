@@ -171,6 +171,9 @@ pub const BOOT_BINS: &[(&str, &str)] = &[
     // `/bin/wldemo` is the widget client: a text field, a list and a button in one
     // window, driven by the keyboard and drawn by the software backend.
     ("/bin/wldemo", "wldemo"),
+    // `/bin/wlpanel` is the session panel: a layer surface across the top of the
+    // output with a launcher button.
+    ("/bin/wlpanel", "wlpanel"),
     // `/bin/wlxd` is the Wayland Phase 2d damage and cursor client: it damages part
     // of a frame and checks the rest survives, then gives the pointer an image.
     ("/bin/wlxd", "wlxd"),

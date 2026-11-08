@@ -1147,6 +1147,16 @@ test-wldemo-x86: build-x86
     python tools/wldemo_probe.py
     @echo "wldemo: the field, the list and the button took their keys (x86_64)"
 
+# wlpanel: tools/wlpanel_probe.py drives the session panel — /bin/wlpanel maps a
+# layer surface across the top of the output, and a click inside its launcher button
+# has to reach it with the pointer's position.
+test-wlpanel-x86: build-x86
+    mkdir -p target/images/x86_64-pc-minix
+    cp target/trampoline.elf target/images/x86_64-pc-minix/minix-x86.elf
+    @just _assert-qemu-version qemu-system-x86_64
+    python tools/wlpanel_probe.py
+    @echo "wlpanel: the launcher took a click on the layer surface (x86_64)"
+
 
 # wlxd: /bin/wlxd drives the Phase 2d damage and cursor path — it damages a small
 # rectangle and checks the rest of the frame survives, then gives the pointer an

@@ -2864,3 +2864,248 @@ fn run_demo() -> Result<(), i32> {
         }
     }
 }
+
+/// `/bin/wlpanel` above is the real client; a host build only has to compile the
+/// binary.
+#[cfg(not(target_os = "minix"))]
+pub fn wl_panel(_args: &[&str]) -> i32 {
+    1
+}
+
+/// `/bin/wlpanel`: the session panel (`gui.md` milestone M5).
+///
+/// A `zwlr_layer_shell_v1` surface anchored to the top-left of the output, one
+/// row tall, drawn with the widget layer. Its button is the launcher: a click
+/// that activates it prints the line the gate looks for, and Escape ends the
+/// client.
+#[cfg(target_os = "minix")]
+pub fn wl_panel(_args: &[&str]) -> i32 {
+    match run_panel() {
+        Ok(()) => {
+            write_out(b"wlpanel: PASS\n");
+            0
+        }
+        Err(code) => code,
+    }
+}
+
+#[cfg(target_os = "minix")]
+const PANEL_HEIGHT: i32 = 32;
+/// The launcher button's width inside the panel.
+#[cfg(target_os = "minix")]
+const PANEL_BUTTON_WIDTH: i32 = 72;
+
+#[cfg(target_os = "minix")]
+fn run_panel() -> Result<(), i32> {
+    use render::Rect;
+    use render::pass::Pass;
+    use render::soft::Software;
+    use render::text::Atlas;
+    use ui::{Button, Event as Input, Form, Theme, Widget};
+
+    let theme = Theme::DARK;
+    let mut form = Form::new([Widget::Button(Button::new(b"Apps"))], theme);
+    form.stack(Rect::new(4, 4, PANEL_BUTTON_WIDTH, theme.row_height), 0);
+    let atlas = Atlas::from_bitmap_font(&crate::fbfont::FONT_8X16);
+
+    let conn = connect()?;
+    let mut client = Client::new();
+    let mut req = [0u8; 512];
+    let mut inbuf = MessageBuffer::new();
+    let mut chunk = [0u8; 512];
+
+    let registry = send_req(conn, &mut req, |q| client.get_registry(q))?;
+    let g = find_globals(conn, &client, &mut inbuf, &mut chunk)?;
+    if g.layer_shell == 0 {
+        return Err(fail(152, b"wlpanel: no zwlr_layer_shell_v1 global\n"));
+    }
+    let compositor = send_req(conn, &mut req, |q| {
+        client.bind(
+            registry,
+            g.compositor,
+            b"wl_compositor",
+            1,
+            Kind::Compositor,
+            q,
+        )
+    })?;
+    let shm = send_req(conn, &mut req, |q| {
+        client.bind(registry, g.shm, b"wl_shm", 1, Kind::Shm, q)
+    })?;
+    let seat = send_req(conn, &mut req, |q| {
+        client.bind(registry, g.seat, b"wl_seat", 1, Kind::Seat, q)
+    })?;
+    let layer_shell = send_req(conn, &mut req, |q| {
+        client.bind(
+            registry,
+            g.layer_shell,
+            b"zwlr_layer_shell_v1",
+            1,
+            Kind::LayerShell,
+            q,
+        )
+    })?;
+    send_req(conn, &mut req, |q| client.get_pointer(seat, q))?;
+    send_req(conn, &mut req, |q| client.get_keyboard(seat, q))?;
+
+    // The panel spans the output's width at the top. The height is the one row
+    // the widget layer needs plus its padding, so the surface and the widget tree
+    // agree without a second measurement.
+    let surface = send_req(conn, &mut req, |q| client.create_surface(compositor, q))?;
+    let panel = send_req(conn, &mut req, |q| {
+        client.get_layer_surface(
+            layer_shell,
+            surface,
+            0,
+            protocol::LAYER_TOP,
+            b"minixrs-panel",
+            q,
+        )
+    })?;
+    send_req(conn, &mut req, |q| {
+        client.set_layer_size(panel, FB_WIDTH as u32, PANEL_HEIGHT as u32, q)
+    })?;
+    send_req(conn, &mut req, |q| {
+        client.set_anchor(
+            panel,
+            protocol::LAYER_ANCHOR_TOP | protocol::LAYER_ANCHOR_LEFT,
+            q,
+        )
+    })?;
+    send_req(conn, &mut req, |q| client.commit(surface, q))?;
+    let (serial, width, height) =
+        await_layer_configure(conn, &client, panel, &mut inbuf, &mut chunk)?;
+    if width == 0 || height == 0 {
+        return Err(fail(153, b"wlpanel: the panel configured no size\n"));
+    }
+    send_req(conn, &mut req, |q| {
+        client.ack_layer_configure(panel, serial, q)
+    })?;
+    let barrier = send_req(conn, &mut req, |q| client.sync(q))?;
+    await_callback(conn, &client, barrier, &mut inbuf, &mut chunk)?;
+
+    let output = Rect::new(0, 0, width as i32, height as i32);
+    let stride = width as i32 * 4;
+    let size = stride * height as i32;
+    let pool_fd = fs::memfd_create(0).map_err(|_| fail(154, b"wlpanel: memfd_create failed\n"))?;
+    fs::truncate(pool_fd, size as i64).map_err(|_| fail(155, b"wlpanel: truncate failed\n"))?;
+    let pool = unsafe {
+        vmem::mmap(
+            core::ptr::null_mut(),
+            size as usize,
+            vmem::PROT_READ | vmem::PROT_WRITE,
+            vmem::MAP_SHARED,
+            pool_fd,
+            0,
+        )
+    };
+    if pool == vmem::MAP_FAILED {
+        return Err(fail(156, b"wlpanel: mmap of the pool failed\n"));
+    }
+    uds::send_fds(conn, &[pool_fd]).map_err(|_| fail(157, b"wlpanel: send_fds failed\n"))?;
+    let pool_obj = send_req(conn, &mut req, |q| client.create_pool(shm, 0, size, q))?;
+    let buffer = send_req(conn, &mut req, |q| {
+        client.create_buffer(
+            pool_obj,
+            0,
+            width as i32,
+            height as i32,
+            stride,
+            protocol::WL_SHM_FORMAT_XRGB8888,
+            q,
+        )
+    })?;
+    send_req(conn, &mut req, |q| client.attach(surface, buffer, 0, 0, q))?;
+
+    let pixels =
+        unsafe { core::slice::from_raw_parts_mut(pool.cast::<u32>(), (width * height) as usize) };
+    let mut soft = Software::new(output, width as usize, pixels)
+        .map_err(|_| fail(158, b"wlpanel: the renderer refused the pool\n"))?;
+    let atlas_texture = soft
+        .create_texture_rgba(atlas.width(), atlas.height(), atlas.pixels())
+        .map_err(|_| fail(159, b"wlpanel: the atlas did not upload\n"))?;
+
+    let mut dirty = true;
+    let mut busy = false;
+    // The pointer's position, from the last `motion`; `wl_pointer.button` carries
+    // no coordinates, so this is where the click is read from.
+    let (mut px, mut py) = (0, 0);
+
+    write_out(b"wlpanel: ready\n");
+
+    loop {
+        if fill(conn, &mut inbuf, &mut chunk, 100) {
+            loop {
+                let msg = match inbuf.next() {
+                    Ok(Some(m)) => m,
+                    Ok(None) => break,
+                    Err(_) => return Err(fail(160, b"wlpanel: bad frame\n")),
+                };
+                let h = Header::parse(msg).map_err(|_| fail(161, b"wlpanel: bad header\n"))?;
+                let mut args = [Arg::Uint(0); MAX_ARGS];
+                let (_, kind, argc) = client
+                    .decode(msg, &mut args)
+                    .map_err(|_| fail(162, b"wlpanel: undecodable event\n"))?;
+                let (opcode, object) = (h.opcode, h.object_id);
+                let a0 = args[0].as_uint();
+                // Surface coordinates are 24.8 fixed point; the sign matters if
+                // the pointer is left of the surface.
+                let at_x = args[1].as_int().unwrap_or(0) >> 8;
+                let at_y = args[2].as_int().unwrap_or(0) >> 8;
+                let code = args[2].as_uint();
+                let state = args[3].as_uint();
+                inbuf.consume(h.size as usize);
+
+                match (kind, opcode) {
+                    (Kind::Pointer, protocol::pointer_ev::MOTION) if argc == 3 => {
+                        px = at_x;
+                        py = at_y;
+                    }
+                    (Kind::Pointer, protocol::pointer_ev::BUTTON) if argc == 4 => {
+                        let pressed = state == Some(wayland::input::STATE_PRESSED);
+                        let response = form.handle(Input::Button {
+                            x: px,
+                            y: py,
+                            pressed,
+                        });
+                        if response.changed {
+                            dirty = true;
+                        }
+                        if response.activated {
+                            write_out(b"wlpanel: launch\n");
+                        }
+                    }
+                    (Kind::Keyboard, protocol::keyboard_ev::KEY) if argc == 4 => {
+                        // Escape ends the client: a panel is otherwise up forever.
+                        if code == Some(1) && state == Some(wayland::input::STATE_PRESSED) {
+                            let _ = uds::close_fd(conn);
+                            return Ok(());
+                        }
+                    }
+                    (Kind::Buffer, protocol::buffer_ev::RELEASE) if object == buffer => {
+                        busy = false
+                    }
+                    (Kind::LayerSurface, protocol::layer_surface_ev::CONFIGURE) => {
+                        send_req(conn, &mut req, |q| {
+                            client.ack_layer_configure(panel, a0.unwrap_or(0), q)
+                        })?;
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        if dirty && !busy {
+            let mut pass = Pass::new(output);
+            form.paint(&mut pass, &atlas, atlas_texture);
+            soft.render(&pass)
+                .map_err(|_| fail(163, b"wlpanel: the panel did not render\n"))?;
+            send_req(conn, &mut req, |q| {
+                client.damage(surface, 0, 0, width as i32, height as i32, q)
+            })?;
+            send_req(conn, &mut req, |q| client.commit(surface, q))?;
+            dirty = false;
+            busy = true;
+        }
+    }
+}

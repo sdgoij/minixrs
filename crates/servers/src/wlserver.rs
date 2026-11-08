@@ -1369,6 +1369,12 @@ mod imp {
         let mut keymap: Option<(i32, u32)> = None;
         let mut clients: [Option<Client>; MAX_CLIENTS] = core::array::from_fn(|_| None);
         let mut istate = InputState::new();
+        // A server with no client objects, so the pointer can still be fed and
+        // stepped while nothing has the focus. Without it the position only
+        // advanced for a focused connection, and a window the pointer entered
+        // while nothing was focused could never be given the focus.
+        let mut idle = Server::new(XRES as i32, YRES as i32);
+        let mut idle_out = [0u8; 256];
         // Which connection's surface input goes to. Between connections this is the
         // loop's to arbitrate; within one, a surface's first commit sets it.
         let mut focus: Option<(usize, u32)> = None;
@@ -1462,6 +1468,7 @@ mod imp {
             }
             if let Some((slot, surface)) = want {
                 move_focus(&mut clients, &mut focus, slot, surface);
+                point_at(&mut clients, slot, &istate);
             }
 
             // The pointer is over the window it is over: moving it into another one
@@ -1469,7 +1476,7 @@ mod imp {
             // console line is how the gate sees each handover: a key injected right
             // after a move is dropped by the guest's input ring, so the client cannot
             // prove two focus changes with two keys.
-            if pump_input(&mut clients, focus, &mut istate)
+            if pump_input(&mut clients, &mut idle, &mut idle_out, focus, &mut istate)
                 && let Some((slot, surface)) = hit_test(&scene, istate.ptr.0, istate.ptr.1)
                 && focus != Some((slot, surface))
             {
@@ -1480,6 +1487,7 @@ mod imp {
                 push(&mut line, &mut at, b"\n");
                 report(&line[..at]);
                 move_focus(&mut clients, &mut focus, slot, surface);
+                point_at(&mut clients, slot, &istate);
             }
         }
     }
@@ -1513,10 +1521,33 @@ mod imp {
         *focus = Some((slot, surface));
     }
 
-    /// Turn queued input into events for the focused connection — or, with nothing
-    /// focused, drain and discard so the input ring does not back up.
+    /// Tell the connection that just took the pointer where the pointer is.
+    ///
+    /// `wl_pointer.enter` carries a position, but the server hands over focus
+    /// without one and `motion` is only emitted when the pointer moves. A client
+    /// that takes the focus on the last step of a move would otherwise believe
+    /// the pointer is at (0, 0) and read the next click at the wrong place.
+    fn point_at(clients: &mut [Option<Client>; MAX_CLIENTS], slot: usize, st: &InputState) {
+        if let Some(c) = clients[slot].as_mut() {
+            let mut reply = DispatchBuf::new(&mut c.out);
+            if motion(&mut c.server, st, now_ms(), &mut reply) {
+                let n = reply.len();
+                if n > 0 {
+                    let _ = uds::send(c.conn, &c.out[..n]);
+                }
+            }
+        }
+    }
+
+    /// Turn queued input into events for the focused connection, or advance the
+    /// tracked pointer when nothing is focused.
+    ///
+    /// The pointer's position has to move whether or not anyone holds the focus:
+    /// it is what decides which window the next move gives the focus to.
     fn pump_input(
         clients: &mut [Option<Client>; MAX_CLIENTS],
+        idle: &mut Server,
+        idle_out: &mut [u8],
         focus: Option<(usize, u32)>,
         st: &mut InputState,
     ) -> bool {
@@ -1540,9 +1571,11 @@ mod imp {
                 moved
             }
             None => {
-                let mut batch = [0u8; 48];
-                while fetch_input(&mut batch).is_some() {}
-                false
+                // Nobody is listening, so the events go into a buffer that is
+                // dropped; the state they update is the shared one.
+                let mut reply = DispatchBuf::new(idle_out);
+                drain_input(idle, st, &mut reply);
+                step_ptr(st)
             }
         }
     }

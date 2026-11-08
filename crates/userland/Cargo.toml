@@ -420,6 +420,12 @@ name = "wldemo"
 path = "src/bin/wldemo.rs"
 test = false
 
+# wlpanel is the session panel: a layer-shell surface with a launcher button.
+[[bin]]
+name = "wlpanel"
+path = "src/bin/wlpanel.rs"
+test = false
+
 [[bin]]
 name = "wlxd"
 path = "src/bin/wlxd.rs"
