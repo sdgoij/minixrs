@@ -2895,6 +2895,27 @@ const PANEL_HEIGHT: i32 = 32;
 #[cfg(target_os = "minix")]
 const PANEL_BUTTON_WIDTH: i32 = 72;
 
+/// Start the launcher's program.
+///
+/// The child replaces its image, so a failed `exec` exits instead of returning
+/// into the panel's loop; the parent keeps the panel and gets the focus back the
+/// next time the pointer moves over it.
+#[cfg(target_os = "minix")]
+fn launch_app() -> Result<(), i32> {
+    use minix_std::process;
+
+    let pid = unsafe { process::fork() }.map_err(|_| fail(164, b"wlpanel: fork failed\n"))?;
+    if pid == 0 {
+        // The fork's stage1 compiler has no C-string literals, so argv[0] is
+        // built from a NUL-terminated byte string.
+        #[allow(clippy::manual_c_str_literals)]
+        let argv = [b"/bin/wldemo\0".as_ptr(), core::ptr::null()];
+        let _ = process::exec(b"/bin/wldemo", &argv, &[]);
+        process::exit(127);
+    }
+    Ok(())
+}
+
 #[cfg(target_os = "minix")]
 fn run_panel() -> Result<(), i32> {
     use render::Rect;
@@ -3073,6 +3094,7 @@ fn run_panel() -> Result<(), i32> {
                         }
                         if response.activated {
                             write_out(b"wlpanel: launch\n");
+                            launch_app()?;
                         }
                     }
                     (Kind::Keyboard, protocol::keyboard_ev::KEY) if argc == 4 => {

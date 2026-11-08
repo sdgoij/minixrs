@@ -156,12 +156,24 @@ def main():
         click(q, True)
         click(q, False)
     step(2, "the launcher took the click", lambda: b"wlpanel: launch" in out)
+    step(3, "the launcher started the app", lambda: b"wldemo: ready" in out)
 
+    # The app takes the focus when it maps, so the next Escape goes to it.
     if ok:
         key(q, "esc", True)
         time.sleep(0.1)
         key(q, "esc", False)
-    step(3, "the panel finished", lambda: b"wlpanel: PASS" in out, 20)
+    step(4, "the app finished", lambda: b"wldemo: PASS" in out, 20)
+
+    # With the app gone nothing is focused, so moving the pointer over the panel
+    # is what hands it the focus again.
+    if ok:
+        absolute(q, 30, 16)
+        time.sleep(1.0)
+        key(q, "esc", True)
+        time.sleep(0.1)
+        key(q, "esc", False)
+    step(5, "the panel finished", lambda: b"wlpanel: PASS" in out, 20)
 
     q.close()
     if not ok:
