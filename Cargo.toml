@@ -46,6 +46,7 @@ members = [
     "crates/minix-std",
     "crates/minix-util",
     "crates/net",
+    "crates/render",
     "crates/servers",
     "crates/userland",
     "crates/wayland",

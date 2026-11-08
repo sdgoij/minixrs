@@ -1,0 +1,18 @@
+[package]
+name = "render"
+version = "0.1.0"
+description = "Scene pass list, damage regions and the GLES renderer"
+
+[package.edition]
+workspace = true
+
+[package.rust-version]
+workspace = true
+
+[package.license]
+workspace = true
+
+[dependencies]
+
+[lints]
+workspace = true
