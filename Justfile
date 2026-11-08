@@ -918,7 +918,7 @@ wldmabufgl-x86: userland-x86 dynlib-x86
 # not the compositor's: this host's virgl renders into a host-side texture, so the client
 # resolves it and transfers it into the object before committing (`.notes/wayland.md` §5, and
 # `tools/egl_bo_probe.c` is the measurement).
-test-wldmabufgl-x86 boot-timeout="120": wldmabufgl-x86 boot-image-x86
+test-wldmabufgl-x86: wldmabufgl-x86 boot-image-x86
     @just _assert-qemu-version qemu-system-x86_64
     M=target/mesa/x86; E="/lib/libdrm.so.2=$M/lib/libdrm.so.2;/lib/libEGL.so.1=$M/lib/libEGL.so.1;/lib/libgbm.so.1=$M/lib/libgbm.so.1;/lib/libexpat.so.1=$M/lib/libexpat.so.1;/lib/libgallium-25.3.6.so=$M/lib/libgallium-25.3.6.so;/lib/libGLESv2.so.2=$M/lib/libGLESv2.so.2;/lib/libz.so.1=$M/lib/libz.so.1;/lib/dri_gbm.so=$M/lib/dri_gbm.so;/bin/wldmabufgl=$M/bin/wldmabufgl"; MINIXFS_EXTRA="$E" MINIXFS_BLOCKS=16384 cargo run -q -p boot-image --bin mkminixfs --release -- x86_64
     @just mkfs-x86
@@ -940,7 +940,7 @@ wlcompose-x86: userland-x86 dynlib-x86
 # colours out of the returned frame, so this measures cross-process sampling, not merely a crash.
 # The devices are the 4d gate's — a 2D `virtio-gpu-pci` and a GL device — the pair the port's role
 # selection (D11) has been validated with; `-display egl-headless` is what a GL device needs.
-test-wlcompose-x86 boot-timeout="120": wlcompose-x86 boot-image-x86
+test-wlcompose-x86: wlcompose-x86 boot-image-x86
     @just _assert-qemu-version qemu-system-x86_64
     M=target/mesa/x86; E="/lib/libdrm.so.2=$M/lib/libdrm.so.2;/lib/libEGL.so.1=$M/lib/libEGL.so.1;/lib/libgbm.so.1=$M/lib/libgbm.so.1;/lib/libexpat.so.1=$M/lib/libexpat.so.1;/lib/libgallium-25.3.6.so=$M/lib/libgallium-25.3.6.so;/lib/libGLESv2.so.2=$M/lib/libGLESv2.so.2;/lib/libz.so.1=$M/lib/libz.so.1;/lib/dri_gbm.so=$M/lib/dri_gbm.so;/bin/wlcompose=$M/bin/wlcompose"; MINIXFS_EXTRA="$E" MINIXFS_BLOCKS=16384 cargo run -q -p boot-image --bin mkminixfs --release -- x86_64
     @just mkfs-x86
@@ -951,7 +951,7 @@ test-wlcompose-x86 boot-timeout="120": wlcompose-x86 boot-image-x86
 # the helper process and scanned out as one frame. `/bin/wlscene` is a plain static client; the
 # helper is the dynamic `/bin/wlcompose`, injected with the Mesa DSOs. The devices and the GL
 # display are the 5b gate's, plus QMP so the host can read the display the frame lands on.
-test-wlscene-x86 boot-timeout="120": wlcompose-x86 boot-image-x86
+test-wlscene-x86: wlcompose-x86 boot-image-x86
     @just _assert-qemu-version qemu-system-x86_64
     M=target/mesa/x86; E="/lib/libdrm.so.2=$M/lib/libdrm.so.2;/lib/libEGL.so.1=$M/lib/libEGL.so.1;/lib/libgbm.so.1=$M/lib/libgbm.so.1;/lib/libexpat.so.1=$M/lib/libexpat.so.1;/lib/libgallium-25.3.6.so=$M/lib/libgallium-25.3.6.so;/lib/libGLESv2.so.2=$M/lib/libGLESv2.so.2;/lib/libz.so.1=$M/lib/libz.so.1;/lib/dri_gbm.so=$M/lib/dri_gbm.so;/bin/wlcompose=$M/bin/wlcompose"; MINIXFS_EXTRA="$E" MINIXFS_BLOCKS=16384 cargo run -q -p boot-image --bin mkminixfs --release -- x86_64
     @just mkfs-x86
