@@ -1,5 +1,11 @@
 # Wayland on minixrs: design proposal and gap analysis
 
+> **Superseded (2026-11):** the compositor north star below, smithay and
+> `cosmic-comp`, is no longer the plan. The tree builds its own GUI stack
+> instead, and the forks, crates and gates that existed for that path are gone.
+> See `.notes/gui.md`. The analysis of the OS primitives in this document still
+> stands.
+
 Status: **Phases 0–2 landed, and Phase 3 through stage 3d-b-5, with
 the softpipe triangle (3c-2) on all three arches.** The loader support it
 depends on has landed (dynamic linking, `dlopen`, multi-module TLS, an 18-object

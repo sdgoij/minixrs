@@ -17,23 +17,3 @@
 	path = rustix
 	url = git@github.com:sdgoij/rustix.git
 	branch = feature/minixrs
-[submodule "polling"]
-	path = polling
-	url = git@github.com:sdgoij/polling.git
-	branch = feature/minixrs
-[submodule "calloop"]
-	path = calloop
-	url = git@github.com:sdgoij/calloop.git
-	branch = feature/minixrs
-[submodule "wayland-rs"]
-	path = wayland-rs
-	url = git@github.com:sdgoij/wayland-rs.git
-	branch = feature/minixrs
-[submodule "rust_libloading"]
-	path = rust_libloading
-	url = git@github.com:sdgoij/rust_libloading.git
-	branch = feature/minixrs
-[submodule "cosmic-comp"]
-	path = cosmic-comp
-	url = git@github.com:sdgoij/cosmic-comp.git
-	branch = feature/minixrs
