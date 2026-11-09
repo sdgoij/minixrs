@@ -1934,6 +1934,22 @@ are arch-specific, `[env]` is tooling/platform, not kernel.
   pacing); not scheduled, and documented in the `bare-metal-debug`
   skill as a platform/harness limitation rather than a code defect.
 
+  *Measured again (2026-11-09), and it is worse than a dropped byte:* a long
+  enough line can arrive **rotated** rather than truncated. Three consecutive
+  lines of `/bin/echo ` plus 230 `e`s, each typed in one write (`tools/smoke/feed.sh`,
+  `FEED_PACE=0`), failed in two of three runs: the console received the prompt,
+  then the last 24 (once, the last 151) of the argument, then a line break, then
+  `/bin/echo ` and the head of the argument, and the shell never executed the
+  line (the driver timed out on the step). The split point differs per run. The
+  line editor and the prompt work are not the cause: it reproduces with the
+  editor's per-byte `TIOCGTAKEN` check removed (an ioctl round trip, and the
+  only per-byte cost those commits added), and none of the three touches an
+  input path (`8be12d03` is the tty output line's owner, `aec857a3` adds the
+  takeover count and the reprint, `3bbbb578` ends the prompt line). A paced run
+  (`FEED_PACE=0.003`) did not reach a verdict either; its log ends at a prompt
+  with the first line echoed whole, so the pacing path needs its own look before
+  it can serve as the workaround here.
+
 - **A pending notification starved the async reply that finishes a file page, so `/bin/hello`
   wedged with its text page left as a fill placeholder (fixed 2026-11-09).** After the thread and prompt work,
   `/bin/hello` stops after `alloc: churn + realloc + align ok`: the four worker lines never
