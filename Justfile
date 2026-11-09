@@ -606,8 +606,8 @@ test-long-path boot-timeout="30": build-x86
 # the active console keep the default termios (canonical, ECHO on) and printed what they took,
 # which the console showed as the argument's tail ahead of the command's own echo (the "rotated"
 # burst in KNOWN_ISSUES). Each step's argument starts with a tag its output must begin with, so a
-# byte lost to the QEMU FIFO still passes while a line the shell never ran fails: the exact
-# argument is deliberately not the expectation, because that loss is a separate, known
+# byte lost to QEMU's stdio transport still passes while a line the shell never ran fails: the
+# exact argument is deliberately not the expectation, because that loss is a separate, known
 # limitation (`FEED_PACE` is its workaround) and this gate is about the line reaching the shell.
 test-burst arch="x86" boot-timeout="30":
     @just test-burst-{{arch}} {{boot-timeout}}
@@ -617,7 +617,17 @@ test-burst-x86 boot-timeout="30": build-x86
     cp target/trampoline.elf target/images/x86_64-pc-minix/minix-x86.elf
     @just _assert-qemu-version qemu-system-x86_64
     FEED_SCENARIO=tools/smoke/burst.tsv sh tools/smoke/feed.sh target/test-burst.log {{boot-timeout}} qemu-system-x86_64 -nographic -m 256M -no-reboot -vga none -device bochs-display,id=fb0 -kernel target/images/x86_64-pc-minix/minix-x86.elf -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0 -device virtio-tablet-pci,display=fb0
-    @echo "burst: every long line reached the shell and ran"
+    @echo "burst: every long line reached the shell and ran (x86_64)"
+
+test-burst-riscv64 boot-timeout="60": build-riscv64
+    @just _assert-qemu-version qemu-system-riscv64
+    FEED_SCENARIO=tools/smoke/burst.tsv sh tools/smoke/feed.sh target/test-burst-riscv64.log {{boot-timeout}} qemu-system-riscv64 -machine virt -m 256M -nographic -global virtio-mmio.force-legacy=off -netdev user,id=net0 -device virtio-net-device,netdev=net0 -device virtio-gpu-device -device virtio-keyboard-device -kernel target/riscv64gc-unknown-minix/release/kernel-boot-riscv64
+    @echo "burst: every long line reached the shell and ran (riscv64)"
+
+test-burst-aarch64 boot-timeout="60": build-aarch64
+    @just _assert-qemu-version qemu-system-aarch64
+    FEED_SCENARIO=tools/smoke/burst.tsv sh tools/smoke/feed.sh target/test-burst-aarch64.log {{boot-timeout}} qemu-system-aarch64 -machine virt -cpu cortex-a57 -m 256M -nographic -no-reboot -global virtio-mmio.force-legacy=off -netdev user,id=net0 -device virtio-net-device,netdev=net0 -device virtio-gpu-device -device virtio-keyboard-device -kernel target/aarch64-unknown-minix/release/kernel-boot-aarch64
+    @echo "burst: every long line reached the shell and ran (aarch64)"
 
 # Boot the bash that `build-bash` produced and drive `tools/smoke/bash.tsv` at
 # it: the version banner, a `-c` command line, an arithmetic expansion, a loop, a
@@ -1416,11 +1426,13 @@ test-arches:
     @just test-fork riscv64
     @just test-waitid riscv64
     @just test-winprobe riscv64
+    @just test-burst riscv64
     @just test-qemu aarch64
     @just test-boot aarch64
     @just test-fork aarch64
     @just test-waitid aarch64
     @just test-winprobe aarch64
+    @just test-burst aarch64
 
 # Fork isolation, per arch: `tools/smoke/fork.tsv` runs `/bin/forktest`, which forks and checks
 # all three directions of the copy - the child's write must not reach the parent, the parent's

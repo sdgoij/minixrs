@@ -1920,19 +1920,18 @@ are arch-specific, `[env]` is tooling/platform, not kernel.
 
 ## x86_64 (`[x86]`)
 
-- **Piped serial input loses bytes under bursts (the x86 analog of the
-  RISC-V issue).** QEMU's chardev pushes a pipe write as one burst; the
-  16550 RX FIFO holds only 16 bytes, so a single command line longer than
-  that overruns the FIFO and drops bytes mid-word (observed:
-  `chmod 4755 /bin/sugid` → `chmod 4755 /bingid`), and back-to-back
-  lines are worse. The serial ISR (trigger 14) + syscall-entry drain +
-  timer tick can't keep up with a burst. Interactive typing is fine
-  (human speed ≪ FIFO drain rate); only scripted piped input is affected.
-  Workaround for probes: write input one byte at a time with a ~3 ms gap
-  (`su_setuid_probe.py` does this) — no drops observed. A guest-side fix
-  would need the UART RX path to drain more aggressively (or QEMU-side
-  pacing); not scheduled, and documented in the `bare-metal-debug`
-  skill as a platform/harness limitation rather than a code defect.
+- **Piped serial input loses bytes under bursts, on the host's `-nographic` transport rather
+  than in the guest (measured 2026-11-09).** QEMU's stdio chardev pushes a pipe write as one burst,
+  and a 240-byte line can lose a run of characters (1, 4, 13 and 48 measured; earlier:
+  `chmod 4755 /bin/sugid` -> `chmod 4755 /bingid`) while short lines and interactive typing are
+  fine. It is the transport, not the guest: the same image and the same single write over a socket
+  chardev (`-serial chardev:socket` in place of `-nographic`) delivered 96 of 96 bursts whole,
+  while `tools/smoke/feed.sh` over stdio lost three of 120. That exonerates the 16550 FIFO and its
+  ISR trigger (14 on x86, 1 on RISC-V), the syscall-entry drain and the `ser_input` ring on this
+  evidence, and it means the earlier FIFO-overrun reading of the same symptom was wrong. A probe
+  that must see every byte still paces its input (`FEED_PACE=0.003`, or `su_setuid_probe.py`'s own
+  ~3 ms gaps), because a guest-side change cannot repair a drop in the host path.
+  (`tools/smoke/feed.sh`, `target/sock_burst.py`-style probe)
 
   *The 2026-11-09 "rotated" measurement was not a rotation of one stream: a second console
   line was stealing the burst, and that is fixed.* `tty_init` wires `console_read` as the devread
@@ -1945,13 +1944,11 @@ are arch-specific, `[env]` is tooling/platform, not kernel.
   shell's editor echoing what it did receive), and the shell never saw the newline so it never ran
   the line. The split point differed per run because it is where the pump moved on to the next
   line. `takes_serial_input` now lets only the active console line (`CONSOLE_LINE`) take bytes from
-  the ring. After the fix: ten runs (seven of six 240-byte lines, three of six distinct-counter
-  lines), no rotated line and no stolen byte; before it, three rotations in the same reproducer.
-  What remains is the plain loss this entry describes, measured on the same runs at about one line
-  in ten (one run lost four characters: 226 of 230 reached the editor and the shell returned to a
-  prompt), so the FIFO overrun this entry describes remains, and the `FEED_PACE` workaround still
-  applies.
-  (`crates/servers/src/tty.rs`)
+  the ring. Before it, three rotations in the reproducer; after it, none. The reproducer is now a
+  tracked gate on all three arches, `just test-burst` (`tools/smoke/burst.tsv`, in `test-arches`):
+  three 240-byte lines typed in one write, each argument tagged so a byte lost to the stdio
+  transport still passes while a line the shell never ran fails.
+  (`crates/servers/src/tty.rs`, `tools/smoke/burst.tsv`, `Justfile`)
 
 - **A pending notification starved the async reply that finishes a file page, so `/bin/hello`
   wedged with its text page left as a fill placeholder (fixed 2026-11-09).** After the thread and prompt work,
