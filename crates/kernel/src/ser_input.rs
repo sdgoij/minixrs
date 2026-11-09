@@ -188,4 +188,30 @@ mod tests {
         }
         assert_eq!(try_read(), None);
     }
+
+    /// A burst the length of a long command line, taken one byte at a time, must come out in the
+    /// order it went in even when it wraps the ring. A rotated line is executed as a different
+    /// command (measured on x86 with 240-byte lines, KNOWN_ISSUES `[x86]`).
+    #[test]
+    fn test_a_long_burst_keeps_its_order_across_the_wrap() {
+        reset();
+        // Put both indices past the wrap point, as consecutive lines do.
+        for _ in 0..200 {
+            unsafe { push_byte(b'x') };
+            assert_eq!(try_read(), Some(b'x'));
+        }
+
+        let mut line = [b'e'; 241];
+        line[..10].copy_from_slice(b"/bin/echo ");
+        line[240] = b'\n';
+        for &b in &line {
+            unsafe { push_byte(b) };
+        }
+
+        assert_eq!(available(), line.len());
+        for &want in &line {
+            assert_eq!(try_read(), Some(want));
+        }
+        assert_eq!(try_read(), None);
+    }
 }

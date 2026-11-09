@@ -4581,4 +4581,55 @@ mod tests {
         let termios = unsafe { core::ptr::read_unaligned(buf.as_ptr() as *const Termios) };
         assert_eq!(termios.c_iflag, 0xCAFE_0000);
     }
+
+    /// A console line is handed over one byte at a time by `console_read` and taken one byte at
+    /// a time by the shell's read loop, across a ring that wraps. A long line must keep its order
+    /// through both paths: a rotated line is executed as a different command. Measured on x86
+    /// with 240-byte lines and recorded in KNOWN_ISSUES `[x86]`.
+    #[test]
+    fn a_long_line_keeps_its_order_through_the_input_queue() {
+        let _lock = TestLockGuard::acquire();
+
+        let mut line = [b'e'; 241];
+        line[..10].copy_from_slice(b"/bin/echo ");
+        line[240] = b'\n';
+
+        let mut tp = Tty::zeroed();
+        setup_raw(&mut tp);
+        // The console pump's shape: one byte per call.
+        for &b in &line {
+            assert_eq!(in_process(&mut tp, &[b]), 1);
+        }
+        assert_eq!(
+            tp.tty_incount,
+            line.len() as i32,
+            "the whole line is queued"
+        );
+
+        let mut got = [0u8; 241];
+        for (i, _) in line.iter().enumerate() {
+            tp.tty_inleft = 1;
+            tp.tty_incum = 0;
+            in_transfer(&mut tp);
+            assert_eq!(tp.tty_incum, 1, "the shell's read {i} returned no byte");
+            got[i] = tp.tty_inbuf_user[0];
+        }
+        assert_eq!(got, line, "the line reached the reader rotated");
+        assert_eq!(tp.tty_incount, 0, "the queue drained");
+    }
+
+    /// The same line in one call, which is how a pty master write delivers its bytes.
+    #[test]
+    fn a_long_burst_in_one_call_keeps_its_order() {
+        let _lock = TestLockGuard::acquire();
+
+        let mut line = [b'e'; 241];
+        line[..10].copy_from_slice(b"/bin/echo ");
+        line[240] = b'\n';
+
+        let mut tp = Tty::zeroed();
+        setup_raw(&mut tp);
+        assert_eq!(in_process(&mut tp, &line), line.len());
+        assert_queue_chars(&tp, &line);
+    }
 }
