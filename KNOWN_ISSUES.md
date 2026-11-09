@@ -299,13 +299,39 @@ are arch-specific, `[env]` is tooling/platform, not kernel.
     RECEIVE (`rts=0x8`, `s_notify_pending` empty) and its own `s_sig_pending` still has bit 74
     (`SIGKSIG`) set, which is *not* evidence of an undelivered wakeup: this port's
     `build_notify_message` ignores its `src`/`dst` arguments, so a SYSTEM notification carries no
-    signal set and never clears `s_sig_pending` the way C's `BuildNotifyMessage` does. So either
-    PM's `GETKSIG` -> `process_ksig_reply` -> `ENDKSIG` loop stopped before the `ENDKSIG` for that
-    endpoint, or `P_STOP` was set again after it (the kernel's signal-delay path sets `P_STOP`
-    before sending and `ENDKSIG` is what clears it). Next: follow one `SIGSEGV` for a user process
-    through `cause_sig` -> PM's loop in `crates/servers/src/pm.rs` (the `send_kernel_call(7)` /
-    `send_kernel_call(8)` pair) and record where it stops; then pin the join wake
-    (`thread::exit` -> `p_join_waiter`) with a boot test.
+    signal set and never clears `s_sig_pending` the way C's `BuildNotifyMessage` does. Measured
+    through PM's own table (`MPROC` at `0x4015010`, `MProc` stride `0x1c0`, `mp_pid@0x4`,
+    `mp_flags@0x188`): `hello`'s entry has `mp_sigstatus = 11` (SIGSEGV), `mp_exitstatus = 0`,
+    `mp_sigpending = mp_ksigpending = 0`, and `mp_flags = 0x69`
+    (`IN_USE | PROC_STOPPED | 0x20 | 0x40`), with no `ZOMBIE` (`0x4`). So PM collected a SIGSEGV,
+    recorded it, and entered `exit_proc` (`crates/servers/src/pm.rs:794`), which did not reach
+    `zombify` at `869`. `P_STOP` is not from signal delivery at all: `exit_proc` calls `stop_proc`
+    (`811`), which implements "stop" as `sys_trace(T_STOP, ...)` (`1735`), and `do_trace_handler`'s
+    `T_STOP` arm (`crates/kernel/src/system.rs:2375-2391`) is the other `P_STOP` setter. Only
+    `T_RESUME` clears it, and nothing resumes a process that is being terminated.
+    Next: find what faults in `hello` now that the fill completes (the SIGSEGV is the trigger, and
+    with the page mapped nothing in its start-up should reach an unmapped address), then why
+    `exit_proc` stops between `mp_flags |= EXITING` and `zombify` in `exit_proc` (`811`-`869`: the
+    children loop, the `check_sig(-mp_procgrp, ...)` HUP, or the `VFS_PM_EXIT` asynsend).
+    The fault census (QEMU `-d int`, uninterrupted, one `hello`) narrows the trigger: 672 user-mode
+    `#PF`, of which 590 are `e=0006` (not present, write) above `mmap_base` (thread stacks and heap,
+    normal demand paging) and 7 are `e=0015` at `0x40285d0`, present, user, instruction fetch, the
+    fill placeholder, taken from two different thread stacks (`SP=0x3ff40fd8` and `0x3ff81fd8`).
+    So the worker threads re-execute into the placeholder seven times. Checked `VMCTL_CLEAR_PAGEFAULT`
+    (`crates/kernel/src/system.rs:5204-5225`) before changing it: the group sweep is deliberate and
+    commented ("Threads whose fault is not yet resolved re-fault on resume and are handled one at a
+    time"), and a thread that re-faults is parked again by `page_pending`, so those seven faults are
+    a thread being parked seven times, not a thread running placeholder code. Making the clear
+    per-Proc would add kernel-call surface for no behavioural change.
+    The prime suspect is instead the last worker fault, `e=0014` (not present, fetch) at
+    `0x4039fff` / `CR2=0x403a000` from a worker stack: fetching across a page boundary whose second
+    page lies outside a region is exactly the `regions.find` miss that ends in `sys_kill(ep,
+    SIGSEGV)`, and the signal then lands on the whole process because threads share the endpoint and
+    PM does not model threads. Next: check whether `hello`'s text region covers `0x403a000`, and
+    whether the fetch at `0x4039fff` straddles the end of the segment. Replacing `stop_proc`'s ptrace
+    `T_STOP` with the reference's stop primitive remains the fix for the wedge itself, since a stalled
+    exit then leaves a process with no `T_RESUME` to clear `P_STOP`. Pin the join wake
+    (`thread::exit` -> `p_join_waiter`) with a boot test once the exit completes.
     Reproduce with `FEED_SCENARIO=target/hello-thrice.tsv sh tools/smoke/feed.sh`.
 
 ---
