@@ -8,25 +8,25 @@
 //! The layout is x86_64's, because that is what VM and the kernel's fault gate
 //! decode:
 //!
-//! - bit 0, `PRESENT`: the page was there, so this is a protection violation. VM reads
-//!   this bit as "the access was a write" — it is what selects the write permission a
-//!   fault is checked against, and it is one half of what makes a fault a
-//!   copy-on-write candidate.
-//! - bit 1, `WRITE`: the access was a write. VM reads this bit as "the page was
-//!   present", and pairs it with bit 0 to arm the copy-on-write path.
+//! - bit 0, `PRESENT`: the page was there, so this is a protection violation. RISC-V
+//!   does not report this (`scause` says only load, store or fetch), so the table
+//!   claims it for a store and for nothing else: together with bit 1 it is what arms
+//!   VM's copy-on-write path.
+//! - bit 1, `WRITE`: the access was a write. VM reads it as the permission a fault has
+//!   to be granted.
 //! - bit 2, `USER`: the fault was taken in user mode.
 //! - bit 4, `INSTR`: an instruction fetch, not a load or a store.
 //!
-//! RISC-V states neither bit 0 nor VM's reading of it: `scause` says only load, store
-//! or fetch. So bit 0 is set for a store and cleared for a load, which is the
-//! distinction the two questions VM asks it are both about. A load that set it would
-//! be refused on every region that is readable but not writable — each
-//! `mmap(PROT_READ)` page, and every read-only segment of a shared object, since only
-//! an `exec`'d image's non-executable segments are pre-faulted by VFS.
+//! A load or a fetch that claimed bit 0 would be taken for a copy-on-write candidate
+//! and reach VM's demand path with write permission demanded, which refuses every
+//! region that is readable but not writable — each `mmap(PROT_READ)` page, and every
+//! read-only segment of a shared object, since only an `exec`'d image's non-executable
+//! segments are pre-faulted by VFS.
 
-/// The page was present; VM reads it as "this access was a write".
+/// The page was present; claimed only for a store, which is the access that can be a
+/// copy-on-write candidate.
 pub const PRESENT: u32 = 0x01;
-/// The access was a write; VM reads it as "the page was present".
+/// The access was a write.
 pub const WRITE: u32 = 0x02;
 /// The fault was taken in user mode.
 pub const USER: u32 = 0x04;
@@ -45,9 +45,9 @@ pub enum Access {
 pub const fn page_fault_code(access: Access, user: bool) -> u32 {
     let mode = if user { USER } else { 0 };
     match access {
-        // A load is the one access that says nothing beyond its mode: VM's two
-        // questions about bit 0 are both about a store, and answering "yes" would
-        // demand write permission for a read.
+        // A load is the one access that says nothing beyond its mode: it is not a
+        // store, so it claims neither the write bit nor the present bit that arms
+        // copy-on-write.
         Access::Load => mode,
         Access::Store => mode | PRESENT | WRITE,
         // Fetching needs neither write permission nor a present page: VM maps the
@@ -64,7 +64,11 @@ mod tests {
     fn user_load_claims_no_write() {
         let code = page_fault_code(Access::Load, true);
         assert_eq!(code, USER);
-        assert_eq!(code & PRESENT, 0, "a load must not demand write permission");
+        assert_eq!(
+            code & PRESENT,
+            0,
+            "a load must not claim the page was present"
+        );
         assert_eq!(code & WRITE, 0, "a load is not a write");
     }
 

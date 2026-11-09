@@ -891,15 +891,31 @@ pub fn sef_signal_handler() {
 
 // Page fault handling (Phase 6.9 — port of pagefaults.c)
 
-// PFERR_* constants from C's VPF_FLAGS decoding
-#[allow(dead_code)]
-const PFERR_NOPAGE: u32 = 0;
-#[allow(dead_code)]
-const PFERR_WRITE: u32 = 0x01;
-#[allow(dead_code)]
-const PFERR_PROT: u32 = 0x02;
-#[allow(dead_code)]
-const PFERR_READ: u32 = 0x04;
+// The page-fault error code has x86_64's layout on every arch: x86 passes the hardware
+// code through, and the RISC-V and AArch64 trap handlers synthesize it
+// (`arch-riscv64/src/faultcode.rs`, `arch-aarch64/src/exception.rs`). Bit 0 says the
+// page was present, bit 1 says the access was a store, bit 2 that it came from user
+// mode, bit 4 that it was an instruction fetch.
+const PFERR_PRESENT: u32 = 0x01;
+const PFERR_WRITE: u32 = 0x02;
+
+/// What the faulting access was, as far as the error code can say.
+///
+/// Named fields rather than two locals at the call site: the two bits sit next to each
+/// other and reading the wrong one is exactly the defect this replaced.
+struct FaultAccess {
+    /// The page was mapped, so the fault is a protection violation.
+    present: bool,
+    /// The access was a store.
+    write: bool,
+}
+
+fn decode_fault_access(error_code: u32) -> FaultAccess {
+    FaultAccess {
+        present: error_code & PFERR_PRESENT != 0,
+        write: error_code & PFERR_WRITE != 0,
+    }
+}
 
 // Signal numbers
 #[allow(dead_code)]
@@ -916,8 +932,8 @@ const SIGABRT: i32 = 6;
 /// 3. If invalid (unmapped address, write to read-only), send SIGSEGV
 ///
 /// Message format:
-///   m9.m9l1 = faulting virtual address (VPF_ADDR)
-///   m9.m9l2 = fault flags (VPF_FLAGS: PFERR_WRITE, PFERR_READ, etc.)
+///   m9.m9l1 = faulting virtual address
+///   m9.m9l2 = page-fault error code (x86_64 layout, see `decode_fault_access`)
 pub fn do_pagefaults(msg: &mut Message) {
     let ep = msg.m_source;
     let addr = unsafe { msg.m_payload.m9.m9l1 } as u64;
@@ -928,10 +944,9 @@ pub fn do_pagefaults(msg: &mut Message) {
 /// Core page fault handler shared by message dispatch and notification path.
 ///
 /// Processes a page fault for `ep` at `addr` with the given `error_code`
-/// (the CPU page fault error code bits).
+/// (x86_64 layout, see `decode_fault_access`).
 fn handle_pagefault_for(ep: i32, addr: u64, error_code: u32) {
-    let is_write = error_code & PFERR_WRITE != 0;
-    let is_prot_fault = error_code & PFERR_PROT != 0;
+    let access = decode_fault_access(error_code);
 
     // Validate the endpoint via the Vmproc table.
     let vmp = match unsafe { proc::vmproc_lookup(ep) } {
@@ -965,8 +980,14 @@ fn handle_pagefault_for(ep: i32, addr: u64, error_code: u32) {
     // Only a region that covers the address is consulted; where none does, the
     // paths below decide (an exec'd image's region bookkeeping is not
     // authoritative — see the COW comment).
+    //
+    // A fetch and a load both ask for read permission; only a store asks for write.
+    // Reading the present bit as the write bit made every protection fault look like
+    // a store, so a worker thread fetching a fill placeholder (present, deliberately
+    // supervisor-only) demanded write permission on the read-only `.text` holding the
+    // instruction and killed the whole process for running its own code.
     if let Some(r) = vmp.vm_regions.find(addr) {
-        let want = if is_write {
+        let want = if access.write {
             region::VR_WRITABLE
         } else {
             region::VR_READABLE
@@ -983,7 +1004,7 @@ fn handle_pagefault_for(ep: i32, addr: u64, error_code: u32) {
     // Handle COW faults via PTE walk (not region lookup). After an exec,
     // VM's region cache is stale (init's pre-exec layout) and doesn't reflect
     // the new binary's mappings. Walking the PTE directly is authoritative.
-    if is_prot_fault && is_write {
+    if access.present && access.write {
         let pte_val = crate::vm::vm_walk_page(cr3, addr);
         // Only a present *user* page with a write fault is a COW candidate.
         // A present page without the user bit (e.g. the kernel's
@@ -1008,10 +1029,8 @@ fn handle_pagefault_for(ep: i32, addr: u64, error_code: u32) {
         }
         // Not a COW candidate. Two cases land here and must fall through
         // to the demand-paging path below rather than SIGSEGV:
-        //  1. Not-present pages: the RISC-V trap always sets the "present"
-        //     bit in the synthesized error code, so not-present store
-        //     faults arrive with is_prot_fault set (and aarch64's raw ESR
-        //     sets both flag bits for leaf-level faults).
+        //  1. Not-present pages: a store to a page nothing has mapped
+        //     arrives with the write bit set and the present bit clear.
         //  2. Supervisor-only identity pages the exec'd page table copies
         //     on RISC-V (and the low-GB alias on aarch64): writing the
         //     mmap heap at mmap_base() hits one of these blocks.
@@ -3980,6 +3999,45 @@ mod tests {
         // of the OK it returns on target.
         assert_eq!(clear_pagefault(0), -1);
         assert_eq!(clear_pagefault(1), -1);
+    }
+
+    #[test]
+    fn test_fault_access_decodes_x86_bits() {
+        // Not-present fetch: `/bin/hello`'s last `.text` instruction is a `jb` whose
+        // first two bytes are on the second-to-last page, so executing it faults on
+        // the last page with this code and that page has to be filled.
+        let fetch = decode_fault_access(0x14);
+        assert!(
+            !fetch.present,
+            "a not-present fetch is not a protection fault"
+        );
+        assert!(!fetch.write, "a fetch is not a store");
+
+        // Present, supervisor-only fetch: a second thread reaching the fill
+        // placeholder while the first thread's FDIO fills the page. Reading this as
+        // a store demanded write permission on the read-only `.text` region and
+        // SIGSEGVed the process for executing its own code.
+        let placeholder_fetch = decode_fault_access(0x15);
+        assert!(placeholder_fetch.present, "0x15 has the present bit");
+        assert!(
+            !placeholder_fetch.write,
+            "a protection fault on a fetch is not a store"
+        );
+
+        // Present store: the copy-on-write candidate.
+        let store = decode_fault_access(0x07);
+        assert!(
+            store.present && store.write,
+            "a present store is a COW candidate"
+        );
+
+        // Store to a page nothing mapped: a write, but not a COW candidate.
+        let hole_store = decode_fault_access(0x06);
+        assert!(!hole_store.present && hole_store.write);
+
+        // Loads never ask for write permission, present or not.
+        assert!(!decode_fault_access(0x05).write);
+        assert!(!decode_fault_access(0x04).write);
     }
 
     #[test]

@@ -286,54 +286,6 @@ are arch-specific, `[env]` is tooling/platform, not kernel.
     this include directory too. (`tools/c-include/fcntl.h`,
     `.refs/minix-3.3.0/sys/sys/fcntl.h`)
 
-37. **A process whose worker threads exit never returns from `thread_join`, and its main slot is
-    left `P_STOP` with no signal to deliver (observed 2026-11-09, x86; the mechanism is
-    arch-independent).** After the async-receive fix recorded under `[x86]`, `/bin/hello`'s fill
-    completes (`0x40285d0` maps `0xe85a025`, present, user-only, executable) and VFS's async
-    table drains, but the process still prints none of its four `thread i: shared=… tls=…` lines.
-    Every thread slot it created has disappeared from the process table, its main slot sits at
-    `rts=0x40` (`P_STOP`) with `rip=0x4002d15` (`JoinInner::join`), and the shell waits in `wait`
-    for it forever. Measured through the monitor: the process's `p_pending` is 0, so its
-    `SIGNALED | SIG_PENDING` pair has already been consumed (`do_getksig` clears them in the same
-    reply), and `P_STOP` is the one flag left, which only `SYS_ENDKSIG` clears. PM is idle in
-    RECEIVE (`rts=0x8`, `s_notify_pending` empty) and its own `s_sig_pending` still has bit 74
-    (`SIGKSIG`) set, which is *not* evidence of an undelivered wakeup: this port's
-    `build_notify_message` ignores its `src`/`dst` arguments, so a SYSTEM notification carries no
-    signal set and never clears `s_sig_pending` the way C's `BuildNotifyMessage` does. Measured
-    through PM's own table (`MPROC` at `0x4015010`, `MProc` stride `0x1c0`, `mp_pid@0x4`,
-    `mp_flags@0x188`): `hello`'s entry has `mp_sigstatus = 11` (SIGSEGV), `mp_exitstatus = 0`,
-    `mp_sigpending = mp_ksigpending = 0`, and `mp_flags = 0x69`
-    (`IN_USE | PROC_STOPPED | 0x20 | 0x40`), with no `ZOMBIE` (`0x4`). So PM collected a SIGSEGV,
-    recorded it, and entered `exit_proc` (`crates/servers/src/pm.rs:794`), which did not reach
-    `zombify` at `869`. `P_STOP` is not from signal delivery at all: `exit_proc` calls `stop_proc`
-    (`811`), which implements "stop" as `sys_trace(T_STOP, ...)` (`1735`), and `do_trace_handler`'s
-    `T_STOP` arm (`crates/kernel/src/system.rs:2375-2391`) is the other `P_STOP` setter. Only
-    `T_RESUME` clears it, and nothing resumes a process that is being terminated.
-    Next: find what faults in `hello` now that the fill completes (the SIGSEGV is the trigger, and
-    with the page mapped nothing in its start-up should reach an unmapped address), then why
-    `exit_proc` stops between `mp_flags |= EXITING` and `zombify` in `exit_proc` (`811`-`869`: the
-    children loop, the `check_sig(-mp_procgrp, ...)` HUP, or the `VFS_PM_EXIT` asynsend).
-    The fault census (QEMU `-d int`, uninterrupted, one `hello`) narrows the trigger: 672 user-mode
-    `#PF`, of which 590 are `e=0006` (not present, write) above `mmap_base` (thread stacks and heap,
-    normal demand paging) and 7 are `e=0015` at `0x40285d0`, present, user, instruction fetch, the
-    fill placeholder, taken from two different thread stacks (`SP=0x3ff40fd8` and `0x3ff81fd8`).
-    So the worker threads re-execute into the placeholder seven times. Checked `VMCTL_CLEAR_PAGEFAULT`
-    (`crates/kernel/src/system.rs:5204-5225`) before changing it: the group sweep is deliberate and
-    commented ("Threads whose fault is not yet resolved re-fault on resume and are handled one at a
-    time"), and a thread that re-faults is parked again by `page_pending`, so those seven faults are
-    a thread being parked seven times, not a thread running placeholder code. Making the clear
-    per-Proc would add kernel-call surface for no behavioural change.
-    The prime suspect is instead the last worker fault, `e=0014` (not present, fetch) at
-    `0x4039fff` / `CR2=0x403a000` from a worker stack: fetching across a page boundary whose second
-    page lies outside a region is exactly the `regions.find` miss that ends in `sys_kill(ep,
-    SIGSEGV)`, and the signal then lands on the whole process because threads share the endpoint and
-    PM does not model threads. Next: check whether `hello`'s text region covers `0x403a000`, and
-    whether the fetch at `0x4039fff` straddles the end of the segment. Replacing `stop_proc`'s ptrace
-    `T_STOP` with the reference's stop primitive remains the fix for the wedge itself, since a stalled
-    exit then leaves a process with no `T_RESUME` to clear `P_STOP`. Pin the join wake
-    (`thread::exit` -> `p_join_waiter`) with a boot test once the exit completes.
-    Reproduce with `FEED_SCENARIO=target/hello-thrice.tsv sh tools/smoke/feed.sh`.
-
 ---
 
 ## RISC-V (`[riscv]`)
@@ -1936,6 +1888,30 @@ are arch-specific, `[env]` is tooling/platform, not kernel.
     restores the target's SIMD image itself (`fpu::restore`'s aarch64 arm, zeroed for a process that
     has not run), closing that last leak; the frame's SIMD block was also relaid out in `q0..q31`
     order so a verbatim copy to the per-process area is linear.
+
+43. **~~A process whose worker threads exit never returned from `thread_join`~~ (FIXED
+    2026-11-09).** The SIGSEGV that stopped `/bin/hello` was not a bad address: VM read bit 0 of the
+    page-fault error code as "the access was a store", but the code has x86_64's layout on every
+    arch, where bit 0 says the page was present and bit 1 says the access was a write. A protection
+    fault on an instruction fetch therefore demanded `VR_WRITABLE`, `.text` has no write permission,
+    and the handler killed the process for running its own code. The fetch is legitimate: hello's
+    last `.text` instruction is a 6-byte `jb` starting at `0x4039fff`, whose remaining four bytes are
+    on page `0x403a000`, so all four worker threads fault on that page; the first starts the FDIO
+    fill and every later one fetches the supervisor-only placeholder, which the misread bit turned
+    into a SIGSEGV. Fixed in `fa5d71a66`: `crates/servers/src/vm/mod.rs` decodes present and write
+    separately, gates copy-on-write on both, and a host test pins `0x15` as a present fetch that is
+    not a store. Three consecutive `/bin/hello` runs in one x86 guest print all four thread lines
+    and `threadstd: all joined, shared=4`, and the shell takes another command afterwards.
+
+    Three readings in this item's open form were wrong and are recorded so they are not repeated:
+    `mp_flags = 0x69` with no `ZOMBIE` did not mean `exit_proc` stopped before `zombify`, because
+    `tell_parent` clears `ZOMBIE` and sets `TOLD_PARENT` by design; the seven `e=0x15` faults were
+    seven SIGSEGVs coalescing into one pending signal, not a thread parked seven times; and
+    `stop_proc`'s ptrace `T_STOP` was not the wedge, since the exit reached `tell_parent` and the
+    slot is released by the parent's reap, which needs no `T_RESUME`. The `0x3bca0` that looked like
+    a `filesz` mismatch is `p_offset + p_filesz` (`0x1000 + 0x3aca0`), the absolute in-file end that
+    `finish_page` compares against. (`crates/servers/src/vm/mod.rs`,
+    `crates/arch-riscv64/src/faultcode.rs`)
 
 ---
 
