@@ -2352,7 +2352,7 @@ once its foreground child is killed by a signal, which needs its own look.
   work.
 - **`ipc` server is unbooted and VM shm is stubbed.** If any consumer needs
   SysV shm, the server must be added to `BOOT_PROCS_ALL` with VM remap finished
-  after VM, per the `brk` ordering rule in `.rules`.
+  after VM, per the `brk` ordering rule in `AGENTS.md`.
 - **wasm.** Keep it out of this design; a browser has none of these primitives.
 - **The fault path now enforces region permissions.** Before `mprotect`, nothing
   could *reduce* a region's rights, so a page fault never had to be refused. It
@@ -2363,7 +2363,7 @@ once its foreground child is killed by a signal, which needs its own look.
 
 ---
 
-## 9. Suggested `.rules` additions
+## 9. Suggested `AGENTS.md` additions
 
 Traps found while writing this, for reviewers to consider:
 

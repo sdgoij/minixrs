@@ -262,7 +262,7 @@ stronger property directly — no present kernel mapping's VA intersects a user 
 - **The physmap must not become "the identity map with a prefix".** Anything that *needs*
   identity (the trampoline, early boot, `kmain @ 0x200000`, the boot test's archive reads) keeps
   it; the point of D3 is that the identity map is a *small, named* exception.
-- **`.rules`-shaped trap:** `pte_to_phys(..)` returns a number that *looks* like a pointer and
+- **`AGENTS.md`-shaped trap:** `pte_to_phys(..)` returns a number that *looks* like a pointer and
   was one for this port's whole history. Converting it is now the rule for page tables (P2b) and P6's
   grep is what keeps it; frames, grant tables and BARs follow in P3.
 - **A walk needs the window already installed.** `walk`/`map_page`/`clear_page` now fault before
@@ -273,7 +273,7 @@ stronger property directly — no present kernel mapping's VA intersects a user 
 ## 8. Where the guidance lives
 
 These traps are maintained as the `minix-physmap` skill (`.agents/skills/minix-physmap/`), not as
-`.rules` entries. `.rules` is for one-line traps a code change must avoid; this is a subsystem's
+`AGENTS.md` entries. `AGENTS.md` is for one-line traps a code change must avoid; this is a subsystem's
 worth of how to work, which belongs in a skill. The paragraphs below are the record the skill was
 written from.
 

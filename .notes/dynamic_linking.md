@@ -1230,7 +1230,7 @@ Dynamic tags needed: `DT_NEEDED`, `DT_STRTAB`/`DT_STRSZ`/`DT_SYMTAB`/`DT_SYMENT`
   aarch64's is still owed, §7 Phase 5).
 - `.agents/skills/minix-boot-process`: a note that a dynamic exec enters `ld.so` first —
   a future boot-chain reader will otherwise conclude the wrong process started (**done**).
-- Any `.rules` addition (per the hygiene policy, in the PR description, not inline). Two
+- Any `AGENTS.md` addition (per the hygiene policy, in the PR description, not inline). Two
   candidates from Phase 0: "the exec path has no `e_type` check while `parse_elf_header`
   does — don't conflate them", and "a new directory in `build_minixfs` renumbers every
   inode after it, which the boot test's `/devices` inode 7 depends on".

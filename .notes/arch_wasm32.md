@@ -621,7 +621,7 @@ kernel reaches past the HAL into paging in a bounded set of places:
 Rather than sprinkling `#[cfg(target_arch = "wasm32")]` at each site, expose
 `hal::PAGING: bool` and gate at these ~10 call sites, or gate whole functions.
 This is the design's main piece of unavoidable ugliness and should be entered
-into `.rules` as a known exception once it lands.
+into `AGENTS.md` as a known exception once it lands.
 
 ### 7.2 exec becomes instantiation
 
