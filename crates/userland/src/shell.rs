@@ -1330,6 +1330,30 @@ fn build_path(cmd_bytes: &[u8], cmd_path: &mut [u8; 256]) -> usize {
     }
 }
 
+/// Pack `args` into `buf` as NUL-terminated strings, 8-byte aligned, and write each string's
+/// address into `argv[1..]`; `argv[0]` is the caller's.
+///
+/// False when an argument does not fit, with the ones before it packed. The shell's arguments come
+/// from a line no longer than `EDIT_MAX`, so the buffer the caller passes cannot run out.
+#[cfg(any(target_os = "minix", test))]
+fn pack_args(buf: &mut [u8], args: &[&str], argv: &mut [*const u8]) -> bool {
+    let mut off = 0usize;
+    for (i, arg) in args.iter().enumerate() {
+        let Some(slot) = argv.get_mut(i + 1) else {
+            return false;
+        };
+        let tok = arg.as_bytes();
+        if off + tok.len() + 1 > buf.len() {
+            return false;
+        }
+        buf[off..off + tok.len()].copy_from_slice(tok);
+        buf[off + tok.len()] = 0;
+        *slot = buf.as_ptr().wrapping_add(off);
+        off = (off + tok.len() + 1 + 7) & !7;
+    }
+    true
+}
+
 /// In the child process, try to exec the command.
 /// Falls through if exec fails, so the caller can retry `/sbin/<cmd>`.
 #[cfg(target_os = "minix")]
@@ -1350,20 +1374,14 @@ fn try_exec(args: &[&str], cmd_path: &mut [u8; 256]) {
 
     let mut argv_buf: [*const u8; 32] = [core::ptr::null(); 32];
     argv_buf[0] = cmd_path.as_ptr();
-    let mut arg_off = child_path_len;
-    for i in 1..args.len().min(32) {
-        let tok = args[i].as_bytes();
-        let len = tok.len().min(55);
-        if arg_off + len + 1 >= cmd_path.len() {
-            break;
-        }
-        // `len` is `tok.len()` clamped to the space one argument may occupy,
-        // so the copy is over the clamp: `tok` itself can be longer.
-        cmd_path[arg_off..arg_off + len].copy_from_slice(&tok[..len]);
-        cmd_path[arg_off + len] = 0;
-        argv_buf[i] = unsafe { cmd_path.as_ptr().add(arg_off) };
-        arg_off += len + 1;
-        arg_off = (arg_off + 7) & !7;
+    // The arguments get a buffer of their own. They used to be packed into `cmd_path` behind the
+    // path, where one argument could occupy at most 55 bytes and a longer one was silently cut to
+    // a prefix (measured: `/bin/echo` with a 61-byte argument printed 55). The line they came
+    // from is at most `EDIT_MAX` bytes, so this buffer holds all of them with room to spare.
+    let mut arg_buf = [0u8; 4 * EDIT_MAX];
+    let argc = args.len().min(32);
+    if !pack_args(&mut arg_buf, &args[1..argc], &mut argv_buf[..argc]) {
+        return;
     }
 
     let r = unsafe {
@@ -1639,5 +1657,32 @@ mod tests {
             tokenize(&mut buf, line.len(), &mut spans),
             Err(TokenizeError::UnmatchedQuote(b'\''))
         );
+    }
+
+    /// An argument longer than 55 bytes used to be cut to a prefix while the shell packed it into
+    /// the command path's buffer (measured in a guest: `/bin/echo` with a 61-byte argument printed
+    /// 55). Every argument now has its own buffer and reaches `argv` whole.
+    #[test]
+    fn an_argument_longer_than_the_old_path_buffer_reaches_argv_whole() {
+        let long = [b'd'; 61];
+        let arg = core::str::from_utf8(&long).unwrap();
+        let mut buf = [0u8; 256];
+        let mut argv = [core::ptr::null(); 2];
+        assert!(pack_args(&mut buf, &[arg], &mut argv));
+        let got = unsafe { core::ffi::CStr::from_ptr(argv[1] as *const core::ffi::c_char) };
+        assert_eq!(got.to_bytes(), &long);
+    }
+
+    #[test]
+    fn packed_arguments_are_separate_nul_terminated_strings() {
+        let mut buf = [0u8; 256];
+        let mut argv = [core::ptr::null(); 4];
+        let args = ["one", "two", "three"];
+        assert!(pack_args(&mut buf, &args, &mut argv));
+        for (i, want) in args.iter().enumerate() {
+            let got = unsafe { core::ffi::CStr::from_ptr(argv[i + 1] as *const core::ffi::c_char) };
+            assert_eq!(got.to_bytes(), want.as_bytes());
+        }
+        assert!(argv[0].is_null(), "argv[0] belongs to the caller");
     }
 }
