@@ -34,9 +34,18 @@ pub struct TestCtx {
 }
 
 impl TestCtx {
-    pub fn assert(&mut self, cond: bool, _msg: &str) {
+    /// Record `cond`, and print `msg` when it does not hold.
+    ///
+    /// The message is what the `FAIL <test>` line in `run` cannot carry: a test that fails
+    /// several checks, or that has to name which error a call returned, is only actionable if
+    /// the reason is in the log next to it. Printed on failure only, so a green run stays as it
+    /// was.
+    pub fn assert(&mut self, cond: bool, msg: &str) {
         if !cond {
             self.failed = true;
+            ser_write("    ");
+            ser_write(msg);
+            ser_write("\n");
         }
     }
 }
@@ -1370,6 +1379,97 @@ fn test_pt_map_unmap(ctx: &mut TestCtx) {
             Err(crate::pagetable::PageTableError::NotMapped) => {}
             _ => ctx.assert(false, "unmapped page should be NotMapped"),
         }
+    }
+}
+
+fn test_pt_fill_then_finish(ctx: &mut TestCtx) {
+    // A demand-paged file page is mapped twice on the same VA: once by `start_file_page` as a
+    // fill placeholder (writable, deliberately not user-accessible, so nothing can run the zeros
+    // while VFS's read is in flight) and once by `finish_page`, which replaces it with the file's
+    // frame under the region's permissions.
+    //
+    // Measured on x86 with `/bin/hello`: the placeholder map took and the finished-page map did
+    // not, so the page stayed supervisor-only, the thread that fetched it faulted identically for
+    // as long as the process lived, and VM's file cache never received the page (87 entries, none
+    // for that page's offset). `start_file_page` no longer reads such a page as finished; this
+    // pins the map that has to replace the placeholder, on every arch, so a regression fails here
+    // with the error named instead of showing up as a wedged guest.
+    unsafe {
+        use crate::hal::{MAP_PRESENT, MAP_USER, MAP_WRITE};
+        use crate::pagetable::{PageTableError, frame_ptr, map_page, walk};
+
+        // A root of our own: the active table is not the one under test.
+        let root = match crate::hal::alloc_phys_page() {
+            Some(p) => p,
+            None => {
+                ctx.assert(false, "alloc root page");
+                return;
+            }
+        };
+        core::ptr::write_bytes(frame_ptr(root), 0, 4096);
+
+        // The address from the measured case: page 0x4028000 of an exec'd image, as a fetch of
+        // the closure entry at 0x40285d0 addressed it.
+        let va: u64 = 0x0402_85D0;
+
+        let placeholder = match crate::hal::alloc_phys_page() {
+            Some(p) => p,
+            None => {
+                ctx.assert(false, "alloc placeholder frame");
+                return;
+            }
+        };
+        ctx.assert(
+            map_page(root, va, placeholder, MAP_PRESENT | MAP_WRITE).is_ok(),
+            "fill placeholder map should succeed",
+        );
+        match walk(root, va) {
+            Ok(wr) => ctx.assert(
+                !crate::hal::pte_is_user(wr.pte_value),
+                "fill placeholder should not be user-accessible",
+            ),
+            Err(_) => ctx.assert(false, "walk of the fill placeholder should succeed"),
+        }
+
+        let file_frame = match crate::hal::alloc_phys_page() {
+            Some(p) => p,
+            None => {
+                ctx.assert(false, "alloc file frame");
+                return;
+            }
+        };
+        match map_page(root, va, file_frame, MAP_PRESENT | MAP_USER) {
+            Ok(()) => ctx.assert(true, "finished page map should replace the placeholder"),
+            Err(PageTableError::OutOfMemory) => {
+                ctx.assert(false, "finished page map failed: OutOfMemory")
+            }
+            Err(PageTableError::AlreadyMapped) => {
+                ctx.assert(false, "finished page map failed: AlreadyMapped")
+            }
+            Err(PageTableError::NotMapped) => {
+                ctx.assert(false, "finished page map failed: NotMapped")
+            }
+            Err(PageTableError::InvalidArgument) => {
+                ctx.assert(false, "finished page map failed: InvalidArgument")
+            }
+        }
+        match walk(root, va) {
+            Ok(wr) => {
+                ctx.assert(
+                    crate::hal::pte_is_user(wr.pte_value),
+                    "finished page should be user-accessible",
+                );
+                ctx.assert(
+                    crate::hal::pte_to_phys(wr.pte_value)
+                        == file_frame & crate::hal::pte_frame_mask(),
+                    "finished page should map the file's frame",
+                );
+            }
+            Err(_) => ctx.assert(false, "walk of the finished page should succeed"),
+        }
+
+        // The frames are not released: the physical allocator has no cross-arch free API
+        // (`test_alloc_free_page` records the same).
     }
 }
 
@@ -2713,6 +2813,7 @@ pub fn run_all() -> u32 {
     // process/grant/syscall/timer/scheduler/safecopy/stack.
     total += run("serial_output", test_serial_output);
     total += run("pt_map_unmap", test_pt_map_unmap);
+    total += run("pt_fill_then_finish", test_pt_fill_then_finish);
     total += run("alloc_free_page", test_alloc_free_page);
     total += run("alloc_contig", test_alloc_contig);
     total += run("vm_alloc_free", test_vm_alloc_free);

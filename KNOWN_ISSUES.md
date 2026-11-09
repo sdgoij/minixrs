@@ -1907,7 +1907,29 @@ are arch-specific, `[env]` is tooling/platform, not kernel.
   pacing); not scheduled, and documented in the `bare-metal-debug`
   skill as a platform/harness limitation rather than a code defect.
 
-- **Nothing outstanding in-tree.** The repeated-exec leak cascade (fdref
+- **A file page's finished-page map is never reached: `/bin/hello` wedges with its text page
+  left as a fill placeholder (open, measured 2026-11-09).** After the thread and prompt work,
+  `/bin/hello` stops after `alloc: churn + realloc + align ok`: the four worker lines never
+  print, the two worker threads sit in `RTS_PAGEFAULT` at the closure entry (`0x40285d0`), and
+  the process ends with `JOINING | P_STOP | SIG_PENDING | SIGNALED` on its main slot, so the
+  pending SIGSEGV can never be delivered and the shell waits forever (a second `/bin/hello` is
+  never even typed to a listening shell). Measured through the QEMU monitor, with no prints in
+  the guest: `PAGE_FAULT_INFO[23] = {0x40285d0, err=0x15, valid=1}`; hello's CR3 (`0xfee9000`
+  at `Proc+0x100`) maps `0x40285d0` to `0xe85a063`, present, writable, supervisor-only, which
+  is exactly the `MAP_WRITE`-only fill placeholder `start_file_page` maps; `-d int` shows one
+  not-present fetch (`e=0x14`) and then present-protection fetches (`e=0x15`)
+  forever, about 6000 a second. VM's request node for that page carries `reqid 83`,
+  `page_addr 0x4028000`, `pa 0xe85a000`, `file_off 0x29000`, `file_size 0x3bca0`; VFS answered
+  that request with `result 0` (read from `VFS_GLOBAL.fs_m_out`); and the page is absent from
+  VM's file cache (`CACHE_TABLE`, 87 entries, none with offset `0x29000`), so `finish_page`
+  never reached its cache insert. `pt_fill_then_finish` (`crates/kernel/src/tests.rs`) maps a
+  page both ways on the same address and passes on x86, RISC-V and AArch64, which rules
+  `map_page` out and leaves the `VM_PAGING_MAP` kernel call (the `vm_map_page_in` wrapper, or
+  whether `finish_file_page` runs at all) as the suspect layer. `start_file_page` now refuses to
+  read a non-user page as finished, so a lost fill fails the process instead of livelocking it,
+  but the fill is still lost.
+
+- **Nothing else outstanding in-tree.** The repeated-exec leak cascade (fdref
   self-reference, VM self-map VA march, exec-addrspace reclaim, munmap
   walk) is fixed: `exec_loop_mem.py 400` is flat (leak 0.0 KiB/exec), and
   the 100× degradation no longer reproduces. x86 is the best-tested port.
