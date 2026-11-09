@@ -133,26 +133,6 @@ are arch-specific, `[env]` is tooling/platform, not kernel.
 10. **Userland `mmap(fd)` has no real consumer** — `mmapfd` is a test
     binary; exec remains the production user. (.notes/filemmap.md §6)
 
-20. **A name longer than 28 bytes cannot be created (2026-09-23, open — measured).**
-    `create`, `mkdir` and `mknod` carry their single name *inside* the request, so the
-    name is capped by the room left after the fixed fields: 28 bytes for
-    `req_create`/`req_mkdir`, 29 for `build_mknod_msg` (a 30-byte name wrote byte 56 of
-    56 as well; that write is bounded now), while `path_len` still advertises the
-    untruncated length. Measured in an x86 guest with `echo n > <name>`: names of 24,
-    25, 27 and **28** bytes create and read back; **29**, 30 and 32 bytes fail with
-    `sh: cannot create <name>: err=02` (ENOENT) and leave nothing behind — that is the
-    shell's own `>` redirect, so this is not a coreutils-only path. It fails loudly
-    rather than creating a file under a truncated name, which is the better half of the
-    news; `MFS_NAME_MAX` is 60, so 29-60 bytes is still a real gap for anything that
-    creates files. `coreutils mkdir`, `ln`, `truncate` and `split` are all in
-    `feat_minix`.
-    The fix is the one lookup just got — grant the name — and it has to land on both
-    sides at once: `parse_mknod_request`'s test in `crates/fs/src/mfs/main.rs` exists
-    because an earlier grant-based layout was never parsed and `mknod` created nothing.
-    Its gate belongs in `tools/smoke/long-path.tsv` (whose header says why no step goes
-    above the 28-byte create limit) or beside it.
-    Measured with a scratch scenario, `target/tmp/create-boundary.tsv`.
-
 24. **`std::env::current_dir` has no implementation for minix (2026-09-24,
     open).** `rust/library/std/src/sys/paths/mod.rs` routes `target_os =
     "minix"` to `sys::paths::unsupported`, so `current_dir` returns
@@ -1912,6 +1892,29 @@ are arch-specific, `[env]` is tooling/platform, not kernel.
     a `filesz` mismatch is `p_offset + p_filesz` (`0x1000 + 0x3aca0`), the absolute in-file end that
     `finish_page` compares against. (`crates/servers/src/vm/mod.rs`,
     `crates/arch-riscv64/src/faultcode.rs`)
+
+44. **~~A name longer than 28 bytes could not be created~~ (FIXED 2026-11-09).** The item's
+    premise was stale: `create`, `mkdir` and `mknod` already carry the name in a grant on both
+    sides (`req_create`/`req_mkdir`/`req_mknod` in `vfs/request.rs`, MFS's dispatch arm and
+    `parse_mknod_request`), and 29- and 40-byte names created and read back. Three defects past
+    that were real. The shell's `try_exec` packed every argument into the command-path buffer and
+    clamped each one to 55 bytes, so `/bin/echo` with a 61-byte argument printed 55; arguments
+    now have their own buffer, sized from the input line (`pack_args`). With that fixed a 60-byte
+    name created and opened by name, but `ls` showed it one character short: `fs_getdents` read a
+    name that fills the 60-byte on-disk field as `MFS_NAME_MAX - 1`, though such a name has no
+    terminator rather than ending early (`entry_name_len`). And a 61-byte name was truncated to
+    60 by the directory-entry write instead of being refused, so creating one landed under a
+    different name; MFS's dispatch now answers `ENAMETOOLONG` when `path_len` exceeds
+    `MFS_NAME_MAX + 1`, and `errstr` names code 36.
+
+    Measured in one x86 guest: 29-, 40- and 60-byte names each create, read back by name and list
+    at full length; a 61-byte name is refused with `mkdir: <name>: err=36 File name too long` and
+    leaves the existing 60-byte file untouched; a 61-byte argument reaches `/bin/echo` whole.
+    `tools/smoke/long-path.tsv` covers the whole range now (it had stopped at 24 with a comment
+    deferring this), 26 steps green, and `just test-arches` (all sixteen gates on three arches)
+    plus the host suites (`fs` 304, `userland` 79, `servers` 758, `kernel` 426) pass.
+    (`crates/userland/src/shell.rs`, `crates/userland/src/lib.rs`,
+    `crates/fs/src/mfs/protect.rs`, `crates/fs/src/mfs/main.rs`, `tools/smoke/long-path.tsv`)
 
 ---
 
