@@ -286,6 +286,28 @@ are arch-specific, `[env]` is tooling/platform, not kernel.
     this include directory too. (`tools/c-include/fcntl.h`,
     `.refs/minix-3.3.0/sys/sys/fcntl.h`)
 
+37. **A process whose worker threads exit never returns from `thread_join`, and its main slot is
+    left `P_STOP` with no signal to deliver (observed 2026-11-09, x86; the mechanism is
+    arch-independent).** After the async-receive fix recorded under `[x86]`, `/bin/hello`'s fill
+    completes (`0x40285d0` maps `0xe85a025`, present, user-only, executable) and VFS's async
+    table drains, but the process still prints none of its four `thread i: shared=… tls=…` lines.
+    Every thread slot it created has disappeared from the process table, its main slot sits at
+    `rts=0x40` (`P_STOP`) with `rip=0x4002d15` (`JoinInner::join`), and the shell waits in `wait`
+    for it forever. Measured through the monitor: the process's `p_pending` is 0, so its
+    `SIGNALED | SIG_PENDING` pair has already been consumed (`do_getksig` clears them in the same
+    reply), and `P_STOP` is the one flag left, which only `SYS_ENDKSIG` clears. PM is idle in
+    RECEIVE (`rts=0x8`, `s_notify_pending` empty) and its own `s_sig_pending` still has bit 74
+    (`SIGKSIG`) set, which is *not* evidence of an undelivered wakeup: this port's
+    `build_notify_message` ignores its `src`/`dst` arguments, so a SYSTEM notification carries no
+    signal set and never clears `s_sig_pending` the way C's `BuildNotifyMessage` does. So either
+    PM's `GETKSIG` -> `process_ksig_reply` -> `ENDKSIG` loop stopped before the `ENDKSIG` for that
+    endpoint, or `P_STOP` was set again after it (the kernel's signal-delay path sets `P_STOP`
+    before sending and `ENDKSIG` is what clears it). Next: follow one `SIGSEGV` for a user process
+    through `cause_sig` -> PM's loop in `crates/servers/src/pm.rs` (the `send_kernel_call(7)` /
+    `send_kernel_call(8)` pair) and record where it stops; then pin the join wake
+    (`thread::exit` -> `p_join_waiter`) with a boot test.
+    Reproduce with `FEED_SCENARIO=target/hello-thrice.tsv sh tools/smoke/feed.sh`.
+
 ---
 
 ## RISC-V (`[riscv]`)
@@ -1907,8 +1929,8 @@ are arch-specific, `[env]` is tooling/platform, not kernel.
   pacing); not scheduled, and documented in the `bare-metal-debug`
   skill as a platform/harness limitation rather than a code defect.
 
-- **A file page's finished-page map is never reached: `/bin/hello` wedges with its text page
-  left as a fill placeholder (open, measured 2026-11-09).** After the thread and prompt work,
+- **A pending notification starved the async reply that finishes a file page, so `/bin/hello`
+  wedged with its text page left as a fill placeholder (fixed 2026-11-09).** After the thread and prompt work,
   `/bin/hello` stops after `alloc: churn + realloc + align ok`: the four worker lines never
   print, the two worker threads sit in `RTS_PAGEFAULT` at the closure entry (`0x40285d0`), and
   the process ends with `JOINING | P_STOP | SIG_PENDING | SIGNALED` on its main slot, so the
@@ -1928,6 +1950,20 @@ are arch-specific, `[env]` is tooling/platform, not kernel.
   whether `finish_file_page` runs at all) as the suspect layer. `start_file_page` now refuses to
   read a non-user page as finished, so a lost fill fails the process instead of livelocking it,
   but the fill is still lost.
+
+    *Fixed (2026-11-09).* The reply was not lost, it was never collected, and the mechanism was
+    the receive order. `mini_receive` checked pending *notifications* before pending async
+    messages and returned with a notification; VM is notified for every page fault it has not
+    resolved, so every receive it made found one and the queued `VM_VFS_REPLY` was never looked
+    at. Measured through the monitor: VFS's table entry for `reqid 83` was still `AMF_VALID`
+    after the guest stopped, VM's `s_asyn_pending` bit for VFS was set in 60 of 60 samples, VM was
+    never `RECEIVING`, and its `rip` sat in `sys_vmctl_memreq_get` (the fault-notification scan).
+    A notification is a wakeup and stays pending until delivered, while an async message is an
+    answer the receiver is waiting for, so `mini_receive` now tries pending async messages first.
+    Pinned by `async_beats_notify` (`crates/kernel/src/tests.rs`), which fails on the old order in
+    all three of its checks. After the fix the page maps as `0xe85a025` (present, user-only,
+    executable), `finish_page` inserts it into the file cache and VFS's async table drains to
+    empty. The remaining `/bin/hello` hang is open item 37, a different defect.
 
 - **Nothing else outstanding in-tree.** The repeated-exec leak cascade (fdref
   self-reference, VM self-map VA march, exec-addrspace reclaim, munmap

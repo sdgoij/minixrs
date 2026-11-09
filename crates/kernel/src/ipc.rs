@@ -549,6 +549,43 @@ pub unsafe fn mini_receive(caller_ptr: *mut Proc, src_e: i32, m_ptr: *mut u8, fl
             let has_reply_pend = (*caller_ptr).p_misc_flags.load(Ordering::Relaxed)
                 & MiscFlags::REPLY_PEND.bits()
                 != 0;
+
+            // Pending async messages are tried before pending notifications and before the
+            // caller queue, and even while REPLY_PEND is set (try_one's NOREPLY skip guards a
+            // SENDREC waiter). C checks notifications first and returns with the notification; a
+            // receiver notified on every iteration of its own loop then never collects an answer
+            // it is waiting for. Measured on x86: VM resolved page faults on notification, and
+            // the FDIO reply that finishes the page (`vfs_request::complete`) stayed `AMF_VALID`
+            // in VFS's table for good, because every receive found a page-fault notification
+            // pending and returned it. The fill never completed, the fault never cleared, and both
+            // were regenerated for as long as the process lived. A notification is a wakeup and
+            // stays pending until delivered, so deferring it costs one receive; deferring an async
+            // message costs the receiver its answer.
+            if has_pending_asend(caller_ptr) {
+                let r = try_async(caller_ptr);
+                if r == OK {
+                    // try_async delivered the message directly into
+                    // p_delivermsg; the syscall handler will copy it out
+                    // via delivermsg on the return path.
+                    (*caller_ptr)
+                        .p_misc_flags
+                        .fetch_and(!MiscFlags::REPLY_PEND.bits(), Ordering::Relaxed);
+                    // The sender's endpoint, as on every other path a message reaches a receiver:
+                    // the receive's return value is who sent it. Returning `OK` here meant the
+                    // syscall epilogue wrote 0 over the endpoint the delivery had just put in the
+                    // return register, so a receiver that takes the sender from its return value
+                    // (VFS does) read "0", meaning PM, and routed the request to its PM handler
+                    // instead of the call that asked (finding 66). The caller-queue scan below
+                    // has always returned the endpoint; this is the same thing for the same reason.
+                    // Read it back out of the delivered message: `try_one` stamped the sender's
+                    // endpoint into it just as `mini_send` does, so the message is the record.
+                    let ep = core::ptr::read_unaligned(
+                        (*caller_ptr).p_delivermsg.as_ptr() as *const i32
+                    );
+                    return ep;
+                }
+            }
+
             if !has_reply_pend {
                 // Check for pending notifications before blocking.
                 if has_pending_notify(caller_ptr) {
@@ -599,38 +636,6 @@ pub unsafe fn mini_receive(caller_ptr: *mut Proc, src_e: i32, m_ptr: *mut u8, fl
                             }
                         }
                     }
-                }
-            }
-
-            // C (L967-978): try pending async messages (try_async) BEFORE
-            // the caller queue scan, and even while REPLY_PEND is set
-            // (try_one's NOREPLY skip guards a SENDREC waiter). The port
-            // previously scanned the caller_q first; a busy sender that
-            // re-queues on every cycle (e.g. cat's EAGAIN read loop) kept
-            // it non-empty forever, starving this branch so deferred async
-            // messages such as VFS_PM_EXIT were never delivered.
-            if has_pending_asend(caller_ptr) {
-                let r = try_async(caller_ptr);
-                if r == OK {
-                    // try_async delivered the message directly into
-                    // p_delivermsg; the syscall handler will copy it out
-                    // via delivermsg on the return path.
-                    (*caller_ptr)
-                        .p_misc_flags
-                        .fetch_and(!MiscFlags::REPLY_PEND.bits(), Ordering::Relaxed);
-                    // The sender's endpoint, as on every other path a message reaches a receiver:
-                    // the receive's return value is who sent it. Returning `OK` here meant the
-                    // syscall epilogue wrote 0 over the endpoint the delivery had just put in the
-                    // return register, so a receiver that takes the sender from its return value
-                    // — VFS does — read "0", meaning PM, and routed the request to its PM handler
-                    // instead of the call that asked (finding 66). The caller-queue scan below
-                    // has always returned the endpoint; this is the same thing for the same reason.
-                    // Read it back out of the delivered message: `try_one` stamped the sender's
-                    // endpoint into it just as `mini_send` does, so the message is the record.
-                    let ep = core::ptr::read_unaligned(
-                        (*caller_ptr).p_delivermsg.as_ptr() as *const i32
-                    );
-                    return ep;
                 }
             }
 

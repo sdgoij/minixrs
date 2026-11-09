@@ -529,6 +529,124 @@ fn test_mini_notify_receiving(ctx: &mut TestCtx) {
 
 // Process table tests
 
+/// Arm a test process as an async sender with one queued message, and give it
+/// the privilege slot that names it.
+///
+/// The table lives in a frame reached through the boot identity map, so the
+/// `virtual_copy` that reads it needs no per-process page table: the sender is
+/// given no CR3 of its own and `s_asyntab` is the frame's kernel address, which
+/// is what that copy resolves under `boot_cr3`.
+unsafe fn arm_async_sender(src_nr: i32, dst_ep: i32, msg_type: i32, priv_id: usize) -> Option<u64> {
+    unsafe {
+        use arch_common::ipc::{AMF_VALID, AsynMsg};
+
+        let pa = crate::hal::alloc_phys_page()?;
+        let mut ent: AsynMsg = core::mem::zeroed();
+        ent.flags = AMF_VALID;
+        ent.endpoint = dst_ep;
+        ent.msg.m_type = msg_type;
+        core::ptr::write_unaligned(crate::pagetable::frame_ptr(pa) as *mut AsynMsg, ent);
+
+        let p = crate::r#priv::priv_addr_mut(priv_id);
+        p.s_proc_nr = src_nr;
+        p.s_id = priv_id as i16;
+        p.s_asyntab = crate::pagetable::frame_ptr(pa) as u64;
+        p.s_asynsize = 1;
+        Some(pa)
+    }
+}
+
+fn test_async_survives_a_pending_notification(ctx: &mut TestCtx) {
+    // VM completes a file-page fill when VFS's answer arrives as an async
+    // message (`vfs_request::complete`). The answer is queued for as long as the
+    // fill is in flight, and VM is woken by a notification for every page fault
+    // it has not resolved yet. If a pending notification is delivered first and
+    // the receive returns, the async answer is never collected: measured on x86
+    // as `/bin/hello` blocked behind a fill whose reply sat `AMF_VALID` in VFS's
+    // table forever, with VM's `s_asyn_pending` bit for VFS set and VM never
+    // blocking. A notification is a wakeup, not a message the receiver is
+    // waiting for, so the async message has to win.
+    unsafe {
+        use crate::r#priv::{SysMap, priv_addr_mut};
+        use crate::proc::{MESSAGE_SIZE, RtsFlags};
+        use arch_common::ipc::AMF_DONE;
+
+        const SRC_NR: i32 = 210;
+        const DST_NR: i32 = 211;
+        const SRC_PRIV: usize = 40;
+        const DST_PRIV: usize = 41;
+        const MESSAGE_TYPE: i32 = 0x1234;
+        const ANY: i32 = 0x0000_ffff;
+
+        let dst = make_test_proc(DST_NR);
+        let src = make_test_proc(SRC_NR);
+        if dst.is_null() || src.is_null() {
+            ctx.assert(false, "make_test_proc failed");
+            return;
+        }
+        let dst_ep = (*dst).p_endpoint;
+
+        let Some(pa) = arm_async_sender(SRC_NR, dst_ep, MESSAGE_TYPE, SRC_PRIV) else {
+            ctx.assert(false, "alloc_phys_page failed");
+            return;
+        };
+        (*src).p_priv = priv_addr_mut(SRC_PRIV) as *mut crate::r#priv::Priv;
+        // No CR3 of its own: both sides of the copy resolve under boot_cr3.
+        (*src).p_seg.p_cr3 = 0;
+        (*dst).p_seg.p_cr3 = 0;
+
+        let d = priv_addr_mut(DST_PRIV);
+        d.s_proc_nr = DST_NR;
+        d.s_id = DST_PRIV as i16;
+        d.s_asyn_pending = SysMap::new();
+        d.s_asyn_pending.set(SRC_PRIV);
+        d.s_notify_pending = SysMap::new();
+        d.s_notify_pending.set(SRC_PRIV);
+        (*dst).p_priv = d as *mut crate::r#priv::Priv;
+        (*dst).p_misc_flags.store(0, Ordering::Relaxed);
+        (*dst).p_rts_flags.store(0, Ordering::Relaxed);
+
+        let mut buf = [0u8; MESSAGE_SIZE];
+        crate::ipc::mini_receive(dst, ANY, buf.as_mut_ptr(), 0);
+
+        let ty = i32::from_ne_bytes([buf[4], buf[5], buf[6], buf[7]]);
+        ctx.assert(
+            ty == MESSAGE_TYPE,
+            "a pending notification must not starve a pending async message",
+        );
+
+        use arch_common::ipc::AsynMsg;
+        let ent = core::ptr::read_unaligned(crate::pagetable::frame_ptr(pa) as *const AsynMsg);
+        ctx.assert(
+            ent.flags & AMF_DONE != 0,
+            "the delivered async entry must be marked done in the sender's table",
+        );
+        ctx.assert(
+            priv_addr_mut(DST_PRIV).s_notify_pending.test(SRC_PRIV),
+            "the notification must still be pending after the async delivery",
+        );
+
+        // The frame is not released: the physical allocator has no cross-arch
+        // free API (`test_alloc_free_page` records the same).
+
+        let d = priv_addr_mut(DST_PRIV);
+        d.s_asyn_pending = SysMap::new();
+        d.s_notify_pending = SysMap::new();
+        (*dst).p_priv = core::ptr::null_mut();
+        let s = priv_addr_mut(SRC_PRIV);
+        s.s_proc_nr = crate::system::NONE;
+        s.s_asyntab = 0;
+        s.s_asynsize = 0;
+        (*src).p_priv = core::ptr::null_mut();
+        (*dst)
+            .p_rts_flags
+            .store(RtsFlags::SLOT_FREE.bits(), Ordering::Relaxed);
+        (*src)
+            .p_rts_flags
+            .store(RtsFlags::SLOT_FREE.bits(), Ordering::Relaxed);
+    }
+}
+
 fn test_crossed_sendrec_reported(ctx: &mut TestCtx) {
     unsafe {
         let caller = make_test_proc(120);
@@ -2765,6 +2883,10 @@ pub fn run_all() -> u32 {
     total += run("mini_send_direct", test_mini_send_direct_delivery);
     total += run("mini_send_queue", test_mini_send_queues_when_not_receiving);
     total += run("mini_notify", test_mini_notify_receiving);
+    total += run(
+        "async_beats_notify",
+        test_async_survives_a_pending_notification,
+    );
     // The SENDREC payload assertions verify the copied message bytes, which
     // requires a real page table (copy_from_user falls back to boot_cr3).
     // RISC-V/AArch64 integration builds don't enable paging, so boot_cr3()==0
