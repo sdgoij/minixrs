@@ -3301,6 +3301,8 @@ pub fn errstr(err: i32) -> &'static [u8] {
         17 => b"File exists",
         20 => b"Not a directory",
         21 => b"Is a directory",
+        28 => b"No space left on device",
+        36 => b"File name too long",
         38 => b"Function not implemented",
         _ => b"Unknown error",
     }

@@ -8,9 +8,12 @@
 # echoes the command, so only real output satisfies one (a write step has no
 # expectation of its own - its evidence is the read-back under it).
 #
-# Nothing here goes above 24: *creating* a name longer than 28 bytes is a separate
-# defect, still open (KNOWN_ISSUES.md item 20 - `create`/`mkdir`/`mknod` embed the
-# name and fail with ENOENT past 28), and a step for it belongs with that fix.
+# The second half covers item 20: `create` and `mkdir` used to carry the name
+# inside the request, which capped it at 28 bytes. The name now travels in a grant
+# on both sides and the on-disk field is 60 bytes, so 29 and 60 both have to work,
+# and 61 has to be refused by name (ENAMETOOLONG) rather than truncated. Commands
+# stay under 80 columns: a longer input line makes the shell's editor redraw across
+# the console's wrap, and the next step then waits on a split echo.
 /bin/echo path-16 > aaaaaaaaaaaaaaaa	
 /bin/cat aaaaaaaaaaaaaaaa	path-16
 /bin/echo path-20 > aaaaaaaaaaaaaaaaaaaa	
@@ -23,4 +26,17 @@
 /bin/cat aaaaaaaaaaaaaaaaaaaaaaa	path-23
 /bin/echo path-24 > aaaaaaaaaaaaaaaaaaaaaaaa	
 /bin/cat aaaaaaaaaaaaaaaaaaaaaaaa	path-24
+/bin/echo c29-ok > aaaaaaaaaaaaaaaaaaaaaaaaaaaaa	
+/bin/cat aaaaaaaaaaaaaaaaaaaaaaaaaaaaa	c29-ok
+/bin/mkdir bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb	
+/bin/echo c40-ok > bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb/f	
+/bin/cat bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb/f	c40-ok
+mkdir d	
+cd d	
+echo c60-ok > cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc	
+/bin/cat cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc	c60-ok
+ls	cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
+mkdir ccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc	mkdir: ccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc: err=36 File name too long
+/bin/cat cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc	c60-ok
+cd ..	
 /bin/echo LONG-PATH-OK	LONG-PATH-OK

@@ -210,7 +210,13 @@ pub fn mfs_main() -> i32 {
                     let mfs = glo::mfs_ptr();
                     let raw = (*mfs).m_in.m_payload.raw;
                     let (grant, path_len) = parse_mknod_request(&raw, &mut (*mfs).cch);
-                    crate::block_io::load_entry_name(grant, path_len, &mut (*mfs).user_path)
+                    // The name field holds `MFS_NAME_MAX` bytes and no more. Refusing a longer
+                    // name is what keeps the create from landing under a truncated one.
+                    if path_len > MFS_NAME_MAX + 1 {
+                        ENAMETOOLONG
+                    } else {
+                        crate::block_io::load_entry_name(grant, path_len, &mut (*mfs).user_path)
+                    }
                 },
                 22 | 23 => unsafe {
                     let mfs = glo::mfs_ptr();
@@ -228,7 +234,12 @@ pub fn mfs_main() -> i32 {
                     (*mfs).cch[2] = uid as i32;
                     (*mfs).cch[3] = gid as i32;
 
-                    crate::block_io::load_entry_name(grant, path_len, &mut (*mfs).user_path)
+                    // See the mknod arm: a name past the on-disk field would be truncated.
+                    if path_len > MFS_NAME_MAX + 1 {
+                        ENAMETOOLONG
+                    } else {
+                        crate::block_io::load_entry_name(grant, path_len, &mut (*mfs).user_path)
+                    }
                 },
                 _ => OK,
             };

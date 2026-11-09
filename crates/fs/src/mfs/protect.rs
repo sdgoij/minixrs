@@ -129,6 +129,14 @@ pub fn fs_chown() -> i32 {
     }
 }
 
+/// The length of an on-disk directory entry's name.
+///
+/// The field has no terminator of its own, so a name that fills it completely is a name of
+/// `MFS_NAME_MAX` bytes, not one that ends a byte early.
+pub fn entry_name_len(name: &[u8; MFS_NAME_MAX]) -> usize {
+    name.iter().position(|&b| b == 0).unwrap_or(MFS_NAME_MAX)
+}
+
 pub fn fs_getdents() -> i32 {
     unsafe {
         let mfs = glo::mfs_ptr();
@@ -220,13 +228,9 @@ pub fn fs_getdents() -> i32 {
                     continue;
                 }
 
-                // Find name length (up to null terminator)
+                // Find name length (up to null terminator, or the whole field).
                 let name_slice = &(*entry).mfs_d_name;
-                let namlen = name_slice
-                    .iter()
-                    .position(|&b| b == 0)
-                    .unwrap_or(MFS_NAME_MAX - 1)
-                    .min(MFS_NAME_MAX - 1);
+                let namlen = entry_name_len(name_slice);
                 if namlen == 0 {
                     pos = block_start + (i as i64 + 1) * DIR_ENTRY_SIZE as i64;
                     continue;
@@ -472,5 +476,22 @@ mod tests {
     fn test_fs_getdents_returns_einval_when_no_inode() {
         init();
         assert_eq!(fs_getdents(), EINVAL);
+    }
+
+    /// A name that fills the 60-byte on-disk field has no NUL in it. Reading that as 59 bytes is
+    /// what made `ls` show a 60-byte name one character short (measured in a guest).
+    #[test]
+    fn test_entry_name_len_handles_a_full_field() {
+        let mut full = [b'c'; MFS_NAME_MAX];
+        assert_eq!(entry_name_len(&full), MFS_NAME_MAX);
+
+        full[MFS_NAME_MAX - 1] = 0;
+        assert_eq!(entry_name_len(&full), MFS_NAME_MAX - 1);
+
+        let mut short = [0u8; MFS_NAME_MAX];
+        short[..3].copy_from_slice(b"abc");
+        assert_eq!(entry_name_len(&short), 3);
+
+        assert_eq!(entry_name_len(&[0u8; MFS_NAME_MAX]), 0);
     }
 }
