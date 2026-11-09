@@ -1934,21 +1934,24 @@ are arch-specific, `[env]` is tooling/platform, not kernel.
   pacing); not scheduled, and documented in the `bare-metal-debug`
   skill as a platform/harness limitation rather than a code defect.
 
-  *Measured again (2026-11-09), and it is worse than a dropped byte:* a long
-  enough line can arrive **rotated** rather than truncated. Three consecutive
-  lines of `/bin/echo ` plus 230 `e`s, each typed in one write (`tools/smoke/feed.sh`,
-  `FEED_PACE=0`), failed in two of three runs: the console received the prompt,
-  then the last 24 (once, the last 151) of the argument, then a line break, then
-  `/bin/echo ` and the head of the argument, and the shell never executed the
-  line (the driver timed out on the step). The split point differs per run. The
-  line editor and the prompt work are not the cause: it reproduces with the
-  editor's per-byte `TIOCGTAKEN` check removed (an ioctl round trip, and the
-  only per-byte cost those commits added), and none of the three touches an
-  input path (`8be12d03` is the tty output line's owner, `aec857a3` adds the
-  takeover count and the reprint, `3bbbb578` ends the prompt line). A paced run
-  (`FEED_PACE=0.003`) did not reach a verdict either; its log ends at a prompt
-  with the first line echoed whole, so the pacing path needs its own look before
-  it can serve as the workaround here.
+  *The 2026-11-09 "rotated" measurement was not a rotation of one stream: a second console
+  line was stealing the burst, and that is fixed.* `tty_init` wires `console_read` as the devread
+  hook of all four console lines, and the notification pump runs `handle_events` on every line, so
+  every console line drained the single kernel serial ring. The lines that are not the active
+  console keep the default termios (`ICANON | ECHO`), so a line that took the tail of a burst
+  **printed it** through its own discipline. Measured with `/bin/echo ` and 230 distinct characters
+  in one write: the console showed the argument's tail (the stealing line's echo), a line break
+  (that line's echo of the stolen newline), then the command prefix and the argument's head (the
+  shell's editor echoing what it did receive), and the shell never saw the newline so it never ran
+  the line. The split point differed per run because it is where the pump moved on to the next
+  line. `takes_serial_input` now lets only the active console line (`CONSOLE_LINE`) take bytes from
+  the ring. After the fix: ten runs (seven of six 240-byte lines, three of six distinct-counter
+  lines), no rotated line and no stolen byte; before it, three rotations in the same reproducer.
+  What remains is the plain loss this entry describes, measured on the same runs at about one line
+  in ten (one run lost four characters: 226 of 230 reached the editor and the shell returned to a
+  prompt), so the FIFO overrun this entry describes remains, and the `FEED_PACE` workaround still
+  applies.
+  (`crates/servers/src/tty.rs`)
 
 - **A pending notification starved the async reply that finishes a file page, so `/bin/hello`
   wedged with its text page left as a fill placeholder (fixed 2026-11-09).** After the thread and prompt work,

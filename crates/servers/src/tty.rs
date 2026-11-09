@@ -1701,6 +1701,19 @@ pub fn tty_init(system_hz_val: u32) {
     }
 }
 
+/// Whether this line may take bytes from the kernel serial ring.
+///
+/// The ring is one stream for the whole machine, and the notification pump runs `handle_events` on
+/// every line, so every console line drains it unless one is told not to. The lines that are not the
+/// active console keep the default termios, which has `ICANON` and `ECHO` set: a line that takes a
+/// burst out of the ring prints what it took and the line the shell is reading never sees those
+/// bytes. Measured on x86 with a 240-byte line typed in one write: the console showed the
+/// argument's tail (echoed by another console line's discipline), a line break, then the command
+/// prefix and the argument's head (echoed by the shell's editor), and the shell never ran it.
+fn takes_serial_input(tp: &Tty) -> bool {
+    (tp.tty_minor as usize) < NR_CONS && tp.tty_minor == get_console_line()
+}
+
 /// Console devread hook — non-blocking input drain.
 ///
 /// Pull the kernel serial ring (`read(0)`, non-blocking: `EAGAIN` means empty)
@@ -1714,6 +1727,9 @@ pub fn tty_init(system_hz_val: u32) {
 fn console_read(tp: &mut Tty, _try_only: i32) -> i32 {
     #[cfg(target_os = "minix")]
     {
+        if !takes_serial_input(tp) {
+            return 0;
+        }
         loop {
             let mut byte = [0u8; 1];
             let r = minix_rt::read(0, &mut byte);
@@ -3228,6 +3244,31 @@ mod tests {
             line2tty(RS232_MINOR).is_none(),
             "RS-232 lines stay inactive"
         );
+    }
+
+    #[test]
+    fn test_only_the_active_console_takes_serial_input() {
+        let _lock = TestLockGuard::acquire();
+        tty_init(100);
+        set_console_line(CONS_MINOR);
+
+        // The ring is one stream and the pump runs every line: exactly one console line may drain it.
+        assert!(takes_serial_input(table_ref(0)));
+        assert!(
+            !takes_serial_input(table_ref(1)),
+            "console 1 must not take the shell's input"
+        );
+        let pty = NR_CONS + NR_RS_LINES;
+        assert!(
+            !takes_serial_input(table_ref(pty)),
+            "a pty slave has its own feed"
+        );
+
+        // The active line is what decides, not minor 0: the console can move.
+        set_console_line(CONS_MINOR + 1);
+        assert!(!takes_serial_input(table_ref(0)));
+        assert!(takes_serial_input(table_ref(1)));
+        set_console_line(CONS_MINOR);
     }
 
     #[test]
