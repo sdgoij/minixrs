@@ -2982,6 +2982,9 @@ pub fn run_all() -> u32 {
     // Threads: 1:1 kernel threads as Proc slots — lifecycle (create/join/
     // exit) and wake-one IPC delivery.
     total += run("thread_lifecycle", test_thread_lifecycle);
+    // The join wake itself: the joiner leaves the run queue while JOINING and
+    // exit puts it back, which a runnable-flag check cannot see.
+    total += run("thread_join_wake", test_thread_join_wake);
     total += run("thread_wake_one", test_thread_wake_one);
     // Group semantics: process death sweeps every thread; a worker calling
     // exit() kills the whole group via the main slot's bookkeeping.
@@ -3056,6 +3059,101 @@ fn test_thread_lifecycle(ctx: &mut TestCtx) {
             crate::thread::join(main, 1) == crate::ipc::OK,
             "join of an exited thread succeeds at once",
         );
+
+        (*main)
+            .p_rts_flags
+            .store(crate::proc::RtsFlags::SLOT_FREE.bits(), Ordering::Relaxed);
+        clear_run_queues();
+    }
+}
+
+/// Whether `rp` is linked into a run queue right now.
+///
+/// The flags alone cannot answer this: `is_runnable()` says the process may run, not that the
+/// scheduler holds it, and a wake that cleared `JOINING` without enqueuing would satisfy every
+/// flag check and then never be scheduled.
+unsafe fn run_queue_contains(rp: *mut crate::proc::Proc) -> bool {
+    unsafe {
+        let head = crate::hal::sched_run_q_head();
+        for q in 0..crate::hal::sched_nr_queues() {
+            let mut p = (*head)[q];
+            while !p.is_null() {
+                if p == rp as *mut core::ffi::c_void {
+                    return true;
+                }
+                p = (*(p as *mut crate::proc::Proc)).p_nextready as *mut core::ffi::c_void;
+            }
+        }
+        false
+    }
+}
+
+/// The join wake, both halves. `thread_lifecycle` checks that the joiner ends runnable; this
+/// checks what makes that true: the waiter is recorded on the target slot, the joiner is taken
+/// off the run queue while it waits, and `exit` clears the waiter and JOINING and enqueues it
+/// again, all before the target slot is recycled.
+fn test_thread_join_wake(ctx: &mut TestCtx) {
+    unsafe {
+        crate::table::proc_init();
+        clear_run_queues();
+        let main = thread_make_main(210);
+        if main.is_null() {
+            ctx.assert(false, "make_test_proc failed");
+            return;
+        }
+        ctx.assert(
+            crate::thread::create(main, 0x401000, 0x7fff_f000, 0) == 1,
+            "thread created",
+        );
+        let worker = (*main).p_t_next;
+        if worker.is_null() {
+            ctx.assert(false, "no thread slot");
+            return;
+        }
+        ctx.assert(
+            run_queue_contains(worker),
+            "a created thread is on the run queue",
+        );
+        crate::sched::enqueue(main);
+        ctx.assert(run_queue_contains(main), "joiner queued before the join");
+
+        ctx.assert(
+            crate::thread::join(main, 1) == crate::ipc::OK,
+            "join registers the waiter",
+        );
+        ctx.assert(
+            (*worker).p_join_waiter == main,
+            "waiter recorded on the target slot",
+        );
+        ctx.assert(
+            (*main).rts_isset(crate::proc::RtsFlags::JOINING),
+            "joiner blocked with JOINING",
+        );
+        ctx.assert(
+            !run_queue_contains(main),
+            "a JOINING thread leaves the run queue",
+        );
+        ctx.assert(
+            run_queue_contains(worker),
+            "the thread being joined stays runnable",
+        );
+
+        ctx.assert(
+            crate::thread::exit(worker) == crate::system::EDONTREPLY,
+            "exit returns EDONTREPLY",
+        );
+        ctx.assert(
+            (*worker).p_join_waiter.is_null(),
+            "exit clears the waiter before the slot is recycled",
+        );
+        ctx.assert(
+            !(*main).rts_isset(crate::proc::RtsFlags::JOINING),
+            "exit clears JOINING on the joiner",
+        );
+        ctx.assert((*main).is_runnable(), "joiner runnable again");
+        ctx.assert(run_queue_contains(main), "the wake enqueues the joiner");
+        ctx.assert((*worker).is_empty(), "exited slot freed");
+        ctx.assert((*main).p_t_next.is_null(), "thread list empty after exit");
 
         (*main)
             .p_rts_flags
