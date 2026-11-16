@@ -13,7 +13,7 @@
 //! version use (`poll` first) and the port's pipes.
 //!
 //! The timer itself rides the one process alarm VFS already owns for
-//! `select`/`poll` deadlines (`vfs::alarm`): the earliest pending timerfd
+//! `select`/`poll` deadlines (`crate::alarm`): the earliest pending timerfd
 //! expiry participates in [`crate::vfs::select`]'s re-arm, and the `CLOCK`
 //! notification that fires calls [`expire`], which advances the counters and
 //! wakes any blocked `poll` on the object.
@@ -25,7 +25,7 @@ use core::cell::UnsafeCell;
 
 use minix_std::fs::Stat;
 
-use crate::vfs::alarm;
+use crate::alarm;
 use crate::vfs::call::{SELF, sys_vircopy};
 use crate::vfs::consts::*;
 use crate::vfs::glo::vfs_global;

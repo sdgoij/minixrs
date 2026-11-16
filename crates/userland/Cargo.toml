@@ -306,6 +306,14 @@ name = "ttyprobe"
 path = "src/bin/ttyprobe.rs"
 test = false
 
+# ttytimeout is the MIN/TIME probe: on the console it sets VMIN=0, VTIME=2, and
+# checks that a raw-mode read returns zero bytes once the deadline passes. It is
+# what makes the tty's read timer observable end to end.
+[[bin]]
+name = "ttytimeout"
+path = "src/bin/ttytimeout.rs"
+test = false
+
 # udstest is the UNIX-domain socket smoke test (Phase 0): a socketpair
 # round-trip plus bind/listen/connect/accept through the /dev/uds server.
 # Embedded as /bin/udstest and driven by `just test-uds-x86`.

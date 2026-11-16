@@ -24,10 +24,6 @@ use arch_common::com::{
 };
 use arch_common::endpoint::ANY;
 
-// Imports from kernel
-
-use kernel::r#priv::MinixTimer;
-
 // Imports from drivers (PTY driver — pty lines and the PtyHost trait)
 
 use drivers::tty::pty::{PtyHost, TTY_OUT_BYTES, minor_to_pty, pty_by_index, pty_init};
@@ -468,8 +464,12 @@ pub struct Tty {
     pub tty_icancel_fn: DevFun,
     /// Minimum requested number of chars in input queue.
     pub tty_min: i32,
-    /// Timer for this TTY.
-    pub tty_tmr: MinixTimer,
+    /// Absolute monotonic tick at which a MIN/TIME read on this line gives up,
+    /// or 0 when no read timer is armed. C keeps the same value in a queued
+    /// `minix_timer_t`; this server owns no kernel timer queue, and its console
+    /// pump already wakes it every two ticks, so only the deadline is kept and
+    /// [`tty_expire_timers`] fires it on that wake.
+    pub tty_tmr_exp: u64,
 
     /// Routine to start actual device output.
     pub tty_devwrite: DevFun,
@@ -604,12 +604,7 @@ impl Tty {
             tty_line_active: false,
             tty_icancel_fn: tty_devnop,
             tty_min: 1,
-            tty_tmr: MinixTimer {
-                tmr_next: core::ptr::null_mut(),
-                tmr_exp_time: 0,
-                tmr_func: 0,
-                tmr_arg: 0,
-            },
+            tty_tmr_exp: 0,
             tty_devwrite: tty_devnop,
             tty_echo_fn: tty_echo_dummy,
             tty_ocancel: tty_devnop,
@@ -1447,6 +1442,24 @@ pub fn handle_events(tp: &mut Tty) {
     // Transfer characters from the input queue to a waiting process.
     in_transfer(tp);
 
+    // C `tty.c` `handle_events` replies here once enough bytes are queued, and
+    // `in_transfer` only answers a read whose byte count has been reached. The
+    // difference is a read with a zero `tty_min`: a fired MIN/TIME timer (or a
+    // hung-up line) forces it to succeed with what it has, zero bytes included.
+    // Without this, a timed-out read stayed suspended forever because nothing
+    // ever completed it.
+    if read_ready_to_reply(tp) {
+        let n = tp.tty_incum.min(CDEV_REPLY_DATA_MAX);
+        let reply_ep = tp.tty_inreply;
+        let id = tp.tty_incaller;
+        tp.tty_inleft = 0;
+        tp.tty_incum = 0;
+        tp.tty_incaller = NONE;
+        tp.tty_inreply = NONE;
+        tp.tty_insuspended = false;
+        chardriver_reply_task_data(reply_ep as i32, id, n as i32, &tp.tty_inbuf_user[..n]);
+    }
+
     // The opposite of the read completion: a suspended write (output that could
     // not drain at once) answers here once the output has gone out. The devwrite
     // hooks zero `tty_outcum`, so the count is the request size kept aside.
@@ -1464,6 +1477,14 @@ pub fn handle_events(tp: &mut Tty) {
     if tp.tty_select_ops != 0 {
         select_retry(tp);
     }
+}
+
+/// Whether a held read may be answered now: C `tty.c` `handle_events` replies
+/// when the queued bytes have reached `tty_min`. A zero `tty_min` (a fired
+/// MIN/TIME timer, or a line whose output speed is `B0`) makes that true
+/// immediately, which is how a timed-out read returns zero bytes.
+fn read_ready_to_reply(tp: &Tty) -> bool {
+    tp.tty_inleft > 0 && tp.tty_min >= 0 && tp.tty_incum >= tp.tty_min as usize
 }
 
 // dev_ioctl — execute deferred ioctl
@@ -1600,34 +1621,77 @@ fn select_retry(tp: &mut Tty) -> i32 {
 
 // Timer functions
 
-/// Timer callback — called when a TTY timer expires.
-///
-/// Sets `tty_min = 0` to force the read to succeed and sets `tty_events` to
-/// trigger event processing.
-fn tty_timed_out(tp: *mut MinixTimer) {
-    // Safety: We trust the timer subsystem passes a valid pointer.
-    // The timer arg stores the tty_index.
-    unsafe {
-        let tmr_arg_val = (*tp).tmr_arg;
-        let tty_idx = tmr_arg_val as i32;
-        let tty_ptr = tty_addr(tty_idx as usize);
-        (*tty_ptr).tty_min = 0;
-        (*tty_ptr).tty_events = 1;
+/// The line's read timer expired: C's `tty_timed_out`, which forces the pending
+/// read to succeed with what it has (zero bytes when nothing arrived).
+fn tty_timed_out(tp: &mut Tty) {
+    tp.tty_min = 0;
+    tp.tty_events = 1;
+}
+
+/// Ticks a `vtime`-decisecond read timer lasts at `hz` ticks per second, or 0
+/// when `VTIME` is zero (no timer). C `tty.c` computes `VTIME * (system_hz/10)`;
+/// the port's rate is 100 (`kernel-boot` sets it at startup), so a decisecond is
+/// exactly ten ticks.
+fn read_timer_ticks(vtime: u8, hz: u32) -> u64 {
+    if vtime == 0 {
+        return 0;
     }
+    ((vtime as u64) * (hz as u64 / 10)).max(1)
 }
 
 /// Set or cancel the inter-byte / read timer for a TTY line.
 fn settimer(tp: &mut Tty, enable: bool) {
-    if enable {
-        let system_hz = SYSTEM_HZ.load(Ordering::Relaxed);
-        let ticks = tp.tty_termios.c_cc[VTIME] as u64 * (system_hz as u64 / 10);
-
-        if ticks > 0 {
-            // TODO: Phase 13 — use timer infrastructure to set a timer
-            // set_timer(&tp.tty_tmr, ticks, tty_timed_out, tp.tty_index);
-        }
+    if !enable {
+        tp.tty_tmr_exp = 0;
+        return;
+    }
+    let ticks = read_timer_ticks(
+        tp.tty_termios.c_cc[VTIME],
+        SYSTEM_HZ.load(Ordering::Relaxed),
+    );
+    tp.tty_tmr_exp = if ticks == 0 {
+        0
     } else {
-        // TODO: Phase 13 — cancel_timer(&tp.tty_tmr);
+        crate::alarm::now() + ticks
+    };
+}
+
+/// Fire the line's read timer if `now` has reached its deadline. Returns whether
+/// it fired. The deadline always clears, but it only touches a read that is still
+/// pending: a deadline can outlive its read (C arms it before the non-blocking
+/// check, and `tty_icancel` does not cancel it), and clearing `tty_min` then would
+/// make the next raw read return immediately.
+fn expire_timer_at(tp: &mut Tty, now: u64) -> bool {
+    if tp.tty_tmr_exp == 0 || now < tp.tty_tmr_exp {
+        return false;
+    }
+    tp.tty_tmr_exp = 0;
+    if tp.tty_inleft > 0 {
+        tty_timed_out(tp);
+    }
+    true
+}
+
+/// Fire every read timer whose deadline has passed, C's `expire_timers(timestamp)`
+/// with the timestamp supplied.
+fn expire_timers_at(now: u64) {
+    for i in 0..NR_CONS + NR_RS_LINES + NR_PTYS {
+        let tp = unsafe { &mut *TTY_TABLE.as_ptr().add(i) };
+        expire_timer_at(tp, now);
+    }
+}
+
+/// Run the expired read timers off the kernel clock.
+///
+/// The console pump (`arm_console_pump`) wakes this server every two ticks, so a
+/// deadline needs no alarm of its own: it is a number checked on each wake, and a
+/// timed-out read returns up to one pump period late. Reading the clock is a
+/// kernel call, so it is skipped entirely while no line has a timer armed.
+fn tty_expire_timers() {
+    let armed = (0..NR_CONS + NR_RS_LINES + NR_PTYS)
+        .any(|i| unsafe { (*TTY_TABLE.as_ptr().add(i)).tty_tmr_exp != 0 });
+    if armed {
+        expire_timers_at(crate::alarm::now());
     }
 }
 
@@ -2254,6 +2318,14 @@ pub fn do_read(
             let mut byte = [0u8; 1];
             let r = minix_rt::read(0, &mut byte);
             if r == EAGAIN as i64 {
+                // The held read gives up when its MIN/TIME deadline passes; there
+                // is no pump alarm on this target to fire it.
+                if expire_timer_at(tp, crate::alarm::now()) {
+                    handle_events(tp);
+                    if tp.tty_inleft == 0 {
+                        return EDONTREPLY;
+                    }
+                }
                 // Yield the CPU: marks us PREEMPTED, the syscall-return path
                 // re-enqueues at the tail and picks the next runnable server.
                 minix_rt::thread_yield();
@@ -2907,6 +2979,10 @@ pub fn tty_server_main() {
         // Check for kernel notifications (NOTIFY_MESSAGE = 0x1000).
         let is_notify = (msg.m_type as u32).wrapping_sub(arch_common::com::NOTIFY_MESSAGE) < 0x100;
         if is_notify {
+            // A read timer whose deadline has passed forces its read to complete.
+            // C's main loop runs `expire_timers(timestamp)` on a CLOCK notification
+            // before handling events.
+            tty_expire_timers();
             // Handle events on all TTY lines (including the pty slaves).
             for i in 0..NR_CONS + NR_RS_LINES + NR_PTYS {
                 let tp = unsafe { &mut *TTY_TABLE.as_ptr().add(i) };
@@ -3165,6 +3241,7 @@ mod tests {
         tp.tty_intail = 0;
         tp.tty_inbuf = [0u16; TTY_IN_BYTES];
         tp.tty_min = 1;
+        tp.tty_tmr_exp = 0;
         tp.tty_reprint = 0;
         tp.tty_escaped = 0;
         tp.tty_inhibited = 0;
@@ -4672,5 +4749,137 @@ mod tests {
         setup_raw(&mut tp);
         assert_eq!(in_process(&mut tp, &line), line.len());
         assert_queue_chars(&tp, &line);
+    }
+
+    /// `VTIME` counts tenths of a second, and the port's tick rate is 100, so a
+    /// decisecond is ten ticks.
+    #[test]
+    fn read_timer_ticks_are_tenths_of_a_second() {
+        let _lock = TestLockGuard::acquire();
+
+        assert_eq!(read_timer_ticks(0, 100), 0, "VTIME 0 means no timer");
+        assert_eq!(read_timer_ticks(1, 100), 10);
+        assert_eq!(read_timer_ticks(2, 100), 20);
+        // A slower clock still arms a nonzero timer rather than zero ticks.
+        assert_eq!(read_timer_ticks(1, 4), 1);
+    }
+
+    /// A raw read with `VMIN == 0` and `VTIME > 0` suspends and arms the deadline;
+    /// the pump's next wake is what fires it. Without the deadline the read waits
+    /// for a byte that never comes.
+    #[test]
+    fn a_min_time_read_arms_its_deadline() {
+        let _lock = TestLockGuard::acquire();
+        tty_init(100);
+        set_console_line(CONS_MINOR);
+
+        let tp = table_mut(0);
+        setup_raw(tp);
+        tp.tty_termios.c_cc[VMIN] = 0;
+        tp.tty_termios.c_cc[VTIME] = 2;
+
+        // `console_read` is a no-op on the host, so nothing satisfies the read.
+        assert_eq!(do_read(CONS_MINOR, 0, 42, 7, 16, 0, 1), EDONTREPLY);
+
+        let tp = table_ref(0);
+        assert_eq!(tp.tty_inleft, 16, "the read is held");
+        assert_ne!(tp.tty_tmr_exp, 0, "VTIME armed a deadline");
+    }
+
+    /// The deadline fires once, forces the pending read to succeed, and clears.
+    #[test]
+    fn an_expired_read_timer_forces_the_read_to_succeed() {
+        let _lock = TestLockGuard::acquire();
+        tty_init(100);
+
+        let tp = table_mut(0);
+        setup_raw(tp);
+        tp.tty_inleft = 16;
+        tp.tty_min = 1;
+        tp.tty_termios.c_cc[VMIN] = 0;
+        tp.tty_termios.c_cc[VTIME] = 2;
+        settimer(tp, true);
+        let deadline = table_ref(0).tty_tmr_exp;
+        assert_eq!(
+            deadline, 20,
+            "two deciseconds at 100 Hz, from tick 0 on the host"
+        );
+
+        // One tick early: still waiting.
+        expire_timers_at(deadline - 1);
+        assert_eq!(table_ref(0).tty_tmr_exp, deadline, "not fired yet");
+        assert_eq!(table_ref(0).tty_min, 1, "still waiting for a byte");
+
+        expire_timers_at(deadline);
+        assert_eq!(table_ref(0).tty_tmr_exp, 0, "the timer is spent");
+        assert_eq!(table_ref(0).tty_min, 0, "the read may return what it has");
+        assert_eq!(table_ref(0).tty_events, 1, "the line wants another pass");
+        assert!(
+            read_ready_to_reply(table_ref(0)),
+            "the expired timer is what lets the zero-byte reply go out"
+        );
+
+        // A spent timer does not fire again and does not touch the line.
+        table_mut(0).tty_min = 1;
+        expire_timers_at(deadline + 1000);
+        assert_eq!(table_ref(0).tty_min, 1, "a spent deadline is not a timer");
+    }
+
+    /// A deadline can outlive its read (C arms it before the non-blocking check and
+    /// `tty_icancel` does not cancel it). Firing then must not clear `tty_min`, or
+    /// the next raw read would return immediately.
+    #[test]
+    fn a_stale_read_timer_leaves_the_next_read_alone() {
+        let _lock = TestLockGuard::acquire();
+        tty_init(100);
+
+        let tp = table_mut(0);
+        setup_raw(tp);
+        tp.tty_termios.c_cc[VMIN] = 1;
+        tp.tty_termios.c_cc[VTIME] = 1;
+        settimer(tp, true);
+        let deadline = table_ref(0).tty_tmr_exp;
+        assert_eq!(
+            deadline, 10,
+            "one decisecond at 100 Hz, from tick 0 on the host"
+        );
+
+        expire_timers_at(deadline);
+        assert_eq!(table_ref(0).tty_tmr_exp, 0, "the deadline still clears");
+        assert_eq!(table_ref(0).tty_min, 1, "no read was pending");
+    }
+
+    /// C's `handle_events` reply rule: once the queued bytes reach `tty_min` the
+    /// read is answered. A zero `tty_min` makes that immediate, which is how a
+    /// timed-out read (or a hung-up line) returns zero bytes.
+    #[test]
+    fn a_zero_min_read_is_ready_to_reply() {
+        let _lock = TestLockGuard::acquire();
+        let mut tp = Tty::zeroed();
+        setup_raw(&mut tp);
+
+        tp.tty_inleft = 16;
+        tp.tty_incum = 0;
+        tp.tty_min = 1;
+        assert!(!read_ready_to_reply(&tp), "VMIN 1 waits for a byte");
+
+        tp.tty_min = 0;
+        assert!(
+            read_ready_to_reply(&tp),
+            "a fired timer completes the read with zero bytes"
+        );
+
+        tp.tty_min = 2;
+        tp.tty_incum = 1;
+        assert!(
+            !read_ready_to_reply(&tp),
+            "one byte does not satisfy VMIN 2"
+        );
+        tp.tty_incum = 2;
+        assert!(read_ready_to_reply(&tp), "two bytes satisfy VMIN 2");
+
+        tp.tty_min = 0;
+        tp.tty_inleft = 0;
+        assert!(!read_ready_to_reply(&tp), "no read is held");
     }
 }

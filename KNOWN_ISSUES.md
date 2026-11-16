@@ -116,9 +116,19 @@ are arch-specific, `[env]` is tooling/platform, not kernel.
      longer a stub for the `CDEV_REPLY` arm (the `SEL1`/`SEL2` arms still
      are), and ioctl args move through a magic grant sized by `ioc_size`,
      which the tty's `TIOCGETA`/`TIOCSETA*` codes carry as
-     `size_of::<Termios>()`, so a full `Termios` round-trips. What is still
-     missing is only the server-side timer infra (VTIME `settimer`), which
-     has no kernel timer API for servers.
+     `size_of::<Termios>()`, so a full `Termios` round-trips. The last piece,
+     the MIN/TIME read timer, is now implemented: `settimer` stores an absolute
+     deadline (`tty_tmr_exp`) sized from `VTIME` at the kernel's tick rate, and
+     `tty_expire_timers` fires it on the console pump's own wake, so no
+     server-side timer queue is needed. The earlier note that servers had "no
+     kernel timer API" was wrong: `SYS_SETALARM` exists, and the input server
+     and VFS already use it. The timer can only complete a read because
+     `handle_events` gained C's post-`in_transfer` reply rule
+     (`read_ready_to_reply`), which the port had dropped: with `tty_min` forced
+     to zero a held read answers at once with what it has, zero bytes included,
+     and that rule is also what honours `VMIN` in raw mode. Gate:
+     `just test-ttytimeout-<arch>` runs `/bin/ttytimeout`, a raw console read
+     with `VMIN=0` and `VTIME=2` that must return zero bytes in its window.
    - `devman` main loop is a TODO — needs `start_vtreefs`'s VFS message
      loop, which is itself a TODO. Sized: the C libvtreefs is a full FS
      server (inode/link/mount/path/read/stadir/table ≈ 10 files), the

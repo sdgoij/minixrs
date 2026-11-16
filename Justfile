@@ -637,6 +637,31 @@ test-burst-aarch64 boot-timeout="60": build-aarch64
     FEED_PACE=0.003 FEED_SCENARIO=tools/smoke/burst.tsv sh tools/smoke/feed.sh target/test-burst-aarch64.log {{boot-timeout}} qemu-system-aarch64 -machine virt -cpu cortex-a57 -m 256M -nographic -no-reboot -global virtio-mmio.force-legacy=off -netdev user,id=net0 -device virtio-net-device,netdev=net0 -device virtio-gpu-device -device virtio-keyboard-device -kernel target/aarch64-unknown-minix/release/kernel-boot-aarch64
     @echo "burst: every long line reached the shell and ran (aarch64)"
 
+# The tty read timer (MIN/TIME). `ttytimeout` switches the console to raw mode with VMIN=0 and
+# VTIME=2, reads without input, and expects zero bytes back once the deadline passes. Nothing
+# else in the tree observes a timer the tty server owns: the deadline is a number checked on
+# the console pump's own wake (C `tty.c` fires it from `expire_timers`), so a regression shows
+# up here as a read that never returns rather than as a wrong byte.
+test-ttytimeout arch="x86" boot-timeout="30":
+    @just test-ttytimeout-{{arch}} {{boot-timeout}}
+
+test-ttytimeout-x86 boot-timeout="30": build-x86
+    mkdir -p target/images/x86_64-pc-minix
+    cp target/trampoline.elf target/images/x86_64-pc-minix/minix-x86.elf
+    @just _assert-qemu-version qemu-system-x86_64
+    FEED_SCENARIO=tools/smoke/ttytimeout.tsv sh tools/smoke/feed.sh target/test-ttytimeout.log {{boot-timeout}} qemu-system-x86_64 -nographic -m 256M -no-reboot -vga none -device bochs-display,id=fb0 -kernel target/images/x86_64-pc-minix/minix-x86.elf -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0 -device virtio-tablet-pci,display=fb0
+    @echo "ttytimeout: a MIN/TIME read returned after its deadline (x86_64)"
+
+test-ttytimeout-riscv64 boot-timeout="60": build-riscv64
+    @just _assert-qemu-version qemu-system-riscv64
+    FEED_SCENARIO=tools/smoke/ttytimeout.tsv sh tools/smoke/feed.sh target/test-ttytimeout-riscv64.log {{boot-timeout}} qemu-system-riscv64 -machine virt -m 256M -nographic -global virtio-mmio.force-legacy=off -netdev user,id=net0 -device virtio-net-device,netdev=net0 -device virtio-gpu-device -device virtio-keyboard-device -kernel target/riscv64gc-unknown-minix/release/kernel-boot-riscv64
+    @echo "ttytimeout: a MIN/TIME read returned after its deadline (riscv64)"
+
+test-ttytimeout-aarch64 boot-timeout="60": build-aarch64
+    @just _assert-qemu-version qemu-system-aarch64
+    FEED_SCENARIO=tools/smoke/ttytimeout.tsv sh tools/smoke/feed.sh target/test-ttytimeout-aarch64.log {{boot-timeout}} qemu-system-aarch64 -machine virt -cpu cortex-a57 -m 256M -nographic -no-reboot -global virtio-mmio.force-legacy=off -netdev user,id=net0 -device virtio-net-device,netdev=net0 -device virtio-gpu-device -device virtio-keyboard-device -kernel target/aarch64-unknown-minix/release/kernel-boot-aarch64
+    @echo "ttytimeout: a MIN/TIME read returned after its deadline (aarch64)"
+
 # The per-command read cost of a large binary. The scenario runs two invocations of the 6 MB
 # multicall, each reading no file data: the first costs 1079 virtio reads of 4 KiB because the
 # first text fault pre-faults every non-executable region of the image (KNOWN_ISSUES #5), and the
@@ -1440,7 +1465,7 @@ test-boot-aarch64: build-aarch64-boot mkfs-aarch64
 # the first failing gate like the individual recipes (the failing log is on
 # stdout).
 #
-# All twelve QEMU gates in one command.
+# Every QEMU gate, on every arch, in one command.
 test-arches:
     @just test-qemu x86
     @just test-boot x86
@@ -1449,6 +1474,7 @@ test-arches:
     @just test-cabi x86
     @just test-winprobe x86
     @just test-burst x86
+    @just test-ttytimeout x86
     @just test-read-cost x86
     @just test-qemu riscv64
     @just test-boot riscv64
@@ -1456,12 +1482,14 @@ test-arches:
     @just test-waitid riscv64
     @just test-winprobe riscv64
     @just test-burst riscv64
+    @just test-ttytimeout riscv64
     @just test-qemu aarch64
     @just test-boot aarch64
     @just test-fork aarch64
     @just test-waitid aarch64
     @just test-winprobe aarch64
     @just test-burst aarch64
+    @just test-ttytimeout aarch64
 
 # Fork isolation, per arch: `tools/smoke/fork.tsv` runs `/bin/forktest`, which forks and checks
 # all three directions of the copy - the child's write must not reach the parent, the parent's

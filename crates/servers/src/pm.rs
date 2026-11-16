@@ -4855,7 +4855,7 @@ fn clock_ticks_to_sec_nsec(clock: u64, boottime: i64, hz: u64) -> (i64, i64) {
 /// clock / system_hz`). Doing that for `CLOCK_MONOTONIC` is a defect
 /// the port does not copy: the value would jump whenever the wall
 /// clock is set, and it would sit `boottime` seconds away from the
-/// kernel tick timeline that `vfs::alarm`/`timerfd`/`select` arm
+/// kernel tick timeline that `crate::alarm`/`timerfd`/`select` arm
 /// absolute deadlines against. Deliberate deviation — see `.notes/wayland.md`
 /// §5.
 fn clock_gettime_reply(

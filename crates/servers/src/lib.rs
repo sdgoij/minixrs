@@ -2,6 +2,7 @@
 
 #![no_std]
 
+pub mod alarm;
 pub mod clock_server;
 // The console's screen model. Compiled where it has a display to feed (the wasm port's `wserver`)
 // and for the host tests, which cover the model itself.

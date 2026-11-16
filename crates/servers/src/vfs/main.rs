@@ -297,7 +297,7 @@ unsafe fn handle_work() {
     // Notifications (m_type == NOTIFY_MESSAGE) are fire-and-forget — no reply needed.
     if call_nr == arch_common::com::NOTIFY_MESSAGE as i32 {
         // Two sources, both meaning "something you were waiting for changed":
-        // the kernel's `CLOCK` alarm, which `vfs::alarm` arms for the earliest
+        // the kernel's `CLOCK` alarm, which `crate::alarm` arms for the earliest
         // suspended `select`/`poll` deadline, and a character driver whose
         // socket or terminal became ready. A driver cannot reliably *send* VFS a
         // readiness report (it can only land while VFS is in `RECEIVE`), so it

@@ -119,6 +119,10 @@ pub const BOOT_BINS: &[(&str, &str)] = &[
     // `/bin/ttyprobe` is the PTY round-trip probe (M2): opens /dev/ptyp0 +
     // /dev/ttyp0 and pushes bytes both ways through the line discipline.
     ("/bin/ttyprobe", "ttyprobe"),
+    // `/bin/ttytimeout` is the MIN/TIME probe: a raw console read with VMIN=0
+    // and VTIME=2 must return zero bytes once the deadline passes, which is the
+    // only end-to-end exercise of the tty's read timer.
+    ("/bin/ttytimeout", "ttytimeout"),
     // `/bin/udstest` is the UNIX-domain socket smoke test (Phase 0): a
     // socketpair round-trip plus bind/listen/connect/accept through /dev/uds.
     ("/bin/udstest", "udstest"),

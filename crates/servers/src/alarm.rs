@@ -1,12 +1,13 @@
-//! VFS server deadlines — the timer behind every blocking readiness wait.
+//! Server deadlines — the timer behind every blocking wait a server owns.
 //!
-//! `select(2)` and `poll(2)` must return when their timeout expires even if no
-//! descriptor became ready. The kernel's only "wake this server later" facility
-//! is `SYS_SETALARM`, which the input server already uses for its periodic
-//! virtio poll: it arms a per-process timer and the kernel notifies the process
-//! from `CLOCK` (`-3`) when it fires. VFS arms exactly one — the earliest
-//! deadline among its suspended waits — and re-arms it whenever that set
-//! changes. `vfs/main.rs` routes a notification back here (`alarm_ticks`).
+//! The kernel's only "wake this server later" facility is `SYS_SETALARM`, which the
+//! input server uses for its periodic virtio poll: it arms a per-process timer and
+//! the kernel notifies the process from `CLOCK` (`-3`) when it fires. Two servers
+//! use it through this module: VFS arms exactly one alarm, the earliest deadline
+//! among its suspended `select`/`poll` waits, and re-arms it whenever that set
+//! changes (`vfs/main.rs` routes a notification back to `alarm_ticks`); the tty
+//! server needs a deadline only as a number, because its console pump already
+//! wakes it every two ticks, and it fires the expired read timers on that wake.
 //!
 //! Deadlines are absolute monotonic ticks. `SYS_SETALARM` with `abs_time` set
 //! takes an absolute tick, so re-arming for a later wait does not accumulate

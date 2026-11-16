@@ -13,7 +13,7 @@
 //! - a character device is asked (`CDEV_SELECT`), and when nothing is ready the
 //!   driver keeps a late watch that answers with `CDEV_SEL2_REPLY`.
 //!
-//! Deadlines come from `vfs::alarm`: the earliest deadline among the suspended
+//! Deadlines come from `crate::alarm`: the earliest deadline among the suspended
 //! waits is armed as the process's `SYS_SETALARM` timer, and the `CLOCK`
 //! notification that fires calls [`alarm_ticks`] to complete every wait whose
 //! deadline has passed. Before this, a bounded timeout blocked forever — an
@@ -550,7 +550,7 @@ unsafe fn arm_earliest() {
     if t != 0 && (min == 0 || t < min) {
         min = t;
     }
-    crate::vfs::alarm::set(min);
+    crate::alarm::set(min);
 }
 
 /// Re-arm the alarm for the earliest deadline across waits and timerfds. Called
@@ -622,7 +622,7 @@ pub unsafe fn do_select() -> i32 {
         if sec == 0 && usec == 0 {
             block = false;
         } else {
-            deadline = crate::vfs::alarm::deadline_timeval(sec, usec);
+            deadline = crate::alarm::deadline_timeval(sec, usec);
         }
     }
 
@@ -721,7 +721,7 @@ pub unsafe fn do_poll() -> i32 {
     if timeout_ms == 0 {
         block = false;
     } else if timeout_ms > 0 {
-        deadline = crate::vfs::alarm::deadline_ms(timeout_ms);
+        deadline = crate::alarm::deadline_ms(timeout_ms);
     }
 
     let Some(slot_idx) = free_slot_index() else {
@@ -817,7 +817,7 @@ pub unsafe fn do_epoll_wait() -> i32 {
     if timeout_ms == 0 {
         e.block = false;
     } else if timeout_ms > 0 {
-        e.deadline = crate::vfs::alarm::deadline_ms(timeout_ms);
+        e.deadline = crate::alarm::deadline_ms(timeout_ms);
     }
 
     unsafe { scan(fp, e) };
@@ -1006,7 +1006,7 @@ pub unsafe fn wake_pipes() {
 ///
 /// Must be called from the VFS main loop.
 pub unsafe fn alarm_ticks() {
-    unsafe { expire_at(crate::vfs::alarm::now()) };
+    unsafe { expire_at(crate::alarm::now()) };
 }
 
 /// Complete every wait whose deadline is at or before `now`, then re-arm. Split
