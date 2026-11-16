@@ -11,13 +11,6 @@ are arch-specific, `[env]` is tooling/platform, not kernel.
 
 ## Cross-arch (`[all]`)
 
-2. **MFS read-path I/O amplification ~3–6×** — large sequential reads issue
-   ~3–6× more virtio-blk I/Os than the file's block count (cat ≈2.8×,
-   mmapfd ≈5.6×, 33 MiB `/bin/bign` pre-fault ≈5.8×). Two candidate fixes
-   (make PREFETCH read; move `ONE_SHOT` off the `FULL_DATA_BLOCK` value)
-   were tried and reverted. Open: profile MFS's cache/read-ahead against
-   the virtio request stream. (.notes/filemmap.md §7)
-
 3. **`mmap(fd)` MAP_SHARED semantics** — implemented (MAP_SHARED sets
    `VR_SHARED`, the pages are file-cache frames shared between processes) and
    exercised by `mmapfd shared`, which forks and checks that the child's write is
@@ -402,6 +395,26 @@ are arch-specific, `[env]` is tooling/platform, not kernel.
    `CACHE_CAPACITY` (4096) LRU table the file-fault path (`start_file_page`) consults before asking
    VFS for a page. What is still true is that `read(2)` does not go through it, because that is the
    filesystem's own cache (item 2).
+
+2. **MFS read-path I/O amplification (fixed in `8e5e397c4`, 2026-08-14; measured again at
+   about 1 I/O per zone on 2026-11-09).** Large sequential reads were
+   recorded at 3-6x the file's block count. The cause was `DEV_RAM = 0` colliding with the
+   root filesystem's device number 0: `lmfs_put_block` sent every block of device 0 to the
+   LRU front, so the shared indirect block was evicted between data chunks and re-read for
+   each one (`8e5e397c4`, pinned by
+   `libminixfs::cache::test_module::test_sequential_read_io_count_stays_near_block_count`). Measured again
+   on the x86 guest with QEMU's `virtio_blk_handle_read` trace: every request is 8 sectors
+   (4096 bytes, one MFS zone), and reading a 6,189,776-byte file costs 1527 requests beyond
+   the reader's own I/O (1511 zones and 16 for metadata), so the read path is about 1.01x.
+   Reading the same file through `coreutils wc` costs 2590 requests in total; the same command
+   with an option it rejects (the applet starts, prints usage and reads no file data) costs
+   1063, and the 1527 difference is the file read. That 1063 is `coreutils`' own exec and
+   startup: its 6 MB image is read for the non-executable regions the exec pre-faults eagerly
+   (`filemmap.md` §5), which is a per-command cost item 5 owns, not MFS's.
+   The two candidate fixes recorded before (read on `PREFETCH`, move `ONE_SHOT` off
+   `FULL_DATA_BLOCK`) were reverted correctly: neither was the defect. One measurement note:
+   the trace backend perturbs the stdio console badly enough that a traced run must verify
+   its command's own output before the counts are believed. (`.notes/filemmap.md` §7)
 
 13. **~~Free slots are left not-quite-free~~ — FIXED (2026-11-01).** `Proc::is_empty` tests the
     `SLOT_FREE` bit, the way C's `get_free_proc` does (`RTS_ISSET`), instead of equality with it, so

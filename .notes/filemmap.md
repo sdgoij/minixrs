@@ -372,13 +372,24 @@ completions via QEMU `-trace`):
   C-faithful alternative first — pre-check both sides of every kernel copy and
   return `EFAULT` — under which an eager pre-touch is the model, not a
   workaround.
-- Large sequential reads also show a **pre-existing ~3-6× I/O
-  amplification** in the MFS/virtio read path (cat ≈2.8×, mmapfd ≈5.6×,
-  bign ≈5.8× the file's block count). Not exec-specific; two candidate
-  fixes (make PREFETCH read; move `ONE_SHOT` off the `FULL_DATA_BLOCK`
-  constant value) were tried and reverted — neither resolved it. Open
-  follow-up: profile MFS's cache/read-ahead against the virtio request
-  stream.
+- Large sequential reads were recorded at ~3-6x the file's block count. **Resolved
+  (2026-11-09): the read path is ~1x, and the multiplier was the root device's cache
+  policy.** `DEV_RAM = 0` collided with the root filesystem's device 0, so
+  `lmfs_put_block` put every root-device block on the LRU front and the shared indirect
+  block was re-read for each data chunk (`8e5e397c4`; the regression is
+  `libminixfs::cache::test_module::test_sequential_read_io_count_stays_near_block_count`).
+  Measured with QEMU's
+  `virtio_blk_handle_read` trace: every request is 8 sectors (4096 bytes, one MFS zone),
+  and a 6,189,776-byte file read costs 1527 requests beyond the reader's own I/O (1511
+  zones + 16 metadata), i.e. ~1.01x. `coreutils wc` of the same file costs 2590 requests
+  in total; the same command with an option it rejects (the applet starts, prints usage and
+  reads no file data) costs 1063, and the 1527 difference is the file read. That 1063 is
+  `coreutils`' own exec and startup (its 6 MB image's non-executable regions, which the exec
+  pre-faults eagerly, §5), so the remaining per-command cost belongs to `KNOWN_ISSUES.md` #5,
+  not to the cache. Measurement caveat: the trace backend perturbs
+  the stdio console enough that a traced run must check the command's own output before
+  trusting the counts. `tools/virtio_read_hist.py` prints the count, byte total and
+  size histogram of a `-trace enable=virtio_blk_handle_read -D <file>` log.
 
 Region-stability stress — **resolved**: the 100× loop used to degrade and
 hang (`hello` stopped completing at ≈44 execs at `-m 256M`). Root-caused
@@ -470,7 +481,7 @@ Remaining:
   read-only and `MAP_SHARED` file pages are shared across processes; what remains is
   for a filesystem (MFS's own buffer cache) to donate pages through
   `VM_SETCACHEPAGE`, which none does yet.
-- MFS read-path I/O amplification (above); the exec-leak is resolved on
+- MFS read-path I/O amplification: resolved (above); the exec-leak is resolved on
   all three arches (x86/riscv 0 KiB/exec; aarch64 reached 0 after the
   fork stopped deep-copying alias leaves — see the aarch64 paragraph
   above).
