@@ -2319,8 +2319,12 @@ pub fn do_read(
             let r = minix_rt::read(0, &mut byte);
             if r == EAGAIN as i64 {
                 // The held read gives up when its MIN/TIME deadline passes; there
-                // is no pump alarm on this target to fire it.
-                if expire_timer_at(tp, crate::alarm::now()) {
+                // is no pump alarm on this target to fire it. The clock is a kernel
+                // call and this loop is the idle path, so it is read only while a
+                // deadline is armed: the wasm harness budgets the syscalls a busy
+                // desktop costs, and an unconditional read here paid for one on
+                // every empty poll (measured: 300 per pointer record, against 25).
+                if tp.tty_tmr_exp != 0 && expire_timer_at(tp, crate::alarm::now()) {
                     handle_events(tp);
                     if tp.tty_inleft == 0 {
                         return EDONTREPLY;
