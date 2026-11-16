@@ -72,8 +72,16 @@ are arch-specific, `[env]` is tooling/platform, not kernel.
    caller's write, keeps servicing FDIO in its main loop, and retries the copy when VM reports the
    range present. That is a new VM request with a completion, a suspended-write state in VFS, and
    `Fault::for_prefault` narrowed to writable regions. Its gate is `just test-read-cost-x86`:
-   `coreutils seq 1` costs 1079 4 KiB reads today with a 1150 ceiling, so a lazy version has to
-   land well below that and a regression cannot hide above it.
+   `coreutils seq 1` costs 1079 4 KiB reads today, so a lazy version has to land well below that.
+
+   *Measured 2026-11-16: the pre-fault is a cold-start cost, which lowers the priority of the
+   touch.* Two invocations of the same 6 MB binary in one boot cost 1088 4 KiB requests in total:
+   the first, `coreutils seq 1`, is 1079 as above, and the second, `coreutils seq 2`, is 9,
+   because VM's file cache already holds every page the pre-fault filled. A shell that runs many
+   applets of one multicall therefore pays the pre-fault once per binary per boot, not once per
+   command, so the async touch would cut that one-time 1079 to roughly 60 rather than cut a
+   per-command cost. `just test-read-cost-x86` now types both commands and holds the total under
+   1120 (1088 in every run so far), so one trace covers both the cold growth and the warm cache.
 
 6. **Kernel-mode fault resume beyond exec** — all three arches' kernel-mode
    resume paths are in-commit and boot-verified, but the lazy coverage is
