@@ -64,6 +64,17 @@ are arch-specific, `[env]` is tooling/platform, not kernel.
    through the owner's FDIO path instead of faulting in kernel mode. The touch is the smaller of
    the two, and both should be judged by the same trace (`tools/virtio_read_hist.py`).
 
+   *Why the pre-copy touch is not small either (found while starting it, 2026-11-09).* A
+   synchronous "make this range present" call from VFS cannot work: VM fills a file page by asking
+   VFS (`vm/vfs_request.rs::send` → `VMVFSREQ_FDIO`, an `asynsend3`), so a VFS blocked on the touch
+   would never answer the FDIO the touch is waiting for. The workable shape is the codebase's own
+   async pattern: when a write-from-user copy returns `EFAULT`, VFS sends the touch, suspends the
+   caller's write, keeps servicing FDIO in its main loop, and retries the copy when VM reports the
+   range present. That is a new VM request with a completion, a suspended-write state in VFS, and
+   `Fault::for_prefault` narrowed to writable regions. Its gate is `just test-read-cost-x86`:
+   `coreutils seq 1` costs 1079 4 KiB reads today with a 1150 ceiling, so a lazy version has to
+   land well below that and a regression cannot hide above it.
+
 6. **Kernel-mode fault resume beyond exec** — all three arches' kernel-mode
    resume paths are in-commit and boot-verified, but the lazy coverage is
    exec-only (text fetch + pre-faulted regions). General kernel-mode copies

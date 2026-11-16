@@ -629,6 +629,24 @@ test-burst-aarch64 boot-timeout="60": build-aarch64
     FEED_SCENARIO=tools/smoke/burst.tsv sh tools/smoke/feed.sh target/test-burst-aarch64.log {{boot-timeout}} qemu-system-aarch64 -machine virt -cpu cortex-a57 -m 256M -nographic -no-reboot -global virtio-mmio.force-legacy=off -netdev user,id=net0 -device virtio-net-device,netdev=net0 -device virtio-gpu-device -device virtio-keyboard-device -kernel target/aarch64-unknown-minix/release/kernel-boot-aarch64
     @echo "burst: every long line reached the shell and ran (aarch64)"
 
+# The per-command read cost of a large binary. `coreutils seq 1` execs the 6 MB multicall and
+# reads no file data, yet it costs 1079 virtio reads of 4 KiB: the first text fault pre-faults
+# every non-executable region of the image (KNOWN_ISSUES #5), which is where a command's I/O
+# goes. The ceiling is an upper bound, not an equality, so a change that makes those pages lazy
+# lands far below it instead of tripping it. Paced input (`FEED_PACE`) because the traced stdio
+# console drops bytes, and a step that never arrived would fail before the count mattered.
+test-read-cost arch="x86" boot-timeout="40":
+    @just test-read-cost-{{arch}} {{boot-timeout}}
+
+test-read-cost-x86 boot-timeout="40": build-x86
+    mkdir -p target/images/x86_64-pc-minix
+    cp target/trampoline.elf target/images/x86_64-pc-minix/minix-x86.elf
+    @just _assert-qemu-version qemu-system-x86_64
+    rm -f target/test-read-cost.trace
+    FEED_PACE=0.003 FEED_SCENARIO=tools/smoke/read-cost.tsv sh tools/smoke/feed.sh target/test-read-cost.log {{boot-timeout}} qemu-system-x86_64 -nographic -monitor none -m 256M -no-reboot -vga none -device bochs-display,id=fb0 -kernel target/images/x86_64-pc-minix/minix-x86.elf -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0 -device virtio-tablet-pci,display=fb0 -drive if=none,id=disk0,file=target/images/x86_64-pc-minix/disk.img,format=raw,cache=writethrough -device virtio-blk-pci,disable-legacy=on,drive=disk0 -trace enable=virtio_blk_handle_read -D target/test-read-cost.trace
+    python tools/virtio_read_hist.py target/test-read-cost.trace --max=1150
+    @echo "read-cost: per-command read cost within the ceiling"
+
 # Boot the bash that `build-bash` produced and drive `tools/smoke/bash.tsv` at
 # it: the version banner, a `-c` command line, an arithmetic expansion, a loop, a
 # redirection read back through a second process, an external command (bash's
@@ -1421,6 +1439,7 @@ test-arches:
     @just test-cabi x86
     @just test-winprobe x86
     @just test-burst x86
+    @just test-read-cost x86
     @just test-qemu riscv64
     @just test-boot riscv64
     @just test-fork riscv64
