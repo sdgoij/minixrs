@@ -371,6 +371,22 @@ are arch-specific, `[env]` is tooling/platform, not kernel.
    prompt-paced census with zero losses, `just test-bash` 6/6 on all three arches,
    `test-qemu`/`test-boot riscv64` green, and the workspace suite green.
 
+37. **A 240-byte write overflows QEMU's receive FIFO before the guest drains it (2026-11-16,
+   open, measured).** `just test-burst-<arch>` types a 240-byte command and failed about one
+   run in two, on x86_64 and riscv64, with the guest's *echo* of the command cut short and
+   corrupted, and then no output at all: the newline was lost too, so the shell waited for the
+   rest of a line that never came. It is not the line discipline. With the same tree stashed
+   the gate failed the same way (riscv64, 1 of 2 runs), aarch64 ran it cleanly in the runs made,
+   and the corruption is in bytes the guest received, before parsing. QEMU delivers a whole
+   host write to a 16-byte 16550 receive FIFO at once, unthrottled by the configured baud, so
+   whatever the guest has not read is dropped; the port reads the UART from an ISR and from
+   `ser_input::read_blocking` (`crates/kernel/src/ser_input.rs`), and neither can outrun an
+   instantaneous 240-byte fill. The gate now paces its input (`FEED_PACE=0.003`, one byte per
+   write, with `type_step` refusing a truncated echo), as the read-cost gate already did and as
+   `tools/smoke/feed.sh` is built for, so it measures the guest and not the transport. Still
+   open: a real burst on real hardware, and whether the port should enable the UART's FIFO
+   (`FCR`, port `0x3F8+2`) at init, which no code does today.
+
 ---
 
 ## AArch64 (`[aarch64]`)
