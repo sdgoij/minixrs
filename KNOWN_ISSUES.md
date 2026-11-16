@@ -51,6 +51,19 @@ are arch-specific, `[env]` is tooling/platform, not kernel.
      `save_fault_context` entry and kernel-mode `restore`, and the RISC-V S-mode
      forwarding.
 
+   *Measured 2026-11-09: the exec pre-fault is where a large binary's per-invocation I/O goes, and it
+   cannot be narrowed to writable segments.* `coreutils true`, which prints nothing and writes
+   nothing, costs 1003 virtio reads of 4 KiB (3.9 MiB) over a boot's 49, because the first text
+   fault pre-faults every non-executable file region of the 6 MB multicall (`Fault::for_prefault`).
+   Restricting that to writable file regions leaves the read-only ones lazy, and the guest then
+   never reaches a shell prompt: the shell's `write(1, "# ", 2)` has VFS copy a rodata literal out
+   of its buffer in kernel mode, the pre-check finds the page absent, and the prompt write fails.
+   So the pre-fault is load-bearing for every program that passes a string literal to a syscall,
+   and dropping it needs either this item's attribution work or a *pre-copy touch*: the copier asks
+   VM to make a user source range present before the kernel copies out of it, so VM fills the page
+   through the owner's FDIO path instead of faulting in kernel mode. The touch is the smaller of
+   the two, and both should be judged by the same trace (`tools/virtio_read_hist.py`).
+
 6. **Kernel-mode fault resume beyond exec** — all three arches' kernel-mode
    resume paths are in-commit and boot-verified, but the lazy coverage is
    exec-only (text fetch + pre-faulted regions). General kernel-mode copies
