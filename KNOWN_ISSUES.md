@@ -285,15 +285,13 @@ the burst-overflow reading in item 37, are under `# Resolved issues`.
     the request and park the faulting thread until the fill completes, which is what `Pending`
     already does when the page is known to be in flight.
 
-        The other candidate, and it is cheaper to test than the AP question: the CPU may be running the
-    worker on the wrong address space. `switch_to_user` loads TTBR0 from `[proc + 288]`, which is
-    `p_seg.p_cr3` only while `p_seg` really begins at that offset, and a slot created by
-    `kernel::thread::create` is filled field by field. Running on another space would explain both
-    halves of what was seen: the first fetch takes a translation fault (EC 0x20, which the vector
-    handles), VM fills the page in *threadtest's* tables, and the retry then fetches from whichever
-    space TTBR0 names, where `0x1003050` may be a zero-filled page, giving `udf #0` with EC 0 and no
-    abort at all. The check is one line in `handle_page_fault`: compare `ttbr0_el1` with
-    `(*rp).p_seg.p_cr3` and print both when they differ.
+    One more candidate is now excluded. The CPU may have been running the worker on the wrong
+    address space: `switch_to_user` loads TTBR0 from `[proc + 288]`, and a slot created by
+    `kernel::thread::create` is filled field by field. A check in `handle_page_fault` compared
+    `ttbr0_el1` with `(*rp).p_seg.p_cr3` for every user fault in the failing run and printed
+    nothing, so the thread runs on its own process's tables and a first abort followed by a retry
+    that reads zeros is not a space switch. That leaves the placeholder itself: a page the port
+    calls kernel-only being fetched at EL0, or a fill that maps a frame it never wrote.
 
     Also unchanged, and separate: an unhandled EL0 class reports and **halts** the machine, which is
     the pre-existing policy for a class the dispatcher does not know. Delivering SIGILL to the
