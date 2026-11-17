@@ -88,6 +88,17 @@ fn run() -> Result<(), i32> {
         4,
         b"udstest: socketpair bytes differ\n",
     )?;
+
+    // ---- a cloned device names itself in fstat ----
+    // MINIX gives a clone open its own device node, so `fstat` reports the clone in
+    // both st_dev and st_rdev; libc's `socketpair.c` passes `fstat(sv[1]).st_dev` to
+    // the driver, which takes the peer's minor from it. The port has no clone nodes,
+    // so VFS composes the same answer from the number the open recorded on the filp.
+    let st = step(minix_std::fs::fstat(a), 41, b"udstest: fstat failed\n")?;
+    if st.st_dev != st.st_rdev || (st.st_dev & 0xffff) == 0 || (st.st_dev >> 16) == 0 {
+        userland::write_err(b"udstest: fstat does not name the cloned device\n");
+        return Err(42);
+    }
     let _ = minix_std::uds::close_fd(a);
     let _ = minix_std::uds::close_fd(b);
 

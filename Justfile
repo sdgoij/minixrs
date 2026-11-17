@@ -1516,6 +1516,7 @@ test-arches:
     @just test-cabi x86
     @just test-mmapanon-x86
     @just test-memfd-x86
+    @just test-uds-x86
     @just test-writeback x86
     @just test-winprobe x86
     @just test-burst x86

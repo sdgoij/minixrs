@@ -155,27 +155,6 @@ are arch-specific, `[env]` is tooling/platform, not kernel.
    signal delivery only). Kernel model (1:1, fork/exec/exit group sweep)
    is done and boot-verified.
 
-28. **Cloned character devices are not visible through `fstat` (2026-09-27, open — a missing
-    subsystem, not a stat bug).** MINIX gives every clone open its own *node*: VFS's
-    `cdev_clone` (`servers/vfs/device.c`) asks PFS to create a temporary device file whose
-    inode's `i_dev` **is** the clone device (`makedev(major(dev), new_minor)`), keeps that
-    vnode on the filp and records `vp->v_sdev`; PFS's `stat_inode` returns `st_dev = i_dev`,
-    so `fstat` names the clone. `libc`'s `socketpair.c` depends on exactly that: it passes
-    `fstat(sv[1]).st_dev` to `NWIOSUDSPAIR`, and the driver takes the peer's minor from it
-    (`minor(dev)`). This port has no clone-node machinery — a `CDEV_CLONED` open reply becomes
-    `filp_dev` alone (`servers/src/vfs/call.rs::do_open`) — and `do_fstat` forwards to the
-    filesystem server unchanged, so it reports the *node's* device: for a cloned socket fd,
-    `st_dev` is the filesystem and `st_rdev` the base device, not the clone. Routing is
-    unaffected (`filp_dev` is what `cdev_io` sends to the driver), so this is not a
-    correctness problem for I/O — only the reference's `fstat` idiom does not port.
-
-    **Decision (2026-09-27): keep clone nodes unimplemented; give a driver that needs its own
-    minor an explicit ioctl.** Replicating `cdev_clone` is a VFS+PFS change (a temporary node
-    per clone open, plus `v_sdev` on the vnode and a close path), and the port's routing does
-    not need it. `/dev/uds` exposes `NWIOGUDSMINOR` (`net::NWIOGUDSMINOR`,
-    `minix-std/src/uds.rs::socket_minor`) and its `socketpair` uses that. Revisit if a ported
-    binary needs `st_dev`/`st_rdev` to name a clone.
-
 29. **A driver cannot call VFS back while VFS waits on it (2026-09-27, settled for sockets,
     open for VND).** MINIX's drivers make privileged *back-calls* into VFS during an ioctl: the
     uds driver moves passed descriptors with `copyfd` (`ioc_uds.c` `send_fds`/`recv_fds`), and
@@ -1411,6 +1390,25 @@ as this file's header says a skill-captured limitation does.
     `/bin/forktest`'s third phase is the `vm_suspend`-less answer to the trade above: the child
     never writes its `SINK` page, the kernel fills it with a file read, and the parent must still
     see its fork-time page. `.notes/wayland.md` 4f has the whole shape.
+
+28. **~~Cloned character devices were not visible through `fstat`~~: FIXED (2026-11-17).**
+    MINIX gives every clone open its own temporary device node whose `i_dev` is the clone
+    (`cdev_clone`), so `fstat` names the clone in `st_dev` and `st_rdev`. This port has no
+    clone nodes: `do_open` records the clone device on the filp (`filp_dev`), and `do_fstat`
+    forwarded to the filesystem unchanged, so a socket's `fstat` reported the filesystem's
+    device in `st_dev` and the base device in `st_rdev`. `do_fstat` now composes C's answer
+    for exactly the clone case (`is_cloned_char`: a character device whose open recorded a
+    device different from the vnode's): the stat is requested into VFS's own buffer,
+    `st_dev` and `st_rdev` are set to the clone, and it is copied to the caller. Everything
+    else keeps the filesystem's answer. `st_ino` remains the opened node's, because there is
+    no second inode here, and nothing that asks for a clone reads it. The rest of the
+    entry's decision still stands: no temporary nodes and no `v_sdev`, and `NWIOGUDSMINOR`
+    stays the port's own way to ask a socket for its minor. Gate: `just test-uds-x86`;
+    `/bin/udstest` now requires `st_dev == st_rdev` with a real major and a non-zero clone
+    minor, and a build with the branch disabled fails it with `fstat does not name the
+    cloned device`. Host-pinned by `test_only_a_cloned_char_device_reports_the_open_device`.
+    (`crates/servers/src/vfs/call.rs`, `crates/userland/src/bin/udstest.rs`,
+    `crates/minix-std/src/fs.rs`)
 
 30. **~~A `memfd` answered only some of the operations a filesystem would~~: FIXED (2026-11-17).**
     A memfd has no filesystem (its `v_fs_e` is NONE and `v_fs_count` is 0, which is what lets

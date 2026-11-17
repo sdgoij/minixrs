@@ -148,7 +148,7 @@ pub const S_IFIFO: u32 = 0o010000;
 
 /// File status structure (mirrors POSIX `stat`).
 #[repr(C)]
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, Default)]
 pub struct Stat {
     pub st_dev: u64,
     pub st_ino: u64,

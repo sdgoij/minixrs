@@ -1731,6 +1731,18 @@ pub fn do_stat() -> i32 {
     r
 }
 
+/// True when an open character device was *cloned*: the driver answered the open
+/// with a fresh minor, which `do_open` recorded on the filp.
+///
+/// MINIX turns such an open into a temporary device node whose `i_dev` is the clone
+/// (`cdev_clone`), so `fstat` reports the clone in `st_dev` and `st_rdev`. This port
+/// has no clone nodes, so `do_fstat` composes the same answer from `filp_dev`; this
+/// predicate is what decides when to (KNOWN_ISSUES.md item 28). A block device, a
+/// non-cloning char device, and everything else keep the filesystem's answer.
+pub(crate) fn is_cloned_char(v_mode: u32, filp_dev: u32, v_dev: u32) -> bool {
+    v_mode & S_IFMT == S_IFCHR && filp_dev != v_dev
+}
+
 /// Perform the `fstat(fd, buf)` system call.
 ///
 /// C source: `minix/servers/vfs/stadir.c` â€” `do_fstat()` (line 155)
@@ -1777,6 +1789,33 @@ pub fn do_fstat() -> i32 {
         // ...or a dma-buf.
         if crate::vfs::dmabuf::is_dmabuf(vp) {
             return crate::vfs::dmabuf::fstat(vp, fp.fp_endpoint, buf_addr);
+        }
+        // A cloned device names itself, as MINIX's temporary clone node does. The
+        // answer is asked for in this server's buffer rather than the caller's so it
+        // can be corrected before it is handed over. `st_ino` stays the opened
+        // node's: there is no second inode here, and nothing that asks for a clone
+        // reads it.
+        if is_cloned_char((*vp).v_mode, filp.filp_dev, (*vp).v_dev) {
+            let mut st = Stat::default();
+            let r = crate::vfs::request::req_stat(
+                (*vp).v_fs_e,
+                (*vp).v_inode_nr,
+                arch_common::com::VFS_PROC_NR,
+                &mut st as *mut Stat as *mut u8,
+                core::mem::size_of::<Stat>(),
+            );
+            if r != OK {
+                return r;
+            }
+            st.st_dev = filp.filp_dev as u64;
+            st.st_rdev = filp.filp_dev as u64;
+            return sys_vircopy(
+                SELF,
+                &st as *const Stat as u64,
+                fp.fp_endpoint,
+                buf_addr,
+                core::mem::size_of::<Stat>(),
+            );
         }
         crate::vfs::request::req_stat(
             (*vp).v_fs_e,
@@ -3700,6 +3739,20 @@ mod tests {
             3,
             "VMNT_FORCEROOTBSF keeps the device with the root FS"
         );
+    }
+
+    #[test]
+    fn test_only_a_cloned_char_device_reports_the_open_device() {
+        // MINIX gives a clone open its own node, so `fstat` names the clone. The port
+        // has no clone nodes; the marker is the device number the open recorded on
+        // the filp differing from the vnode's. Everything else keeps the FS answer,
+        // and a block device whose filp_dev differs is not a clone.
+        let base = arch_common::com::UDS_MAJOR << 16;
+        let clone = base | 0x30;
+        assert!(is_cloned_char(S_IFCHR, clone, base));
+        assert!(!is_cloned_char(S_IFCHR, base, base));
+        assert!(!is_cloned_char(S_IFBLK, clone, base));
+        assert!(!is_cloned_char(S_IFREG, clone, base));
     }
 
     #[test]
