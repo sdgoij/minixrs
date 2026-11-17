@@ -73,6 +73,11 @@ are arch-specific, `[env]` is tooling/platform, not kernel.
    per-command cost. `just test-read-cost-x86` now types both commands and holds the total under
    1120 (1088 in every run so far), so one trace covers both the cold growth and the warm cache.
 
+   *Checked 2026-11-17: the shape and the ceiling are unchanged.* The gate measures 1087 requests
+   of 8 sectors each for the two commands together, against the 1088 recorded above, so the
+   pre-fault still costs one zone-sized request per page and the pre-copy touch is still the only
+   change that would lower it. The touch remains unattempted, and its gate is this same one.
+
 6. **Kernel-mode fault resume beyond exec** — all three arches' kernel-mode
    resume paths are in-commit and boot-verified, but the lazy coverage is
    exec-only (text fetch + pre-faulted regions). General kernel-mode copies
@@ -93,6 +98,20 @@ are arch-specific, `[env]` is tooling/platform, not kernel.
    in practice today and its breakage is invisible; it will have to be fixed
    (or the resume rebuilt the way `#PF` does it) before any of the coverage
    above can be added.
+
+   *Read again 2026-11-17: one save path can produce that resume, and the instrument
+   that measured it was not that path.* `save_timer_context` writes the resume CS as
+   `0x001B` outright ("the timer ISR only switches from user mode"), so the timer and
+   serial ISRs cannot make a kernel resume; only `save_fault_context` can, from a #PF
+   taken while the kernel runs. `restore`'s `4:` branch then takes its resume stack from
+   `p_reg[168]`, which that function fills from the CPU frame's RSP slot at index 19.
+   The fault entry runs on IST1 and its own layout comment documents the SS/RSP slots
+   for that delivery, so the slot should hold the interrupted kernel RSP; nothing in the
+   tree measures it. The measured #GP came from a `#DB` instrument, and neither context
+   saver runs on that vector, so the CS slot was set by hand on a frame saved by another
+   path. It shows the branch is unreachable machinery, not that its frame is wrong;
+   proving the frame needs a deliberate kernel-mode #PF, which the pre-check design in
+   item 5 makes hard to reach on purpose.
 
 
 29. **A driver cannot call VFS back while VFS waits on it (2026-09-27, settled for sockets,
@@ -118,6 +137,15 @@ are arch-specific, `[env]` is tooling/platform, not kernel.
     state saved around the nested call. No consumer needs VND yet, so this is recorded rather
     than resolved. (`crates/servers/src/vfs/scm.rs`, `crates/servers/src/vfs/call.rs::do_copyfd`,
     `crates/drivers/src/storage/vnd.rs`)
+
+    *Checked 2026-11-17: the VND driver is not part of the shipped system.* No driver process or
+    boot configuration references `vnd`: it is declared as a module (`crates/drivers/src/storage/mod.rs`)
+    and nothing else in the tree mentions it, while every driver that does run has a binary in
+    `crates/servers/src/bin` (`virtio_blk`, `uds`, `tty`, ...) and a device node. So `VNDIOCSET`
+    and the two `Unsupported` back-calls are unreachable from a guest. That is why the item is
+    recorded rather than fixed: a mechanism with no caller cannot be validated, and the shape it
+    needs (a second VFS thread, or VFS answering the ioctl itself as it does for the socket ones)
+    is a decision for whoever first needs a file-backed block device.
 
 ---
 
