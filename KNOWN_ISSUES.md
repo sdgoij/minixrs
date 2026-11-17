@@ -206,36 +206,44 @@ the burst-overflow reading in item 37, are under `# Resolved issues`.
 
 ## AArch64 (`[aarch64]`)
 
-49. **`/bin/threadtest` dies on aarch64 once its worker threads first run (2026-11-17, open,
-    reproduced).** `just test-threads aarch64` runs `tools/smoke/threads.tsv` against
-    `/bin/threadtest`, which spawns four kernel threads that block in PM IPC, bump a shared
-    counter and are joined. The same binary and the same scenario pass on x86_64 and
+49. **`/bin/threadtest` takes an unhandled EL0 exception on aarch64 once a worker runs
+    (2026-11-17, open, reproduced).** `just test-threads aarch64` runs `tools/smoke/threads.tsv`
+    against `/bin/threadtest`, which spawns four kernel threads that block in PM IPC, bump a
+    shared counter and are joined. The same binary and the same scenario pass on x86_64 and
     riscv64. On aarch64 the command prints at most one byte of its `threadtest: spawned` line and
-    the shell is back at its prompt: the harness reports that the step never answered, and no
-    error is printed, so the process is reaped rather than exiting through one of its own failure
-    paths.
+    the shell is back at its prompt: no error from the program itself, so it was killed.
 
-    It is a scheduling race, not a translation gap that never resolves. Adding one diagnostic
-    `write` in the main thread between the create loop and the workers' first run, or a write per
-    created thread, makes the run pass with all four threads reporting and `counter=4`; removing
-    it makes it fail again, every time.
+    Two faults were in the way of seeing this, and both are now fixed (this commit). The
+    unknown-exception report in `arch-aarch64/src/exception.rs` wrote a bare `X` to the UART's
+    **physical** address `0x0900_0000`. With the MMU on that address is not mapped (devices are
+    reached through the physmap), so the report itself took a kernel-mode store fault, which
+    `handle_page_fault` forwards to VM as a user address, and VM answered `sys_kill(SIGSEGV)` to
+    whichever process was running: the trace showed the same kill at `0x0900_0000` repeating
+    forever, which read as a wild user store and was not one. The report now goes through
+    `serial_write_byte` and prints the class, ELR, SPSR, ESR and FAR.
 
-    A temporary print in `kernel::vm::handle_page_fault`, filtered to processes that have
-    threads, showed both worker slots (tids 1 and 2) repeatedly taking a **user store**
-    translation fault at `0x0000_0000_0900_0000` (error code 2: user, write, page not present),
-    while `sbrk` in the same process reports its heap at `0x0000_0000_2010_0000`. Nothing in the
-    process asks for a mapping at `0x0900_0000`, so the store is landing on a wild stack pointer
-    rather than a page VM could fill.
+    With that fixed the real event is visible: `EL0 unhandled exception, EC=0x00`, `ESR=0x02000000`
+    (ISS zero), `ELR=FAR=0x0000_0000_0100_3060`, `SPSR=0x8000_0000` (EL0t). EC 0 is ARMv8's
+    "unknown reason", the class an **undefined instruction** reports, and `0x1003060` is inside
+    the program's own `.text` (the `memset`/`memcpy` functions). The instruction that belongs at
+    that address in the linked binary is a plain `add x8, x8, x10`, so the fetch is not seeing
+    the file's instruction: a zero-filled page (`0x00000000` is `udf #0`) is the likely content,
+    and the same address had earlier been seen taking a *translation* fault, which fits a page
+    that is mapped without being filled from the file.
 
-    The faulting thread's own SP and ELR cannot be read from `Proc::p_reg` for this diagnosis: the
-    EL0 fault path leaves the saved frame on the kernel stack and only the syscall path copies
-    288 bytes into `p_reg`, so `p_reg`'s ELR is the thread's last syscall return, not the faulting
-    instruction. The next step is LLDB against the failing build (`aarch64-debugging`): break on
-    `handle_page_fault`, dump the frame it is called with, and compare `SP_EL0`, `ELR_EL1` and
-    `TTBR0_EL1` for the faulting thread against the same moment on riscv64. The suspects are the
-    new thread's initial frame (`arch-aarch64::hal::set_initial_regs` writes SP_EL0 and x2;
-    `switch_to_user` loads TTBR0 from `[proc + 288]`) and the first-schedule path for a thread
-    that has never run.
+    This is also why a diagnostic `write` in the main thread makes the run pass: the write's own
+    formatting code runs on that `.text` page, so the main thread faults it in first, from the
+    file, before any worker fetches it. The open question is therefore narrow: why a file-backed
+    `.text` fault taken by a **worker** leaves the page unfilled (or zero-filled) when the same
+    fault taken by the main thread fills it from the file. The next step is to have the worker
+    read the instruction word at `0x1003060` with a volatile load and print it before it calls
+    into that page, and to trace `handle_pagefault_for`'s region flags for the address (VR_FILE
+    set or not) on that path.
+
+    Also unchanged, and separate: an unhandled EL0 class reports and **halts** the machine, which
+    is the pre-existing policy for a class the dispatcher does not know. Delivering SIGILL to the
+    process would be the user-visible behaviour to aim for, and it needs a kernel-side path from
+    the vector, not a report.
 
 The two standing notes (probe/stub traps, and the dual page-table
 layout) are captured in the `aarch64-debugging` skill and sit under `# Resolved issues`,

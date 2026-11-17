@@ -237,10 +237,9 @@ el1_sync_vector:
     cmp     x0, #0x25          // EC_DATA_ABT_EL1
     b.eq    1f
 
-    // Unknown EL1 exception — print 'X' and hang.
-    mov     x9, #0x09000000
-    mov     w10, #'X'
-    str     w10, [x9]
+    // Unknown EL1 exception: report the class and halt (see the EL0 path for why
+    // this is not a raw store to the UART's physical address).
+    bl      el1_unknown_exception
     b       .
 
 1:  // Data/instr abort from EL1
@@ -615,10 +614,11 @@ el0_sync_handler:
     cmp     x0, #0x07          // EC_FP_SIMD (trapped SIMD/FP access)
     b.eq    3f
 
-    // Unknown exception — print 'X' and hang.
-    mov     x9, #0x09000000
-    mov     w10, #'X'
-    str     w10, [x9]
+    // Unknown EL0 exception: report the class and halt. This used to write a bare
+    // 'X' to the UART's physical address, which faults once the MMU is on (devices
+    // are reached through the physmap), so the report itself became a page fault on
+    // a user address and VM killed whichever process was running.
+    bl      el0_unknown_exception
     b       .
 
 1:  // Syscall
@@ -796,6 +796,87 @@ unsafe extern "C" fn el0_pf_handler(_frame: *mut u8) {
             }
         }
     }
+}
+
+/// Report an EL0 synchronous exception whose class the dispatcher does not handle, and
+/// halt.
+///
+/// The dispatcher used to write a bare `X` to the UART's physical address here. Once the
+/// MMU is on, that address is not mapped (devices are reached through the physmap), so the
+/// report itself took a kernel-mode store fault at `0x0900_0000`; the fault was forwarded
+/// to VM as a user address and VM killed whichever process happened to be running, which is
+/// how a thread that took an unhandled exception looked like a process dying for no reason.
+///
+/// # Safety
+///
+/// Called from the EL0 synchronous-exception vector, with interrupts masked.
+#[unsafe(no_mangle)]
+unsafe extern "C" fn el0_unknown_exception(ec: u64) -> ! {
+    unsafe { unknown_exception_report(b"EL0", ec) }
+}
+
+/// The same report for an unhandled EL1 synchronous exception.
+///
+/// # Safety
+///
+/// Called from the EL1 synchronous-exception vector, with interrupts masked.
+#[unsafe(no_mangle)]
+unsafe extern "C" fn el1_unknown_exception(ec: u64) -> ! {
+    unsafe { unknown_exception_report(b"EL1", ec) }
+}
+
+/// Print `<level> unhandled exception, EC=0x<nn>` and halt.
+///
+/// # Safety
+///
+/// Exception context only; never returns.
+unsafe fn unknown_exception_report(level: &[u8; 3], ec: u64) -> ! {
+    let elr: u64;
+    let spsr: u64;
+    let esr: u64;
+    let far: u64;
+    unsafe {
+        core::arch::asm!(
+            "mrs {elr}, elr_el1",
+            "mrs {spsr}, spsr_el1",
+            "mrs {esr}, esr_el1",
+            "mrs {far}, far_el1",
+            elr = out(reg) elr,
+            spsr = out(reg) spsr,
+            esr = out(reg) esr,
+            far = out(reg) far,
+        );
+    }
+    for &b in level {
+        crate::hal::serial_write_byte(b);
+    }
+    for &b in b" unhandled exception, EC=0x" {
+        crate::hal::serial_write_byte(b);
+    }
+    for i in 0..2 {
+        let nib = ((ec >> (4 * (1 - i))) & 0xF) as u8;
+        crate::hal::serial_write_byte(if nib < 10 {
+            b'0' + nib
+        } else {
+            b'a' + (nib - 10)
+        });
+    }
+    for (tag, v) in [(b'E', elr), (b'P', spsr), (b'R', esr), (b'F', far)] {
+        crate::hal::serial_write_byte(b' ');
+        crate::hal::serial_write_byte(tag);
+        crate::hal::serial_write_byte(b'=');
+        for i in 0..16 {
+            let nib = ((v >> (60 - 4 * i)) & 0xF) as u8;
+            crate::hal::serial_write_byte(if nib < 10 {
+                b'0' + nib
+            } else {
+                b'a' + (nib - 10)
+            });
+        }
+    }
+    crate::hal::serial_write_byte(b'\r');
+    crate::hal::serial_write_byte(b'\n');
+    crate::hal::halt()
 }
 
 #[cfg(test)]
