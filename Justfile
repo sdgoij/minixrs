@@ -726,6 +726,31 @@ test-pipeblock-aarch64 boot-timeout="40": build-aarch64
     FEED_SCENARIO=tools/smoke/pipeblock.tsv sh tools/smoke/feed.sh target/test-pipeblock-aarch64.log {{boot-timeout}} qemu-system-aarch64 -machine virt -cpu cortex-a57 -m 256M -nographic -no-reboot -global virtio-mmio.force-legacy=off -netdev user,id=net0 -device virtio-net-device,netdev=net0 -device virtio-gpu-device -device virtio-keyboard-device -kernel target/aarch64-unknown-minix/release/kernel-boot-aarch64
     @echo "pipeblock: a pipe read waited for its writer (aarch64)"
 
+# Kernel threads (KNOWN_ISSUES.md 8): `tools/smoke/threads.tsv`. `threadtest` spawns four
+# kernel threads that block in PM IPC, bump a shared counter and exit, and joins them;
+# `forkthread` forks from a worker and requires the child to be a copy of that worker. Per
+# arch because the thread frame is: the kernel records the stack top and the TLS base in
+# each arch's own layout (`SYS_thread_create`/`SYS_thread_set_tls`).
+test-threads arch="x86" boot-timeout="40":
+    @just test-threads-{{arch}} {{boot-timeout}}
+
+test-threads-x86 boot-timeout="30": build-x86
+    mkdir -p target/images/x86_64-pc-minix
+    cp target/trampoline.elf target/images/x86_64-pc-minix/minix-x86.elf
+    @just _assert-qemu-version qemu-system-x86_64
+    FEED_SCENARIO=tools/smoke/threads.tsv sh tools/smoke/feed.sh target/test-threads-x86.log {{boot-timeout}} qemu-system-x86_64 -nographic -m 256M -no-reboot -vga none -device bochs-display,id=fb0 -kernel target/images/x86_64-pc-minix/minix-x86.elf -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0 -device virtio-tablet-pci,display=fb0
+    @echo "threads: four kernel threads shared the process and were joined (x86_64)"
+
+test-threads-riscv64 boot-timeout="40": build-riscv64
+    @just _assert-qemu-version qemu-system-riscv64
+    FEED_SCENARIO=tools/smoke/threads.tsv sh tools/smoke/feed.sh target/test-threads-riscv64.log {{boot-timeout}} qemu-system-riscv64 -machine virt -m 256M -nographic -global virtio-mmio.force-legacy=off -netdev user,id=net0 -device virtio-net-device,netdev=net0 -device virtio-gpu-device -device virtio-keyboard-device -kernel target/riscv64gc-unknown-minix/release/kernel-boot-riscv64
+    @echo "threads: four kernel threads shared the process and were joined (riscv64)"
+
+test-threads-aarch64 boot-timeout="40": build-aarch64
+    @just _assert-qemu-version qemu-system-aarch64
+    FEED_SCENARIO=tools/smoke/threads.tsv sh tools/smoke/feed.sh target/test-threads-aarch64.log {{boot-timeout}} qemu-system-aarch64 -machine virt -cpu cortex-a57 -m 256M -nographic -no-reboot -global virtio-mmio.force-legacy=off -netdev user,id=net0 -device virtio-net-device,netdev=net0 -device virtio-gpu-device -device virtio-keyboard-device -kernel target/aarch64-unknown-minix/release/kernel-boot-aarch64
+    @echo "threads: four kernel threads shared the process and were joined (aarch64)"
+
 # The per-command read cost of a large binary. The scenario runs two invocations of the 6 MB
 # multicall, each reading no file data: the first costs 1079 virtio reads of 4 KiB because the
 # first text fault pre-faults every non-executable region of the image (KNOWN_ISSUES #5), and the
@@ -1545,6 +1570,7 @@ test-arches:
     @just test-burst x86
     @just test-ttytimeout x86
     @just test-pipeblock x86
+    @just test-threads x86
     @just test-eventfd-x86
     @just test-timerfd-x86
     @just test-epoll-x86
@@ -1558,6 +1584,7 @@ test-arches:
     @just test-burst riscv64
     @just test-ttytimeout riscv64
     @just test-pipeblock riscv64
+    @just test-threads riscv64
     @just test-qemu aarch64
     @just test-boot aarch64
     @just test-fork aarch64
@@ -1567,6 +1594,8 @@ test-arches:
     @just test-burst aarch64
     @just test-ttytimeout aarch64
     @just test-pipeblock aarch64
+    # `test-threads aarch64` is deliberately absent: it reproduces KNOWN_ISSUES item 49, so it
+    # stays a command a person runs, not a gate CI would fail on every push.
     @just test-coreutils-wedge-aarch64
 
 # Fork isolation, per arch: `tools/smoke/fork.tsv` runs `/bin/forktest`, which forks and checks

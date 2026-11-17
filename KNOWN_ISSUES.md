@@ -149,12 +149,6 @@ are arch-specific, `[env]` is tooling/platform, not kernel.
      `vm_unmap` in `servers/src/ipc.rs` are *callers* of VM, so a server
      blocking on VM in those paths is the ordinary shape, not a cycle.
 
-8. **Threads (THREADS.md open workstreams)** — `thread_local!` in the minix
-   std PAL, `Mutex`/`Condvar` over a futex sleep/wake, per-thread errno,
-   C-ABI pthread surface; per-thread sigreturn is deferred (process-level
-   signal delivery only). Kernel model (1:1, fork/exec/exit group sweep)
-   is done and boot-verified.
-
 29. **A driver cannot call VFS back while VFS waits on it (2026-09-27, settled for sockets,
     open for VND).** MINIX's drivers make privileged *back-calls* into VFS during an ioctl: the
     uds driver moves passed descriptors with `copyfd` (`ioc_uds.c` `send_fds`/`recv_fds`), and
@@ -212,7 +206,38 @@ the burst-overflow reading in item 37, are under `# Resolved issues`.
 
 ## AArch64 (`[aarch64]`)
 
-No open issues. The two standing notes (probe/stub traps, and the dual page-table
+49. **`/bin/threadtest` dies on aarch64 once its worker threads first run (2026-11-17, open,
+    reproduced).** `just test-threads aarch64` runs `tools/smoke/threads.tsv` against
+    `/bin/threadtest`, which spawns four kernel threads that block in PM IPC, bump a shared
+    counter and are joined. The same binary and the same scenario pass on x86_64 and
+    riscv64. On aarch64 the command prints at most one byte of its `threadtest: spawned` line and
+    the shell is back at its prompt: the harness reports that the step never answered, and no
+    error is printed, so the process is reaped rather than exiting through one of its own failure
+    paths.
+
+    It is a scheduling race, not a translation gap that never resolves. Adding one diagnostic
+    `write` in the main thread between the create loop and the workers' first run, or a write per
+    created thread, makes the run pass with all four threads reporting and `counter=4`; removing
+    it makes it fail again, every time.
+
+    A temporary print in `kernel::vm::handle_page_fault`, filtered to processes that have
+    threads, showed both worker slots (tids 1 and 2) repeatedly taking a **user store**
+    translation fault at `0x0000_0000_0900_0000` (error code 2: user, write, page not present),
+    while `sbrk` in the same process reports its heap at `0x0000_0000_2010_0000`. Nothing in the
+    process asks for a mapping at `0x0900_0000`, so the store is landing on a wild stack pointer
+    rather than a page VM could fill.
+
+    The faulting thread's own SP and ELR cannot be read from `Proc::p_reg` for this diagnosis: the
+    EL0 fault path leaves the saved frame on the kernel stack and only the syscall path copies
+    288 bytes into `p_reg`, so `p_reg`'s ELR is the thread's last syscall return, not the faulting
+    instruction. The next step is LLDB against the failing build (`aarch64-debugging`): break on
+    `handle_page_fault`, dump the frame it is called with, and compare `SP_EL0`, `ELR_EL1` and
+    `TTBR0_EL1` for the faulting thread against the same moment on riscv64. The suspects are the
+    new thread's initial frame (`arch-aarch64::hal::set_initial_regs` writes SP_EL0 and x2;
+    `switch_to_user` loads TTBR0 from `[proc + 288]`) and the first-schedule path for a thread
+    that has never run.
+
+The two standing notes (probe/stub traps, and the dual page-table
 layout) are captured in the `aarch64-debugging` skill and sit under `# Resolved issues`,
 as this file's header says a skill-captured limitation does.
 
@@ -221,6 +246,31 @@ as this file's header says a skill-captured limitation does.
 # Resolved issues
 
 ## Cross-arch (`[all]`)
+
+8. **~~Threads (THREADS.md open workstreams)~~: the API surface landed; one defect remains
+   (2026-11-17).** The entry was stale. `thread_local!` works: the minix std PAL allocates a
+   TLS block and installs the thread pointer at start-up and for every spawned thread
+   (`rust/library/std/src/sys/pal/minix/mod.rs`, `minix_rt::thread_set_tls`).
+   `std::sync::{Mutex, Condvar, RwLock, Once}` are the generic futex implementations over
+   `minix_rt::futex_wait`/`futex_wake` (`rust/library/std/src/sys/sync/futex/minix.rs`), and
+   `std::thread::spawn` creates a kernel thread (`rust/library/std/src/sys/thread/minix.rs`
+   over `SYS_thread_create`). The C-ABI pthread surface is `crates/minix-libc/src/pthread.rs`
+   (THREADS.md Slice 3) and `errno` is a thread-local in its TLS block. The kernel model
+   (1:1, fork/exec/exit group sweep, and thread-aware IPC receiver matching in
+   `kernel::ipc::find_receiver`) was already boot-verified.
+
+   What was really missing was a gate. `/bin/threadtest` and `/bin/forkthread` were both in
+   `BOOT_BINS` and built into every image, and no recipe ran them. `just test-threads <arch>`
+   now drives both through `tools/smoke/threads.tsv`: four kernel threads that block in PM
+   IPC, bump a shared counter and are joined, then a fork from a worker whose child must be a
+   copy of that worker rather than of the main thread.
+
+   `test-threads x86` and `test-threads riscv64` are in `test-arches` and pass. `aarch64`
+   fails, now open as item 49, so its recipe stays a command a person runs until that is
+   fixed.
+
+   Still deferred and unchanged: per-thread sigreturn. Signals are delivered per process, so
+   a signal lands on the main thread's frame, which is what every consumer in the tree uses.
 
 35. **~~`epoll` ignores `EPOLLONESHOT`~~: FIXED (2026-11-17).** An `EPOLLONESHOT`
     interest is now disarmed by its own report, as on Linux: it stays in the set

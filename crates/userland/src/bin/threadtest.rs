@@ -83,6 +83,12 @@ pub unsafe fn main(_argc: i32, _argv: *const *const u8) -> i32 {
         // the shared address space, so every thread can use them.
         let base64 = unsafe { minix_rt::sbrk(STACK_SIZE as isize) };
         if base64 < 0 {
+            let mut buf = [0u8; 64];
+            let mut j = 0;
+            push(&mut buf, &mut j, b"threadtest: stack sbrk failed (errno ");
+            push_num(&mut buf, &mut j, base64.unsigned_abs() as usize);
+            push(&mut buf, &mut j, b")\n");
+            unsafe { minix_rt::write(2, buf.as_ptr(), j) };
             return 1;
         }
         let stack_top = (((base64 as usize) + STACK_SIZE) & !0xF) - 8;

@@ -107,6 +107,7 @@ pub unsafe fn main(_argc: i32, _argv: *const *const u8) -> i32 {
     // Per-thread user stack from the heap (VM-backed via sbrk).
     let base64 = unsafe { minix_rt::sbrk(STACK_SIZE as isize) };
     if base64 < 0 {
+        userland::write_err(b"forkthread: stack sbrk failed\n");
         return 1;
     }
     let stack_top = (((base64 as usize) + STACK_SIZE) & !0xF) - 8;

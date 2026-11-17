@@ -1,0 +1,25 @@
+# The `just test-threads <arch>` scenario: kernel threads, driven by
+# `/bin/threadtest` and `/bin/forkthread`.
+#
+#   FEED_SCENARIO=tools/smoke/threads.tsv sh tools/smoke/feed.sh <log> <seconds> <qemu command…>
+#
+# One step per line, as `tools/smoke/scenario.tsv` documents: the command, a tab, and the
+# whole line its output must produce.
+#
+# `threadtest` prints its line only after four kernel threads have each blocked in a PM
+# round trip, bumped a shared atomic counter and exited, and the main thread has joined all
+# four: a thread stuck in IPC, a lost wake on `thread_join`, or a thread that never got the
+# CPU leaves the counter short or the join unanswered, which the harness reports as this
+# step not answering.
+#
+# `forkthread` prints its line only after a worker thread forked and the child proved it was
+# a copy of that worker rather than of the main thread (its tid, copied into the child's
+# frame, is not 0). A fork that cloned the wrong thread's frame prints the "NOT a worker
+# copy" line and exits 2 instead.
+#
+# The expectation is an extended regular expression anchored to the whole line, so the
+# parentheses in `threadtest`'s summary are escaped: unescaped, `(expected 4)` is a group and
+# the pattern demands "counter=4 expected 4", which the guest never prints.
+
+/bin/threadtest	threadtest: all joined, counter=4 \(expected 4\)
+/bin/forkthread	forkthread: OK
