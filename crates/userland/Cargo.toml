@@ -473,5 +473,12 @@ name = "wlscene"
 path = "src/bin/wlscene.rs"
 test = false
 
+# procfsprobe reads `/proc/hz` and `/proc/uptime` through the mount VFS makes. Driven by
+# `just test-procfs-<arch>`.
+[[bin]]
+name = "procfsprobe"
+path = "src/bin/procfsprobe.rs"
+test = false
+
 [lints]
 workspace = true

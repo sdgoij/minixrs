@@ -94,95 +94,6 @@ are arch-specific, `[env]` is tooling/platform, not kernel.
    (or the resume rebuilt the way `#PF` does it) before any of the coverage
    above can be added.
 
-7. **Server Phase 12/13 stubs** (not arch bugs, but known gaps). Only one gap is still open:
-   **`procfs` is not ready to wire: it publishes two files, and the rest need sources this port
-   does not have**. `crates/fs/src/procfs` has the VTreeFS tree, the inode table and the buffer
-   helpers, and `procfs_main` starts a real loop, but nothing calls it: there is no `procfs` bin,
-   no `BOOT_BINS` entry, and VFS mounts no `/proc`.
-
-   The root now serves `hz` and `uptime` for real, from `SYS_TIMES` (the call ext2's
-   `clock_time` makes), with C's `100 * ticks / hz` split kept as a pure, host-tested helper.
-   Those two are the whole of `ROOT_FILES`: the other entries used to print a constant ("0",
-   "0 0 0 0 0") that a reader cannot tell from data, so they are out of the tree rather than
-   stubbed in it. What each needs, measured:
-   - `kinfo`: C prints `nr_procs nr_tasks` from `sys_getkinfo`, and the port's `KInfo` is
-     `{ boottime, loadinfo, reserved[14] }` with neither field, so the struct has to grow before
-     the file can say anything true.
-   - `meminfo`: `vm_info_stats` (VMIW_STATS). VM owns the numbers; no request lets a server ask.
-   - `loadavg`: C samples `GET_LOADINFO`, which is a defined constant with **no arm** in
-     `do_getinfo_handler` (that handler covers WHOAMI, MACHINE, KINFO, HZ, IRQHOOKS, IMAGE,
-     PROCTAB, PRIVTAB, PROC, PRIV, IRQACTIDS, MONPARAMS and PHYS_DELTA).
-   - `cpuinfo`: `GET_CPUINFO` has no arm either, and `cpuinfo.rs`'s `print_cpu` prints
-     "GenuineIntel" for vendor 0, so it must stay unpublished until it reads something real.
-   - `dmap`: `getsysinfo(VFS, SI_DMAP_TAB)` does exist (`vfs/misc.rs`), so this one is only a call.
-   - `/proc/<pid>`: the bulk of C's procfs. `tree.rs`'s `PROC`, `MPROC` and `FPROC` tables are
-     zeroed statics and `slot_in_use` returns false, so the lookup and getdents hooks have nothing
-     to build from. `GET_PROCTAB` (the kernel's `Proc` array) already works, which is the first
-     half; PM's `mproc` and VFS's `fproc` are the other two.
-
-   Wiring the server is a boot slot of its own: `arch-common/com.rs`, `kernel/table.rs`,
-   `kernel-boot/lib.rs`, both lists in `boot-image/manifest.rs`, the `BOOTED_PROCS` and the
-   process lists in `kernel-boot/boot_test.rs` (and `kernel/tests.rs`'s initramfs list), a bin and
-   a Cargo entry, and VFS's `main.rs`/`mount.rs`. One trap there: boot_test check D pins the
-   *last* message VFS sends before boot-complete as `mount_devman`'s `/devices` lookup, so a
-   `/proc` mount has to be mounted before devman or that check moves with it.
-
-   The order that costs least: build the per-`pid` tables first (they need `GET_PROCTAB` plus PM
-   and VFS, not a new syscall), then wire and mount the server once the tree has content worth a
-   boot slot, then add the remaining root files behind the info arms each one needs. Doing the
-   mount first would add a boot process that serves two numbers.
-   - `tty` — `sys_safecopyto/from` (SYS_SAFECOPYTO/FROM kernel calls) and
-     `chardriver_reply_task`/`chardriver_reply_select` (CDEV_REPLY /
-     CDEV_SEL2_REPLY builders) are implemented and wired into `dev_ioctl`
-     (TIOCDRAIN deferred reply) and `select_retry`. The deferred
-     READ/WRITE/IOCTL protocol is implemented too: VFS hands the request
-     over without waiting and the driver answers `CDEV_REPLY`, which
-     `cdev_reply` -> `cdev_io_reply` completes (`70fbb3ff8`, gated per
-     driver by `dmap_cdev_async`, set for the tty). So `cdev_reply` is no
-     longer a stub for the `CDEV_REPLY` arm (the `SEL1`/`SEL2` arms still
-     are), and ioctl args move through a magic grant sized by `ioc_size`,
-     which the tty's `TIOCGETA`/`TIOCSETA*` codes carry as
-     `size_of::<Termios>()`, so a full `Termios` round-trips. The last piece,
-     the MIN/TIME read timer, is now implemented: `settimer` stores an absolute
-     deadline (`tty_tmr_exp`) sized from `VTIME` at the kernel's tick rate, and
-     `tty_expire_timers` fires it on the console pump's own wake, so no
-     server-side timer queue is needed. The earlier note that servers had "no
-     kernel timer API" was wrong: `SYS_SETALARM` exists, and the input server
-     and VFS already use it. The timer can only complete a read because
-     `handle_events` gained C's post-`in_transfer` reply rule
-     (`read_ready_to_reply`), which the port had dropped: with `tty_min` forced
-     to zero a held read answers at once with what it has, zero bytes included,
-     and that rule is also what honours `VMIN` in raw mode. Gate:
-     `just test-ttytimeout-<arch>` runs `/bin/ttytimeout`, a raw console read
-     with `VMIN=0` and `VTIME=2` that must return zero bytes in its window.
-   - `devman` main loop **landed**: `crates/servers/src/devman.rs` (1792 lines) serves the
-     device tree through `vtreefs::start_vtreefs`, whose message loop
-     (`crates/libs/src/vtreefs/mod.rs`) answers the port's FS protocol and RS's init request;
-     `/sbin/devman` is a `BOOT_BINS` entry and VFS mounts it at `/devices`. `procfs` is the
-     part of this entry that is still open, above.
-   - `clock_server` main loop is implemented (real RECEIVE → `dispatch_clock`
-     → SENDNB loop, `CLOCK_GETTIME` reads the kernel clock via SYS_TIMES,
-     `CLOCK_SETTIME` forwards to SYS_SETTIME); note userland
-     `clock_gettime` actually goes through PM, which already works.
-   - VM `do_vfs_reply` completes the port's VM→VFS requests: they are asynchronous
-     (`vm/vfs_request.rs`, `asynsend3` with `AMF_NOREPLY`), so the reply is the only
-     thing that can finish them, and a reply whose request id matches nothing is
-     reported rather than read as an answer.
-   - `clear_pagefault` forwards VMCTL_CLEAR_PAGEFAULT to the kernel.
-   - **No allocation inside VFS's VM-request handlers (FDIO, FDLOOKUP,
-     FDCLOSE of `do_vm_call`).** The hazard was that those run while VM is
-     blocked in `vfs_request_sync`, and a server's heap growth is itself a
-     *synchronous* VM call (`minix-rt`'s `mmap_chunk` → `vmem::mmap` →
-     blocking sendrec), so an allocation there was delivered into VM's
-     SENDREC reply slot and wedged both servers — VM already returned from
-     the fault handler, VFS waited for the mmap reply, run queues empty.
-     VM does not wait on VFS any more (`vm/vfs_request.rs`, asynchronous with
-     `AMF_NOREPLY`, so a waiting server cannot absorb the request either), so
-     the handler may allocate and the class is gone rather than policed —
-     .notes/porting_plan.md finding 58.
-     Still true, and unrelated to that: `vm_remap`, `vm_getphys` and
-     `vm_unmap` in `servers/src/ipc.rs` are *callers* of VM, so a server
-     blocking on VM in those paths is the ordinary shape, not a cycle.
 
 29. **A driver cannot call VFS back while VFS waits on it (2026-09-27, settled for sockets,
     open for VND).** MINIX's drivers make privileged *back-calls* into VFS during an ioctl: the
@@ -250,6 +161,26 @@ as this file's header says a skill-captured limitation does.
 # Resolved issues
 
 ## Cross-arch (`[all]`)
+
+7. **~~Server Phase 12/13 stubs~~: procfs is wired and mounted (2026-11-17).** The server is
+   boot process 21 (`PROC_FS_PROC_NR`), built as `/sbin/procfs` from
+   `crates/servers/src/bin/procfs.rs` and listed in `BOOT_PROCS_ALL`, both lists in
+   `boot-image/src/manifest.rs`, the boot suite's process lists and `kernel/tests.rs`'s initramfs
+   list. VFS mounts it at `/proc` (`vfs/mount.rs::mount_procfs`) *before* `mount_devman`, because
+   boot_test check D pins the last message VFS sends before boot-complete as devman's `/devices`
+   lookup. `build_minixfs` makes the `/proc` directory after every inode the layout tests pin, so
+   `/devices` stays inode 7 and `/bin/echo` stays inode 8.
+
+   `just test-procfs <arch>` is the gate, on all three arches. `/bin/procfsprobe` opens
+   `/proc/hz` and `/proc/uptime`, parses both, stats `/proc`, and asks for a path under it that is
+   not there. It is the only client in the tree that opens a path under a user-mounted VTreeFS:
+   the server's own unit tests drive `handle_fs_message` directly, so they cannot notice a mount
+   that never crossed the VFS boundary.
+
+   What `/proc` still does not carry is a feature omission, not this wiring defect: `kinfo`,
+   `meminfo`, `loadavg`, `cpuinfo`, `dmap` and the binary per-pid files each need a source this
+   port does not have. `.notes/procfs.md` records what each one needs and why a placeholder is
+   not an option; they can land file by file as those sources arrive.
 
 8. **~~Threads (THREADS.md open workstreams)~~: the API surface landed; one defect remains
    (2026-11-17).** The entry was stale. `thread_local!` works: the minix std PAL allocates a

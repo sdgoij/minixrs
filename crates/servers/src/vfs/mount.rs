@@ -644,6 +644,102 @@ pub unsafe fn mount_devman(root_vp: *mut Vnode) -> i32 {
     OK
 }
 
+/// Register the procfs server's vmnt and mount it at `/proc` via `req_readsuper`.
+///
+/// The shape is `mount_devman`'s: the mount point is resolved in MFS so the vmnt
+/// records it as `m_mounted_on`/`m_fs`, and a vnode is created for procfs's root so
+/// path traversal can cross into the tree. `m_path` lets the resolver split a
+/// `/proc/...` request at the mount boundary.
+///
+/// Mounted before `mount_devman` so the last message VFS sends before
+/// boot-complete stays devman's `/devices` lookup, which the boot suite's check D
+/// pins (`kernel-boot/src/boot_test.rs`).
+///
+/// # Safety
+///
+/// `root_vp` must point to a valid MFS root vnode (from `mount_root`).
+pub unsafe fn mount_procfs(root_vp: *mut Vnode) -> i32 {
+    let vmp = get_free_vmnt();
+    if vmp.is_null() {
+        return ENFILE;
+    }
+    unsafe {
+        (*vmp).m_fs_e = arch_common::com::PROC_FS_PROC_NR;
+    }
+
+    let (r, node, _flags_reply) = unsafe {
+        req_readsuper(
+            vmp,
+            core::ptr::null(),
+            0, /* label_len */
+            0, /* dev: none */
+            0, /* readonly: writable */
+            0, /* isroot: procfs must not be mounted as root */
+        )
+    };
+    if r != OK {
+        unsafe { mark_vmnt_free(vmp) };
+        return r;
+    }
+
+    // Resolve the mount point (/proc) in the root filesystem.
+    let mount_path: &[u8] = b"/proc";
+    let mut resolve = Lookup::default();
+    resolve.l_path[..mount_path.len()].copy_from_slice(mount_path);
+    resolve.l_path_len = mount_path.len();
+    let root_ino = (*root_vp).v_inode_nr;
+    let (lr, lres) = unsafe {
+        req_lookup(
+            arch_common::com::MFS_PROC_NR,
+            root_ino,
+            root_ino,
+            0,    /* uid */
+            0,    /* gid */
+            None, /* superuser: no supplemental groups */
+            &resolve,
+        )
+    };
+    if lr != OK {
+        unsafe { mark_vmnt_free(vmp) };
+        return lr;
+    }
+
+    unsafe {
+        (*vmp).m_dev = node.dev;
+        (*vmp).m_root_node = node.inode_nr;
+        (*vmp).m_mounted_on = lres.inode_nr;
+        (*vmp).m_fs = arch_common::com::MFS_PROC_NR; // mounted-on dir lives on MFS
+        (*vmp).m_flags = 0;
+        let label = b"procfs";
+        let m_label = &mut (*vmp).m_label;
+        let copy_len = label.len().min(LABEL_MAX - 1);
+        m_label[..copy_len].copy_from_slice(&label[..copy_len]);
+        m_label[copy_len] = 0;
+        // Mount path for the path resolver's mount-prefix splitter.
+        let m_path = &mut (*vmp).m_path;
+        m_path[..mount_path.len()].copy_from_slice(mount_path);
+        m_path[mount_path.len()] = 0;
+    }
+
+    // Create the procfs root vnode so mount crossing can find it
+    // (find_vnode(PROC_FS, m_root_node)).
+    let vp = get_free_vnode();
+    if vp.is_null() {
+        unsafe { mark_vmnt_free(vmp) };
+        return ENFILE;
+    }
+    unsafe {
+        (*vp).v_fs_e = arch_common::com::PROC_FS_PROC_NR;
+        (*vp).v_inode_nr = node.inode_nr;
+        (*vp).v_mode = node.mode;
+        (*vp).v_size = node.file_size;
+        (*vp).v_dev = node.dev;
+        (*vp).v_ref_count = 1;
+        (*vp).v_fs_count = 1;
+    }
+    OK
+}
+
 /// Check if a device is NONE (no device).
 pub fn is_nonedev(dev: u32) -> i32 {
     if dev == u32::MAX { OK } else { ENOSYS }
@@ -655,9 +751,9 @@ pub fn is_nonedev(dev: u32) -> i32 {
 /// not enough: each pass takes off whatever its mount point no longer needs, and
 /// `NR_MNTS` passes is deeper than the table can nest (C runs the same loop).
 ///
-/// The passes walk table slots rather than device numbers, because the two mounts
-/// on this port that have no device — PFS and devman — carry the same `NO_DEV`
-/// sentinel, so `unmount(dev)` would have to guess which was meant. Those two are
+/// The passes walk table slots rather than device numbers, because the mounts on this port
+/// that have no device — PFS, procfs and devman — carry the same `NO_DEV`
+/// sentinel, so `unmount(dev)` would have to guess which was meant. Those three are
 /// skipped, as `do_sync` already skips them: there is no medium to leave
 /// consistent, and PFS's record is fabricated by `mount_pfs` at init rather than
 /// created by a mount that succeeded, so it is the one vmnt that does not imply a

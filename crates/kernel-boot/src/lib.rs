@@ -10,8 +10,9 @@
 
 use arch_common::com::{
     DEVMAN_PROC_NR, DS_PROC_NR, FB_PROC_NR, INIT_PROC_NR, INPUT_PROC_NR, MFS_PROC_NR, NET_PROC_NR,
-    PFS_PROC_NR, PM_PROC_NR, RAMDISK_PROC_NR, RS_PROC_NR, SCHED_PROC_NR, TTY_PROC_NR, UDS_PROC_NR,
-    VFS_PROC_NR, VIRTIO_BLK_PROC_NR, VIRTIO_NET_PROC_NR, VM_PROC_NR, WLS_PROC_NR, WS_PROC_NR,
+    PFS_PROC_NR, PM_PROC_NR, PROC_FS_PROC_NR, RAMDISK_PROC_NR, RS_PROC_NR, SCHED_PROC_NR,
+    TTY_PROC_NR, UDS_PROC_NR, VFS_PROC_NR, VIRTIO_BLK_PROC_NR, VIRTIO_NET_PROC_NR, VM_PROC_NR,
+    WLS_PROC_NR, WS_PROC_NR,
 };
 
 pub mod boot_init;
@@ -233,6 +234,7 @@ const BOOT_PROCS_ALL: &[(&str, i32)] = &[
     ("/sbin/mfs", MFS_PROC_NR),         // Minix File System
     ("/sbin/pfs", PFS_PROC_NR),         // Pipe File System
     ("/sbin/devman", DEVMAN_PROC_NR),   // device manager (VTreeFS tree)
+    ("/sbin/procfs", PROC_FS_PROC_NR),  // procfs (VTreeFS tree, mounted at /proc)
     ("/sbin/tty", TTY_PROC_NR),         // Terminal driver
     ("/sbin/fb", FB_PROC_NR),           // framebuffer driver
     ("/sbin/input", INPUT_PROC_NR),     // PS/2 keyboard driver

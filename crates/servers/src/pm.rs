@@ -5317,7 +5317,7 @@ mod tests {
     #[test]
     fn test_init_boot_procs_registers_at_the_kernel_process_number() {
         let registered = init_proc_with_boot_image();
-        assert_eq!(registered, arch_common::com::WLS_PROC_NR as u32 + 1);
+        assert_eq!(registered, arch_common::com::PROC_FS_PROC_NR as u32 + 1);
         unsafe {
             let base = MPROC.as_ptr();
             for entry in test_image().iter().filter(|e| e.proc_nr >= 0) {
@@ -6613,7 +6613,7 @@ mod tests {
             assert_eq!(pm_isokendpt(0), None, "a free slot must not answer for PM");
         }
         let slots = init_proc_with_boot_image();
-        assert_eq!(slots, arch_common::com::WLS_PROC_NR as u32 + 1);
+        assert_eq!(slots, arch_common::com::PROC_FS_PROC_NR as u32 + 1);
         let mut msg = make_msg();
         msg.m_payload.m1.m1i1 = 0; // PM endpoint
         assert_eq!(unsafe { handle_getepinfo(0, &mut msg) }, 1);

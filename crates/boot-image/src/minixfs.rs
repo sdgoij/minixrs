@@ -629,6 +629,11 @@ pub fn build_minixfs(files: &[(&'static str, Vec<u8>)]) -> Vec<u8> {
     // image does. Created last, so every inode the layout tests pin keeps its number.
     fs.add_symlink(root_zone, "link", b"/sys/devices/virtio-gpu");
 
+    // Mount point for procfs (VFS's `mount_procfs` crosses into the server's VTreeFS
+    // here). Created last, with the symlink, so every inode the layout tests pin keeps
+    // its number; `/devices` stays inode 7 and `/bin/echo` stays inode 8.
+    let _proc_zone = fs.add_directory(root_zone, "proc");
+
     // `alloc_inode` only fails once the *bitmap block* (32768 bits) fills, so a payload that
     // outgrows `INODES` is written with the overflow bits set and fails in the guest as
     // `err=28` on the first `> file`, with nothing in the build saying why. Refuse such an
@@ -917,11 +922,11 @@ mod tests {
         // Every inode in the table must be marked in use (bit N), so MFS's
         // alloc_bit never hands out an inode that already has table data.
         // The builder writes slot N-1 for inode N; walk the table. The
-        // empty image has 8 dirs (root, bin, sbin, etc, tmp, dev, devices,
-        // dri) + 4 data files (rc, session, passwd, secret) + 19 devices (tty00, tty01, null,
+        // empty image has 9 dirs (root, bin, sbin, etc, tmp, dev, devices,
+        // dri, proc) + 4 data files (rc, session, passwd, secret) + 19 devices (tty00, tty01, null,
         // console, ip, udp, tcp, fb, kbd, the 8 pty nodes ttyp0-3/ptyp0-3, uds,
-        // and dri/renderD128) + the /link symlink = 32 inodes.
-        let n_inodes = 32usize;
+        // and dri/renderD128) + the /link symlink = 33 inodes.
+        let n_inodes = 33usize;
         for ino in 1..=n_inodes {
             assert_eq!(
                 (imap[ino / 8] >> (ino % 8)) & 1,
@@ -929,11 +934,11 @@ mod tests {
                 "inode {ino} must be marked in use at bit {ino}"
             );
         }
-        // And the next bit (inode 33) is free — the first allocatable inode.
+        // And the next bit (inode 34) is free, the first allocatable inode.
         assert_eq!(
-            imap[33 / 8] & (1 << (33 % 8)),
+            imap[34 / 8] & (1 << (34 % 8)),
             0,
-            "inode 33 must be free for the first create"
+            "inode 34 must be free for the first create"
         );
         let _ = itable_off;
     }

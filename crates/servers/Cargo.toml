@@ -108,5 +108,10 @@ name = "devman"
 path = "src/bin/devman.rs"
 test = false
 
+[[bin]]
+name = "procfs"
+path = "src/bin/procfs.rs"
+test = false
+
 [lints]
 workspace = true

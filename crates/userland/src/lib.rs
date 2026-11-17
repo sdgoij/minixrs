@@ -67,6 +67,10 @@ pub mod symlinktest;
 /// is waiting on.
 pub mod linktest;
 
+/// `/bin/procfsprobe` — reads `/proc/hz` and `/proc/uptime` through the mount VFS makes, the
+/// only client that crosses into a user-mounted VTreeFS.
+pub mod procfsprobe;
+
 /// When >= 0, all `write_out` calls are routed through this fd (via VFS)
 /// instead of the kernel's serial shortcut on fd 1. Set by the shell's
 /// redirect child after `fork`, so it is process-private.

@@ -6,9 +6,9 @@
 //! Gated behind cfg(feature = "boot-test") — no impact on normal builds.
 
 use arch_common::com::{
-    DEVMAN_PROC_NR, DS_PROC_NR, MFS_PROC_NR, NET_PROC_NR, PFS_PROC_NR, PM_PROC_NR, RAMDISK_PROC_NR,
-    RS_PROC_NR, SCHED_PROC_NR, TTY_PROC_NR, VFS_PROC_NR, VIRTIO_BLK_PROC_NR, VIRTIO_NET_PROC_NR,
-    VM_PROC_NR,
+    DEVMAN_PROC_NR, DS_PROC_NR, MFS_PROC_NR, NET_PROC_NR, PFS_PROC_NR, PM_PROC_NR, PROC_FS_PROC_NR,
+    RAMDISK_PROC_NR, RS_PROC_NR, SCHED_PROC_NR, TTY_PROC_NR, VFS_PROC_NR, VIRTIO_BLK_PROC_NR,
+    VIRTIO_NET_PROC_NR, VM_PROC_NR,
 };
 
 /// The base every userland binary is linked at: the target spec's
@@ -43,6 +43,7 @@ const BOOTED_PROCS: &[(i32, &str)] = &[
     (MFS_PROC_NR, "mfs"),
     (TTY_PROC_NR, "tty"),
     (DEVMAN_PROC_NR, "devman"),
+    (PROC_FS_PROC_NR, "procfs"),
 ];
 
 /// Run all boot tests, then exit QEMU with success/failure.
@@ -1567,6 +1568,7 @@ fn test_all_boot_procs_alive() -> u32 {
         (PFS_PROC_NR, "PFS"),
         (TTY_PROC_NR, "TTY"),
         (DEVMAN_PROC_NR, "DEVMAN"),
+        (PROC_FS_PROC_NR, "PROCFS"),
     ];
     let mut failures = 0;
     for &(ep, name) in procs {
@@ -1593,6 +1595,7 @@ fn test_boot_procs_consistent() -> u32 {
         (PFS_PROC_NR, "pfs"),
         (TTY_PROC_NR, "tty"),
         (DEVMAN_PROC_NR, "devman"),
+        (PROC_FS_PROC_NR, "procfs"),
     ];
     let mut failures = 0;
     for &(nr, name) in procs {
@@ -1651,6 +1654,7 @@ fn test_brk_heap_mapped() -> u32 {
         (PFS_PROC_NR, "pfs"),
         (TTY_PROC_NR, "tty"),
         (DEVMAN_PROC_NR, "devman"),
+        (PROC_FS_PROC_NR, "procfs"),
     ];
     let mut failures = 0;
     for &(nr, name) in procs {

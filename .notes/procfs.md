@@ -12,6 +12,33 @@ one file, and both are deliberate rather than permanent.
 | `/proc/uptime` | `SYS_TIMES`, monotonic ticks split as C's `100 * ticks / hz` |
 | `/proc/<pid>/status` | PM's `SI_PROC_TAB` record: name, state, pid, ppid, uid |
 
+## How it is mounted
+
+The server is boot process 21 (`PROC_FS_PROC_NR`). The kernel loads `/sbin/procfs` from the
+initramfs with the other boot servers, so it has an `MProc`/`Fproc` slot before anything talks to
+it, and VFS mounts it at `/proc` in `sef_cb_init_fresh`. The mount is resolved in MFS like
+devman's: `req_readsuper` on the server, then `req_lookup` for `/proc` on MFS, then a vnode for
+the server's root so path traversal can cross at the mount boundary.
+
+The order matters in one direction: `/proc` is mounted **before** `/devices`. Boot-test check D
+reads the last message VFS sent before `SYS_BOOT_COMPLETE` and expects devman's `/devices`
+lookup, so a mount added after devman moves that check with it. Nothing else depends on the
+order: both servers are enqueued before the scheduler starts, so VFS's `SENDREC` waits for
+either.
+
+The image's `/proc` directory is created last in `build_minixfs`, after the symlink, so the
+inode numbers the layout tests and the boot test pin do not move.
+
+## The gate
+
+`just test-procfs <arch>` types `/bin/procfsprobe` into the shell on all three arches. The probe
+reads the two root files and parses them, stats `/proc`, and asks for `/proc/no-such-file`. It
+exists because nothing else in the tree opens a path under a user-mounted VTreeFS: the unit
+tests in `crates/libs/src/vtreefs` and `crates/fs/src/procfs` call `handle_fs_message` directly,
+so they pass whether or not VFS ever crosses the mount point. The probe's own parse helpers
+(`parse_decimal`, `is_uptime`) have host tests; the end-to-end case is what proves the two sides
+meet.
+
 The root's other C files are **not in the tree**. They used to print constants (`"0"`,
 `"0 0 0 0 0"`), and a constant a reader cannot tell from data is worse than an absent file:
 

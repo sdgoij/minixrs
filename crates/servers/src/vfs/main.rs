@@ -42,6 +42,7 @@ const BOOT_ENDPOINTS: &[i32] = &[
     arch_common::com::INPUT_PROC_NR,      // 17: PS/2 keyboard driver
     arch_common::com::WS_PROC_NR,         // 18: window server
     arch_common::com::WLS_PROC_NR,        // 20: Wayland server
+    arch_common::com::PROC_FS_PROC_NR,    // 21: procfs
 ];
 
 /// Offset of m_source in the message buffer (4 bytes).
@@ -216,6 +217,13 @@ unsafe fn sef_cb_init_fresh() -> i32 {
                 rfp.fp_cdir = root_vp;
             }
         }
+    }
+
+    // Mount procfs first, then devman. Boot-test check D pins the last message
+    // VFS sends before boot-complete as mount_devman's lookup of `/devices`, so
+    // the `/proc` mount has to come before it.
+    if !root_vp.is_null() {
+        let _ = unsafe { mount::mount_procfs(root_vp) };
     }
 
     // Mount devman so its device tree is populated (its init_hook fires on

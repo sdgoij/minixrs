@@ -36,6 +36,9 @@ pub const INPUT_PROC_NR: Endpoint = 17;
 pub const WS_PROC_NR: Endpoint = 18;
 pub const UDS_PROC_NR: Endpoint = 19;
 pub const WLS_PROC_NR: Endpoint = 20;
+/// ProcFS server. A user slot, not a special proc: `LAST_SPECIAL_PROC_NR` is 10 (init), and the
+/// drivers above are user processes too.
+pub const PROC_FS_PROC_NR: Endpoint = 21;
 
 /// Character-device major for the framebuffer driver (/dev/fb).
 pub const FB_MAJOR: u32 = 19;

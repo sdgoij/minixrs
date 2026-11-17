@@ -1,0 +1,20 @@
+# The procfs mount scenario, driven by `just test-procfs <arch>`.
+#
+# `KNOWN_ISSUES.md` item 7 wired the procfs server: a boot process of its own
+# (`/sbin/procfs`, endpoint 21), an initramfs entry, and a mount at `/proc` in VFS.
+# Nothing else in the tree opens a path under a user-mounted VTreeFS, so the
+# server's own unit tests drive `handle_fs_message` directly and never involve VFS
+# or MFS. This step is what proves the mount crossed the boundary: VFS resolves
+# `/proc` in MFS, records the vmnt, and asks procfs for the rest of the path.
+#
+# The client's fields are separate claims, so a mount that half-works cannot read as
+# a pass. `hz` is `/proc/hz`, a positive decimal from the kernel clock (`SYS_TIMES`).
+# `uptime` is `/proc/uptime`, `<seconds>.<hundredths>`, which is C's `%ld.%02ld`
+# split. `dir` is `/proc` itself resolving to a directory through the mount. `gone`
+# is a path under `/proc` that is not there: it has to be the mounted tree's own
+# `ENOENT` (2), which is only reachable if VFS split the path at `/proc` rather than
+# falling through to the root filesystem.
+#
+# The same line holds on all three arches because none of the claims is a number the
+# arch chooses: the two files are parsed, not compared, and the refusals are errnos.
+/bin/procfsprobe	procfs: hz=ok uptime=ok dir=ok gone=err 2

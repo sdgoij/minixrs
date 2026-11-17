@@ -2192,6 +2192,7 @@ fn test_initramfs_boot_process_elfs(ctx: &mut TestCtx) {
         "/sbin/pfs",
         "/sbin/ramdisk",
         "/sbin/devman",
+        "/sbin/procfs",
         "/sbin/fb",
         "/sbin/input",
         "/sbin/virtio_blk",

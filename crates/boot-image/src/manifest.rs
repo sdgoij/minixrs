@@ -226,6 +226,8 @@ pub const BOOT_BINS: &[(&str, &str)] = &[
     ("/sbin/virtio_net", "virtio_net"),
     ("/sbin/net", "net"),
     ("/sbin/devman", "devman"),
+    // The procfs server (`.notes/procfs.md`): boot proc 21, mounted at `/proc`.
+    ("/sbin/procfs", "procfs"),
     ("/sbin/fb", "fb"),
     ("/sbin/input", "input"),
     // `/sbin/wlserver` is the Wayland server (.notes/wayland.md Phase 1): boot proc 20,
@@ -264,6 +266,10 @@ pub const BOOT_BINS: &[(&str, &str)] = &[
     // said *and* what they left behind — the measurement `KNOWN_ISSUES.md` item 37 is waiting on,
     // and the one program in the image that reaches `fs_link`/`fs_rename`.
     ("/bin/linktest", "linktest"),
+    // `/bin/procfsprobe` reads `/proc/hz` and `/proc/uptime` through the mount VFS makes for the
+    // procfs server, and asks for a path under `/proc` that is not there. `just test-procfs
+    // <arch>` drives it; it is the only client that crosses into a user-mounted VTreeFS.
+    ("/bin/procfsprobe", "procfsprobe"),
     // `/bin/forktest` fills two separately aligned 4 KiB writable pages, forks, and checks both
     // directions of the copy: the child's write must not reach the parent, and the parent's
     // post-fork write must not reach a child that only reads that page. The second direction is
@@ -307,6 +313,7 @@ pub const INITRAMFS_BINS: &[&str] = &[
     "/sbin/mfs",
     "/sbin/pfs",
     "/sbin/devman",
+    "/sbin/procfs",
     "/sbin/tty",
     "/sbin/fb",
     "/sbin/input",

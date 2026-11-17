@@ -1561,6 +1561,30 @@ test-boot-aarch64: build-aarch64-boot mkfs-aarch64
 # stdout).
 #
 # Every QEMU gate, on every arch, in one command.
+# The procfs mount, per arch: `tools/smoke/procfs.tsv` runs `/bin/procfsprobe`, the only
+# client that opens a path under a user-mounted VTreeFS. It reads `/proc/hz` and
+# `/proc/uptime`, stats `/proc`, and asks for a path under it that is not there, so a mount
+# that never crossed the VFS boundary reads as a failure rather than as silence.
+test-procfs arch="x86" boot-timeout="40":
+    @just test-procfs-{{arch}} {{boot-timeout}}
+
+test-procfs-x86 boot-timeout="40": build-x86
+    mkdir -p target/images/x86_64-pc-minix
+    cp target/trampoline.elf target/images/x86_64-pc-minix/minix-x86.elf
+    @just _assert-qemu-version qemu-system-x86_64
+    FEED_SCENARIO=tools/smoke/procfs.tsv sh tools/smoke/feed.sh target/test-procfs-x86.log {{boot-timeout}} qemu-system-x86_64 -nographic -m 256M -no-reboot -vga none -device bochs-display,id=fb0 -kernel target/images/x86_64-pc-minix/minix-x86.elf -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0 -device virtio-tablet-pci,display=fb0
+    @echo "procfs: /proc is mounted and serves hz and uptime (x86_64)"
+
+test-procfs-riscv64 boot-timeout="60": build-riscv64
+    @just _assert-qemu-version qemu-system-riscv64
+    FEED_SCENARIO=tools/smoke/procfs.tsv sh tools/smoke/feed.sh target/test-procfs-riscv64.log {{boot-timeout}} qemu-system-riscv64 -machine virt -m 256M -nographic -global virtio-mmio.force-legacy=off -netdev user,id=net0 -device virtio-net-device,netdev=net0 -device virtio-gpu-device -device virtio-keyboard-device -kernel target/riscv64gc-unknown-minix/release/kernel-boot-riscv64
+    @echo "procfs: /proc is mounted and serves hz and uptime (riscv64)"
+
+test-procfs-aarch64 boot-timeout="60": build-aarch64
+    @just _assert-qemu-version qemu-system-aarch64
+    FEED_SCENARIO=tools/smoke/procfs.tsv sh tools/smoke/feed.sh target/test-procfs-aarch64.log {{boot-timeout}} qemu-system-aarch64 -machine virt -cpu cortex-a57 -m 256M -nographic -no-reboot -global virtio-mmio.force-legacy=off -netdev user,id=net0 -device virtio-net-device,netdev=net0 -device virtio-gpu-device -device virtio-keyboard-device -kernel target/aarch64-unknown-minix/release/kernel-boot-aarch64
+    @echo "procfs: /proc is mounted and serves hz and uptime (aarch64)"
+
 test-arches:
     @just test-qemu x86
     @just test-boot x86
@@ -1572,6 +1596,7 @@ test-arches:
     @just test-uds-x86
     @just test-writeback x86
     @just test-winprobe x86
+    @just test-procfs x86
     @just test-burst x86
     @just test-ttytimeout x86
     @just test-pipeblock x86
@@ -1586,6 +1611,7 @@ test-arches:
     @just test-waitid riscv64
     @just test-writeback riscv64
     @just test-winprobe riscv64
+    @just test-procfs riscv64
     @just test-burst riscv64
     @just test-ttytimeout riscv64
     @just test-pipeblock riscv64
@@ -1596,6 +1622,7 @@ test-arches:
     @just test-waitid aarch64
     @just test-writeback aarch64
     @just test-winprobe aarch64
+    @just test-procfs aarch64
     @just test-burst aarch64
     @just test-ttytimeout aarch64
     @just test-pipeblock aarch64
