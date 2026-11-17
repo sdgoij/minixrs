@@ -273,6 +273,23 @@ const USER_STACK_TOP: u64 = 0x3FD0_0000;
 #[cfg(all(target_os = "minix", target_arch = "wasm32"))]
 const USER_STACK_TOP: u64 = 0x02E0_0000;
 
+/// The most argv entries and the most envp entries `execve` will copy.
+///
+/// C's `minix_stack_params` has no count bound: it keeps adding to the frame
+/// and reports `E2BIG` when the size overflows. The port builds a fixed offset
+/// table instead, so it bounds each array and refuses a longer one rather than
+/// silently truncating it.
+#[cfg_attr(not(target_os = "minix"), allow(dead_code))]
+const MAX_EXEC_ENTRIES: usize = 63;
+
+/// One offset per argv entry plus one per envp entry.
+#[cfg_attr(not(target_os = "minix"), allow(dead_code))]
+const EXEC_OFFSET_SLOTS: usize = 2 * MAX_EXEC_ENTRIES;
+
+// The offset table is indexed once per argv entry and once per envp entry; a
+// table smaller than the two caps lets a long command write past its end.
+const _: () = assert!(EXEC_OFFSET_SLOTS >= 2 * MAX_EXEC_ENTRIES);
+
 /// Execute a new program via the PM→VFS chain (matching C `execve` in
 /// `.refs/minix-3.3.0/minix/lib/libc/sys/execve.c`).
 ///
@@ -300,19 +317,28 @@ pub unsafe fn execve(
         let mut envc = 0usize;
         let mut str_bytes = 0usize;
         let mut p = argv;
-        while !p.read().is_null() && argc < 63 {
+        while !p.read().is_null() && argc < MAX_EXEC_ENTRIES {
             let s = p.read();
             str_bytes += cstr_len(s) + 1;
             argc += 1;
             p = p.add(1);
         }
+        // The loop stops at the terminator or at the cap. A non-null entry
+        // here means it stopped at the cap, so the array is longer than the
+        // frame can name: report E2BIG as C does rather than truncate it.
+        if !p.read().is_null() {
+            return -7; // E2BIG
+        }
         if !envp.is_null() {
             let mut q = envp;
-            while !q.read().is_null() && envc < 63 {
+            while !q.read().is_null() && envc < MAX_EXEC_ENTRIES {
                 let s = q.read();
                 str_bytes += cstr_len(s) + 1;
                 envc += 1;
                 q = q.add(1);
+            }
+            if !q.read().is_null() {
+                return -7; // E2BIG
             }
         }
 
@@ -332,7 +358,7 @@ pub unsafe fn execve(
 
         // Copy strings to the end of the frame, going down: argv then envp.
         let mut str_pos = frame + frame_size;
-        let mut offsets = [0usize; 64];
+        let mut offsets = [0usize; EXEC_OFFSET_SLOTS];
         let mut oi = 0usize;
         let mut pi = argv;
         for _ in 0..argc {
@@ -2121,5 +2147,17 @@ mod tests {
             assert_eq!(w.pos, 4);
         }
         assert_eq!(&buf, b"hell");
+    }
+
+    #[test]
+    fn exec_offset_table_covers_the_largest_argv_and_envp() {
+        // `execve` fills one table slot per argv entry and then one per envp
+        // entry, each capped at `MAX_EXEC_ENTRIES`. The table used to hold 64,
+        // so the largest command it accepted wrote past the end of it.
+        let last_envp_slot = MAX_EXEC_ENTRIES - 1 + MAX_EXEC_ENTRIES - 1;
+        assert!(
+            last_envp_slot < EXEC_OFFSET_SLOTS,
+            "the offset table must hold every argv and envp slot"
+        );
     }
 }

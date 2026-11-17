@@ -315,103 +315,16 @@ are arch-specific, `[env]` is tooling/platform, not kernel.
     errno of the one occurrence was not captured. Suspects, in order: `minix-rt::execve`'s own
     `sbrk` of the argument frame, which can return `ENOMEM` before the syscall is made; VM's
     loader on the 1.6 MB image; and the allocation-heavy-path class aarch64 item 9 describes.
-    Next step: read the errno from the next failing gate, in CI or locally.
+    Next step: read the errno from the next failing gate, in CI or locally. The `execve`
+    offset-table overflow in item 45 is one candidate for this class and is fixed; the gate has
+    not failed since the diagnostic, so the errno is still owed.
 
 ---
 
 ## RISC-V (`[riscv]`)
 
-6. **riscv64 ticked no clock at all, and its C heap leaked (2026-09-25).**
-   Found by driving bash in a riscv64 guest: three defects, all fixed, plus a
-   residual flake that is not.
-   *The timer was armed but never enabled.* `clint::init_timer` wrote `stimecmp`
-   and nothing ever set `sie.STIE`, so the deadline lapsed in silence — no clock
-   tick, no virtual timer, no `alarm`, nothing preempted, and
-   `kernel::bootwatch` (500 ticks of slack for the userspace boot phase) never
-   reached its deadline, which is why `just test-boot riscv64` failed. Compounding
-   it, the per-tick accounting sat *behind* the callback's SPP check, so it ran
-   only for a tick taken in U-mode — and every tick this port takes arrives in
-   S-mode (measured: sampling the 1st, 100th, 1000th and 10000th tick). The
-   accounting now runs for both, and the SPP check still decides whether the tick
-   may switch. Verified: `just test-boot riscv64` prints `ALL TESTS PASSED`,
-   where before it stopped at `phase 1 complete; releasing init`.
-   *The C heap leaked.* `realloc` took a block's size from the header at the
-   *user* pointer instead of `HDR` bytes below it, so a grow that read high
-   returned the same too-small block and the caller overran it; and `malloc`'s
-   extension path placed a fresh block at a page-rounded `sbrk` address while
-   leaving the free-list walk unable to cross the gap in front of it, so every
-   extension leaked its page (`free`'s O(heap) walk then turned the leak into a
-   crawl). Measured in the guest: a probe growing one buffer to 100000 bytes
-   prints `REALLOC ok`; a 300000-cycle varying-size churn probe goes from hanging
-   to `CHURN ok 300000`; `bash -c 'for i in {1..4000}; do s=$((s+i)); done; echo
-   S=$s'` goes from killed by SIGSEGV every time to `S=8002000`.
-   *The last of it was a trap-state bug, not a C one.* After those fixes a
-   `bash -c` step still died in about 5-10% of invocations: the child ended as a
-   signal (139 from the shell's `waitpid_status`) and VM's trace of the kill said
-   `pf-noregion 0x0` with error code 0x14 — a user *instruction* fetch at address
-   zero, which reads as a call through a null function pointer. It was not one.
-   The riscv64 trap handler read `stval` **live**, and `stval` is the one fault
-   CSR that is not part of the interrupted context: the trap entry saves `sepc`,
-   `sstatus` and `scause` into the frame but not `stval`, and the architecture
-   lets a trap that is not a load/store/instruction fault — an interrupt, and
-   this port takes its ticks *inside* a U-mode trap's handler — write 0 there.
-   Measured with the entry's value kept alongside: the live CSR read 0 while the
-   saved one held the real address (`cause=0xc`, `0x103257e`, inside bash's own
-   text). VM was therefore handed address 0, found no region covering it, and
-   killed a process that had done nothing wrong. `trap_asm.rs` now saves `stval`
-   into the trap frame's unused `288..296` slot (the same offsets in `hal.rs` are
-   the *sigframe*, a different 296-byte buffer on the user's stack), and `trap.rs`
-   reads the fault address from the frame, as it already did `scause`/`sepc`/
-   `sstatus`. Verified: 60 consecutive `bash -c` invocations in the prompt-paced
-   census with zero losses, `just test-bash riscv64` 3/3 green, and
-   `test-qemu`/`test-boot riscv64` plus the workspace suite green. Two things to
-   carry forward: the timer fix above is what took the arithmetic step from
-   failing two runs in three to not failing at all, and the zero that VM saw was
-   a plausible-looking NULL dereference until the frame's copy showed the real
-   address — the fault *address* a handler forwards is as much state as the
-   cause.
-
-   *The FP image, and the one measurement the first probe missed.* The trap frame
-   saves no `f`-register and the port kept no per-process image, so with
-   `PSL_USERSET`'s `FS=Dirty` (the registers, not the hardware's lazy
-   `FS=Off`-and-trap path) two processes each using floating point could see each
-   other's registers across a switch. Measured: a probe that names `fs0`, holds a
-   value in it across a `getpid()` and checks it afterwards reported `FPPROBE
-   parent bad=40000` and `FPPROBE child bad=40000` — every round, both processes —
-   while the same probe with the `fork` removed reported `FPONE bad=0`, so the loss
-   needed the other process to have run, not merely a trap. A first version of the
-   probe passed instead: `register double held asm("fs0")` around the call compiled
-   to `fsd fs0` before it and `fld fs0` after it, giving the value a stack home the
-   compiler reloaded, so the register never really held it; the set, the call and
-   the check are one `asm` block now. The fix saves at the *switch* rather than the
-   entry, because the kernel executes no floating point itself — nothing between a
-   process's last user instruction and the switch can disturb its registers — so
-   `riscv_post_syscall`, `riscv_timer_callback` and the boot `switch_to_user`
-   (`crates/kernel-boot/src/riscv64.rs`) call `kernel::fpu::save` on the process
-   being left and `restore` on the one being entered. `fork` saves the parent
-   before copying the image to the child, `exec` zeroes it, and `restore` writes
-   `fcsr` (rounding mode and accrued flags) as well as `f0`-`f31`, so neither leaks
-   either; `fcsr` lives past the 256 bytes of registers in the one-page area
-   (`RISCV_FCSR_OFF`), while the user-visible `mc_fpstate` stays registers-only.
-   Verified: the probe reports `FPPROBE ok` (both `bad=0`), 80/80 steps in the
-   prompt-paced census with zero losses, `just test-bash` 6/6 on all three arches,
-   `test-qemu`/`test-boot riscv64` green, and the workspace suite green.
-
-37. **A 240-byte write overflows QEMU's receive FIFO before the guest drains it (2026-11-16,
-   open, measured).** `just test-burst-<arch>` types a 240-byte command and failed about one
-   run in two, on x86_64 and riscv64, with the guest's *echo* of the command cut short and
-   corrupted, and then no output at all: the newline was lost too, so the shell waited for the
-   rest of a line that never came. It is not the line discipline. With the same tree stashed
-   the gate failed the same way (riscv64, 1 of 2 runs), aarch64 ran it cleanly in the runs made,
-   and the corruption is in bytes the guest received, before parsing. QEMU delivers a whole
-   host write to a 16-byte 16550 receive FIFO at once, unthrottled by the configured baud, so
-   whatever the guest has not read is dropped; the port reads the UART from an ISR and from
-   `ser_input::read_blocking` (`crates/kernel/src/ser_input.rs`), and neither can outrun an
-   instantaneous 240-byte fill. The gate now paces its input (`FEED_PACE=0.003`, one byte per
-   write, with `type_step` refusing a truncated echo), as the read-cost gate already did and as
-   `tools/smoke/feed.sh` is built for, so it measures the guest and not the transport. Still
-   open: a real burst on real hardware, and whether the port should enable the UART's FIFO
-   (`FCR`, port `0x3F8+2`) at init, which no code does today.
+No open issues. The RISC-V clock, heap, trap-state and FP-image defects in item 6, and
+the burst-overflow reading in item 37, are under `# Resolved issues`.
 
 ---
 
@@ -2003,6 +1916,18 @@ are arch-specific, `[env]` is tooling/platform, not kernel.
     (`crates/userland/src/shell.rs`, `crates/userland/src/lib.rs`,
     `crates/fs/src/mfs/protect.rs`, `crates/fs/src/mfs/main.rs`, `tools/smoke/long-path.tsv`)
 
+45. **`execve` wrote past a 64-entry offset table for a long argv/envp sequence
+    (fixed 2026-11-17).** The argument frame is built around `offsets: [0usize; 64]`,
+    filled once per argv entry and then once per envp entry, but each scan was capped at 63
+    independently (`argc < 63`, `envc < 63`), so the pair could make 126 writes through a
+    64-slot array: a 63-argument command with two environment variables corrupted the stack
+    around the frame. It is on the path an exec failure (item 38) would traverse, which is why
+    it was inspected. The table is now `2 * MAX_EXEC_ENTRIES` (126), a const assertion keeps it
+    at least that large, and a scan that stops at the cap with entries remaining returns
+    `E2BIG` instead of silently truncating argv or envp. Pinned by
+    `exec_offset_table_covers_the_largest_argv_and_envp`.
+    (`crates/minix-rt/src/lib.rs`)
+
 ---
 
 ## x86_64 (`[x86]`)
@@ -2151,6 +2076,97 @@ are arch-specific, `[env]` is tooling/platform, not kernel.
    tested in it never runs — see the testing notes); `bkl` is an empty no-op,
    which is what `BKL_LOCK` is on every other arch while SMP is off
    (`arch-x86_64/src/spinlock.rs` compiles the primitives out).
+
+6. **~~riscv64 ticked no clock at all, and its C heap leaked~~ — FIXED (2026-09-25).**
+   Found by driving bash in a riscv64 guest: three defects, all fixed, plus a
+   residual flake that is not.
+   *The timer was armed but never enabled.* `clint::init_timer` wrote `stimecmp`
+   and nothing ever set `sie.STIE`, so the deadline lapsed in silence — no clock
+   tick, no virtual timer, no `alarm`, nothing preempted, and
+   `kernel::bootwatch` (500 ticks of slack for the userspace boot phase) never
+   reached its deadline, which is why `just test-boot riscv64` failed. Compounding
+   it, the per-tick accounting sat *behind* the callback's SPP check, so it ran
+   only for a tick taken in U-mode — and every tick this port takes arrives in
+   S-mode (measured: sampling the 1st, 100th, 1000th and 10000th tick). The
+   accounting now runs for both, and the SPP check still decides whether the tick
+   may switch. Verified: `just test-boot riscv64` prints `ALL TESTS PASSED`,
+   where before it stopped at `phase 1 complete; releasing init`.
+   *The C heap leaked.* `realloc` took a block's size from the header at the
+   *user* pointer instead of `HDR` bytes below it, so a grow that read high
+   returned the same too-small block and the caller overran it; and `malloc`'s
+   extension path placed a fresh block at a page-rounded `sbrk` address while
+   leaving the free-list walk unable to cross the gap in front of it, so every
+   extension leaked its page (`free`'s O(heap) walk then turned the leak into a
+   crawl). Measured in the guest: a probe growing one buffer to 100000 bytes
+   prints `REALLOC ok`; a 300000-cycle varying-size churn probe goes from hanging
+   to `CHURN ok 300000`; `bash -c 'for i in {1..4000}; do s=$((s+i)); done; echo
+   S=$s'` goes from killed by SIGSEGV every time to `S=8002000`.
+   *The last of it was a trap-state bug, not a C one.* After those fixes a
+   `bash -c` step still died in about 5-10% of invocations: the child ended as a
+   signal (139 from the shell's `waitpid_status`) and VM's trace of the kill said
+   `pf-noregion 0x0` with error code 0x14 — a user *instruction* fetch at address
+   zero, which reads as a call through a null function pointer. It was not one.
+   The riscv64 trap handler read `stval` **live**, and `stval` is the one fault
+   CSR that is not part of the interrupted context: the trap entry saves `sepc`,
+   `sstatus` and `scause` into the frame but not `stval`, and the architecture
+   lets a trap that is not a load/store/instruction fault — an interrupt, and
+   this port takes its ticks *inside* a U-mode trap's handler — write 0 there.
+   Measured with the entry's value kept alongside: the live CSR read 0 while the
+   saved one held the real address (`cause=0xc`, `0x103257e`, inside bash's own
+   text). VM was therefore handed address 0, found no region covering it, and
+   killed a process that had done nothing wrong. `trap_asm.rs` now saves `stval`
+   into the trap frame's unused `288..296` slot (the same offsets in `hal.rs` are
+   the *sigframe*, a different 296-byte buffer on the user's stack), and `trap.rs`
+   reads the fault address from the frame, as it already did `scause`/`sepc`/
+   `sstatus`. Verified: 60 consecutive `bash -c` invocations in the prompt-paced
+   census with zero losses, `just test-bash riscv64` 3/3 green, and
+   `test-qemu`/`test-boot riscv64` plus the workspace suite green. Two things to
+   carry forward: the timer fix above is what took the arithmetic step from
+   failing two runs in three to not failing at all, and the zero that VM saw was
+   a plausible-looking NULL dereference until the frame's copy showed the real
+   address — the fault *address* a handler forwards is as much state as the
+   cause.
+
+   *The FP image, and the one measurement the first probe missed.* The trap frame
+   saves no `f`-register and the port kept no per-process image, so with
+   `PSL_USERSET`'s `FS=Dirty` (the registers, not the hardware's lazy
+   `FS=Off`-and-trap path) two processes each using floating point could see each
+   other's registers across a switch. Measured: a probe that names `fs0`, holds a
+   value in it across a `getpid()` and checks it afterwards reported `FPPROBE
+   parent bad=40000` and `FPPROBE child bad=40000` — every round, both processes —
+   while the same probe with the `fork` removed reported `FPONE bad=0`, so the loss
+   needed the other process to have run, not merely a trap. A first version of the
+   probe passed instead: `register double held asm("fs0")` around the call compiled
+   to `fsd fs0` before it and `fld fs0` after it, giving the value a stack home the
+   compiler reloaded, so the register never really held it; the set, the call and
+   the check are one `asm` block now. The fix saves at the *switch* rather than the
+   entry, because the kernel executes no floating point itself — nothing between a
+   process's last user instruction and the switch can disturb its registers — so
+   `riscv_post_syscall`, `riscv_timer_callback` and the boot `switch_to_user`
+   (`crates/kernel-boot/src/riscv64.rs`) call `kernel::fpu::save` on the process
+   being left and `restore` on the one being entered. `fork` saves the parent
+   before copying the image to the child, `exec` zeroes it, and `restore` writes
+   `fcsr` (rounding mode and accrued flags) as well as `f0`-`f31`, so neither leaks
+   either; `fcsr` lives past the 256 bytes of registers in the one-page area
+   (`RISCV_FCSR_OFF`), while the user-visible `mc_fpstate` stays registers-only.
+   Verified: the probe reports `FPPROBE ok` (both `bad=0`), 80/80 steps in the
+   prompt-paced census with zero losses, `just test-bash` 6/6 on all three arches,
+   `test-qemu`/`test-boot riscv64` green, and the workspace suite green.
+
+37. **~~A 240-byte write overflows QEMU's receive FIFO before the guest drains it~~ — a
+   host-transport drop, not a FIFO overrun (2026-11-16; resolved 2026-11-17).**
+   `just test-burst-<arch>` types a 240-byte command and failed about one run in two, with the
+   guest's echo cut short and then no output at all. That is the host's stdio chardev dropping
+   bytes, not the guest's UART: the same image and the same single write over a socket chardev
+   delivered 96 of 96 bursts whole, while stdio lost three of 120 (the `[x86]` resolved entry
+   has the measurement). The receive FIFOs were already enabled, contrary to this entry's
+   premise: x86 writes `FCR` `0xC7` (enabled, cleared, 14-byte trigger) in `init_serial`,
+   RISC-V writes `0x07` in `uart::init_uart`, and aarch64 sets `LCR_H.FEN` in `uart_init`. A
+   guest cannot buffer an instantaneous host write into a 16-byte FIFO, so the gate paces its
+   input (`FEED_PACE=0.003`, one byte per write, `type_step` refusing a truncated echo), as
+   `tools/smoke/feed.sh` is built to.
+   (`crates/kernel-boot/src/main.rs`, `crates/arch-riscv64/src/uart.rs`,
+   `crates/arch-aarch64/src/hal.rs`, `Justfile`, `tools/smoke/feed.sh`)
 
 ---
 
