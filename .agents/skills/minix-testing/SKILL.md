@@ -70,6 +70,7 @@ them before handing back — the tree must be shippable at every checkpoint
 | **Host `cargo test`** | `#[test]` on host | Pure logic: parsing, math, struct layouts, constants, state machines. No hardware or syscall access. | Instant |
 | **QEMU integration** (`just test-qemu`) | `test_runner.rs` inside QEMU (ring 0) | Kernel internals: page tables, IPC, scheduler, timers, interrupts, ELF loading, grant tables, syscall dispatch. Compile with `features = ["qemu-tests"]`. | ~30s per cycle |
 | **Boot test** (`just test-boot`) | In-kernel after VFS mount_root | Multi-server IPC, filesystem reads, cross-process data transfer, VFS↔MFS protocol. Feature `boot-test`. | ~30s per cycle |
+| **Wasm harnesses** (`sh tools/wasm-verify.sh`) | `tools/wasm-servers/boot.cjs`, `tools/wasm-browser/run.js`, `page.test.js` | The real servers under the wasm host: boot at quiescence, a shell at a live prompt, and the page under a stub DOM. Catches a boot-process or VFS-mount change the host and QEMU gates cannot see. See the `wasm-testing` skill. | minutes |
 
 ## When to Use Each
 
@@ -78,6 +79,8 @@ Parser bug?                → host cargo test (instant)
 IPC syscall wrong?         → QEMU integration test (add Phase G)
 VFS mount_root broken?     → boot test (add assertion in boot_test.rs)
 Data corruption?           → boot test with raw byte dump first
+Boot process or VFS mount? → also the wasm system (`wasm-testing`): BOOT_IMAGE is
+                              shared and VFS's init runs there too
 ```
 
 ## Both suites, all three arches
@@ -208,6 +211,9 @@ just test-boot aarch64
 # All six QEMU gates (x86/riscv64/aarch64 x qemu+boot) - what an
 # arch-gated change needs
 just test-arches
+
+# The wasm system (Linux/WSL; see `wasm-testing`)
+sh tools/wasm-verify.sh
 
 # Normal boot
 just run                            # no tests, starts shell

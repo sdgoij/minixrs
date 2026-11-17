@@ -493,6 +493,11 @@ const specs = [
   // VFS's init mounts devman's tree right after the root filesystem, and
   // `mount_devman` blocks until it starts.
   { slot: 15, entry: 'minix_server_devman', label: 'devman' },
+  // The process filesystem, at `PROC_FS_PROC_NR`. `BOOT_IMAGE` names it on every target, so
+  // VFS's init mounts `/proc` here too (`mount_procfs`, which runs *before* `mount_devman`);
+  // without an instance the mount's `REQ_READSUPER` waits on a peer that never answers and VFS
+  // never reaches devman. Spawned before VFS for the same reason devman is.
+  { slot: 21, entry: 'minix_server_procfs', label: 'procfs' },
   // VFS last: its init calls `mount_root`, which asks MFS for the root superblock,
   // so MFS has to be alive and answering first.
   { slot: 1, entry: 'minix_server_vfs', label: 'vfs' },
@@ -528,7 +533,11 @@ const specs = [
   { slot: 20, entry: 'minix_ds_client', label: 'client' },
   // The control: the same client, never announced to RS, so DS has no label for
   // it. Its publish must still be refused.
-  { slot: 21, entry: 'minix_ds_client_unregistered', label: 'unregistered' },
+  //
+  // Slot 24: above the boot procs *and* the two module slots (22, 23). 21 is procfs's
+  // `PROC_FS_PROC_NR`, so a client there would be spawned over a process the kernel's
+  // `BOOT_IMAGE` already made.
+  { slot: 24, entry: 'minix_ds_client_unregistered', label: 'unregistered' },
   // A program as its own module (M7a step 1). Not a server and not a boot process: its slot
   // is outside `BOOT_IMAGE`, so the kernel has no privilege structure to attach and the host
   // asks for the shared USER slot explicitly (`spawnAsUser`) — the same link `do_fork` makes

@@ -201,6 +201,18 @@ pub extern "C" fn minix_server_devman() -> i32 {
     0
 }
 
+/// The process filesystem, whose VTreeFS the `/proc` mount point names.
+///
+/// `PROC_FS_PROC_NR` is a boot process in the shared `BOOT_IMAGE`, so VFS's init mounts it on
+/// this target exactly as it does on the hardware arches (`mount_procfs`). Without this
+/// instance VFS blocks on its `REQ_READSUPER` and never reaches `mount_devman`, which is the
+/// same absent-peer shape as the `virtio_blk` probe above: here the answer is an instance too.
+#[unsafe(no_mangle)]
+pub extern "C" fn minix_server_procfs() -> i32 {
+    fs::procfs::main::procfs_main();
+    0
+}
+
 /// The framebuffer server: `/dev/fb` (major 19, minor 0 in the boot image).
 ///
 /// On wasm its backend is the host's canvas rather than a device on a bus, so the surface is

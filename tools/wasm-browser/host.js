@@ -117,6 +117,10 @@ export const SYSTEM_SPECS = [
   { slot: 13, entry: 'minix_server_virtio_net', label: 'virtio_net' },
   { slot: 14, entry: 'minix_server_net', label: 'net' },
   { slot: 15, entry: 'minix_server_devman', label: 'devman' },
+  // The process filesystem, at `PROC_FS_PROC_NR`. `BOOT_IMAGE` names it on every target, so
+  // VFS's init mounts `/proc` here too (`mount_procfs`, before `mount_devman`); without an
+  // instance the mount waits on a peer that never answers and VFS never reaches devman.
+  { slot: 21, entry: 'minix_server_procfs', label: 'procfs' },
   { slot: 1, entry: 'minix_server_vfs', label: 'vfs' },
   { slot: 16, entry: 'minix_server_fb', label: 'fb' },
   { slot: 17, entry: 'minix_server_input', label: 'input' },

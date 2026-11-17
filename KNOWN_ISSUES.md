@@ -177,6 +177,11 @@ as this file's header says a skill-captured limitation does.
    the server's own unit tests drive `handle_fs_message` directly, so they cannot notice a mount
    that never crossed the VFS boundary.
 
+   The wasm system runs an instance as well (`minix_server_procfs` in `crates/wasm-servers`, slot
+   21 in both front ends), because `BOOT_IMAGE` names procfs on every target and VFS mounts it
+   unconditionally; without one, VFS's init waits on a peer that never answers. The harness's DS
+   test client moved from slot 21 to 24.
+
    What `/proc` still does not carry is a feature omission, not this wiring defect: `kinfo`,
    `meminfo`, `loadavg`, `cpuinfo`, `dmap` and the binary per-pid files each need a source this
    port does not have. `.notes/procfs.md` records what each one needs and why a placeholder is

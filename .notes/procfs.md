@@ -29,6 +29,14 @@ either.
 The image's `/proc` directory is created last in `build_minixfs`, after the symlink, so the
 inode numbers the layout tests and the boot test pin do not move.
 
+The wasm system gets an instance too. `crates/wasm-servers` exports
+`minix_server_procfs` over `fs::procfs::main::procfs_main`, and both front ends spawn it at
+slot 21 before VFS (`tools/wasm-servers/boot.cjs`, `tools/wasm-browser/host.js`). That is not
+optional: `BOOT_IMAGE` names procfs on every target and VFS's init mounts it unconditionally,
+so without an instance the mount waits on a peer that never answers and VFS never reaches
+`mount_devman`. The harness's own DS test client moved from slot 21 to 24, because 21 is now a
+boot process.
+
 ## The gate
 
 `just test-procfs <arch>` types `/bin/procfsprobe` into the shell on all three arches. The probe

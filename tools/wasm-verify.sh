@@ -9,10 +9,11 @@
 #   sh tools/wasm-verify.sh boot       # one of: boot | run | page
 #   WASM_TRACE_IPC=1 sh tools/wasm-verify.sh boot
 #
-# Run it from a Linux host — CI, or a Linux guest such as WSL. A Windows host
-# cannot link the modules: the checkout's stage1 is a Windows `rustc`, and its
-# `lld` does not do `-flavor wasm`. When the checkout's own stage1 is not the
-# linking host's, point the build at one that is — e.g. a stage1 fetched with
+# It runs on any host with a stage1 whose sysroot has the wasm32-minix target and
+# a linker that can do `-flavor wasm`. On Windows that linker is the checkout's
+# ci-llvm `lld.exe`, which `tools/lld.py` resolves; the stage1 ships no rust-lld.
+# When the checkout's stage1 belongs to another host, point the build at a stage1
+# that matches the linking host, e.g. one fetched with
 # `MINIXRS_STAGE1_DEST=/tmp/stage1 python tools/fetch-stage1.py`:
 #
 #   MINIXRS_RUSTC=/tmp/stage1/bin/rustc \

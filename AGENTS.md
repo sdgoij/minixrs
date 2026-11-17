@@ -54,6 +54,7 @@ just image <arch>
 | Dynamic linking or `ldso` | `just test-dynlink-<arch>`, `cargo test -p ldso` |
 | Mesa, libdrm or the GL/EGL stack | `just test-gltriangle <arch>` (see `mesa-port`) |
 | bash or readline | `just test-interactive-bash <arch>` |
+| A boot process, `BOOT_IMAGE`/`BOOT_PROCS_ALL`, a `*_PROC_NR`, a boot-image manifest, or a mount VFS performs at init | `sh tools/wasm-verify.sh` (the wasm system shares the boot image and runs VFS's init unchanged; see `wasm-testing`) |
 | wasm front ends or the network link | `sh tools/wasm-verify.sh`, `node tools/wasm-browser/net.test.js`, `node tools/wasm-net/relay.test.js` |
 | The rust fork or the toolchain pin | `just bootstrap`, `just verify-stage1` (Linux/WSL), then the arch suites; see `rust-fork-rebase` |
 | Documentation only | no build gate; verify links and claims by hand |
