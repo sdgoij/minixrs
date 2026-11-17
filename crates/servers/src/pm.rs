@@ -97,10 +97,10 @@ pub const NGROUPS_MAX: usize = 32;
 /// Process name length.
 pub const PROC_NAME_LEN: usize = 16;
 
-pub const IN_USE: u32 = 0x00001;
+pub const IN_USE: u32 = arch_common::types::PM_PROC_IN_USE;
 pub const WAITING: u32 = 0x00002;
-pub const ZOMBIE: u32 = 0x00004;
-pub const PROC_STOPPED: u32 = 0x00008;
+pub const ZOMBIE: u32 = arch_common::types::PM_PROC_ZOMBIE;
+pub const PROC_STOPPED: u32 = arch_common::types::PM_PROC_STOPPED;
 pub const ALARM_ON: u32 = 0x00010;
 pub const EXITING: u32 = 0x00020;
 pub const TOLD_PARENT: u32 = 0x00040;

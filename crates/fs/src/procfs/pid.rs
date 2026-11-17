@@ -1,32 +1,26 @@
 //! ProcFS per-process PID directory files — adapted from `minix/fs/procfs/pid.c`
+//!
+//! C lists `psinfo`, `cmdline`, `environ` and `map` here. Each needs something this port does not
+//! have yet (`cmdline`/`environ` read the target's frame through VM, `map` reads VM's regions,
+//! and `psinfo` is a binary struct joined from the kernel, PM, VFS and VM tables), so the list
+//! carries the one file that can be produced truthfully today: a text `status`. That is a
+//! deviation from C, recorded in `.notes/procfs.md`, and it is deliberately *not* C's formats
+//! with invented numbers in them.
 
-use crate::procfs::buf::buf_write;
+use crate::procfs::buf::buf_write_fmt;
 use crate::procfs::consts::*;
+use crate::procfs::tree;
 use crate::procfs::types::{File, FileData};
+use arch_common::types::{PM_PROC_STOPPED, PM_PROC_ZOMBIE, ProcTabEntry};
 
 /// Files that appear in each per-process PID directory.
 ///
 /// Terminated by an entry with `None` data.
 pub static PID_FILES: &[File] = &[
     File {
-        name: "psinfo",
+        name: "status",
         mode: REG_ALL_MODE,
-        data: FileData::Dynamic(pid_psinfo),
-    },
-    File {
-        name: "cmdline",
-        mode: REG_ALL_MODE,
-        data: FileData::Dynamic(pid_cmdline),
-    },
-    File {
-        name: "environ",
-        mode: REG_ALL_MODE,
-        data: FileData::Dynamic(pid_environ),
-    },
-    File {
-        name: "map",
-        mode: REG_ALL_MODE,
-        data: FileData::Dynamic(pid_map),
+        data: FileData::Dynamic(pid_status),
     },
     // Sentinel
     File {
@@ -36,42 +30,37 @@ pub static PID_FILES: &[File] = &[
     },
 ];
 
+/// The state letter `/proc/<pid>/status` prints, from PM's flags.
+///
+/// C derives a richer set of letters from PM's flags *and* the kernel's run-state flags. PM's view
+/// alone distinguishes a zombie and a stopped process; everything else PM has in use is reported
+/// as `R`, which is the honest reading of "in use and not stopped or zombie".
+pub fn state_letter(e: &ProcTabEntry) -> char {
+    if e.flags & PM_PROC_ZOMBIE != 0 {
+        'Z'
+    } else if e.flags & PM_PROC_STOPPED != 0 {
+        'T'
+    } else {
+        'R'
+    }
+}
+
 /// Check whether the given slot is a zombie process.
-///
-/// TODO: check `mproc[slot - NR_TASKS].mp_flags & (TRACE_ZOMBIE | ZOMBIE)`.
-pub fn is_zombie(_slot: i32) -> bool {
-    false
+pub fn is_zombie(slot: i32) -> bool {
+    tree::entry(slot).flags & PM_PROC_ZOMBIE != 0
 }
 
-/// Print information used by `ps(1)` and `top(1)`.
+/// A text summary of one process.
 ///
-/// TODO: read from `proc[]`, `mproc[]`, `fproc[]` tables and format
-///       `PSINFO_VERSION` line plus extended info.
-fn pid_psinfo(_slot: i32) {
-    buf_write("1 T 0 (stub) R 0 0 0 0 0\n");
-}
-
-/// Dump the process's command line.
-///
-/// TODO: call `get_frame()` and use `sys_datacopy()` to read from the
-///       target process, then `buf_append()` each null-terminated arg.
-fn pid_cmdline(_slot: i32) {
-    // Nothing written (stub).
-}
-
-/// Dump the process's environment.
-///
-/// TODO: similar to `pid_cmdline()` but reads environment pointers.
-fn pid_environ(_slot: i32) {
-    // Nothing written (stub).
-}
-
-/// Print a memory map of the process.
-///
-/// TODO: call `vm_info_region()` to get regions, format as
-///       `"%08lx-%08lx %c%c%c\n"` lines.
-fn pid_map(_slot: i32) {
-    // Nothing written (stub).
+/// C's `psinfo` is what `ps(1)` parses; this is the readable form that the record behind
+/// `SI_PROC_TAB` can fill in today.
+fn pid_status(slot: i32) {
+    let e = tree::entry(slot);
+    buf_write_fmt(format_args!("Name:   {}\n", e.name_str()));
+    buf_write_fmt(format_args!("State:  {}\n", state_letter(&e)));
+    buf_write_fmt(format_args!("Pid:    {}\n", e.pid));
+    buf_write_fmt(format_args!("PPid:   {}\n", e.ppid));
+    buf_write_fmt(format_args!("Uid:    {}\n", e.euid));
 }
 
 #[cfg(test)]
@@ -80,21 +69,29 @@ mod tests {
     use crate::procfs::buf;
 
     #[test]
-    fn pid_psinfo_does_not_panic() {
-        buf::buf_init(0, 128);
-        pid_psinfo(0);
-        let (_, len) = buf::buf_get();
-        assert!(len > 0);
+    fn state_letters_come_from_the_flags() {
+        let mut e = ProcTabEntry::empty();
+        e.flags = arch_common::types::PM_PROC_IN_USE;
+        assert_eq!(state_letter(&e), 'R');
+        e.flags |= PM_PROC_ZOMBIE;
+        assert_eq!(state_letter(&e), 'Z');
+        e.flags = arch_common::types::PM_PROC_IN_USE | PM_PROC_STOPPED;
+        assert_eq!(state_letter(&e), 'T');
     }
 
     #[test]
-    fn is_zombie_returns_false() {
-        assert!(!is_zombie(0));
-    }
-
-    #[test]
-    fn pid_files_has_sentinel() {
+    fn pid_files_has_sentinel_and_names_status() {
+        assert_eq!(PID_FILES[0].name, "status");
         let last = PID_FILES.last().unwrap();
         assert!(matches!(last.data, crate::procfs::types::FileData::None));
+    }
+
+    #[test]
+    fn status_of_an_absent_slot_is_empty_not_panic() {
+        buf::buf_init(0, 128);
+        pid_status(-1);
+        let (_, len) = buf::buf_get();
+        // A slot outside the table yields the empty record, whose fields are all zero.
+        assert!(len > 0);
     }
 }

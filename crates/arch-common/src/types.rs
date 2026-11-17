@@ -148,6 +148,14 @@ pub struct MinixMemRange {
 
 pub const PROC_NAME_LEN: usize = 16;
 
+/// PM's `mp_flags` bits a reader of `/proc` needs, shared so the record's meaning is defined once.
+///
+/// PM's own constants (`IN_USE`, `ZOMBIE`, `PROC_STOPPED`) alias these, and `procfs` turns them
+/// into the state letter it prints, so a bit moved on one side cannot silently change the other.
+pub const PM_PROC_IN_USE: u32 = 0x00001;
+pub const PM_PROC_ZOMBIE: u32 = 0x00004;
+pub const PM_PROC_STOPPED: u32 = 0x00008;
+
 /// One process as PM hands it to a reader of `/proc` (the `SI_PROC_TAB` answer).
 ///
 /// C's `procfs` asks PM for the raw `mproc` array and parses it against
