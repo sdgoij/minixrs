@@ -250,7 +250,7 @@ system-image-riscv64: boot-image-riscv64
     extras=""; if [ -f target/bash/riscv64/bash ]; then extras=/bin/bash=target/bash/riscv64/bash; else echo "system-image: no /bin/bash (run 'just build-bash riscv64' to include it)"; fi; MINIXFS_EXTRA="${extras}${MINIXFS_EXTRA:+;$MINIXFS_EXTRA}" MINIXFS_BLOCKS="${MINIXFS_BLOCKS:-8192}" cargo run -q -p boot-image --bin mkminixfs --release -- riscv64
     @just mkfs-riscv64
 
-boot-image-aarch64: userland-aarch64 dynlib-aarch64
+boot-image-aarch64: userland-aarch64 coreutils-aarch64 dynlib-aarch64
     RUSTC="{{stage1-rustc}}" cargo build -p kernel-boot --bin kernel-boot-aarch64 --target aarch64-unknown-minix --features embed_initramfs,aarch64 --release
     cp target/aarch64-unknown-minix/release/kernel-boot-aarch64 target/boot-kernel-aarch64.elf
     mkdir -p target/images/aarch64-unknown-minix
@@ -1857,6 +1857,7 @@ check:
     cargo clippy --all-targets -- -D warnings
     python tools/check-c-headers.py
     python tools/check-physmap.py
+    python tools/check-justfile.py
     @test -n "{{stage1-rustc}}" || (echo 'error: stage1 rustc not found — run `just bootstrap` first' >&2 && exit 1)
     RUSTC="{{stage1-rustc}}" cargo check -p kernel-boot --bin kernel-boot-riscv64 --features riscv64 --target riscv64gc-unknown-minix --release
 

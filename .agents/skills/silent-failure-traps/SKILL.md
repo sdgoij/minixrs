@@ -138,6 +138,15 @@ working shell).
   the verdict was inverted relative to what the summary prints above it ("distinct error messages",
   empty). Read the section the script printed, not the status it returned, and give a script an
   explicit exit when its tail is a search.
+- **A stale `target/` hides a missing recipe prerequisite; only a clean tree shows it.** CI's
+  `gltriangle (aarch64)` job died with `kernel build.rs: boot binary .../release/coreutils missing`
+  because `boot-image-aarch64` never depended on `coreutils-aarch64` once aarch64 started embedding
+  the multicall: every local gate had the binary from an earlier `build-aarch64`, so the gap could
+  not appear on a machine that had ever built the arch. `crates/kernel/build.rs` panics on *any*
+  missing `BOOT_BINS` entry, so a recipe that builds `kernel-boot` must depend on
+  `userland-<arch>`, `coreutils-<arch>` and `dynlib-<arch>`; `tools/check-justfile.py` (run by
+  `just check`) pins that, and to see the failure by hand, move the artifact aside first
+  (`rm target/<triple>/release/<bin>`) rather than trusting a green run.
 
 ## Where the reference implementations are
 
