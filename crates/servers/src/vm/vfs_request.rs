@@ -1,7 +1,8 @@
 //! VM's requests to VFS, and the replies that complete them.
 //!
-//! VM asks VFS three things: resolve an fd (`FDLOOKUP`), read a file block into a page (`FDIO`),
-//! and close an fd (`FDCLOSE`). The first two used to be a blocking `SENDREC`, which made VM wait
+//! VM asks VFS four things: resolve an fd (`FDLOOKUP`), read a file block into a page (`FDIO`),
+//! write a `MAP_SHARED` page back to its file (`FDWRITE`, `vm/writeback.rs`), and close an fd
+//! (`FDCLOSE`). The first two used to be a blocking `SENDREC`, which made VM wait
 //! on VFS — and a `SENDREC`'s receive matches on source endpoint alone, so a request VFS made
 //! *while* VM was waiting (a server growing its heap asks VM to mmap, finding 58) was delivered
 //! into VM's reply slot. VFS then waited for a reply to a message VM had read as its own answer,
@@ -80,6 +81,9 @@ pub enum Job {
     /// A file page waiting on FDIO. The fault it belongs to travels in the state, because the page
     /// that lands last is what resolves that fault.
     Page(PageState),
+    /// A `MAP_SHARED` page waiting on FDWRITE (see `vm/writeback.rs`). The state it belongs to is
+    /// the engine's single in-flight page, which is why this variant carries nothing.
+    Writeback,
 }
 
 /// One outstanding request: the id VFS will echo, and what to complete.
@@ -343,6 +347,14 @@ pub fn complete(msg: &mut Message) -> i32 {
             reply_to(ep, &mut caller_msg, status);
         }
         Some(Job::Page(state)) => crate::vm::finish_file_page(state, &reply),
+        Some(Job::Writeback) => {
+            let result = i32::from_le_bytes(
+                reply[VMV_RESULT_OFF..VMV_RESULT_OFF + 4]
+                    .try_into()
+                    .unwrap_or([0; 4]),
+            );
+            crate::vm::writeback::complete(result == 0);
+        }
         None => report_unmatched(reqid),
     }
     SUSPEND
@@ -640,6 +652,7 @@ mod tests {
         match take_job(101) {
             Some(Job::Mmap { ep, .. }) => assert_eq!(ep, 1),
             Some(Job::Page(_)) => panic!("reqid 101 was an mmap"),
+            Some(Job::Writeback) => panic!("reqid 101 was an mmap"),
             None => panic!("reqid 101 was outstanding"),
         }
 

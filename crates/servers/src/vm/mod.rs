@@ -13,6 +13,7 @@ pub mod pb;
 pub mod proc;
 pub mod region;
 pub mod vfs_request;
+pub mod writeback;
 
 use arch_common::com::{
     NR_VM_CALLS, RS_PROC_NR, VFS_PROC_NR, VM_BRK, VM_CLEARCACHE, VM_EXEC_NEWMEM, VM_EXIT, VM_FORK,
@@ -742,6 +743,10 @@ pub fn vm_main() {
         const ANY: i32 = 0x0000ffff;
 
         loop {
+            // Retry a writeback that could not be sent for lack of a request slot.
+            // Every turn is a chance to make progress, independent of what else
+            // arrives.
+            crate::vm::writeback::pump();
             let mut msg = Message {
                 m_source: 0,
                 m_type: 0,
@@ -1955,9 +1960,7 @@ fn do_munmap(msg: &mut Message) -> i32 {
             // Remove the region from tracking; close a file region's vmfd
             // once no other process's region references the same file.
             if let Some(removed) = vmp.vm_regions.remove(addr) {
-                if removed.flags & region::VR_FILE != 0 {
-                    fdref_close_if_unused(removed.dev, removed.ino, removed.fd, -1);
-                }
+                retire_file_region(&removed, -1);
                 direct_region = removed.flags & region::VR_DIRECT != 0;
             }
         }
@@ -2160,39 +2163,60 @@ fn vmfd_is_referenced(dev: u32, ino: u32, fd: i32, exclude_ep: i32) -> bool {
     referenced
 }
 
-/// Close a VM file descriptor (FDCLOSE) once no region in any process other
-/// than `exclude_ep` references its (dev, ino, fd) — a lightweight fdref:
-/// fork clones regions verbatim, so the same vmfd is shared until the last
-/// user goes away. The exec/exit path passes the dying endpoint as
-/// `exclude_ep` because its own regions are still present while the scan
-/// runs and would otherwise keep the vmfd alive forever (VFS's vmfd table
-/// fills 1 fd per exec). Callers that already removed the region pass -1.
-fn fdref_close_if_unused(dev: u32, ino: u32, fd: i32, exclude_ep: i32) {
-    if fd < 0 {
+/// Release a file region that has left its process's region list.
+///
+/// A writable `MAP_SHARED` region's pages are still only in the file cache at this
+/// point (nothing traps the stores that dirtied them), so they are handed to
+/// `vm/writeback.rs` before the vmfd is closed. The writeback needs that vmfd, so
+/// when there is work to do it owns the close: it sends `FDCLOSE` after the last
+/// write, and the two reach VFS in the order they were queued.
+///
+/// `exclude_ep` is the process whose own region list still holds `r` (-1 when the
+/// region was already removed). Fork clones regions verbatim, so the vmfd is
+/// shared with siblings until the last of them lets go.
+///
+/// The closing itself is a lightweight fdref: a `close` that waits would deadlock
+/// during exec, where VFS is blocked in its own request to VM and would read the
+/// close as the answer to that (`vfs_request::close`).
+fn retire_file_region(r: &region::VirRegion, exclude_ep: i32) {
+    if r.flags & region::VR_FILE == 0 || r.fd < 0 {
         return;
     }
-    if !vmfd_is_referenced(dev, ino, fd, exclude_ep) {
-        crate::vm::vfs_request::close(fd);
+    let close = !vmfd_is_referenced(r.dev, r.ino, r.fd, exclude_ep);
+    if crate::vm::writeback::queue_region(
+        r.flags,
+        r.dev,
+        r.ino,
+        r.fd,
+        r.file_offset,
+        r.file_size,
+        close,
+    ) {
+        return;
+    }
+    if close {
+        crate::vm::vfs_request::close(r.fd);
     }
 }
 
-/// Close every file region of `ep` that no other process references.
-/// Used on exec (region list reset) and process exit.
+/// Close every file region of `ep` that no other process references, writing back
+/// a shared writable region's pages first. Used on exec (region list reset) and
+/// process exit.
 fn fdref_close_regions(ep: i32) {
-    let mut to_close: [(u32, u32, i32); region::MAX_REGIONS] = [(0, 0, -1); region::MAX_REGIONS];
-    let mut n = 0usize;
+    let mut regions: [Option<region::VirRegion>; region::MAX_REGIONS] = [None; region::MAX_REGIONS];
     unsafe {
         if let Some(vmp) = proc::vmproc_lookup(ep) {
-            for r in vmp.vm_regions.regions.iter().flatten() {
-                if r.flags & region::VR_FILE != 0 && n < region::MAX_REGIONS {
-                    to_close[n] = (r.dev, r.ino, r.fd);
-                    n += 1;
+            for (slot, r) in regions.iter_mut().zip(vmp.vm_regions.regions.iter()) {
+                if let Some(r) = r
+                    && r.flags & region::VR_FILE != 0
+                {
+                    *slot = Some(*r);
                 }
             }
         }
     }
-    for &(dev, ino, fd) in &to_close[..n] {
-        fdref_close_if_unused(dev, ino, fd, ep);
+    for r in regions.iter().flatten() {
+        retire_file_region(r, ep);
     }
 }
 
@@ -2695,9 +2719,7 @@ pub fn finish_mmap_file(ep: i32, caller_msg: &mut [u8; 64], reply: &[u8; 64]) ->
                 return EAGAIN;
             }
             for r in carved.removed() {
-                if r.flags & region::VR_FILE != 0 {
-                    fdref_close_if_unused(r.dev, r.ino, r.fd, -1);
-                }
+                retire_file_region(r, -1);
             }
         } else {
             return EINVAL;
@@ -2776,9 +2798,7 @@ fn do_mmap_dev(
                 return EAGAIN;
             }
             for r in removed[..n].iter().flatten() {
-                if r.flags & region::VR_FILE != 0 {
-                    fdref_close_if_unused(r.dev, r.ino, r.fd, -1);
-                }
+                retire_file_region(r, -1);
             }
         } else {
             return EINVAL;
@@ -3182,9 +3202,7 @@ fn do_vfs_mmap(msg: &mut Message) -> i32 {
             // image (vircopy of user buffers) hit present pages.
             vmp.prefault_exec = true;
             for r in carved.removed() {
-                if r.flags & region::VR_FILE != 0 {
-                    fdref_close_if_unused(r.dev, r.ino, r.fd, -1);
-                }
+                retire_file_region(r, -1);
             }
         } else {
             return EINVAL;

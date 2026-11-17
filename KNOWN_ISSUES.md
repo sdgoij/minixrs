@@ -281,20 +281,6 @@ are arch-specific, `[env]` is tooling/platform, not kernel.
     offset-table overflow in item 45 is one candidate for this class and is fixed; the gate has
     not failed since the diagnostic, so the errno is still owed.
 
-48. **A `MAP_SHARED` file page has no writeback (2026-11-17, open, deliberate).** A
-    write through a `MAP_SHARED` file mapping lands in the cache frame and is visible
-    to every mapper of that page, but nothing writes the frame back to the file:
-    `munmap`, `msync` and process exit do not ask VFS to write it, and the FDIO
-    protocol VM uses for file pages is read-only (`VMVFSREQ_FDIO` calls `req_read`).
-    Closing and reopening the file therefore loses the write. No ported consumer
-    depends on it (`wl_shm` uses a memfd, whose pages are the object rather than a
-    file cache entry), and fixing it needs a write request VM can send without
-    blocking on VFS (VFS may be blocked on VM), a dirty mark per cached page, and a
-    writeback at munmap/exit before the region's fd is closed. The divergence half of
-    the original item is fixed (item 47).
-    (`crates/servers/src/vm/cache.rs`, `crates/servers/src/vm/vfs_request.rs`,
-    `crates/servers/src/vfs/call.rs`, `.notes/filemmap.md` §6)
-
 ---
 
 ## RISC-V (`[riscv]`)
@@ -1946,9 +1932,40 @@ the burst-overflow reading in item 37, are under `# Resolved issues`.
     cached, and the refused insert takes no reference. Pinned by
     `test_a_mapped_page_is_not_evicted` and
     `test_a_full_cache_of_mapped_pages_refuses_the_insert`, and the existing
-    `test_lru_eviction` now exercises cache-only pages. Writeback is a separate gap,
-    recorded as item 48.
+    `test_lru_eviction` now exercises cache-only pages. Writeback, the other half of
+    the original gap, is fixed too (item 48).
     (`crates/servers/src/vm/cache.rs`)
+
+48. **~~A `MAP_SHARED` file page had no writeback~~: FIXED (2026-11-17).** A store
+    through a writable shared file mapping lands in the cache frame every mapper
+    shares, and nothing traps the store, so the file itself stayed as it was: closing
+    and reopening lost the write. The cache now carries a dirty mark per page
+    (`vm/cache.rs`), set when a writable shared region is released and cleared once
+    its writeback lands; a dirty entry is never evicted, for the same reason a mapped
+    one is not. `vm/writeback.rs` owns the asynchronous side: `munmap`, `exec` and
+    process exit mark the released region's file range and queue a job that walks the
+    dirty pages and sends `VMVFSREQ_FDWRITE` for each. The bytes come from a mapping
+    of the cache frame in *VM's* address space, held with a `PhysBlock` reference
+    until VFS answers, because the mapping process's address space can be gone before
+    VFS reads it. The vmfd is closed by the last job queued for it, after that job's
+    writes, which ordering VM's FIFO async queue at VFS provides. VFS's handler
+    (`do_vm_call`) writes through `req_write` and clamps the length to the vnode's
+    real size, so a file that ends mid-page is not extended. Only a writable shared
+    *file* region is written back: a memfd's frames are the object, and a read-only
+    mapping cannot have been written through. Still owed: `msync` does not exist as a
+    syscall in this port, and a shared region `mprotect`ed read-only after a write is
+    not written back (nothing in the tree `mprotect`s a file mapping). Gate:
+    `just test-writeback <arch>` (`tools/smoke/writeback.tsv`) creates a file, maps it
+    shared, has the child store through the mapping and exit, and then, after the
+    parent verifies its own view, reopens the file with a new fd, which cannot see the
+    cache; on the old tree it fails with `shared write did not reach the file`.
+    Pinned on the host by `test_mark_range_dirty_covers_only_that_file_range`,
+    `test_find_dirty_after_walks_offsets_in_order`, `test_a_dirty_page_is_not_evicted`,
+    `test_mark_written_keeps_a_still_mapped_page_dirty`, and the writeback module's
+    FIFO, ring-full and region-filter tests. `just test-arches` is green.
+    (`crates/servers/src/vm/{cache,writeback,vfs_request,mod}.rs`,
+    `crates/servers/src/vfs/{call,consts}.rs`, `crates/arch-common/src/com.rs`,
+    `crates/userland/src/lib.rs`, `tools/smoke/writeback.tsv`, `Justfile`)
 
 ---
 

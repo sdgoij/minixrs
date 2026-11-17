@@ -936,14 +936,16 @@ pub fn mmapfd(args: &[&str]) -> i32 {
     if args.contains(&"anon-shared") {
         return mmapfd_anon_shared();
     }
-    let shared = args.contains(&"shared");
-    let path = args
-        .iter()
-        .find(|a| **a != "shared")
-        .copied()
-        .unwrap_or("/bin/hello");
-    if shared {
-        return mmapfd_shared(path);
+    // A shared mapping writes through to the file now, so it must never default to
+    // an image binary: `mmapfd shared` names the file it is allowed to modify.
+    if args.contains(&"shared") {
+        return match args.iter().copied().find(|a| *a != "shared") {
+            Some(path) => mmapfd_shared(path),
+            None => {
+                write_err(b"mmapfd: shared needs the file to map\n");
+                1
+            }
+        };
     }
     let path = args.get(1).copied().unwrap_or("/bin/hello");
     // Two independent fds: one backs the mmap, the other is used for direct
@@ -1068,13 +1070,19 @@ pub fn mmapfd(args: &[&str]) -> i32 {
 }
 
 /// MAP_SHARED mode: parent and forked child map the same file region and
-/// verify cross-process write visibility through the shared cache frame.
+/// verify cross-process write visibility through the shared cache frame, then
+/// that the write reaches the file once the mapping is gone.
 ///
 /// The parent faults the first page in BEFORE forking, so the child
 /// inherits it COW-protected (vm_paging_fork clears W on the child's
 /// writable PTEs); the child's first store must then re-enable
 /// writability on the shared frame (VM's VR_SHARED COW exception) rather
 /// than copy it — otherwise the parent would not see the marker.
+///
+/// The reopen is the second half (KNOWN_ISSUES.md item 48): a shared mapping's
+/// store lands in the cache frame, and only `munmap`/exit makes VM write it back
+/// to the file. A fresh fd cannot see the cache, so a byte the file did not receive
+/// is invisible here.
 fn mmapfd_shared(path: &str) -> i32 {
     // The backing fd needs write access for a writable shared mapping
     // (POSIX; VM also uses it for the FDIO reads).
@@ -1156,7 +1164,29 @@ fn mmapfd_shared(path: &str) -> i32 {
         let _ = minix_std::vmem::munmap(p, size);
         let _ = minix_std::fs::close(fd);
     }
-    write_out(b"mmapfd: shared mapping verified (cross-process visibility)\n");
+
+    // The mapping is gone; the file must now carry the child's marker. Only the
+    // file is read here: this fd was opened after the unmap and has never seen the
+    // frame the store went into.
+    let reopened = match unsafe { minix_std::fs::open(path.as_bytes(), minix_std::fs::O_RDONLY, 0) }
+    {
+        Ok(fd) => fd,
+        Err(_) => {
+            write_err(b"mmapfd: cannot reopen (shared)\n");
+            return 4;
+        }
+    };
+    let mut b = [0u8; 1];
+    let got = match unsafe { minix_std::fs::read(reopened, &mut b) } {
+        Ok(1) => b[0],
+        _ => 0,
+    };
+    let _ = minix_std::fs::close(reopened);
+    if got != 0x5A {
+        write_err(b"mmapfd: shared write did not reach the file\n");
+        return 5;
+    }
+    write_out(b"mmapfd: shared file mapping verified: cross-process visibility and writeback\n");
     0
 }
 

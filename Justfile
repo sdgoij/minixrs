@@ -603,6 +603,30 @@ test-mmapanon-x86 boot-timeout="20": build-x86
     FEED_SCENARIO=tools/smoke/mmapanon.tsv sh tools/smoke/feed.sh target/test-mmapanon-x86.log {{boot-timeout}} qemu-system-x86_64 -nographic -m 256M -no-reboot -vga none -device bochs-display,id=fb0 -kernel target/images/x86_64-pc-minix/minix-x86.elf -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0 -device virtio-tablet-pci,display=fb0
     @echo "mmapanon: MAP_SHARED|MAP_ANONYMOUS is shared across fork (x86_64)"
 
+# The MAP_SHARED *file* gate: the store's visibility to other mappers is one half and
+# was already there; the other is that the file receives it when the mapping goes away
+# (KNOWN_ISSUES.md item 48). `tools/smoke/writeback.tsv` creates its own file and
+# reopens it with a new fd, which cannot see the cache, so only a real writeback can
+# satisfy the expectation. Per arch because the writeback goes through VM's own
+# self-mapping (`vm_mappage`) and VFS's grant, both of which are arch-specific.
+test-writeback arch="x86" boot-timeout="40":
+    @just test-writeback-{{arch}} {{boot-timeout}}
+
+test-writeback-x86 boot-timeout="40": system-image-x86
+    @just _assert-qemu-version qemu-system-x86_64
+    FEED_SCENARIO=tools/smoke/writeback.tsv sh tools/smoke/feed.sh target/test-writeback-x86.log {{boot-timeout}} qemu-system-x86_64 -nographic -m 256M -no-reboot -vga none -device bochs-display,id=fb0 -kernel target/images/x86_64-pc-minix/minix-x86-boot.elf -drive if=none,id=disk0,file=target/images/x86_64-pc-minix/disk.img,format=raw,cache=writethrough -device virtio-blk-pci,disable-legacy=on,drive=disk0 -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0 -device virtio-tablet-pci,display=fb0
+    @echo "writeback: a MAP_SHARED file store reached the file (x86_64)"
+
+test-writeback-riscv64 boot-timeout="60": system-image-riscv64
+    @just _assert-qemu-version qemu-system-riscv64
+    FEED_SCENARIO=tools/smoke/writeback.tsv sh tools/smoke/feed.sh target/test-writeback-riscv64.log {{boot-timeout}} qemu-system-riscv64 -machine virt -m 256M -nographic -global virtio-mmio.force-legacy=off -drive if=none,id=disk0,file=target/images/riscv64gc-unknown-minix/disk.img,format=raw,cache=writethrough -device virtio-blk-device,drive=disk0 -netdev user,id=net0 -device virtio-net-device,netdev=net0 -device virtio-gpu-device -device virtio-keyboard-device -kernel target/images/riscv64gc-unknown-minix/minix-riscv64-boot.elf
+    @echo "writeback: a MAP_SHARED file store reached the file (riscv64)"
+
+test-writeback-aarch64 boot-timeout="60": system-image-aarch64
+    @just _assert-qemu-version qemu-system-aarch64
+    FEED_SCENARIO=tools/smoke/writeback.tsv sh tools/smoke/feed.sh target/test-writeback-aarch64.log {{boot-timeout}} qemu-system-aarch64 -machine virt -cpu cortex-a57 -m 256M -nographic -no-reboot -global virtio-mmio.force-legacy=off -drive if=none,id=disk0,file=target/images/aarch64-unknown-minix/disk.img,format=raw,cache=writethrough -device virtio-blk-device,drive=disk0 -netdev user,id=net0 -device virtio-net-device,netdev=net0 -device virtio-gpu-device -device virtio-keyboard-device -kernel target/images/aarch64-unknown-minix/minix-aarch64-boot.elf
+    @echo "writeback: a MAP_SHARED file store reached the file (aarch64)"
+
 # Long paths must resolve. KNOWN_ISSUES.md item 19: a pathname of 24 bytes or more
 # killed VFS — it wrote the REQ_LOOKUP terminator one byte past the 56-byte message
 # at exactly 24, and truncated anything longer to 24 and resolved the wrong name.
@@ -1491,6 +1515,7 @@ test-arches:
     @just test-waitid x86
     @just test-cabi x86
     @just test-mmapanon-x86
+    @just test-writeback x86
     @just test-winprobe x86
     @just test-burst x86
     @just test-ttytimeout x86
@@ -1499,6 +1524,7 @@ test-arches:
     @just test-boot riscv64
     @just test-fork riscv64
     @just test-waitid riscv64
+    @just test-writeback riscv64
     @just test-winprobe riscv64
     @just test-burst riscv64
     @just test-ttytimeout riscv64
@@ -1506,6 +1532,7 @@ test-arches:
     @just test-boot aarch64
     @just test-fork aarch64
     @just test-waitid aarch64
+    @just test-writeback aarch64
     @just test-winprobe aarch64
     @just test-burst aarch64
     @just test-ttytimeout aarch64

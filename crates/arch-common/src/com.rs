@@ -594,6 +594,9 @@ pub const VMPPARAM_HANDLEMEM: u32 = 2;
 pub const VMVFSREQ_FDLOOKUP: u32 = 101;
 pub const VMVFSREQ_FDCLOSE: u32 = 102;
 pub const VMVFSREQ_FDIO: u32 = 103;
+/// Write a `MAP_SHARED` file page back to its file (a port extension: C has no
+/// writeback at all). The source is a buffer in VM's own address space.
+pub const VMVFSREQ_FDWRITE: u32 = 104;
 
 // Basic VM calls allowed to every process
 pub const VM_BASIC_CALLS: [u32; 7] = [
@@ -907,6 +910,8 @@ mod tests {
         assert_eq!(VMIW_STATS, 1);
         assert_eq!(VMIW_REGION, 3);
         assert_eq!(VMVFSREQ_FDLOOKUP, 101);
+        assert_eq!(VMVFSREQ_FDIO, 103);
+        assert_eq!(VMVFSREQ_FDWRITE, 104);
     }
 
     #[test]

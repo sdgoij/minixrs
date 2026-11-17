@@ -19,11 +19,11 @@
 //! fixed slot array — the VM server is single-threaded `no_std` and allocates
 //! nothing at runtime (matching `pb.rs`'s static-table style).
 //!
-//! Cache entries are always *clean* file content: `finish_page` only inserts pages
-//! whose whole 4 KiB lies inside the file, and only for read-only or `MAP_SHARED`
-//! regions, so a cached frame is never dirtied by a MAP_PRIVATE write (a writable
-//! MAP_PRIVATE file page keeps the private allocate+FDIO path and never enters the
-//! cache).
+//! Cache entries hold *file content*, but a `MAP_SHARED` writable mapping writes
+//! into the shared frame: those pages are marked dirty when the mapping goes away
+//! and written back by `vm/writeback.rs`. A dirty entry is never evicted, because
+//! dropping it would discard the only copy of the write that is about to reach the
+//! file.
 
 use core::cell::UnsafeCell;
 
@@ -71,6 +71,10 @@ struct CacheEntry {
     /// LRU list neighbours (slot indices, `NONE` at the ends).
     older: usize,
     newer: usize,
+    /// A shared mapping wrote this page and it has not reached the file yet. Set
+    /// by [`CacheTable::mark_range_dirty`] when the mapping is released, cleared
+    /// by [`CacheTable::mark_written`] once the writeback lands.
+    dirty: bool,
 }
 
 /// Fixed-slot cache table with an LRU list threaded through the slots.
@@ -103,19 +107,22 @@ impl<const N: usize> CacheTable<N> {
         self.count == 0
     }
 
-    /// The oldest slot whose frame no mapping holds, for eviction.
+    /// The oldest slot that may be evicted: no mapping keeps its frame and no
+    /// writeback is still owed for it.
     ///
     /// A cached page whose `PhysBlock` count is above one still has a live mapping
     /// (or a forked sibling) holding the frame. Dropping its cache entry would
     /// leave the mapping with a frame no longer keyed by the file, so a later fault
     /// of the same page would allocate a second frame and the two mappings would
-    /// stop sharing (KNOWN_ISSUES.md item 47). Such an entry stays until its last
-    /// mapping goes away.
-    fn lru_oldest_unmapped(&self) -> Option<usize> {
+    /// stop sharing (KNOWN_ISSUES.md item 47). A dirty entry is excluded for the
+    /// same reason: the cache holds the only copy of a `MAP_SHARED` write until it
+    /// reaches the file. Both kinds stay until their reference, or their writeback,
+    /// goes away.
+    fn lru_oldest_evictable(&self) -> Option<usize> {
         let mut slot = self.lru_oldest;
         while slot != NONE {
             let e = self.slots[slot].as_ref().expect("live slot in LRU list");
-            if pb::pb_count(e.pb) <= 1 {
+            if pb::pb_count(e.pb) <= 1 && !e.dirty {
                 return Some(slot);
             }
             slot = e.newer;
@@ -271,6 +278,7 @@ impl<const N: usize> CacheTable<N> {
                 pb,
                 older: NONE,
                 newer: NONE,
+                dirty: false,
             },
         );
     }
@@ -299,6 +307,7 @@ impl<const N: usize> CacheTable<N> {
                 pb,
                 older: NONE,
                 newer: NONE,
+                dirty: false,
             },
         );
     }
@@ -324,11 +333,11 @@ impl<const N: usize> CacheTable<N> {
             return;
         }
         // New key: evict the LRU oldest entry no mapping holds when full. A mapped
-        // page is never evicted (see `lru_oldest_unmapped`); when every entry is
-        // mapped the new page is not cached, and the caller keeps its own
-        // reference on the frame.
+        // or dirty page is never evicted (see `lru_oldest_evictable`); when every
+        // entry is one of those the new page is not cached, and the caller keeps
+        // its own reference on the frame.
         if self.count == N {
-            let Some(victim) = self.lru_oldest_unmapped() else {
+            let Some(victim) = self.lru_oldest_evictable() else {
                 return;
             };
             let victim_pb = self.slots[victim].as_ref().expect("victim slot live").pb;
@@ -348,9 +357,92 @@ impl<const N: usize> CacheTable<N> {
         self.lru_push(slot);
     }
 
+    /// Mark every cached file page of `(dev, ino)` whose offset lies in
+    /// `[lo, hi)` as owing a writeback.
+    ///
+    /// Called when a writable `MAP_SHARED` region is released. The mapping's
+    /// pages are the real answer, but only the cache is still reachable once the
+    /// process's address space is destroyed, so the cache entries stand in for
+    /// them. Marking is idempotent, and a page the region never faulted simply has
+    /// no entry. Returns how many entries this call newly marked.
+    pub fn mark_range_dirty(&mut self, dev: u32, ino: u32, lo: u64, hi: u64) -> usize {
+        let mut marked = 0;
+        for e in self.slots.iter_mut().flatten() {
+            if e.dev == dev
+                && e.ino == ino
+                && e.dev_offset == NO_DEV_OFFSET
+                && e.ino_offset >= lo
+                && e.ino_offset < hi
+                && !e.dirty
+            {
+                e.dirty = true;
+                marked += 1;
+            }
+        }
+        marked
+    }
+
+    /// The next dirty file page of `(dev, ino)` at or after `after`, and inside
+    /// `[lo, hi)`: its file offset, frame and `PhysBlock` index.
+    ///
+    /// Ascending by offset, so a writeback job can use the returned offset to walk
+    /// the range without holding a slot index, which moves when the table evicts;
+    /// a page written back from a stale index would be skipped.
+    pub fn find_dirty_after(
+        &self,
+        dev: u32,
+        ino: u32,
+        lo: u64,
+        hi: u64,
+        after: u64,
+    ) -> Option<(u64, u64, usize)> {
+        let mut best: Option<&CacheEntry> = None;
+        for e in self.slots.iter().flatten() {
+            if e.dev != dev
+                || e.ino != ino
+                || e.dev_offset != NO_DEV_OFFSET
+                || !e.dirty
+                || e.ino_offset < lo
+                || e.ino_offset >= hi
+                || e.ino_offset < after
+            {
+                continue;
+            }
+            if best.is_none_or(|b| e.ino_offset < b.ino_offset) {
+                best = Some(e);
+            }
+        }
+        best.map(|e| (e.ino_offset, e.phys, e.pb))
+    }
+
+    /// Clear a dirty mark once `phys` has been written back to the file.
+    ///
+    /// Only when the entry still describes the frame that was written, and only
+    /// when no mapping holds it any more (`pb_count` 1, the cache's own). A page
+    /// another process still maps may be written again after this writeback, and
+    /// it cannot re-mark itself (nothing traps the store), so it stays dirty and
+    /// the other process's release writes it again.
+    pub fn mark_written(&mut self, dev: u32, ino: u32, ino_offset: u64, phys: u64) {
+        for e in self.slots.iter_mut().flatten() {
+            if e.dev == dev
+                && e.ino == ino
+                && e.ino_offset == ino_offset
+                && e.phys == phys
+                && pb::pb_count(e.pb) <= 1
+            {
+                e.dirty = false;
+                return;
+            }
+        }
+    }
+
     /// Remove every entry for `dev`, releasing each frame's cache reference.
     /// Mappings in live processes keep their own reference, so the frames
     /// survive until those processes unmap them.
+    ///
+    /// A dirty entry's writeback is dropped with it. The only caller is
+    /// `VM_CLEARCACHE`, which asks for a device's cache to be discarded, and no
+    /// filesystem in the port sends it.
     pub fn clear_bydev(&mut self, dev: u32) {
         let mut i = 0;
         while i < N {
@@ -429,6 +521,35 @@ pub fn cache_insert_byino(dev: u32, ino: u32, ino_offset: u64, phys: u64, pb: us
     unsafe {
         (*CACHE_TABLE.get()).insert_byino(dev, ino, ino_offset, phys, pb);
     }
+}
+
+/// Mark the cached pages of `(dev, ino)` in `[lo, hi)` as owing a writeback.
+/// See [`CacheTable::mark_range_dirty`].
+pub fn cache_mark_range_dirty(dev: u32, ino: u32, lo: u64, hi: u64) -> usize {
+    if dev == NO_DEV || ino == VMC_NO_INODE || lo >= hi {
+        return 0;
+    }
+    unsafe { (*CACHE_TABLE.get()).mark_range_dirty(dev, ino, lo, hi) }
+}
+
+/// The next dirty file page of `(dev, ino)` in `[lo, hi)` at or after `after`.
+/// See [`CacheTable::find_dirty_after`].
+pub fn cache_find_dirty_after(
+    dev: u32,
+    ino: u32,
+    lo: u64,
+    hi: u64,
+    after: u64,
+) -> Option<(u64, u64, usize)> {
+    if dev == NO_DEV || ino == VMC_NO_INODE {
+        return None;
+    }
+    unsafe { (*CACHE_TABLE.get()).find_dirty_after(dev, ino, lo, hi, after) }
+}
+
+/// Clear a page's dirty mark after its writeback. See [`CacheTable::mark_written`].
+pub fn cache_mark_written(dev: u32, ino: u32, ino_offset: u64, phys: u64) {
+    unsafe { (*CACHE_TABLE.get()).mark_written(dev, ino, ino_offset, phys) }
 }
 
 /// Drop every cached page of `dev`. See [`CacheTable::clear_bydev`].
@@ -686,6 +807,125 @@ mod tests {
         pb::pb_unref(a);
         pb::pb_unref(b);
         pb::pb_unref(c);
+    }
+
+    #[test]
+    fn test_mark_range_dirty_covers_only_that_file_range() {
+        // A writable MAP_SHARED region dirties the cached pages of the file range
+        // it covered, and nothing else: another file, another device, or a page of
+        // the same file outside the range must stay clean, because those are
+        // written back by their own region's release, if at all.
+        let mut t = CacheTable::<8>::new();
+        let a = pb::pb_new(frame()).unwrap();
+        let b = pb::pb_new(frame()).unwrap();
+        let c = pb::pb_new(frame()).unwrap();
+        t.insert_byino(0, 11, 0x1000, 0x4000, a);
+        t.insert_byino(0, 11, 0x2000, 0x5000, b);
+        t.insert_byino(0, 12, 0x1000, 0x6000, c);
+
+        assert_eq!(t.mark_range_dirty(0, 11, 0x1000, 0x2000), 1);
+        assert_eq!(t.find_dirty_after(0, 11, 0, u64::MAX, 0), Some((0x1000, 0x4000, a)));
+        assert_eq!(t.find_dirty_after(0, 12, 0, u64::MAX, 0), None);
+        assert_eq!(t.find_dirty_after(0, 11, 0x2000, u64::MAX, 0), None);
+        // Idempotent: a second release of an overlapping region marks nothing new.
+        assert_eq!(t.mark_range_dirty(0, 11, 0, u64::MAX), 1);
+
+        t.clear_bydev(0);
+        pb::pb_unref(a);
+        pb::pb_unref(b);
+        pb::pb_unref(c);
+    }
+
+    #[test]
+    fn test_find_dirty_after_walks_offsets_in_order() {
+        // The writeback job advances by file offset, so a call with `after` must
+        // return the next page *after* the one just written, and never the one it
+        // already passed. Inserting out of order must not matter.
+        let mut t = CacheTable::<8>::new();
+        let mut pbs = [0usize; 3];
+        for (i, off) in [0x2000u64, 0x0, 0x1000].iter().enumerate() {
+            let pb = pb::pb_new(frame()).unwrap();
+            pbs[i] = pb;
+            t.insert_byino(0, 11, *off, 0x4000 + *off, pb);
+        }
+        t.mark_range_dirty(0, 11, 0, 0x3000);
+
+        let (o1, _, pb1) = t.find_dirty_after(0, 11, 0, 0x3000, 0).unwrap();
+        assert_eq!(o1, 0);
+        let (o2, _, _) = t.find_dirty_after(0, 11, 0, 0x3000, o1 + 0x1000).unwrap();
+        assert_eq!(o2, 0x1000);
+        let (o3, _, _) = t.find_dirty_after(0, 11, 0, 0x3000, o2 + 0x1000).unwrap();
+        assert_eq!(o3, 0x2000);
+        assert_eq!(t.find_dirty_after(0, 11, 0, 0x3000, o3 + 0x1000), None);
+
+        t.clear_bydev(0);
+        for pb in pbs {
+            pb::pb_unref(pb);
+        }
+    }
+
+    #[test]
+    fn test_a_dirty_page_is_not_evicted() {
+        // A dirty entry is the only copy of a shared write until it reaches the
+        // file. Evicting it would lose that write silently, so it waits for the
+        // writeback like a mapped page waits for its mapping.
+        let mut t = CacheTable::<2>::new();
+        let dirty = pb::pb_new(frame()).unwrap();
+        let clean = pb::pb_new(frame()).unwrap();
+        t.insert_byino(0, 1, 0, 0x4000, dirty);
+        t.insert_byino(0, 2, 0, 0x5000, clean);
+        t.mark_range_dirty(0, 1, 0, u64::MAX);
+        // Both entries are cache-only; only `clean` may be evicted.
+        pb::pb_unref(dirty);
+        pb::pb_unref(clean);
+
+        let fresh = pb::pb_new(frame()).unwrap();
+        t.insert_byino(0, 3, 0, 0x6000, fresh);
+
+        assert_eq!(t.find_byino(0, 1, 0, false), Some((0x4000, dirty)));
+        assert_eq!(t.find_byino(0, 2, 0, false), None);
+        assert_eq!(t.find_byino(0, 3, 0, false), Some((0x6000, fresh)));
+
+        // Once written back and unmapped, the page is evictable again.
+        t.mark_written(0, 1, 0, 0x4000);
+        let newest = pb::pb_new(frame()).unwrap();
+        let more = pb::pb_new(frame()).unwrap();
+        t.insert_byino(0, 4, 0, 0x7000, newest);
+        assert_eq!(t.find_byino(0, 1, 0, false), None, "clean page is evicted");
+        t.insert_byino(0, 5, 0, 0x8000, more);
+
+        t.clear_bydev(0);
+        pb::pb_unref(fresh);
+        pb::pb_unref(newest);
+        pb::pb_unref(more);
+    }
+
+    #[test]
+    fn test_mark_written_keeps_a_still_mapped_page_dirty() {
+        // A page another process still maps may be written again after this
+        // writeback, and nothing traps that store to re-dirty it. It has to stay
+        // dirty so that process's release writes it once more.
+        let mut t = CacheTable::<4>::new();
+        let pb = pb::pb_new(frame()).unwrap();
+        t.insert_byino(0, 1, 0, 0x4000, pb);
+        t.mark_range_dirty(0, 1, 0, u64::MAX);
+        // Count 2: the cache's reference and a mapping's.
+        assert_eq!(pb::pb_count(pb), 2);
+
+        t.mark_written(0, 1, 0, 0x4000);
+        assert_eq!(t.find_dirty_after(0, 1, 0, u64::MAX, 0), Some((0, 0x4000, pb)));
+
+        // The mapping goes away and the retry clears it.
+        pb::pb_unref(pb);
+        t.mark_written(0, 1, 0, 0x4000);
+        assert_eq!(t.find_dirty_after(0, 1, 0, u64::MAX, 0), None);
+
+        // A writeback of a frame the entry no longer describes clears nothing.
+        t.mark_range_dirty(0, 1, 0, u64::MAX);
+        t.mark_written(0, 1, 0, 0x9000);
+        assert_eq!(t.find_dirty_after(0, 1, 0, u64::MAX, 0), Some((0, 0x4000, pb)));
+
+        t.clear_bydev(0);
     }
 
     #[test]

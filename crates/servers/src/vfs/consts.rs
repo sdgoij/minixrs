@@ -449,6 +449,9 @@ pub const VM_PROC_NR: i32 = 8;
 pub const VMVFSREQ_FDLOOKUP: i32 = 101;
 pub const VMVFSREQ_FDCLOSE: i32 = 102;
 pub const VMVFSREQ_FDIO: i32 = 103;
+/// Write a `MAP_SHARED` page back to its file. The data comes from VM's own
+/// address space, not the mapping process's (see `call.rs::do_vm_call`).
+pub const VMVFSREQ_FDWRITE: i32 = 104;
 pub const VM_RQ_BASE: i32 = 0xC00;
 pub const VM_VFS_REPLY: i32 = VM_RQ_BASE + 30;
 

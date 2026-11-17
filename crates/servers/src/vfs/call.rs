@@ -3242,6 +3242,61 @@ pub fn do_vm_call() -> i32 {
                 if r < 0 { r } else { OK }
             }
         }
+        VMVFSREQ_FDWRITE => {
+            // Write one page of the vmfd's file back, reading the bytes from
+            // VM's own address space at `fault_va`. The source is VM and not
+            // the process that mapped the page: a writeback is issued while
+            // that process's region is being torn down, so its address space
+            // may be gone by the time VFS gets here, while VM's scratch
+            // mapping of the cache frame is held until this request answers.
+            let fp = unsafe { crate::vfs::glo::current_fp() };
+            if fp.is_null() {
+                return vm_call_reply(ep, ESRCH, req_id);
+            }
+            unsafe {
+                if req_fd < 0 || (req_fd as usize) >= OPEN_MAX {
+                    return vm_call_reply(ep, EBADF, req_id);
+                }
+                let fp_mut = &mut *fp;
+                let filp_idx = fp_mut.fp_filp[req_fd as usize];
+                if filp_idx < 0 {
+                    return vm_call_reply(ep, EBADF, req_id);
+                }
+
+                let filp_arr = core::ptr::addr_of_mut!((*vfs_global()).filp) as *mut Filp;
+                let filp = &mut *filp_arr.add(filp_idx as usize);
+                let vp = filp.filp_vno;
+                if vp.is_null() {
+                    return vm_call_reply(ep, EBADF, req_id);
+                }
+
+                // A mapped write never extends the file (POSIX: bytes past EOF
+                // are not written), and VM knows only the page-rounded size. The
+                // vnode's size is the real one, so the tail of a file that ends
+                // mid-page is written as its own length rather than a full page.
+                let in_file = (*vp).v_size - offset;
+                if in_file <= 0 {
+                    OK
+                } else {
+                    let len = (length as i64).min(in_file) as u32;
+                    let fs_e = (*vp).v_fs_e;
+                    let inode_nr = (*vp).v_inode_nr;
+                    let (r, _) = crate::vfs::request::req_write(
+                        fs_e,
+                        inode_nr,
+                        fault_va as *const u8,
+                        offset,
+                        len,
+                        VM_PROC_NR,
+                        0,
+                    );
+                    // Like the FDIO branch: the port's `req_write` reports the
+                    // FS reply's byte count on success; VM treats any non-zero
+                    // result as a failure, so normalize it to OK.
+                    if r < 0 { r } else { OK }
+                }
+            }
+        }
         _ => EINVAL,
     };
 

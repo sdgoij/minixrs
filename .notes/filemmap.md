@@ -64,12 +64,13 @@ buffer cache does not hand pages to VM.
 |---|---|---|
 | mmap message carries fd/offset | `minix-std/src/vmem.rs`; `do_mmap` → `do_mmap_file` for user mmaps, `do_vfs_mmap` for exec segments | **used** |
 | `VR_*` region flags | `servers/src/vm/region.rs` — `VR_FILE` + `{dev,ino,fd,file_offset,file_size}`, `VR_EXEC`, `VR_WRITABLE/READABLE`, plus `VR_SHARED` and `VR_CACHE` | **implemented** |
-| VM↔VFS request codes | `arch-common/src/com.rs` (`VMVFSREQ_FDLOOKUP/FDCLOSE/FDIO`, `VM_VFS_REPLY`, `VM_VFS_MMAP`) | constants exist, used |
-| VFS `do_vm_call` (FDLOOKUP/FDCLOSE/FDIO) | `servers/src/vfs/call.rs` | **implemented** (dupvm, resolve vnode → dev/ino; FDIO does `req_read` into the faulting page; reply normalized to OK — byte count travels in the payload) |
+| VM↔VFS request codes | `arch-common/src/com.rs` (`VMVFSREQ_FDLOOKUP/FDCLOSE/FDIO/FDWRITE`, `VM_VFS_REPLY`, `VM_VFS_MMAP`) | constants exist, used |
+| VFS `do_vm_call` (FDLOOKUP/FDCLOSE/FDIO/FDWRITE) | `servers/src/vfs/call.rs` | **implemented** (dupvm, resolve vnode → dev/ino; FDIO does `req_read` into the faulting page; FDWRITE does `req_write` from VM's own address space, length clamped to the vnode's real size; reply normalized to OK, byte count travels in the payload) |
 | VM→VFS request plumbing | `vm/vfs_request.rs` — asynchronous (`asynsend3` with `AMF_NOREPLY`), several in flight keyed by request id, a fixed node pool; the faulting process stays `RTS_PAGEFAULT`-blocked, VM does not wait | **implemented** (2026-09: was a synchronous SENDREC, finding 58) |
 | VM `do_vfs_mmap` | `servers/src/vm/mod.rs` — creates one lazy VR_FILE region per exec'd `PT_LOAD` (per-segment prot, in-file end, clears identity PTEs, sets one-shot pre-fault) | **implemented** |
 | VM `do_vfs_reply` | `vm/vfs_request.rs::complete` — matches the reply's request id to the outstanding request and completes it (the `mmap` answers its caller itself; a page fault finishes its page and resolves the fault) | **implemented** |
-| VM file page cache | `crates/servers/src/vm/cache.rs` (`cache_find`/`cache_insert`/`clear_bydev`, LRU, 4096 pages); used by `vm/mod.rs::start_file_page`/`finish_page` | **implemented** — read-only and `MAP_SHARED`-writable file pages are shared across processes. The `do_mapcache`/`do_setcache`/`do_clearcache` handlers are implemented too (not stubs), but no filesystem calls them yet |
+| VM file page cache | `crates/servers/src/vm/cache.rs` (`cache_find`/`cache_insert`/`clear_bydev`, LRU, 4096 pages); used by `vm/mod.rs::start_file_page`/`finish_page` | **implemented**: read-only and `MAP_SHARED`-writable file pages are shared across processes, and a writable shared page carries a dirty mark that pins it until its writeback lands. The `do_mapcache`/`do_setcache`/`do_clearcache` handlers are implemented too (not stubs), but no filesystem calls them yet |
+| `MAP_SHARED` file writeback | `crates/servers/src/vm/writeback.rs`: a ring of released regions; each job walks the dirty cache pages of its file range, maps the frame into VM's own address space and sends `VMVFSREQ_FDWRITE`; the vmfd is closed by the last job queued for it | **implemented** (2026-11-17, KNOWN_ISSUES item 48) |
 | `handle_pagefault_for` | vm/mod.rs | **file branch implemented**: `advance_fault` → `start_file_page` (a `vm/cache.rs` hit maps a shared frame and skips the rest; on miss: alloc → zero → map writable → FDIO → `finish_file_page`: zero bss tail → downgrade to region perms), the fault resolved by the page that lands last |
 | VFS `vfs_memmap` | `servers/src/vfs/mmap.rs` | **implemented** (sends `VM_VFS_MMAP` with fd+offset+len+vaddr+prot+in-file end) |
 | VFS `map_vnode` | mmap.rs | **implemented** — `req_newnode` to the mapped FS (PFS), sets `v_mapfs_e`/`v_mapinode_nr`/`v_mapfs_count`; returns ENOSYS only when `find_vmnt` finds no mount (the C panics) |
@@ -269,6 +270,18 @@ mode it faulted in.
   same frame. There *is* a consumer now: `mmapfd shared`
   (`userland/src/lib.rs::mmapfd_shared`). This is no longer "deferred, no userland
   consumer yet".
+- **`MAP_SHARED` file writeback** (`crates/servers/src/vm/writeback.rs`): **implemented** (2026-11-17, KNOWN_ISSUES item 48). Nothing traps a store into a
+  shared page, so the cache cannot learn that a page changed; the dirty mark is
+  therefore set from the *region* at release, for every cached page of the file range
+  the region covered, by `munmap`, `exec` and process exit. The write request takes
+  its bytes from a scratch mapping of the cache frame inside VM's own address space
+  (`vm_mappage`), not from the released process: at exit the page tables are gone
+  before VFS can answer. A dirty entry is never evicted, and the vmfd's `FDCLOSE` is
+  sent by the last job queued for it, after its writes, which ordering the async
+  queue at VFS gives. VFS clamps the length to the vnode's real size so a mid-page
+  file end is not extended. Two gaps remain: there is no `msync` syscall in the port,
+  and a region `mprotect`ed read-only after a write is not written back (the release
+  checks `VR_WRITABLE`, and nothing in the tree `mprotect`s a file mapping).
 - **Userland `mmap(fd)`**: exercised by `/bin/mmapfd` (§7) and `mmapfd shared`;
   exec remains the production user. The `do_fstat` gap recorded here does **not**
   hold in the current code: `do_fstat` → `req_stat` uses a write grant
@@ -485,4 +498,6 @@ Remaining:
   all three arches (x86/riscv 0 KiB/exec; aarch64 reached 0 after the
   fork stopped deep-copying alias leaves — see the aarch64 paragraph
   above).
-- `mmap(fd)` MAP_SHARED semantics (v2, no consumer yet).
+- `mmap(fd)` MAP_SHARED semantics (v2): shared across fork and written back to the
+  file at release; `just test-writeback <arch>` and `just test-mmapanon-x86` are the
+  gates (§6).

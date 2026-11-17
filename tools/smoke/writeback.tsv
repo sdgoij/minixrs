@@ -1,0 +1,9 @@
+# The MAP_SHARED file writeback gate (KNOWN_ISSUES.md item 48): a store through a
+# shared file mapping lands in the cache frame every mapper shares, but the file
+# itself only receives it when the mapping is gone. The parent forks, the child's
+# store is visible in the parent's view, and then the parent's reopen of the file
+# (a fresh fd, which cannot see the cache) has to find it too. A file of its own is
+# created first: a shared mapping is writable now, so this never maps an image
+# binary.
+/bin/echo writeback-marker > wb.txt	
+/bin/mmapfd shared wb.txt	mmapfd: shared file mapping verified: cross-process visibility and writeback
