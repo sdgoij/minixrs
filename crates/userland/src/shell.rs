@@ -1390,8 +1390,10 @@ fn try_exec(args: &[&str], cmd_path: &mut [u8; 256]) -> Option<i32> {
         )
     };
 
-    // Try /sbin/<cmd> as fallback.
-    if r < 0 && cmd_start > 1 && 6 + cmd_name_len < cmd_path.len() {
+    // Try /sbin/<cmd> as fallback, but only when /bin/<cmd> was simply not there. Any other
+    // error is about the command the user asked for, and retrying a path that cannot exist
+    // would replace it with the fallback's own ENOENT (item 38).
+    if should_try_sbin(r) && cmd_start > 1 && 6 + cmd_name_len < cmd_path.len() {
         cmd_path[..6].copy_from_slice(b"/sbin/");
         cmd_path[6..6 + cmd_name_len].copy_from_slice(&cmd_name[..cmd_name_len]);
         cmd_path[6 + cmd_name_len] = 0;
@@ -1406,6 +1408,23 @@ fn try_exec(args: &[&str], cmd_path: &mut [u8; 256]) -> Option<i32> {
         return Some(r2);
     }
     Some(r)
+}
+
+/// `ENOENT` as the kernel reports it. The shell compares against no other error, so this is not
+/// an errno table: `minix-rt` hands back the kernel's negative numbers as they are.
+#[cfg(any(target_os = "minix", test))]
+const ENOENT: i32 = -2;
+
+/// Whether `/sbin/<cmd>` is worth trying after `/bin/<cmd>` failed with `primary`.
+///
+/// Only the file's absence from `/bin` makes a second directory meaningful. Every other error
+/// (the heap, the loader, a page it cannot read) is about the command the user asked for, and
+/// retrying a path that cannot exist replaced it with the fallback's own `ENOENT`: the random
+/// `/bin/bash` failure was reported as `/sbin/bash: -2` for exactly that reason, and the errno
+/// owed to item 38 was never the real one.
+#[cfg(any(target_os = "minix", test))]
+fn should_try_sbin(primary: i32) -> bool {
+    primary == ENOENT
 }
 
 /// Say why an external command did not run.
@@ -1743,5 +1762,17 @@ mod tests {
         assert_eq!(format_errno(&mut buf, -2), b"-2");
         assert_eq!(format_errno(&mut buf, 12345), b"12345");
         assert_eq!(format_errno(&mut buf, i32::MIN), b"-2147483648");
+    }
+
+    /// Only a missing file in `/bin` makes `/sbin` worth a second try. Every other error is the
+    /// command's own, and the fallback's `ENOENT` used to replace it in the message, which is why
+    /// the intermittent `/bin/bash` failure was reported as a `/sbin/bash` that never existed.
+    #[test]
+    fn only_a_missing_file_tries_sbin() {
+        assert!(should_try_sbin(ENOENT));
+        assert!(!should_try_sbin(-12), "ENOMEM from the argument frame is the command's");
+        assert!(!should_try_sbin(-13), "EACCES is the command's");
+        assert!(!should_try_sbin(-1), "the exec-never-returned sentinel is not an errno");
+        assert!(!should_try_sbin(0));
     }
 }

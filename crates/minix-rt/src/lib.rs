@@ -417,12 +417,28 @@ pub unsafe fn execve(
 
         // On failure, return the memory used for the frame (matching C).
         sbrk(-(frame_size as isize));
-        if r < 0 {
-            return r as i32;
-        }
-        // Success never returns here (the image is replaced).
-        -1
+        exec_reply_status(&msg, r as i32)
     }
+}
+
+/// The status of a failed `execve`: PM's reply, not the SENDREC's return.
+///
+/// A SENDREC returns the *replier's endpoint*, which is positive; the status travels in the
+/// reply's `m_type`. This used to return the endpoint, so every exec failure was reported as
+/// `-1` (EPERM) whatever the cause, and the failing gate could not be chased (KNOWN_ISSUES
+/// item 38). `chdir`, `fork` and `waitpid` beside this read the same field.
+///
+/// `sendrec` is negative only when the call itself failed. A reply with a non-negative
+/// status cannot happen (PM answers only a failure, and on success the image is already
+/// running), so that case keeps the old `-1` sentinel rather than letting a caller continue
+/// on the old image believing it exec'd.
+#[cfg(any(target_os = "minix", test))]
+pub(crate) fn exec_reply_status(msg: &[u8; 64], sendrec: i32) -> i32 {
+    if sendrec < 0 {
+        return sendrec;
+    }
+    let status = i32::from_le_bytes(msg[4..8].try_into().unwrap_or([0; 4]));
+    if status < 0 { status } else { -1 }
 }
 
 /// Length of a NUL-terminated string in the current address space.
@@ -1943,6 +1959,35 @@ mod tests {
         let msg = diag_message(&chunk);
         assert_eq!(DIAG_CHUNK_MAX, 48);
         assert_eq!(&msg[16..64], &chunk[..]);
+    }
+
+    #[test]
+    fn test_exec_reply_status_reads_pm_reply() {
+        // PM answers a failed exec with the negative status in `m_type`, while SENDREC's own
+        // return is the replier's *endpoint* (positive). Reading the wrong one turned every
+        // failure into -1, whatever the cause (item 38).
+        let mut msg = [0u8; 64];
+        msg[4..8].copy_from_slice(&(-12i32).to_le_bytes());
+        assert_eq!(exec_reply_status(&msg, 3), -12);
+        assert_eq!(exec_reply_status(&msg, 0), -12);
+    }
+
+    #[test]
+    fn test_exec_reply_status_keeps_sendrec_error() {
+        // A SENDREC that failed before any reply carries its error itself.
+        let msg = [0u8; 64];
+        assert_eq!(exec_reply_status(&msg, -2), -2);
+    }
+
+    #[test]
+    fn test_exec_reply_status_never_reports_success() {
+        // PM replies only on failure, and on success the image is already replaced. A
+        // non-negative `m_type` must therefore not let the caller continue on the old image.
+        let mut msg = [0u8; 64];
+        msg[4..8].copy_from_slice(&0i32.to_le_bytes());
+        assert_eq!(exec_reply_status(&msg, 3), -1);
+        msg[4..8].copy_from_slice(&7i32.to_le_bytes());
+        assert_eq!(exec_reply_status(&msg, 3), -1);
     }
 
     #[test]

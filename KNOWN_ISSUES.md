@@ -210,23 +210,27 @@ are arch-specific, `[env]` is tooling/platform, not kernel.
     it. (`crates/servers/src/vfs/epoll.rs`, `crates/servers/src/vfs/select.rs`,
     `crates/servers/src/vfs/call.rs`)
 
-38. **An `exec` of a command can fail at random, and the shell called every failure "not found"
-    (2026-11-16, open, measured).** The interactive-bash gate failed in CI on aarch64 and on
-    riscv64 (`bash never printed its prompt`), the console showing the prompt's reprint of the
-    line and then `sh: 'bash' not found` for a `/bin/bash` that is in the image: `mkminixfs`
-    reported it as part of `100 files` with no missing-bash warning, and `mkfs` copies that image
-    straight to the disk the guest boots. So the file was there and the `exec` returned. The
-    message was the shell's for *every* failure of `try_exec`, and the errno was discarded (the
-    `/sbin` fallback's with `let _ =`), which is why this could not be chased. It now prints the
-    last path tried and the kernel's error, `sh: 'bash' not found (/bin/bash: -2)`, from
-    `report_exec_failure`/`format_errno` in `crates/userland/src/shell.rs`. Reproduced once
-    locally in 3 runs before the diagnostic, then not in 16 consecutive runs after it, so the
-    errno of the one occurrence was not captured. Suspects, in order: `minix-rt::execve`'s own
-    `sbrk` of the argument frame, which can return `ENOMEM` before the syscall is made; VM's
-    loader on the 1.6 MB image; and the allocation-heavy-path class aarch64 item 9 describes.
-    Next step: read the errno from the next failing gate, in CI or locally. The `execve`
-    offset-table overflow in item 45 is one candidate for this class and is fixed; the gate has
-    not failed since the diagnostic, so the errno is still owed.
+38. **An `exec` of a command can fail at random (2026-11-16, open, measured).** The
+    interactive-bash gate failed in CI on aarch64 and on riscv64 (`bash never printed its
+    prompt`), the console showing the prompt's reprint of the line and then a message for a
+    `/bin/bash` that is in the image: `mkminixfs` reported it as part of `100 files` with no
+    missing-bash warning, and `mkfs` copies that image straight to the disk the guest boots. So
+    the file was there and the `exec` returned. Reproduced once locally in 3 runs, then not in 26
+    consecutive runs since. Suspects, in order: `minix-rt::execve`'s own `sbrk` of the argument
+    frame, which can return `ENOMEM` before the syscall is made; VM's loader on the 1.6 MB image;
+    and the allocation-heavy-path class aarch64 item 9 describes. The `execve` offset-table
+    overflow in item 45 is one candidate for this class and is fixed.
+
+    *Both layers that hid the errno are now fixed, so the next occurrence reports the real one.*
+    The shell printed `not found` for every failure of `try_exec` (`report_exec_failure`/
+    `format_errno` in `crates/userland/src/shell.rs` now print the path and the kernel's number),
+    and `minix_rt::execve` returned the SENDREC's *return value* rather than PM's reply, so even
+    that number was the replier's endpoint, positive, reported as `-1`. It reads the reply's
+    `m_type` now (`exec_reply_status`, host-tested beside `chdir`/`fork`/`brk`), and the `/sbin`
+    fallback is tried only when `/bin/<cmd>` was `ENOENT`, so a substantive error is no longer
+    replaced by the fallback's own `-2` (`should_try_sbin`, host-tested). Next step: read the
+    errno from the next failing gate, in CI or locally. It has not failed in 26 runs since the
+    first half of the diagnostic landed, so the errno is still owed.
 
 ---
 
