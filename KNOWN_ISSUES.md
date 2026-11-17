@@ -276,22 +276,36 @@ the burst-overflow reading in item 37, are under `# Resolved issues`.
     page this port calls non-user, and a fetch of it does not take the permission fault that would
     park the thread in `PageOutcome::Pending` until VFS finishes the fill.
 
-    That also explains why the `pte_is_user` branch two dozen lines above (`an orphan placeholder`)
-    does not save it: it answers a question about the PTE that the hardware is not answering the
-    same way. The next step is one comparison and then a decision. The comparison: dump the PTE
-    that `finish_page` installs for the same VA (`MAP_USER | MAP_WRITE | MAP_EXEC`) the same way,
-    and settle which AP encoding this port and QEMU actually agree makes a TTBR0 page unreachable
-    from EL0. The decision: either give the placeholder that encoding, or stop mapping it before
-    the request and park the faulting thread until the fill completes, which is what `Pending`
-    already does when the page is known to be in flight.
+    The remaining pieces are measured too, and they close the loop. The fetch that dies is a
+    **file-backed** fault: a probe printed the region it found for `0x1003050` as flags `0xc2`,
+    which includes `VR_FILE`, so VM took the fill path rather than the zero-fill heap path. The fill
+    itself is correct: a probe read the first word of the frame `finish_page` had just installed
+    (`0x...2f43`, AP `0b01`) and found the file's instruction (`0xf100054a`, `0xf94012a8`,
+    `0x912c8000` for the three boot pages it saw), so the bytes arrive. What the worker executed was
+    therefore the **placeholder**, during the window, and not a bad fill: the PTE it fetched was
+    `0x...2f03` with AP zero, the value `pte_is_user` calls kernel-only.
 
-    One more candidate is now excluded. The CPU may have been running the worker on the wrong
-    address space: `switch_to_user` loads TTBR0 from `[proc + 288]`, and a slot created by
-    `kernel::thread::create` is filled field by field. A check in `handle_page_fault` compared
-    `ttbr0_el1` with `(*rp).p_seg.p_cr3` for every user fault in the failing run and printed
-    nothing, so the thread runs on its own process's tables and a first abort followed by a retry
-    that reads zeros is not a space switch. That leaves the placeholder itself: a page the port
-    calls kernel-only being fetched at EL0, or a fill that maps a frame it never wrote.
+    That is the whole defect: the thread runs on the placeholder before its own page completes. The
+    design expects the opposite. `VMCTL_CLEAR_PAGEFAULT` sweeps the *whole group*, and
+    `handle_page_fault` documents that a still-unresolved thread then "re-faults and gets its turn",
+    which is only true while the placeholder refuses the access. On x86 the U/S bit refuses it (the
+    comment above the placeholder says the page is "deliberately *not* user-accessible"); on aarch64
+    the fetch runs and executes zeros.
+
+    A direct read of a kernel-mapped address cannot settle what AP value would refuse EL0 here: that
+    experiment (`read_volatile` of `0x0900_0000` from a user program) faults, but the address is
+    *unmapped* for a user process since the identity window was closed (resolved item 16), so it
+    tests the absence of a mapping, not the permission. The port's own convention treats AP `0b01`
+    as user read-write and `0b11` as user read-only (COW leaves), and both are in use and working,
+    so the value that denies EL0 has to be settled against the ARM ARM rather than guessed.
+
+    Two fixes, and the second does not depend on that answer. One: give the placeholder the AP value
+    that actually refuses EL0 on this arch, once the encoding is confirmed. Two, structural and
+    encoding-free: have the FDIO fill write the file's bytes through a VM-owned temporary mapping
+    instead of into an address space the process can reach, and map the page only when its content
+    is the file's. Then an early resume takes an ordinary translation fault, `start_file_page`
+    answers `Pending`, and the thread parks until the fill really completes, which is the property
+    the design already documents.
 
     Also unchanged, and separate: an unhandled EL0 class reports and **halts** the machine, which is
     the pre-existing policy for a class the dispatcher does not know. Delivering SIGILL to the
