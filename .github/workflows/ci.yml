@@ -150,6 +150,21 @@ jobs:
       - name: Run host tests
         run: cargo test --workspace
 
+      # The repository's own static gates, the ones `just check` runs before it needs a
+      # toolchain: the C header contract (`tools/c-include` against the exports), the
+      # physmap rule, and the Justfile's image prerequisites. They are plain Python over
+      # the tree, so they cost a second here - and they are the only place a *clean-tree*
+      # build input can be checked, since a warm `target/` hides a missing recipe
+      # dependency (that is how `boot-image-aarch64` lost coreutils and only the aarch64
+      # gltriangle job noticed). `just check` remains the local entry point; this runs its
+      # toolchain-free half rather than repeating the clippy pass below.
+      - name: The repository's static checks
+        if: runner.os == 'Linux'
+        run: |
+          # The recipes call `python`, by that name (the same reason the other jobs do this).
+          sudo ln -sf /usr/bin/python3 /usr/local/bin/python
+          just check-static
+
       # The pinned channel's clippy component is not guaranteed to be in the
       # runner image, so add it explicitly - the `test-linux` recipe does the
       # same in the container.

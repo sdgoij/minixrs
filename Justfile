@@ -1853,13 +1853,26 @@ test-linux:
 # The physmap rule is the same kind of gate (`.notes/physmap.md` P6): a physical address is a
 # number, not a pointer, and check-physmap.py rejects one cast to a pointer unless the line
 # converts it (`phys_to_virt`/`frame_ptr`/`table_ptr`) or says `physmap-ok: <reason>`.
+#
+# The Justfile check pins what a clean tree needs and a warm `target/` hides: a recipe that
+# builds `kernel-boot` must depend on the recipes that produce every `BOOT_BINS` entry.
+#
+# `just check` is the commit gate: clippy, the static checks, and a riscv64 kernel compile.
 check:
     cargo clippy --all-targets -- -D warnings
+    @just check-static
+    @test -n "{{stage1-rustc}}" || (echo 'error: stage1 rustc not found — run `just bootstrap` first' >&2 && exit 1)
+    RUSTC="{{stage1-rustc}}" cargo check -p kernel-boot --bin kernel-boot-riscv64 --features riscv64 --target riscv64gc-unknown-minix --release
+
+# The C header contract, the physmap rule and the Justfile's image prerequisites. CI's
+# `host-tests` job runs this on its own rather than the whole of `check`, which would repeat
+# that job's clippy pass and want a stage1 it does not install.
+#
+# `check-static` is the toolchain-free half of the commit gate.
+check-static:
     python tools/check-c-headers.py
     python tools/check-physmap.py
     python tools/check-justfile.py
-    @test -n "{{stage1-rustc}}" || (echo 'error: stage1 rustc not found — run `just bootstrap` first' >&2 && exit 1)
-    RUSTC="{{stage1-rustc}}" cargo check -p kernel-boot --bin kernel-boot-riscv64 --features riscv64 --target riscv64gc-unknown-minix --release
 
 # Which repositories have commits their remote does not: the superproject and every
 # fork, each compared with its own upstream. Nested vendored submodules are skipped,
