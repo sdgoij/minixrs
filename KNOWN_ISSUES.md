@@ -95,18 +95,42 @@ are arch-specific, `[env]` is tooling/platform, not kernel.
    above can be added.
 
 7. **Server Phase 12/13 stubs** (not arch bugs, but known gaps). Only one gap is still open:
-   **`procfs` is ported but not wired, and several of its handlers return fixed text**. The
-   other bullets below describe work that has since landed and are kept as the record of what
-   the port does now; `devman`'s main loop is one of them, and its old "is a TODO" wording is
-   corrected here.
+   **`procfs` is not ready to wire: it publishes two files, and the rest need sources this port
+   does not have**. `crates/fs/src/procfs` has the VTreeFS tree, the inode table and the buffer
+   helpers, and `procfs_main` starts a real loop, but nothing calls it: there is no `procfs` bin,
+   no `BOOT_BINS` entry, and VFS mounts no `/proc`.
 
-   `crates/fs/src/procfs` has the VTreeFS tree, the inode table and the buffer helpers, and
-   `procfs_main` starts a real loop, but nothing calls it: there is no `procfs` bin, no
-   `BOOT_BINS` entry, and VFS mounts no `/proc`. Its content handlers also return a fixed string
-   where C's procfs asks PM, VM or the kernel (`root.rs` uptime, loadinfo, kinfo and vminfo;
-   `cpuinfo.rs` machine and cpuinfo; `pid.rs` cmdline, environ and psinfo; `misc.rs` load
-   averages). Wiring it is a boot slot, a VFS mount and those queries, and no consumer needs it
-   yet, so this is recorded rather than started.
+   The root now serves `hz` and `uptime` for real, from `SYS_TIMES` (the call ext2's
+   `clock_time` makes), with C's `100 * ticks / hz` split kept as a pure, host-tested helper.
+   Those two are the whole of `ROOT_FILES`: the other entries used to print a constant ("0",
+   "0 0 0 0 0") that a reader cannot tell from data, so they are out of the tree rather than
+   stubbed in it. What each needs, measured:
+   - `kinfo`: C prints `nr_procs nr_tasks` from `sys_getkinfo`, and the port's `KInfo` is
+     `{ boottime, loadinfo, reserved[14] }` with neither field, so the struct has to grow before
+     the file can say anything true.
+   - `meminfo`: `vm_info_stats` (VMIW_STATS). VM owns the numbers; no request lets a server ask.
+   - `loadavg`: C samples `GET_LOADINFO`, which is a defined constant with **no arm** in
+     `do_getinfo_handler` (that handler covers WHOAMI, MACHINE, KINFO, HZ, IRQHOOKS, IMAGE,
+     PROCTAB, PRIVTAB, PROC, PRIV, IRQACTIDS, MONPARAMS and PHYS_DELTA).
+   - `cpuinfo`: `GET_CPUINFO` has no arm either, and `cpuinfo.rs`'s `print_cpu` prints
+     "GenuineIntel" for vendor 0, so it must stay unpublished until it reads something real.
+   - `dmap`: `getsysinfo(VFS, SI_DMAP_TAB)` does exist (`vfs/misc.rs`), so this one is only a call.
+   - `/proc/<pid>`: the bulk of C's procfs. `tree.rs`'s `PROC`, `MPROC` and `FPROC` tables are
+     zeroed statics and `slot_in_use` returns false, so the lookup and getdents hooks have nothing
+     to build from. `GET_PROCTAB` (the kernel's `Proc` array) already works, which is the first
+     half; PM's `mproc` and VFS's `fproc` are the other two.
+
+   Wiring the server is a boot slot of its own: `arch-common/com.rs`, `kernel/table.rs`,
+   `kernel-boot/lib.rs`, both lists in `boot-image/manifest.rs`, the `BOOTED_PROCS` and the
+   process lists in `kernel-boot/boot_test.rs` (and `kernel/tests.rs`'s initramfs list), a bin and
+   a Cargo entry, and VFS's `main.rs`/`mount.rs`. One trap there: boot_test check D pins the
+   *last* message VFS sends before boot-complete as `mount_devman`'s `/devices` lookup, so a
+   `/proc` mount has to be mounted before devman or that check moves with it.
+
+   The order that costs least: build the per-`pid` tables first (they need `GET_PROCTAB` plus PM
+   and VFS, not a new syscall), then wire and mount the server once the tree has content worth a
+   boot slot, then add the remaining root files behind the info arms each one needs. Doing the
+   mount first would add a boot process that serves two numbers.
    - `tty` — `sys_safecopyto/from` (SYS_SAFECOPYTO/FROM kernel calls) and
      `chardriver_reply_task`/`chardriver_reply_select` (CDEV_REPLY /
      CDEV_SEL2_REPLY builders) are implemented and wired into `dev_ioctl`

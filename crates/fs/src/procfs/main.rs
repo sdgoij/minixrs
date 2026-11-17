@@ -40,19 +40,18 @@ fn get_root_inode() -> u16 {
 
 /// Initialization hook called by VTreeFS at startup.
 ///
-/// Constructs the static portion of the ProcFS tree.
-#[allow(dead_code)]
+/// Constructs the static portion of the ProcFS tree. A directory's children are built by calling
+/// [`construct_tree`] with that directory's own list, so per-`pid` directories slot in as one more
+/// call when their file list exists (see `tree.rs`: the process tables behind them are stubs).
 fn init_hook() {
     let root = get_root_inode();
     construct_tree(root, crate::procfs::root::ROOT_FILES);
 }
 
-/// Recursively construct the static portion of the ProcFS tree.
+/// Construct the entries of one directory from a sentinel-terminated `files` list.
 ///
-/// For each non-sentinel entry in `files`:
-/// - If the file mode has `S_IFDIR` set, the entry describes a subdirectory
-///   to be created recursively.
-/// - Otherwise, a regular inode is created.
+/// The list is flat: C's `tree.c` recurses into a directory's own `files` array, and this port
+/// passes each directory's array in its own call instead (nothing nests yet).
 pub fn construct_tree(dir: u16, files: &[File]) {
     for file in files {
         // Sentinel check.
@@ -61,14 +60,6 @@ pub fn construct_tree(dir: u16, files: &[File]) {
         }
 
         let _node = add_inode(dir, file.name, NO_INDEX, file.mode, &file.data);
-
-        if file.mode & S_IFDIR != 0 {
-            // Directory entry: recurse.
-            // The child file list must be stored inside FileData — currently
-            // FileData does not have a directory variant.  This will need to
-            // be added when subdirectories (e.g. /proc/net/) are implemented.
-            // For now, skip recursion.
-        }
     }
 }
 
