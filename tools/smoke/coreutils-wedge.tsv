@@ -12,4 +12,7 @@ coreutils seq 3 > wedge-big.txt
 coreutils wc -l wedge-big.txt	3 wedge-big.txt
 coreutils seq 200 > wedge-big.txt	
 coreutils wc -l wedge-big.txt	200 wedge-big.txt
+# `pwd` is the `std::env::current_dir` path: the std PAL walks the cwd up to the root
+# and back down through `minix_std::fs::getcwd` (KNOWN_ISSUES.md item 24).
+coreutils pwd	/
 /bin/echo WEDGE-OK	WEDGE-OK

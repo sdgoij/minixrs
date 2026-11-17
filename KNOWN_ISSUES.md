@@ -168,18 +168,6 @@ are arch-specific, `[env]` is tooling/platform, not kernel.
 10. **Userland `mmap(fd)` has no real consumer** — `mmapfd` is a test
     binary; exec remains the production user. (.notes/filemmap.md §6)
 
-24. **`std::env::current_dir` has no implementation for minix (2026-09-24,
-    open).** `rust/library/std/src/sys/paths/mod.rs` routes `target_os =
-    "minix"` to `sys::paths::unsupported`, so `current_dir` returns
-    "unsupported operation" whatever the libc can do — it does not call
-    `getcwd`, which is why item 23 does not fix it. `std::env::current_dir`,
-    `std::fs::canonicalize` and `Command::current_dir` all go through it, so
-    `coreutils pwd` fails and any applet that resolves a relative path in Rust
-    rather than leaving it to VFS is wrong. The fix is to route minix to
-    `sys/paths/unix.rs::getcwd` (which calls `libc::getcwd` and grows on
-    `ERANGE`); it needs the Rust fork and a stage1 rebuild, so it is not a change
-    to make alongside libc work.
-
 28. **Cloned character devices are not visible through `fstat` (2026-09-27, open — a missing
     subsystem, not a stat bug).** MINIX gives every clone open its own *node*: VFS's
     `cdev_clone` (`servers/vfs/device.c`) asks PFS to create a temporary device file whose
@@ -1386,6 +1374,18 @@ the burst-overflow reading in item 37, are under `# Resolved issues`.
     holds every message inside `strerror`'s buffer, which was 32 bytes and
     silently truncated the long ones.
     (`crates/minix-libc/src/c_sys.rs`, `crates/minix-libc/src/c_string.rs`)
+
+24. **~~`std::env::current_dir` has no implementation for minix~~: FIXED (2026-11-17).**
+    The fork's `sys/paths/mod.rs` routes `target_os = "minix"` to
+    `sys/pal/minix/path.rs`, whose `getcwd` walks the cwd up to the root and back down
+    through `minix_std::fs::getcwd` (ported from MINIX's `__getcwd`), growing the buffer on
+    `ERANGE`; the same module implements `chdir` and `temp_dir`. The fix was already in the
+    fork (`d2280b1c34e`, "std: add getcwd, dirent inodes and exec to minix"); the entry was
+    stale. Verified in the guest with the current stage1: `coreutils pwd` prints `/`, a new step in
+    `tools/smoke/coreutils-wedge.tsv` driven by `just test-coreutils-wedge` (6 steps green).
+    (`rust/library/std/src/sys/paths/mod.rs`,
+    `rust/library/std/src/sys/pal/minix/path.rs`, `crates/minix-std/src/fs.rs`,
+    `tools/smoke/coreutils-wedge.tsv`)
 
 25. **~~MFS `getdents` returned `OK` at end-of-directory without a reply payload~~
     — FIXED (2026-09-24).** The end-of-directory path returned a bare `0`,
