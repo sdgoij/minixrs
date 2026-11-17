@@ -36,8 +36,8 @@ const TIMERFD_MODE: u32 = S_IFREG | 0o600;
 
 /// `timerfd_create(2)` / `timerfd_settime(2)` flags, matching
 /// `<sys/timerfd.h>` in `tools/c-include`.
-pub const TFD_NONBLOCK: i32 = 0o4000; // O_NONBLOCK
-pub const TFD_CLOEXEC: i32 = 0o200000; // the port's O_CLOEXEC
+pub const TFD_NONBLOCK: i32 = O_NONBLOCK; // O_NONBLOCK
+pub const TFD_CLOEXEC: i32 = O_CLOEXEC as i32; // O_CLOEXEC
 pub const TFD_TIMER_ABSTIME: i32 = 1;
 
 /// `CLOCK_MONOTONIC` (the clock `calloop` uses).

@@ -373,8 +373,23 @@ pub const PFS_PROC_NR: i32 = arch_common::com::PFS_PROC_NR;
 /// Pipe buffer size in bytes (POSIX PIPE_BUF, minimum atomic write size).
 pub const PIPE_BUF_SIZE: i32 = 7168;
 
-/// Open flag: non-blocking I/O.
-pub const O_NONBLOCK: i32 = 0o4000;
+// Open flags, MINIX 3.3.0's `sys/sys/fcntl.h` (NetBSD's) values. They live
+// here rather than beside each handler: when the same flag was defined in two
+// places they drifted apart, and the header's values stopped matching MINIX.
+/// Non-blocking I/O (`O_NONBLOCK`).
+pub const O_NONBLOCK: i32 = 0o4;
+/// Append on every write (`O_APPEND`).
+pub const O_APPEND: u32 = 0o10;
+/// Create the file if it does not exist (`O_CREAT`).
+pub const O_CREAT: u32 = 0o1000;
+/// Truncate to zero length (`O_TRUNC`).
+pub const O_TRUNC: u32 = 0o2000;
+/// Fail if the file already exists (`O_EXCL`).
+pub const O_EXCL: u32 = 0o4000;
+/// Do not assign a controlling terminal (`O_NOCTTY`).
+pub const O_NOCTTY: i32 = 0o100000;
+/// Close the descriptor on exec (`O_CLOEXEC`).
+pub const O_CLOEXEC: u32 = 0o20000000;
 /// Open flag mask for the access mode (read-only, write-only, read-write).
 pub const O_ACCMODE: u32 = 0o3;
 

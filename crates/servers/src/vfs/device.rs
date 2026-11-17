@@ -283,9 +283,6 @@ const CDEV_NOCTTY: i32 = 0x02;
 /// Reply flag: a successful CDEV_OPEN made the device the controlling tty.
 const CDEV_CTTY: i32 = 2;
 
-/// O_NOCTTY open flag (minix/include/fcntl.h).
-const O_NOCTTY: i32 = 0o400;
-
 /// Max bytes the tty replies inline per CDEV_READ (48-byte payload).
 const INLINE_READ_MAX: usize = 48;
 /// Max bytes the tty accepts inline per CDEV_WRITE (m2_l3 = last 8 payload bytes).
@@ -1136,7 +1133,7 @@ mod tests {
     fn test_open_access_flags_noctty() {
         // O_RDWR | O_NOCTTY: read + write, not the controlling tty.
         assert_eq!(
-            open_access_flags(0o02 | 0o400),
+            open_access_flags(0o02 | O_NOCTTY),
             CDEV_R_BIT | CDEV_W_BIT | CDEV_NOCTTY
         );
     }

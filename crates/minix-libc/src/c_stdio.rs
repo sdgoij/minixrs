@@ -2149,9 +2149,9 @@ unsafe fn mode_flags(mode: *const c_char) -> Option<(c_int, c_int)> {
     const O_RDONLY: c_int = 0o00;
     const O_WRONLY: c_int = 0o01;
     const O_RDWR: c_int = 0o02;
-    const O_CREAT: c_int = 0o100;
-    const O_TRUNC: c_int = 0o1000;
-    const O_APPEND: c_int = 0o2000;
+    const O_CREAT: c_int = 0o1000;
+    const O_TRUNC: c_int = 0o2000;
+    const O_APPEND: c_int = 0o10;
     if mode.is_null() {
         return None;
     }

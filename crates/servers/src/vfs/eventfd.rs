@@ -38,9 +38,9 @@ const EVENTFD_MODE: u32 = S_IFREG | 0o600;
 /// `eventfd(2)` flags, matching `<sys/eventfd.h>` in `tools/c-include`.
 pub const EFD_SEMAPHORE: i32 = 1;
 /// `O_NONBLOCK`; accepted, but a read never blocks here (see the module docs).
-pub const EFD_NONBLOCK: i32 = 0o4000;
-/// The port's `O_CLOEXEC` (see `tools/c-include/fcntl.h`).
-pub const EFD_CLOEXEC: i32 = 0o200000;
+pub const EFD_NONBLOCK: i32 = O_NONBLOCK;
+/// `O_CLOEXEC` (see `tools/c-include/fcntl.h`).
+pub const EFD_CLOEXEC: i32 = O_CLOEXEC as i32;
 
 /// Maximum live eventfds.
 const MAX_EVENTFDS: usize = 64;

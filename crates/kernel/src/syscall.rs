@@ -194,7 +194,7 @@ unsafe fn sys_open_handler(caller: *mut crate::proc::Proc, args: &[u64; 6]) -> i
     let msg: &mut [u8; crate::proc::MESSAGE_SIZE] = &mut (*caller).p_sendmsg;
     msg.fill(0);
     msg[0..4].copy_from_slice(&VFS_PROC_NR.to_le_bytes());
-    if flags & 0o100 != 0 {
+    if flags & 0o1000 != 0 {
         // O_CREAT set — the file may need to be created (VFS_CREAT).
         msg[4..8].copy_from_slice(&0x104i32.to_le_bytes()); // VFS_CREAT = 0x104
         msg[8..16].copy_from_slice(&path_ptr.to_le_bytes());

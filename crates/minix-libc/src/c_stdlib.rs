@@ -499,8 +499,8 @@ pub unsafe extern "C" fn mktemp(template: *mut c_char) -> *mut c_char {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn mkstemp(template: *mut c_char) -> c_int {
     const O_RDWR: c_int = 0o02;
-    const O_CREAT: c_int = 0o100;
-    const O_EXCL: c_int = 0o200;
+    const O_CREAT: c_int = 0o1000;
+    const O_EXCL: c_int = 0o4000;
     const EINVAL: i32 = 22;
     const EEXIST: i32 = 17;
     if template.is_null() {

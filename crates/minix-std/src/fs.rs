@@ -113,18 +113,19 @@ pub const UTIME_OMIT: i64 = -2;
 
 pub const F_DUPFD: i32 = 0;
 
-// Open flags  (from `minix/include/fcntl.h`)
+// Open flags (MINIX 3.3.0's `sys/sys/fcntl.h`, which is NetBSD's).
 
-pub const O_RDONLY: i32 = 0o00;
-pub const O_WRONLY: i32 = 0o01;
-pub const O_RDWR: i32 = 0o02;
-pub const O_CREAT: i32 = 0o100;
-pub const O_EXCL: i32 = 0o200;
-pub const O_NOCTTY: i32 = 0o400;
-pub const O_TRUNC: i32 = 0o1000;
-pub const O_APPEND: i32 = 0o2000;
-pub const O_NONBLOCK: i32 = 0o4000;
-pub const O_SYNC: i32 = 0o10000;
+pub const O_RDONLY: i32 = 0o0;
+pub const O_WRONLY: i32 = 0o1;
+pub const O_RDWR: i32 = 0o2;
+pub const O_NONBLOCK: i32 = 0o4;
+pub const O_APPEND: i32 = 0o10;
+pub const O_SYNC: i32 = 0o200;
+pub const O_CREAT: i32 = 0o1000;
+pub const O_TRUNC: i32 = 0o2000;
+pub const O_EXCL: i32 = 0o4000;
+pub const O_NOCTTY: i32 = 0o100000;
+pub const O_CLOEXEC: i32 = 0o20000000;
 
 // Seek whence constants
 
@@ -1401,7 +1402,7 @@ pub const EFD_SEMAPHORE: i32 = 1;
 /// Accepted; a read on a zero counter returns `EAGAIN` here regardless.
 pub const EFD_NONBLOCK: i32 = O_NONBLOCK;
 /// Set close-on-exec on the returned descriptor.
-pub const EFD_CLOEXEC: i32 = 0o200000;
+pub const EFD_CLOEXEC: i32 = O_CLOEXEC;
 
 /// `eventfd(initval, flags)`: an anonymous 64-bit counter returned as a
 /// descriptor an event loop can `poll`.
@@ -1428,7 +1429,7 @@ pub fn eventfd(initval: u32, flags: i32) -> Result<i32, MinixErr> {
 
 // timerfd(2) flags (match `tools/c-include/sys/timerfd.h`).
 pub const TFD_NONBLOCK: i32 = O_NONBLOCK;
-pub const TFD_CLOEXEC: i32 = 0o200000;
+pub const TFD_CLOEXEC: i32 = O_CLOEXEC;
 /// `value` is interpreted as an absolute time on `clockid`.
 pub const TFD_TIMER_ABSTIME: i32 = 1;
 
@@ -1520,7 +1521,7 @@ pub fn timerfd_gettime(fd: i32) -> Result<Itimerspec, MinixErr> {
 
 // epoll(7) constants (match `tools/c-include/sys/epoll.h`).
 /// `epoll_create1` flag: set close-on-exec on the returned descriptor.
-pub const EPOLL_CLOEXEC: i32 = 0o200000;
+pub const EPOLL_CLOEXEC: i32 = O_CLOEXEC;
 /// `epoll_ctl` operations.
 pub const EPOLL_CTL_ADD: i32 = 1;
 pub const EPOLL_CTL_DEL: i32 = 2;
@@ -1825,15 +1826,16 @@ mod tests {
     #[test]
     fn test_open_flags() {
         assert_eq!(O_RDONLY, 0o00);
-        assert_eq!(O_WRONLY, 0o01);
-        assert_eq!(O_RDWR, 0o02);
-        assert_eq!(O_CREAT, 0o100);
-        assert_eq!(O_EXCL, 0o200);
-        assert_eq!(O_NOCTTY, 0o400);
-        assert_eq!(O_TRUNC, 0o1000);
-        assert_eq!(O_APPEND, 0o2000);
-        assert_eq!(O_NONBLOCK, 0o4000);
-        assert_eq!(O_SYNC, 0o10000);
+        assert_eq!(O_WRONLY, 0o1);
+        assert_eq!(O_RDWR, 0o2);
+        assert_eq!(O_NONBLOCK, 0o4);
+        assert_eq!(O_APPEND, 0o10);
+        assert_eq!(O_SYNC, 0o200);
+        assert_eq!(O_CREAT, 0o1000);
+        assert_eq!(O_TRUNC, 0o2000);
+        assert_eq!(O_EXCL, 0o4000);
+        assert_eq!(O_NOCTTY, 0o100000);
+        assert_eq!(O_CLOEXEC, 0o20000000);
     }
 
     #[test]

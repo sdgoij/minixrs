@@ -285,22 +285,6 @@ are arch-specific, `[env]` is tooling/platform, not kernel.
     it. (`crates/servers/src/vfs/epoll.rs`, `crates/servers/src/vfs/select.rs`,
     `crates/servers/src/vfs/call.rs`)
 
-36. **The C header's `O_*` flags do not match MINIX's (2026-11-08).**
-    `tools/c-include/fcntl.h` defines the open flags as the values the C clients have used since
-    the header was added, not the values in `.refs/minix-3.3.0/sys/sys/fcntl.h`. Only the access
-    mode agrees (`O_RDONLY`, `O_WRONLY`, `O_RDWR` are 0, 1, 2); the rest alias unrelated MINIX
-    flags: `O_CREAT` 0x40 (MINIX `O_ASYNC`), `O_EXCL` 0x80 (`O_SYNC`), `O_TRUNC` 0x200
-    (`O_CREAT`), `O_APPEND` 0x400 (`O_TRUNC`), `O_NONBLOCK` 0x800 (`O_EXCL`), `O_CLOEXEC`
-    0x10000 (`O_DSYNC`). A C program that passes one gets a different operation than it asked
-    for; `cabi.c`'s `pipe2(O_NONBLOCK)` check is the visible consumer and is asking the kernel
-    for `O_EXCL`. The header stayed latent because it spelled these with Rust's `0o` literal
-    prefix, so no C compiler could expand the macros at all; `ctest.c`'s `open(..., O_RDONLY)`
-    turned that into a hard build failure and the syntax was fixed in `8d27b3809` without
-    changing any value. Fixing the values means taking MINIX's numbers and re-running the C
-    gates (`cabi`, `hello`/`ctest`, `gbmtest`, the EGL probes), because Mesa is compiled against
-    this include directory too. (`tools/c-include/fcntl.h`,
-    `.refs/minix-3.3.0/sys/sys/fcntl.h`)
-
 38. **An `exec` of a command can fail at random, and the shell called every failure "not found"
     (2026-11-16, open, measured).** The interactive-bash gate failed in CI on aarch64 and on
     riscv64 (`bash never printed its prompt`), the console showing the prompt's reprint of the
@@ -1927,6 +1911,34 @@ the burst-overflow reading in item 37, are under `# Resolved issues`.
     `E2BIG` instead of silently truncating argv or envp. Pinned by
     `exec_offset_table_covers_the_largest_argv_and_envp`.
     (`crates/minix-rt/src/lib.rs`)
+
+46. **~~The C header's `O_*` flags did not match MINIX's~~ — FIXED (2026-11-17; was open
+    item 36).** The header, `minix-libc`, `minix-std`, the kernel's `SYS_open` check,
+    VFS's `do_open`/`do_creat`/`do_pipe2`/`eventfd`/`timerfd`/`epoll`, the DRM
+    `DRM_CLOEXEC`, and the std PAL's duplicated constants now all use MINIX 3.3.0's
+    `sys/sys/fcntl.h` values (`O_CREAT` 0x200, `O_EXCL` 0x800, `O_TRUNC` 0x400,
+    `O_APPEND` 0x8, `O_NONBLOCK` 0x4, `O_CLOEXEC` 0x400000). The open flags are defined
+    once in `vfs::consts`, the std PAL re-exports `minix_std::fs::O_*` instead of keeping a
+    copy, and `do_open`/`do_creat` now honour `O_CLOEXEC` at open time (C's `common_open`
+    does), with `do_open`'s stale `1 << 12` guard replaced by the flag. The stage1 sysroot
+    was rebuilt (`just bootstrap all`) so std carries the new values. Gates:
+    `cargo test --workspace` (3203 passed), clippy, `just check`, `just test-cabi x86`
+    (the `pipe2(O_NONBLOCK)` probe), `just test-cdyn-x86`, and
+    `just test-coreutils-wedge` (`coreutils seq 3 > file`, the std `File::create` path).
+    The Mesa/gbm/EGL probes were not re-run: the prebuilt DSOs predate the header and a
+    source build needs WSL.
+
+    Still the port's own ABI: `F_GETLK`/`F_SETLK`/`F_SETLKW`, the lock types and
+    `struct flock` in the same header, and `minix-libc::fcntl` takes an `int` third
+    argument, so a lock command cannot carry a `struct flock`. That is a separate defect,
+    recorded here rather than silently aligned; the lock path stays reachable only from a
+    message a caller builds itself.
+    (`tools/c-include/fcntl.h`, `crates/servers/src/vfs/consts.rs`,
+    `crates/servers/src/vfs/call.rs`, `crates/servers/src/vfs/device.rs`,
+    `crates/servers/src/vfs/{eventfd,timerfd,epoll}.rs`, `crates/minix-std/src/fs.rs`,
+    `crates/minix-libc/src/{lib,c_stdio,c_stdlib}.rs`, `crates/kernel/src/syscall.rs`,
+    `crates/drivers/src/video/drm.rs`,
+    `rust/library/std/src/sys/pal/minix/syscall.rs`)
 
 ---
 

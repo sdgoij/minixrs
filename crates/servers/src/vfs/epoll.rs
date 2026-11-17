@@ -36,7 +36,7 @@ use crate::vfs::types::{Filp, Vnode};
 const EPOLL_MODE: u32 = S_IFREG | 0o600;
 
 /// `epoll_create1(2)` flags, matching `<sys/epoll.h>` in `tools/c-include`.
-pub const EPOLL_CLOEXEC: i32 = 0o200000; // the port's O_CLOEXEC
+pub const EPOLL_CLOEXEC: i32 = O_CLOEXEC as i32;
 
 /// `epoll_ctl(2)` operations, matching `<sys/epoll.h>`.
 pub const EPOLL_CTL_ADD: i32 = 1;

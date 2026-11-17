@@ -42,12 +42,6 @@ pub(crate) const SELF: i32 = 31742;
 /// SYS_VIRCOPY kernel call number.
 #[cfg_attr(not(target_os = "minix"), allow(dead_code))]
 const SYS_VIRCOPY: i32 = 15;
-/// O_EXCL open flag (from `minix/include/fcntl.h`).
-const O_EXCL: u32 = 0o200;
-/// O_TRUNC open flag (from `minix/include/fcntl.h`).
-const O_TRUNC: u32 = 0o1000;
-/// O_APPEND open flag (from `minix/include/fcntl.h`).
-const O_APPEND: u32 = 0o2000;
 /// CP_FLAG_TRY: direct copy without VM fallback.
 const CP_FLAG_TRY: i32 = 0x01;
 
@@ -157,7 +151,7 @@ pub fn do_open() -> i32 {
     let path_len = r_u32(&glob.fs_m_in, 24) as usize;
 
     // Reject O_CREAT (use do_creat instead).
-    if flags & (1 << 12) != 0 {
+    if flags & O_CREAT != 0 {
         return EINVAL;
     }
 
@@ -305,6 +299,12 @@ pub fn do_open() -> i32 {
     // release here: a `put_vnode` would drop the vnode the open fd depends on to
     // zero, and the entry would be reused while the filp still pointed at it (C's
     // `do_open` hands the reference over the same way).
+    // C's `common_open` marks the descriptor close-on-exec here. Setting it after
+    // the filp is wired means a failed open cannot leave the bit set on a slot a
+    // later open reuses.
+    if flags & O_CLOEXEC != 0 {
+        fp.fp_cloexec |= 1u64 << fd;
+    }
     fd
 }
 
@@ -459,6 +459,9 @@ pub fn do_creat() -> i32 {
     }
     fp.fp_filp[fd as usize] = filp_idx;
     // As in `do_open`: the reference from `eat_path` belongs to the filp now.
+    if open_flags & O_CLOEXEC != 0 {
+        fp.fp_cloexec |= 1u64 << fd;
+    }
     fd
 }
 
@@ -1007,7 +1010,7 @@ pub fn do_pipe2() -> i32 {
         (*filp_arr.add(filp1 as usize)).filp_flags = extra_flags;
     }
 
-    if (flags as u32) & 0x00400000 != 0 {
+    if (flags as u32) & O_CLOEXEC != 0 {
         fp.fp_cloexec |= 1u64 << fd0;
         fp.fp_cloexec |= 1u64 << fd1;
     }

@@ -121,9 +121,9 @@ pub const DRM_IOCTL_PRIME_FD_TO_HANDLE: u32 = iowr(DRM_IOCTL_BASE, 0x2e, SZ_PRIM
 const SZ_PRIME_HANDLE: u32 = 12;
 
 /// `DRM_CLOEXEC` — the ABI's spelling of `O_CLOEXEC`, a flag an export may ask for the
-/// descriptor to carry. The port's value, because the client is built against the port's
-/// `<fcntl.h>` (Linux's `O_CLOEXEC` is `0x80000`; this port's is `0o200000`).
-pub const DRM_CLOEXEC: u32 = 0o200000;
+/// descriptor to carry. It is MINIX 3.3.0's `O_CLOEXEC` (`0x400000`), because the client
+/// is built against the port's `<fcntl.h>` (Linux's is `0x80000`).
+pub const DRM_CLOEXEC: u32 = 0o20000000;
 /// `DRM_RDWR` — the ABI's spelling of `O_RDWR`, the other flag an export may carry.
 pub const DRM_RDWR: u32 = 0o02;
 

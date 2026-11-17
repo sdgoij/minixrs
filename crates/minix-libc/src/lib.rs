@@ -748,9 +748,9 @@ pub unsafe extern "C" fn pipe(fds: *mut [c_int; 2]) -> c_int {
 /// `O_CLOEXEC` / `O_NONBLOCK` / `F_SETFD` / `F_SETFL` (`fcntl.h`), the flags
 /// `pipe2` and `accept4` apply to the descriptor they create.
 #[cfg(target_os = "minix")]
-const O_CLOEXEC: c_int = 0o200000;
+const O_CLOEXEC: c_int = 0o20000000;
 #[cfg(target_os = "minix")]
-const O_NONBLOCK: c_int = 0o4000;
+const O_NONBLOCK: c_int = 0o4;
 #[cfg(target_os = "minix")]
 const F_SETFD: c_int = 2;
 #[cfg(target_os = "minix")]
