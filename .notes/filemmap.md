@@ -282,8 +282,12 @@ mode it faulted in.
   file end is not extended. Two gaps remain: there is no `msync` syscall in the port,
   and a region `mprotect`ed read-only after a write is not written back (the release
   checks `VR_WRITABLE`, and nothing in the tree `mprotect`s a file mapping).
-- **Userland `mmap(fd)`**: exercised by `/bin/mmapfd` (§7) and `mmapfd shared`;
-  exec remains the production user. The `do_fstat` gap recorded here does **not**
+- **Userland `mmap(fd)`**: the production user is the Wayland compositor, not
+  exec: `wlserver` maps each client `wl_shm` pool's memfd when it composites
+  (`crates/servers/src/wlserver.rs::compose_scene`), the keymap memfd it builds, and
+  the fb/dmabuf fds of its present path; `wserver` maps `/dev/fb` the same way.
+  `/bin/mmapfd` (§7) and `mmapfd shared` remain the focused tests (KNOWN_ISSUES
+  item 10, resolved once this landed). The `do_fstat` gap recorded here does **not**
   hold in the current code: `do_fstat` → `req_stat` uses a write grant
   (`vfs/call.rs`, `vfs/request.rs`) and MFS `fs_stat` copies the `Stat` back
   (`fs/src/mfs/stadir.rs::stat_inode` → `safecopy_to`). mmapfd still avoids `fstat`

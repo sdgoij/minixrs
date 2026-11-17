@@ -155,9 +155,6 @@ are arch-specific, `[env]` is tooling/platform, not kernel.
    signal delivery only). Kernel model (1:1, fork/exec/exit group sweep)
    is done and boot-verified.
 
-10. **Userland `mmap(fd)` has no real consumer** — `mmapfd` is a test
-    binary; exec remains the production user. (.notes/filemmap.md §6)
-
 28. **Cloned character devices are not visible through `fstat` (2026-09-27, open — a missing
     subsystem, not a stat bug).** MINIX gives every clone open its own *node*: VFS's
     `cdev_clone` (`servers/vfs/device.c`) asks PFS to create a temporary device file whose
@@ -415,6 +412,14 @@ the burst-overflow reading in item 37, are under `# Resolved issues`.
     standard live-update shape). All four definitions now carry C's values, with
     `test_minix_ipc_error_codes_match_c` pinning them. (`.notes/porting_plan.md`
     finding 20)
+
+10. **~~Userland `mmap(fd)` has no real consumer~~: resolved (2026-11-17), the entry was
+    stale.** `wlserver` is a production `mmap(fd)` user and has been since the `wl_shm`
+    present path landed: `compose_scene` maps each client's pool memfd by the fd it
+    received over the socket (`crates/servers/src/wlserver.rs`), `load_keymap` maps the
+    keymap memfd it builds, and the present path maps the fb and dma-buf fds;
+    `wserver` maps `/dev/fb` the same way. `mmapfd` is therefore a focused test, not the
+    only user. (`.notes/filemmap.md` §6)
 
 12. **A process VM decides to kill was not killed (2026-09-21, FIXED — the multicall wedge).**
     This is what made every multicall tool look broken, and it was two bugs in the same path, each
