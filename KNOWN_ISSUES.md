@@ -267,14 +267,23 @@ the burst-overflow reading in item 37, are under `# Resolved issues`.
     (`crates/servers/src/vm/mod.rs`, the comment above that call says the placeholder is
     "deliberately *not* user-accessible" so no user thread can run its zeros).
 
-    On aarch64 that intent may not hold: `MAP_WRITE` is `0` in `arch-aarch64/src/hal.rs` and the
-    access permission lives entirely in AP[2:1], so a placeholder mapped with `MAP_WRITE` alone may
-    be an EL0-accessible page whose AP is simply zero, and an EL0 fetch of it then runs zeros rather
-    than taking the permission fault that would park the thread until the fill completes. The next
-    question is therefore precise: what PTE is live for the VA when the fetch succeeds, and does
-    `pte_is_user` say so? Instrument `start_file_page` (or VM's fault entry) to print the PTE for
-    the faulting page during the fill window, and compare the same moment on x86, where the U/S bit
-    makes the placeholder supervisor-only and the gate passes.
+    On aarch64 that intent does not hold, and the measurement says so. A probe in
+    `start_file_page`, right after the placeholder's `vm_map_page_in`, walked the PTE and printed
+    it: `0x0000_47d3_2f03` for VA `0x1003000` (`0x47f62f03` and `0x48382f03` in the next two fills,
+    so only the frame moves). The low bits are `0x...f03`: VALID, TYPE, SH_INNER, AF and NG, with
+    **AP = 0**, which is the value `pte_is_user` reports as kernel-only, and the probe printed `K`
+    for it. The worker still fetched that mapping and ran its zeros. So the placeholder is not the
+    page this port calls non-user, and a fetch of it does not take the permission fault that would
+    park the thread in `PageOutcome::Pending` until VFS finishes the fill.
+
+    That also explains why the `pte_is_user` branch two dozen lines above (`an orphan placeholder`)
+    does not save it: it answers a question about the PTE that the hardware is not answering the
+    same way. The next step is one comparison and then a decision. The comparison: dump the PTE
+    that `finish_page` installs for the same VA (`MAP_USER | MAP_WRITE | MAP_EXEC`) the same way,
+    and settle which AP encoding this port and QEMU actually agree makes a TTBR0 page unreachable
+    from EL0. The decision: either give the placeholder that encoding, or stop mapping it before
+    the request and park the faulting thread until the fill completes, which is what `Pending`
+    already does when the page is known to be in flight.
 
     Also unchanged, and separate: an unhandled EL0 class reports and **halts** the machine, which
     is the pre-existing policy for a class the dispatcher does not know. Delivering SIGILL to the
