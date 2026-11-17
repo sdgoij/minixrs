@@ -281,20 +281,19 @@ are arch-specific, `[env]` is tooling/platform, not kernel.
     offset-table overflow in item 45 is one candidate for this class and is fixed; the gate has
     not failed since the diagnostic, so the errno is still owed.
 
-47. **A `MAP_SHARED` file page has no writeback, and a cache-evicted page diverges
-    (2026-11-17, open, deliberate).** The file page cache (`vm/cache.rs`, 4096 entries)
-    holds one `PhysBlock` reference per cached page, and a mapping holds its own, so
-    eviction (`insert_entry`'s `pb_unref` of the LRU victim) leaves the mapping's frame
-    alive but drops the file key. A later fault of the same `(dev, ino, offset)` reads
-    the file into a new frame, so the two mappings no longer share the page and nothing
-    writes the dirty frame back to the file. No ported consumer does this today
-    (`wl_shm` uses a memfd, whose pages are the object rather than a file cache entry),
-    and fixing it needs a writeback path from VM to VFS's FDIO and a dirty bit on the
-    cache entry, so it is recorded rather than synthesized. A shorter-term mitigation
-    would be to skip a mapped victim during eviction; it trades cache capacity for
-    coherence and is not done here.
-    (`crates/servers/src/vm/cache.rs`, `crates/servers/src/vm/mod.rs`,
-    `.notes/filemmap.md` §6)
+48. **A `MAP_SHARED` file page has no writeback (2026-11-17, open, deliberate).** A
+    write through a `MAP_SHARED` file mapping lands in the cache frame and is visible
+    to every mapper of that page, but nothing writes the frame back to the file:
+    `munmap`, `msync` and process exit do not ask VFS to write it, and the FDIO
+    protocol VM uses for file pages is read-only (`VMVFSREQ_FDIO` calls `req_read`).
+    Closing and reopening the file therefore loses the write. No ported consumer
+    depends on it (`wl_shm` uses a memfd, whose pages are the object rather than a
+    file cache entry), and fixing it needs a write request VM can send without
+    blocking on VFS (VFS may be blocked on VM), a dirty mark per cached page, and a
+    writeback at munmap/exit before the region's fd is closed. The divergence half of
+    the original item is fixed (item 47).
+    (`crates/servers/src/vm/cache.rs`, `crates/servers/src/vm/vfs_request.rs`,
+    `crates/servers/src/vfs/call.rs`, `.notes/filemmap.md` §6)
 
 ---
 
@@ -1935,6 +1934,21 @@ the burst-overflow reading in item 37, are under `# Resolved issues`.
     `crates/minix-libc/src/{lib,c_stdio,c_stdlib}.rs`, `crates/kernel/src/syscall.rs`,
     `crates/drivers/src/video/drm.rs`,
     `rust/library/std/src/sys/pal/minix/syscall.rs`)
+
+47. **~~A cache-evicted `MAP_SHARED` page diverged from its mapping~~: FIXED
+    (2026-11-17).** The file page cache holds one `PhysBlock` reference per page and a
+    mapping holds its own, so `insert_entry`'s eviction used to drop the LRU entry even
+    when its count was above one: the mapping kept the frame, the file key was gone,
+    and a later fault of the same `(dev, ino, offset)` read the file into a new frame,
+    so two mappings of one page stopped sharing. Eviction now walks the LRU
+    oldest-first for an entry whose count is one (the cache's alone) and leaves a
+    mapped page in place; when every entry is mapped the new page is simply not
+    cached, and the refused insert takes no reference. Pinned by
+    `test_a_mapped_page_is_not_evicted` and
+    `test_a_full_cache_of_mapped_pages_refuses_the_insert`, and the existing
+    `test_lru_eviction` now exercises cache-only pages. Writeback is a separate gap,
+    recorded as item 48.
+    (`crates/servers/src/vm/cache.rs`)
 
 ---
 

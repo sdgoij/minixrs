@@ -103,6 +103,26 @@ impl<const N: usize> CacheTable<N> {
         self.count == 0
     }
 
+    /// The oldest slot whose frame no mapping holds, for eviction.
+    ///
+    /// A cached page whose `PhysBlock` count is above one still has a live mapping
+    /// (or a forked sibling) holding the frame. Dropping its cache entry would
+    /// leave the mapping with a frame no longer keyed by the file, so a later fault
+    /// of the same page would allocate a second frame and the two mappings would
+    /// stop sharing (KNOWN_ISSUES.md item 47). Such an entry stays until its last
+    /// mapping goes away.
+    fn lru_oldest_unmapped(&self) -> Option<usize> {
+        let mut slot = self.lru_oldest;
+        while slot != NONE {
+            let e = self.slots[slot].as_ref().expect("live slot in LRU list");
+            if pb::pb_count(e.pb) <= 1 {
+                return Some(slot);
+            }
+            slot = e.newer;
+        }
+        None
+    }
+
     /// Remove `slot` from the LRU list. `slot` must be a live entry.
     fn lru_remove(&mut self, slot: usize) {
         let (older, newer) = {
@@ -303,10 +323,14 @@ impl<const N: usize> CacheTable<N> {
             self.lru_touch(slot);
             return;
         }
-        // New key: evict the LRU oldest when full.
+        // New key: evict the LRU oldest entry no mapping holds when full. A mapped
+        // page is never evicted (see `lru_oldest_unmapped`); when every entry is
+        // mapped the new page is not cached, and the caller keeps its own
+        // reference on the frame.
         if self.count == N {
-            let victim = self.lru_oldest;
-            debug_assert!(victim != NONE, "full table must have an oldest");
+            let Some(victim) = self.lru_oldest_unmapped() else {
+                return;
+            };
             let victim_pb = self.slots[victim].as_ref().expect("victim slot live").pb;
             self.lru_remove(victim);
             self.slots[victim] = None;
@@ -492,28 +516,28 @@ mod tests {
             let pb = pb::pb_new(frame()).unwrap();
             *slot = pb;
             t.insert_bydev(1, (i as u64) * 0x1000, 0, 0, (i as u64 + 1) * 0x1000, pb);
+            // Cache-only. Eviction leaves a page with a live mapping alone, so this
+            // test must not keep the owner's reference (see
+            // `test_a_mapped_page_is_not_evicted`).
+            pb::pb_unref(pb);
         }
         // Touching entry 0 makes it newest.
         assert_eq!(t.find_bydev(1, 0, None, 0, true), Some((0x1000, pbs[0])));
-        // Inserting a fifth entry evicts the LRU oldest: entry 1. The
-        // eviction releases the cache's reference (back to the owner's 1).
+        // Inserting a fifth entry evicts the LRU oldest: entry 1. The eviction
+        // releases the cache's only reference, which frees the frame.
         let pb5 = pb::pb_new(frame()).unwrap();
         t.insert_bydev(1, 4 * 0x1000, 0, 0, 5 * 0x1000, pb5);
         assert_eq!(t.len(), 4);
         assert_eq!(t.find_bydev(1, 0, None, 0, false), Some((0x1000, pbs[0])));
         assert_eq!(t.find_bydev(1, 0x1000, None, 0, false), None);
-        assert_eq!(pb::pb_count(pbs[1]), 1);
-        pb::pb_unref(pbs[1]);
         assert_eq!(pb::pb_count(pbs[1]), 0);
         assert_eq!(
             t.find_bydev(1, 4 * 0x1000, None, 0, false),
             Some((5 * 0x1000, pb5))
         );
+        // Clearing frees the cache-only entries; pb5's owner reference remains.
         t.clear_bydev(1);
         pb::pb_unref(pb5);
-        pb::pb_unref(pbs[0]);
-        pb::pb_unref(pbs[2]);
-        pb::pb_unref(pbs[3]);
     }
 
     #[test]
@@ -610,6 +634,58 @@ mod tests {
         t.clear_bydev(7);
         pb::pb_unref(pb1);
         pb::pb_unref(pb2);
+    }
+
+    #[test]
+    fn test_a_mapped_page_is_not_evicted() {
+        // The table is full with `mapped` (LRU oldest) and `unmapped`. A mapping
+        // keeps `mapped`'s frame, so its count is 2 (the mapping's and the cache's);
+        // dropping the entry would lose the file key while the frame stays live. The
+        // insert must evict `unmapped` instead.
+        let mut t = CacheTable::<2>::new();
+        let mapped = pb::pb_new(frame()).unwrap();
+        let unmapped = pb::pb_new(frame()).unwrap();
+        t.insert_byino(0, 1, 0, 0x4000, mapped);
+        t.insert_byino(0, 2, 0, 0x5000, unmapped);
+        // Drop the caller's reference on `unmapped`: only the cache holds it now.
+        pb::pb_unref(unmapped);
+        // Refresh `unmapped` so `mapped` is the LRU oldest.
+        assert!(t.find_byino(0, 2, 0, true).is_some());
+
+        let fresh = pb::pb_new(frame()).unwrap();
+        t.insert_byino(0, 3, 0, 0x6000, fresh);
+
+        assert_eq!(t.find_byino(0, 1, 0, false), Some((0x4000, mapped)));
+        assert_eq!(t.find_byino(0, 2, 0, false), None);
+        assert_eq!(t.find_byino(0, 3, 0, false), Some((0x6000, fresh)));
+
+        t.clear_bydev(0);
+        pb::pb_unref(mapped);
+        pb::pb_unref(fresh);
+    }
+
+    #[test]
+    fn test_a_full_cache_of_mapped_pages_refuses_the_insert() {
+        // Every entry is mapped (count 2: a mapping plus the cache), so there is no
+        // coherent victim. The new page is not cached, and the refused insert takes
+        // no reference on its frame.
+        let mut t = CacheTable::<2>::new();
+        let a = pb::pb_new(frame()).unwrap();
+        let b = pb::pb_new(frame()).unwrap();
+        t.insert_byino(0, 1, 0, 0x4000, a);
+        t.insert_byino(0, 2, 0, 0x5000, b);
+
+        let c = pb::pb_new(frame()).unwrap();
+        t.insert_byino(0, 3, 0, 0x6000, c);
+
+        assert_eq!(t.len(), 2);
+        assert_eq!(t.find_byino(0, 3, 0, false), None);
+        assert_eq!(pb::pb_count(c), 1, "a refused insert takes no reference");
+
+        t.clear_bydev(0);
+        pb::pb_unref(a);
+        pb::pb_unref(b);
+        pb::pb_unref(c);
     }
 
     #[test]
