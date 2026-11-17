@@ -248,24 +248,33 @@ the burst-overflow reading in item 37, are under `# Resolved issues`.
     aligned, and RISC-V's ABI wants the same, so both now take the aligned top itself. The same
     EC=0 appears with the aligned stack, which rules alignment out as the cause.
 
-    What is known now, and where the next session starts. The page is **not** the problem: in the
-    failing configuration a worker that volatile-reads `0x1003060` and `0x1003000` before anything
-    else gets exactly the file's words (`0x3940056b`, `0x8b224502`), and with those two reads in
-    front the whole run passes with `counter=4`. So a *data* fault on that file-backed text page is
-    filled from the file and the worker proceeds. Without them the worker's first access is an
-    *instruction fetch* of the same page, and that produces the same `EC=0x00` report with FAR
-    equal to ELR, first at `0x1003060` and, in a rebuilt binary, at `0x1003050`; the linked word at
-    both addresses is again a valid ARMv8.0 instruction. So the fetch is not executing the file's
-    bytes.
+    What is known now, and where the next session starts. A worker that volatile-reads `0x1003060`
+    and `0x1003000` before anything else gets exactly the file's words (`0x3940056b`, `0x8b224502`),
+    and with those two reads in front the whole run passes with `counter=4`: a *data* fault on that
+    file-backed text page is filled from the file and the worker proceeds. Without them the worker's
+    first access is an *instruction fetch* of the same page, and that produces the same EC=0x00
+    report with FAR equal to ELR, first at `0x1003060` and, in a rebuilt binary, at `0x1003050`;
+    the linked word at both addresses is again a valid ARMv8.0 instruction. So the same page
+    resolves one way for a read and another for a fetch.
 
-    The leading hypothesis is therefore a stale instruction-side entry for that VA: the fill path
-    flushes what the data read needs (the read after the fault returns the file's bytes), but the
-    fetch needs the I-cache side too, and only `switch_to_user` and the exec path invalidate the
-    I-cache on this arch (`ic ialluis` in `arch-aarch64/src/switch.rs`). The next step is to watch
-    the guest execute: QEMU with `-d in_asm,int` (or LLDB, `aarch64-debugging`) around the fill,
-    to see the instruction word the CPU actually retires after the page is filled, and to check
-    whether `vm_map_page_in`'s aarch64 path and the fault-resume path invalidate the I-cache at
-    all.
+    A stale I-cache or TLB entry is ruled out, and QEMU says what actually happens. `-d int` records
+    `Taking exception 1 [Undefined Instruction] ... with ESR 0x0/0x2000000 ... with ELR 0x1003050`,
+    so the fetch was not an abort at all: it succeeded and the word was zero. `-d in_asm` shows the
+    translation QEMU built from guest memory at that moment: `0x01003050: 00000000 udf #0`. So the
+    page held zeros when the worker fetched it, while a *data* fault on the same page reads the
+    file's bytes. That is the zero-filled fill window `start_file_page` describes: it maps the frame
+    with `vm_map_page_in(cr3, va, pa, MAP_WRITE)` before asking VFS for the file's block
+    (`crates/servers/src/vm/mod.rs`, the comment above that call says the placeholder is
+    "deliberately *not* user-accessible" so no user thread can run its zeros).
+
+    On aarch64 that intent may not hold: `MAP_WRITE` is `0` in `arch-aarch64/src/hal.rs` and the
+    access permission lives entirely in AP[2:1], so a placeholder mapped with `MAP_WRITE` alone may
+    be an EL0-accessible page whose AP is simply zero, and an EL0 fetch of it then runs zeros rather
+    than taking the permission fault that would park the thread until the fill completes. The next
+    question is therefore precise: what PTE is live for the VA when the fetch succeeds, and does
+    `pte_is_user` say so? Instrument `start_file_page` (or VM's fault entry) to print the PTE for
+    the faulting page during the fill window, and compare the same moment on x86, where the U/S bit
+    makes the placeholder supervisor-only and the gate passes.
 
     Also unchanged, and separate: an unhandled EL0 class reports and **halts** the machine, which
     is the pre-existing policy for a class the dispatcher does not know. Delivering SIGILL to the
