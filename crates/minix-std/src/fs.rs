@@ -597,6 +597,46 @@ pub unsafe fn utime(
     }
 }
 
+/// Set the access/modification times of an open descriptor (`futimens`).
+///
+/// The descriptor rather than a path is what lets this reach an anonymous object,
+/// which has no name; a memfd keeps the times in its vnode and reports them from
+/// `fstat`. The nanosecond fields follow [`utime`]'s rules.
+///
+/// # Safety
+///
+/// Must be called in a context where the VFS server is running.
+pub unsafe fn futimens(
+    fd: i32,
+    actime: i64,
+    modtime: i64,
+    acnsec: i64,
+    mnsec: i64,
+) -> Result<(), MinixErr> {
+    #[cfg(not(target_os = "minix"))]
+    {
+        let _ = (fd, actime, modtime, acnsec, mnsec);
+        Err(MinixErr::ENOSYS)
+    }
+    #[cfg(target_os = "minix")]
+    unsafe {
+        let mut msg = [0u8; 64];
+        // The same layout as `utime`, with `name` NULL and the descriptor set:
+        // VFS's `do_utimens` splits on exactly that to choose the fd form.
+        msg_set_i32(&mut msg, OFF_CALL, VFS_UTIMENS as i32);
+        msg_set_i64(&mut msg, 8, actime);
+        msg_set_i64(&mut msg, 16, modtime);
+        msg_set_i64(&mut msg, 24, acnsec);
+        msg_set_i64(&mut msg, 32, mnsec);
+        msg_set_u64(&mut msg, 40, 0); // len
+        msg_set_u64(&mut msg, 48, 0); // name (NULL selects futimens)
+        msg_set_i32(&mut msg, 56, fd);
+        msg_set_i32(&mut msg, 60, 0); // flags
+        vfs_call(&mut msg)?;
+        Ok(())
+    }
+}
+
 /// Remove a directory.
 pub fn rmdir(path: &[u8]) -> Result<(), MinixErr> {
     #[cfg(not(target_os = "minix"))]

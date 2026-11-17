@@ -164,6 +164,14 @@ pub struct Vnode {
     pub v_mapinode_nr: u32,
     pub v_mode: u32,
     pub v_size: i64,
+    /// Access and modification times, in seconds since the epoch.
+    ///
+    /// Only an anonymous object uses these: a filesystem keeps an inode's times
+    /// and `stat` asks it, while a memfd has no inode to ask and no path to name
+    /// it (item 30). A vnode handed to a filesystem therefore carries stale
+    /// values that nothing reads.
+    pub v_atime: i64,
+    pub v_mtime: i64,
     pub v_uid: i32,
     pub v_gid: i32,
     pub v_ref_count: i32,
@@ -191,6 +199,8 @@ impl Default for Vnode {
             v_mapinode_nr: 0,
             v_mode: 0,
             v_size: 0,
+            v_atime: 0,
+            v_mtime: 0,
             v_uid: 0,
             v_gid: 0,
             v_ref_count: 0,

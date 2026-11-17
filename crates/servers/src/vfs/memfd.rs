@@ -16,8 +16,7 @@
 //!
 //! Nothing here involves a filesystem server. `v_fs_count` stays 0, which is
 //! what makes `put_vnode` skip its `req_putnode` without a special case, and the
-//! four operations that would otherwise reach a filesystem — read, write,
-//! truncate and stat — are answered here:
+//! operations that would otherwise reach a filesystem are answered here:
 //!
 //! * `read`/`write` go through the object's **cache pages** (VM's
 //!   `VM_MAPCACHEPAGE` window, the same mechanism a filesystem uses for block
@@ -26,6 +25,12 @@
 //!   separate store would drift from the mapping silently.
 //! * `ftruncate` sets the vnode's size. Growth needs no blocks: a page appears
 //!   when it is first written or faulted.
+//! * `fstat` reports the vnode's identity, size and times, and
+//!   `utimens` (`futimens`) stores those times in it: an object with no inode
+//!   has nowhere else to keep them.
+//! * `fsync` succeeds: there is no backing store to flush.
+//! * `fstatvfs` describes the object's own pages (item 30). It is not a
+//!   filesystem's capacity, because there is no filesystem.
 //!
 //! See `.notes/wayland.md` §6.4 for the design and §5 row 18 for the deviation.
 
@@ -34,7 +39,7 @@ use minix_std::fs::Stat;
 use crate::vfs::call::{SELF, sys_vircopy};
 use crate::vfs::consts::*;
 use crate::vfs::glo::vfs_global;
-use crate::vfs::types::Vnode;
+use crate::vfs::types::{Statvfs, Vnode};
 
 /// `S_IFREG` with the permissions a memfd is created with.
 const MEMFD_MODE: u32 = S_IFREG | 0o600;
@@ -63,11 +68,21 @@ pub fn do_create() -> i32 {
 ///
 /// Reaches the global fproc and filp tables; only VFS's own dispatch may call it.
 unsafe fn create_inner() -> i32 {
-    let (_vp, _id, fd) =
+    let (vp, _id, fd) =
         match crate::vfs::anon::create_anon(arch_common::com::MEMFD_DEV, MEMFD_MODE, 0) {
             Ok(v) => v,
             Err(e) => return e,
         };
+
+    // A memfd has no inode, so its vnode is the only place its times can live. A
+    // fresh object is as old as its creation; a clock that cannot be read leaves
+    // them at zero rather than failing the create.
+    if let Ok(ts) = minix_std::time::clock_gettime(minix_std::time::CLOCK_REALTIME) {
+        unsafe {
+            (*vp).v_atime = ts.tv_sec;
+            (*vp).v_mtime = ts.tv_sec;
+        }
+    }
 
     // `memfd_create`'s MFD_CLOEXEC, bit 0 of its flags.
     if r_i32_msg(8) & 1 != 0 {
@@ -112,12 +127,66 @@ pub unsafe fn fstat(vp: *const Vnode, user_ep: i32, buf_addr: u64) -> i32 {
         st_size: (*vp).v_size,
         st_blksize: 0,
         st_blocks: 0,
-        st_atime: 0,
-        st_mtime: 0,
-        st_ctime: 0,
+        st_atime: (*vp).v_atime,
+        st_mtime: (*vp).v_mtime,
+        st_ctime: (*vp).v_mtime,
     };
     let bytes = core::mem::size_of::<Stat>();
     sys_vircopy(SELF, &st as *const Stat as u64, user_ep, buf_addr, bytes)
+}
+
+/// Store the times `futimens` resolved for a memfd.
+///
+/// The caller has already applied `UTIME_NOW`/`UTIME_OMIT`, so these are the
+/// values to keep. Second resolution: `Stat` cannot express nanoseconds.
+///
+/// # Safety
+///
+/// `vp` must be a live memfd vnode pointer.
+pub unsafe fn set_times(vp: *mut Vnode, atime: i64, mtime: i64) {
+    (*vp).v_atime = atime;
+    (*vp).v_mtime = mtime;
+}
+
+/// The `statvfs` this object answers with: its own pages, not a filesystem's.
+///
+/// There is no storage to measure, so the object is the whole of it: the block
+/// size is the page size, `f_blocks` is the object rounded up to pages, and
+/// nothing is free. `f_fsid` carries the identity the object is keyed by, and
+/// `f_namemax` is zero because nothing can be named in it. Describing a
+/// filesystem here would be the wrong answer item 30 warns about; describing the
+/// object is what a caller can act on.
+///
+/// # Safety
+///
+/// `vp` must be a live memfd vnode pointer.
+pub unsafe fn build_statvfs(vp: *const Vnode) -> Statvfs {
+    let size = (*vp).v_size.max(0) as u64;
+    Statvfs {
+        f_flags: 0,
+        f_bsize: PAGE as u32,
+        f_frsize: PAGE as u32,
+        f_blocks: size.div_ceil(PAGE),
+        f_bfree: 0,
+        f_bavail: 0,
+        f_files: 1,
+        f_ffree: 0,
+        f_favail: 0,
+        f_fsid: (*vp).v_dev as u64,
+        f_flag: 0,
+        f_namemax: 0,
+    }
+}
+
+/// `fstatvfs` on a memfd, built here rather than asked of a filesystem.
+///
+/// # Safety
+///
+/// `vp` must be a live memfd vnode pointer.
+pub unsafe fn fstatvfs(vp: *const Vnode, user_ep: i32, buf_addr: u64) -> i32 {
+    let st = unsafe { build_statvfs(vp) };
+    let bytes = core::mem::size_of::<Statvfs>();
+    sys_vircopy(SELF, &st as *const Statvfs as u64, user_ep, buf_addr, bytes)
 }
 
 /// `read`/`write` on a memfd, through the object's cache pages.
@@ -249,4 +318,54 @@ unsafe fn r_i32_msg(off: usize) -> i32 {
             .try_into()
             .unwrap_or([0; 4]),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn memfd_vnode(size: i64) -> Vnode {
+        Vnode {
+            v_dev: arch_common::com::MEMFD_DEV,
+            v_inode_nr: 7,
+            v_mode: MEMFD_MODE,
+            v_size: size,
+            v_ref_count: 1,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn test_statvfs_describes_the_object_not_a_filesystem() {
+        // There is no filesystem to measure. The answer has to be about the object:
+        // page-sized blocks, the object's own pages, one file, nothing free. Asking
+        // a caller to treat it as a filesystem's capacity would be the wrong answer.
+        let st = unsafe { build_statvfs(&memfd_vnode(8192)) };
+        assert_eq!(st.f_bsize, 4096);
+        assert_eq!(st.f_frsize, 4096);
+        assert_eq!(st.f_blocks, 2);
+        assert_eq!(st.f_bfree, 0);
+        assert_eq!(st.f_bavail, 0);
+        assert_eq!(st.f_files, 1);
+        assert_eq!(st.f_ffree, 0);
+        assert_eq!(st.f_favail, 0);
+        assert_eq!(st.f_fsid, arch_common::com::MEMFD_DEV as u64);
+        assert_eq!(
+            st.f_namemax, 0,
+            "nothing can be named in an anonymous object"
+        );
+
+        // A partial page still costs a page.
+        assert_eq!(unsafe { build_statvfs(&memfd_vnode(1)) }.f_blocks, 1);
+        // And a size the arithmetic must not wrap on reads as empty.
+        assert_eq!(unsafe { build_statvfs(&memfd_vnode(-1)) }.f_blocks, 0);
+    }
+
+    #[test]
+    fn test_set_times_keeps_seconds_on_the_vnode() {
+        let mut v = memfd_vnode(4096);
+        assert_eq!((v.v_atime, v.v_mtime), (0, 0));
+        unsafe { set_times(&mut v, 1_700_000_000, 1_700_000_001) };
+        assert_eq!((v.v_atime, v.v_mtime), (1_700_000_000, 1_700_000_001));
+    }
 }

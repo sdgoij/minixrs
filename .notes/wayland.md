@@ -377,7 +377,7 @@ not now, record it.
 | 15 | wasm | absent | keep the `WS_*` protocol; Wayland is hardware-arch only | **Exclude** |
 | 16 | Shared-object segments | an LLD `-shared` link emits a `GNU_RELRO` `PT_LOAD` per object | Drop it (`-z norelro`), nothing in the OS reads the header; 4 regions/object → **3**. `--no-rosegment` declined (it would map `.rodata`/`.dynstr` executable) | **Deviate** |
 | 17 | `SCM_CREDS` | appended to every `recvmsg` that has room, from a credential word that stays zeroed until a `sendmsg` fills it | emitted only once a send has recorded credentials | **Deviate** (the reference lets a receiver read `cr_uid` 0, *root*, before its peer has sent anything) |
-| 18 | `memfd` | no such thing: an in-memory file must be a real inode with a filesystem behind it (or SysV shm, which VM never finished here) | an object **identity** (`MEMFD_DEV` + a never-reused id) with no filesystem at all; VFS answers the four operations that would reach one, and VM's `(dev, ino)` page cache is the storage | **Deviate** (net-new; MINIX has no memfd to follow) |
+| 18 | `memfd` | no such thing: an in-memory file must be a real inode with a filesystem behind it (or SysV shm, which VM never finished here) | an object **identity** (`MEMFD_DEV` + a never-reused id) with no filesystem at all; VFS answers every operation that would reach one (`read`/`write`, `ftruncate`, `stat`, `utimens`, `fsync`, `statvfs`), and VM's `(dev, ino)` page cache is the storage | **Deviate** (net-new; MINIX has no memfd to follow) |
 | 19 | `mprotect` | **none**, listed in `lib/libc/sys/MISSING_SYSCALLS`; nothing could reduce a region's rights, so the fault path never had to refuse one | net-new `VM_MPROTECT`: region bits + PTE re-map, and **enforcement in the fault path** (before the COW path, or COW would re-grant write on a page just made read-only) | **Net-new** (no original to follow) |
 | 20 | `eventfd` | no such thing; the reference's substitute is a pipe or SysV shm | a VFS-internal counter object with a synthetic identity (`EVENTFD_DEV`), no filesystem, answered by VFS; a blocked `poll`/`select` on it is woken by `wake_eventfd`, not a driver reply. Deviation: a read on a zero counter answers `EAGAIN` rather than blocking (the port's pipes deviate the same way, no suspend/revive for reads yet) | **Net-new** (no original to follow) |
 | 21 | `timerfd` | no such thing; an event loop would emulate a timeout over `select` | a VFS-internal timer object with a synthetic identity (`TIMERFD_DEV`), one-shot or periodic, absolute or relative; its next expiry folds into the **one** `SYS_SETALARM` deadline that `select`/`poll` also arm, and the tick calls `timerfd::expire`. Deviation: a read with a zero expiry count answers `EAGAIN` rather than blocking (same as `eventfd`/pipes) | **Net-new** (no original to follow) |
@@ -580,6 +580,11 @@ memfd is given one rather than a filesystem:
   It previously took none, so every memfd `read`/`write` consumed the cache's own
   reference and eventually freed a frame the cache still pointed at, an object
   that stopped reading its own data after a few transfers (`do_mapcache`).
+- The filesystem-shaped calls a `wl_shm` pool does not use but a ported binary might
+  are answered too: `futimens` stores the times in the vnode (a memfd has no inode),
+  `fsync` succeeds, and `fstatvfs` describes the object's own pages rather than
+  inventing a filesystem for it (KNOWN_ISSUES item 30). The vnode carries
+  `v_atime`/`v_mtime` for this, and `do_utimens` gained the fd form it had rejected.
 
 The alternative, a real in-memory filesystem serving anonymous inodes, is the
 more MINIX-idiomatic shape and is what we want eventually; the port's `PFS`

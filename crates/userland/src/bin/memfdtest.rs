@@ -58,6 +58,69 @@ fn run() -> Result<(), i32> {
         return Err(4);
     }
 
+    // ---- the filesystem-shaped operations an anonymous object still answers ----
+    // Nothing backs the object, so there is nothing to flush (item 30).
+    step(minix_std::fs::fsync(fd), 42, b"memfdtest: fsync failed\n")?;
+
+    // `futimens` is the only time-setting call that can name an object with no
+    // path; the times live in its vnode and `fstat` reports them.
+    step(
+        unsafe {
+            minix_std::fs::futimens(fd, 0, 0, minix_std::fs::UTIME_NOW, minix_std::fs::UTIME_NOW)
+        },
+        43,
+        b"memfdtest: futimens (now) failed\n",
+    )?;
+    let st = step(
+        minix_std::fs::fstat(fd),
+        44,
+        b"memfdtest: fstat failed (now)\n",
+    )?;
+    if st.st_atime <= 0 || st.st_mtime <= 0 {
+        userland::write_err(b"memfdtest: futimens(UTIME_NOW) was not stored\n");
+        return Err(45);
+    }
+
+    // An explicit timestamp is stored as given...
+    step(
+        unsafe { minix_std::fs::futimens(fd, 1_000_000_000, 1_000_000_001, 0, 0) },
+        46,
+        b"memfdtest: futimens failed\n",
+    )?;
+    let st = step(minix_std::fs::fstat(fd), 47, b"memfdtest: fstat failed\n")?;
+    if st.st_atime != 1_000_000_000 || st.st_mtime != 1_000_000_001 {
+        userland::write_err(b"memfdtest: futimens did not store the times\n");
+        return Err(48);
+    }
+    // ...and UTIME_OMIT leaves its own field alone.
+    step(
+        unsafe { minix_std::fs::futimens(fd, 0, 7, minix_std::fs::UTIME_OMIT, 0) },
+        49,
+        b"memfdtest: futimens (omit) failed\n",
+    )?;
+    let st = step(
+        minix_std::fs::fstat(fd),
+        50,
+        b"memfdtest: fstat failed (omit)\n",
+    )?;
+    if st.st_atime != 1_000_000_000 || st.st_mtime != 7 {
+        userland::write_err(b"memfdtest: UTIME_OMIT did not keep the atime\n");
+        return Err(51);
+    }
+
+    // `fstatvfs` describes the object's own pages: a page-sized block, the object's
+    // two pages, one file, nothing free. It must succeed rather than ask a
+    // filesystem at `v_fs_e == NONE`.
+    let sv = step(
+        minix_std::fs::fstatvfs(fd),
+        52,
+        b"memfdtest: fstatvfs failed\n",
+    )?;
+    if sv.f_bsize != 4096 || sv.f_frsize != 4096 || sv.f_blocks != 2 || sv.f_files != 1 {
+        userland::write_err(b"memfdtest: fstatvfs does not describe the object\n");
+        return Err(53);
+    }
+
     // ---- two writable shared mappings of one object ----
     let a = unsafe {
         minix_std::vmem::mmap(

@@ -203,21 +203,6 @@ are arch-specific, `[env]` is tooling/platform, not kernel.
     than resolved. (`crates/servers/src/vfs/scm.rs`, `crates/servers/src/vfs/call.rs::do_copyfd`,
     `crates/drivers/src/storage/vnd.rs`)
 
-30. **A `memfd` answers the operations a filesystem would, but not every one of them (2026-09-27,
-    open, deliberate).** `vfs::memfd` gives an anonymous shared-memory object an identity
-    (`MEMFD_DEV` plus a never-reused id) and deliberately no filesystem: `v_fs_e` is NONE and
-    `v_fs_count` is 0, which is what lets `put_vnode` skip its `req_putnode` without a special
-    case. VFS answers `read`, `write`, `ftruncate`, `fstat`, `fchmod` and `fchown` there, and the
-    mapping path needs nothing at all (VM's `(dev, ino)` page cache *is* the object).
-
-    The remaining filesystem-shaped operations still travel to `v_fs_e == NONE` and fail with
-    whatever an endpoint of NONE yields: `utimens` and `fsync` on a memfd, and `fstatvfs`, which
-    has no meaning for an object with no storage to measure. Nothing on the `wl_shm` path
-    (`memfd_create`, `ftruncate`, `mmap`, `SCM_RIGHTS`, `read`/`write`) reaches them, so they are
-    recorded rather than synthesized — a ported binary that `utimes` or `fsync`es a memfd gets a
-    failing call rather than a wrong answer. (`crates/servers/src/vfs/memfd.rs`,
-    `crates/servers/src/vfs/call.rs`)
-
 32. **`read` never blocks in VFS, so an `eventfd`/`timerfd` read on a zero count returns
     `EAGAIN` (2026-09-28, open, deliberate).** The port has no suspend/revive for reads
     (item 31's sibling: `vfs::pipe` reads return `EAGAIN` rather than suspending), and
@@ -1431,6 +1416,29 @@ the burst-overflow reading in item 37, are under `# Resolved issues`.
     `/bin/forktest`'s third phase is the `vm_suspend`-less answer to the trade above: the child
     never writes its `SINK` page, the kernel fills it with a file read, and the parent must still
     see its fork-time page. `.notes/wayland.md` 4f has the whole shape.
+
+30. **~~A `memfd` answered only some of the operations a filesystem would~~: FIXED (2026-11-17).**
+    A memfd has no filesystem (its `v_fs_e` is NONE and `v_fs_count` is 0, which is what lets
+    `put_vnode` skip `req_putnode`), so every call VFS did not answer itself travelled to an
+    endpoint of NONE and failed: `futimens` on a memfd, `fsync` on a memfd, and `fstatvfs`, which
+    has no storage to measure. `vfs::memfd` now answers all three. `do_utimens` gained the
+    fd form C's `time.c` already has (it rejected `name == NULL` outright), so `futimens` resolves
+    the descriptor's vnode and, for a memfd, stores the times in the vnode (new `v_atime`/`v_mtime`,
+    since an inode is what holds a filesystem file's times) and `fstat` reports them. `fsync`
+    succeeds: there is nothing to flush. `fstatvfs` describes the *object* rather than inventing a
+    filesystem for it: page-sized blocks, `f_blocks` the object's pages, one file, nothing free,
+    `f_fsid` the object's identity, `f_namemax` zero. Nothing on the `wl_shm` path
+    (`memfd_create`, `ftruncate`, `mmap`, `SCM_RIGHTS`, `read`/`write`) reaches any of them, which
+    is why they were recorded rather than synthesized before. Gate: `just test-memfd-x86` (now in
+    `test-arches`); `/bin/memfdtest` checks each call and what `fstat` reports afterwards, and a
+    build with the memfd branch in `do_utimens` disabled fails it. Pinned on the host by
+    `test_statvfs_describes_the_object_not_a_filesystem` and
+    `test_set_times_keeps_seconds_on_the_vnode`. Still absent, and now a separate question: there
+    is no C `futimens` declaration in `tools/c-include` or `minix-libc`, so C code can only reach
+    the fd form through `minix_std::fs::futimens`.
+    (`crates/servers/src/vfs/{memfd,call,types,anon,glo}.rs`,
+    `crates/minix-std/src/fs.rs`, `crates/userland/src/bin/memfdtest.rs`,
+    `.notes/wayland.md` §5 row 18)
 
 31. **A blocking `select`/`poll` on a pipe never wakes without a timeout (2026-09-28, FIXED).**
     The readiness engine (`crates/servers/src/vfs/select.rs`) asks `pipe_check` whether a pipe fd

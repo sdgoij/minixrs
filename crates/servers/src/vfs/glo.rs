@@ -174,6 +174,8 @@ const fn new_vnode_array() -> [Vnode; NR_VNODES] {
         v_mapinode_nr: 0,
         v_mode: 0,
         v_size: 0,
+        v_atime: 0,
+        v_mtime: 0,
         v_uid: 0,
         v_gid: 0,
         v_ref_count: 0,
@@ -357,12 +359,14 @@ mod tests {
         // probe anchors; keep in sync with the struct). Filp gained
         // filp_dev/filp_dgram (8 bytes × NR_FILPS = 8192 shift); Vnode
         // gained the mapped-FS fields (v_mapfs_e/v_mapinode_nr/v_mapfs_count
-        // → 88-byte stride, 8 bytes × NR_VNODES = 8192 more). Fproc's
+        // → 88-byte stride, 8 bytes × NR_VNODES = 8192 more) and then the
+        // anonymous object's times (v_atime/v_mtime, 16 bytes × NR_VNODES =
+        // 16384 more). Fproc's
         // fp_sgroups shrank to the port's NGROUPS_MAX of 32 (64 bytes × 256
         // fprocs = 16384 the other way). Dmap gained dmap_linux_ioctl and
         // NR_DEVICES grew 64 → 256 for the DRM render node's major
         // (32-byte stride × 192 more entries = 6144 the other way).
-        assert_eq!(core::mem::offset_of!(VfsGlobal, err_code), 318784);
-        assert_eq!(core::mem::offset_of!(VfsGlobal, fs_m_in), 318800);
+        assert_eq!(core::mem::offset_of!(VfsGlobal, err_code), 335168);
+        assert_eq!(core::mem::offset_of!(VfsGlobal, fs_m_in), 335184);
     }
 }

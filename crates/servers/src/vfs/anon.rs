@@ -63,6 +63,9 @@ pub unsafe fn create_anon(dev: u32, mode: u32, size: i64) -> Result<(*mut Vnode,
     (*vp).v_inode_nr = id;
     (*vp).v_mode = mode;
     (*vp).v_size = size;
+    // A reused vnode slot still holds its previous object's times.
+    (*vp).v_atime = 0;
+    (*vp).v_mtime = 0;
     (*vp).v_dev = dev;
     (*vp).v_fs_count = 0;
     (*vp).v_ref_count = 1;

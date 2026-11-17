@@ -1454,6 +1454,10 @@ pub fn do_fsync() -> i32 {
         if vp.is_null() {
             return EBADF;
         }
+        // Nothing backs a memfd, so there is nothing to flush.
+        if crate::vfs::memfd::is_memfd(vp) {
+            return OK;
+        }
         crate::vfs::request::req_sync((*vp).v_fs_e)
     }
 }
@@ -1920,6 +1924,10 @@ pub fn do_fstatvfs() -> i32 {
         let vp = filp.filp_vno;
         if vp.is_null() {
             return EBADF;
+        }
+        // A memfd has no filesystem to measure; its own pages are the answer.
+        if crate::vfs::memfd::is_memfd(vp) {
+            return crate::vfs::memfd::fstatvfs(vp, fp.fp_endpoint, buf_addr);
         }
         crate::vfs::request::req_statvfs(
             (*vp).v_fs_e,
@@ -2829,9 +2837,9 @@ const UTIME_OMIT: i64 = -2;
 
 /// Perform the `utimens(path, times, flag)` system call (and its friends).
 ///
-/// C source: `minix/servers/vfs/time.c` — `do_utimens()`. Path-based style
-/// only (utime/utimes/utimensat by name); the fd-based futimens style is
-/// not wired because the port's VFS has no filp→vnode bridge for it.
+/// C source: `minix/servers/vfs/time.c`, `do_utimens()`. Both styles: a path
+/// (`utime`/`utimes`/`utimensat` by name) and an already-open fd (`futimens`,
+/// which is the only way an anonymous object such as a memfd can be reached).
 pub fn do_utimens() -> i32 {
     let fp = match current_fp() {
         Some(fp) => fp,
@@ -2845,37 +2853,54 @@ pub fn do_utimens() -> i32 {
     let mnsec = r_u64(m, OFF_UT_MNSEC) as i64;
     let path_len = r_u32(m, OFF_UT_LEN) as usize;
     let path_addr = r_u64(m, OFF_UT_NAME);
-    let _fd = r_i32(m, OFF_UT_FD);
+    let fd = r_i32(m, OFF_UT_FD);
     let flags = r_i32(m, OFF_UT_FLAGS);
 
-    if path_addr == 0 {
-        return EINVAL; // futimens-style fd call not supported
-    }
     if flags != 0 {
         return EINVAL; // unknown flag (AT_SYMLINK_NOFOLLOW unsupported)
     }
-    let mut path_buf = [0u8; PATH_MAX];
-    let copy_len = path_len.min(PATH_MAX - 1);
-    unsafe {
-        if sys_vircopy(
-            fp.fp_endpoint,
-            path_addr,
-            SELF,
-            path_buf.as_mut_ptr() as u64,
-            copy_len,
-        ) != 0
-        {
-            return EBADF;
+
+    // `futimens` names an already-open descriptor instead of a path, which is the
+    // only way an anonymous object (a memfd) can be reached. C splits on the same
+    // condition (`m_vfs_utimens.name == NULL`) into FUTIMENS_STYLE.
+    let by_path = path_addr != 0;
+    let vp = if by_path {
+        let mut path_buf = [0u8; PATH_MAX];
+        let copy_len = path_len.min(PATH_MAX - 1);
+        unsafe {
+            if sys_vircopy(
+                fp.fp_endpoint,
+                path_addr,
+                SELF,
+                path_buf.as_mut_ptr() as u64,
+                copy_len,
+            ) != 0
+            {
+                return EBADF;
+            }
         }
-    }
-    let actual_len = path_buf[..copy_len]
-        .iter()
-        .position(|&b| b == 0)
-        .unwrap_or(copy_len);
-    let mut resolve = Lookup::default();
-    resolve.l_path[..actual_len].copy_from_slice(&path_buf[..actual_len]);
-    resolve.l_path_len = actual_len;
-    let vp = unsafe { path::eat_path(&resolve, fp) };
+        let actual_len = path_buf[..copy_len]
+            .iter()
+            .position(|&b| b == 0)
+            .unwrap_or(copy_len);
+        let mut resolve = Lookup::default();
+        resolve.l_path[..actual_len].copy_from_slice(&path_buf[..actual_len]);
+        resolve.l_path_len = actual_len;
+        unsafe { path::eat_path(&resolve, fp) }
+    } else {
+        let filp_idx = unsafe { crate::vfs::filedes::get_filp(fd, fp) };
+        if filp_idx < 0 {
+            return filp_idx;
+        }
+        unsafe {
+            let filp_arr = core::ptr::addr_of_mut!((*vfs_global()).filp) as *mut Filp;
+            let filp = &*filp_arr.add(filp_idx as usize);
+            if filp.filp_vno.is_null() {
+                return EBADF;
+            }
+            filp.filp_vno
+        }
+    };
     if vp.is_null() {
         return ENOENT;
     }
@@ -2936,18 +2961,36 @@ pub fn do_utimens() -> i32 {
     }
 
     if r == OK {
-        r = unsafe {
-            crate::vfs::request::req_utime(
-                vp_ref.v_fs_e,
-                vp_ref.v_inode_nr,
-                new_atime.0,
-                new_mtime.0,
-                new_atime.1,
-                new_mtime.1,
-            )
-        };
+        if unsafe { crate::vfs::memfd::is_memfd(vp) } {
+            // A memfd has no inode to send the request to; its vnode is where its
+            // times live. UTIME_OMIT already resolved to "keep the current value".
+            let at = if new_atime.1 == UTIME_OMIT {
+                vp_ref.v_atime
+            } else {
+                new_atime.0
+            };
+            let mt = if new_mtime.1 == UTIME_OMIT {
+                vp_ref.v_mtime
+            } else {
+                new_mtime.0
+            };
+            unsafe { crate::vfs::memfd::set_times(vp, at, mt) };
+        } else {
+            r = unsafe {
+                crate::vfs::request::req_utime(
+                    vp_ref.v_fs_e,
+                    vp_ref.v_inode_nr,
+                    new_atime.0,
+                    new_mtime.0,
+                    new_atime.1,
+                    new_mtime.1,
+                )
+            };
+        }
     }
-    unsafe { mount::put_vnode(vp) };
+    if by_path {
+        unsafe { mount::put_vnode(vp) };
+    }
     r
 }
 
