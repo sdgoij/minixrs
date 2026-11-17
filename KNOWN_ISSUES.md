@@ -222,7 +222,8 @@ the burst-overflow reading in item 37, are under `# Resolved issues`.
     against `/bin/threadtest`, which spawns four kernel threads that block in PM IPC, bump a
     shared counter and are joined. The same binary and the same scenario pass on x86_64 and
     riscv64. On aarch64 the command prints at most one byte of its `threadtest: spawned` line and
-    the shell is back at its prompt: no error from the program itself, so it was killed.
+    the shell is back at its prompt: no error from the program itself, so it was killed. With the
+    report fixed below, it halts and prints the exception class instead.
 
     Two faults were in the way of seeing this, and both are now fixed (this commit). The
     unknown-exception report in `arch-aarch64/src/exception.rs` wrote a bare `X` to the UART's
@@ -235,21 +236,36 @@ the burst-overflow reading in item 37, are under `# Resolved issues`.
 
     With that fixed the real event is visible: `EL0 unhandled exception, EC=0x00`, `ESR=0x02000000`
     (ISS zero), `ELR=FAR=0x0000_0000_0100_3060`, `SPSR=0x8000_0000` (EL0t). EC 0 is ARMv8's
-    "unknown reason", the class an **undefined instruction** reports, and `0x1003060` is inside
-    the program's own `.text` (the `memset`/`memcpy` functions). The instruction that belongs at
-    that address in the linked binary is a plain `add x8, x8, x10`, so the fetch is not seeing
-    the file's instruction: a zero-filled page (`0x00000000` is `udf #0`) is the likely content,
-    and the same address had earlier been seen taking a *translation* fault, which fits a page
-    that is mapped without being filled from the file.
+    "unknown reason", the class an **undefined instruction** reports, and `0x1003060` is the first
+    instruction of `memcpy` in that build, where the linked word is `5f 40 00 f1`
+    (`cmp x2, #0x10`), which every ARMv8.0 core decodes. EC 0x20, an instruction abort, is what an
+    unmapped fetch reports and the vector handles it, so by the time this exception is taken the
+    CPU had a translation for the page and retired something that was not the file's instruction.
 
-    This is also why a diagnostic `write` in the main thread makes the run pass: the write's own
-    formatting code runs on that `.text` page, so the main thread faults it in first, from the
-    file, before any worker fetches it. The open question is therefore narrow: why a file-backed
-    `.text` fault taken by a **worker** leaves the page unfilled (or zero-filled) when the same
-    fault taken by the main thread fills it from the file. The next step is to have the worker
-    read the instruction word at `0x1003060` with a volatile load and print it before it calls
-    into that page, and to trace `handle_pagefault_for`'s region flags for the address (VR_FILE
-    set or not) on that path.
+    Also fixed in the course of this, and not the cause: `/bin/threadtest` and `/bin/forkthread`
+    computed their initial thread stack top as `(base + size) & !0xF - 8` on every arch. That is
+    x86_64's entry convention (as if a return address had been pushed); AArch64 wants SP 16-byte
+    aligned, and RISC-V's ABI wants the same, so both now take the aligned top itself. The same
+    EC=0 appears with the aligned stack, which rules alignment out as the cause.
+
+    What is known now, and where the next session starts. The page is **not** the problem: in the
+    failing configuration a worker that volatile-reads `0x1003060` and `0x1003000` before anything
+    else gets exactly the file's words (`0x3940056b`, `0x8b224502`), and with those two reads in
+    front the whole run passes with `counter=4`. So a *data* fault on that file-backed text page is
+    filled from the file and the worker proceeds. Without them the worker's first access is an
+    *instruction fetch* of the same page, and that produces the same `EC=0x00` report with FAR
+    equal to ELR, first at `0x1003060` and, in a rebuilt binary, at `0x1003050`; the linked word at
+    both addresses is again a valid ARMv8.0 instruction. So the fetch is not executing the file's
+    bytes.
+
+    The leading hypothesis is therefore a stale instruction-side entry for that VA: the fill path
+    flushes what the data read needs (the read after the fault returns the file's bytes), but the
+    fetch needs the I-cache side too, and only `switch_to_user` and the exec path invalidate the
+    I-cache on this arch (`ic ialluis` in `arch-aarch64/src/switch.rs`). The next step is to watch
+    the guest execute: QEMU with `-d in_asm,int` (or LLDB, `aarch64-debugging`) around the fill,
+    to see the instruction word the CPU actually retires after the page is filled, and to check
+    whether `vm_map_page_in`'s aarch64 path and the fault-resume path invalidate the I-cache at
+    all.
 
     Also unchanged, and separate: an unhandled EL0 class reports and **halts** the machine, which
     is the pre-existing policy for a class the dispatcher does not know. Delivering SIGILL to the

@@ -609,22 +609,27 @@ test-mmapanon-x86 boot-timeout="20": build-x86
 # reopens it with a new fd, which cannot see the cache, so only a real writeback can
 # satisfy the expectation. Per arch because the writeback goes through VM's own
 # self-mapping (`vm_mappage`) and VFS's grant, both of which are arch-specific.
+#
+# Input is paced (`FEED_PACE`) because the first step is a whole command line in one
+# write and a guest that drops the tail of a burst loses it: riscv64 failed 1 run in 3
+# on the unmodified tree with `# /bin/echo writeback-marker > wb.t` in the log, which
+# the paced path turns into a verified echo and a retry instead of a lost step.
 test-writeback arch="x86" boot-timeout="40":
     @just test-writeback-{{arch}} {{boot-timeout}}
 
 test-writeback-x86 boot-timeout="40": system-image-x86
     @just _assert-qemu-version qemu-system-x86_64
-    FEED_SCENARIO=tools/smoke/writeback.tsv sh tools/smoke/feed.sh target/test-writeback-x86.log {{boot-timeout}} qemu-system-x86_64 -nographic -m 256M -no-reboot -vga none -device bochs-display,id=fb0 -kernel target/images/x86_64-pc-minix/minix-x86-boot.elf -drive if=none,id=disk0,file=target/images/x86_64-pc-minix/disk.img,format=raw,cache=writethrough -device virtio-blk-pci,disable-legacy=on,drive=disk0 -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0 -device virtio-tablet-pci,display=fb0
+    FEED_PACE=0.003 FEED_SCENARIO=tools/smoke/writeback.tsv sh tools/smoke/feed.sh target/test-writeback-x86.log {{boot-timeout}} qemu-system-x86_64 -nographic -m 256M -no-reboot -vga none -device bochs-display,id=fb0 -kernel target/images/x86_64-pc-minix/minix-x86-boot.elf -drive if=none,id=disk0,file=target/images/x86_64-pc-minix/disk.img,format=raw,cache=writethrough -device virtio-blk-pci,disable-legacy=on,drive=disk0 -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0 -device virtio-tablet-pci,display=fb0
     @echo "writeback: a MAP_SHARED file store reached the file (x86_64)"
 
 test-writeback-riscv64 boot-timeout="60": system-image-riscv64
     @just _assert-qemu-version qemu-system-riscv64
-    FEED_SCENARIO=tools/smoke/writeback.tsv sh tools/smoke/feed.sh target/test-writeback-riscv64.log {{boot-timeout}} qemu-system-riscv64 -machine virt -m 256M -nographic -global virtio-mmio.force-legacy=off -drive if=none,id=disk0,file=target/images/riscv64gc-unknown-minix/disk.img,format=raw,cache=writethrough -device virtio-blk-device,drive=disk0 -netdev user,id=net0 -device virtio-net-device,netdev=net0 -device virtio-gpu-device -device virtio-keyboard-device -kernel target/images/riscv64gc-unknown-minix/minix-riscv64-boot.elf
+    FEED_PACE=0.003 FEED_SCENARIO=tools/smoke/writeback.tsv sh tools/smoke/feed.sh target/test-writeback-riscv64.log {{boot-timeout}} qemu-system-riscv64 -machine virt -m 256M -nographic -global virtio-mmio.force-legacy=off -drive if=none,id=disk0,file=target/images/riscv64gc-unknown-minix/disk.img,format=raw,cache=writethrough -device virtio-blk-device,drive=disk0 -netdev user,id=net0 -device virtio-net-device,netdev=net0 -device virtio-gpu-device -device virtio-keyboard-device -kernel target/images/riscv64gc-unknown-minix/minix-riscv64-boot.elf
     @echo "writeback: a MAP_SHARED file store reached the file (riscv64)"
 
 test-writeback-aarch64 boot-timeout="60": system-image-aarch64
     @just _assert-qemu-version qemu-system-aarch64
-    FEED_SCENARIO=tools/smoke/writeback.tsv sh tools/smoke/feed.sh target/test-writeback-aarch64.log {{boot-timeout}} qemu-system-aarch64 -machine virt -cpu cortex-a57 -m 256M -nographic -no-reboot -global virtio-mmio.force-legacy=off -drive if=none,id=disk0,file=target/images/aarch64-unknown-minix/disk.img,format=raw,cache=writethrough -device virtio-blk-device,drive=disk0 -netdev user,id=net0 -device virtio-net-device,netdev=net0 -device virtio-gpu-device -device virtio-keyboard-device -kernel target/images/aarch64-unknown-minix/minix-aarch64-boot.elf
+    FEED_PACE=0.003 FEED_SCENARIO=tools/smoke/writeback.tsv sh tools/smoke/feed.sh target/test-writeback-aarch64.log {{boot-timeout}} qemu-system-aarch64 -machine virt -cpu cortex-a57 -m 256M -nographic -no-reboot -global virtio-mmio.force-legacy=off -drive if=none,id=disk0,file=target/images/aarch64-unknown-minix/disk.img,format=raw,cache=writethrough -device virtio-blk-device,drive=disk0 -netdev user,id=net0 -device virtio-net-device,netdev=net0 -device virtio-gpu-device -device virtio-keyboard-device -kernel target/images/aarch64-unknown-minix/minix-aarch64-boot.elf
     @echo "writeback: a MAP_SHARED file store reached the file (aarch64)"
 
 # Long paths must resolve. KNOWN_ISSUES.md item 19: a pathname of 24 bytes or more

@@ -101,6 +101,24 @@ fn worker(arg: usize) -> ! {
     minix_rt::thread_exit(0)
 }
 
+/// The initial value of the new thread's stack pointer for its entry function.
+///
+/// The kernel restores a new thread directly to `entry` with no call, so the initial
+/// stack has to match each arch's own entry convention. x86_64 wants RSP ≡ 8 (mod 16),
+/// as if a return address had been pushed; AArch64 faults on an SP that is not 16-byte
+/// aligned, and RISC-V's ABI wants it aligned, so those take the top itself.
+fn initial_stack_top(base: usize) -> usize {
+    let top = (base + STACK_SIZE) & !0xF;
+    #[cfg(target_arch = "x86_64")]
+    {
+        top - 8
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        top
+    }
+}
+
 #[allow(clippy::missing_safety_doc)]
 #[unsafe(no_mangle)]
 pub unsafe fn main(_argc: i32, _argv: *const *const u8) -> i32 {
@@ -110,9 +128,7 @@ pub unsafe fn main(_argc: i32, _argv: *const *const u8) -> i32 {
         userland::write_err(b"forkthread: stack sbrk failed\n");
         return 1;
     }
-    let stack_top = (((base64 as usize) + STACK_SIZE) & !0xF) - 8;
-    // The kernel restores the thread directly to `entry` with no call, so
-    // the initial RSP must match the x86_64 entry convention: ≡ 8 (mod 16).
+    let stack_top = initial_stack_top(base64 as usize);
     let entry: fn(usize) -> ! = worker;
     let tid = minix_rt::thread_create(entry as usize, stack_top, 1);
     if tid <= 0 {
