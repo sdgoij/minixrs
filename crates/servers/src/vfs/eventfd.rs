@@ -18,10 +18,10 @@
 //! by a write from any process (`vfs::select::wake_eventfd`) — no driver
 //! round-trip, because VFS *is* the device.
 //!
-//! Deviation from Linux: a `read` on a counter of 0 returns `EAGAIN` rather than
-//! blocking. The port's pipes already deviate the same way (there is no
-//! suspend/revive for reads yet — see `vfs::pipe`), and an event-loop consumer
-//! polls before it reads.
+//! A `read` on a counter of 0 waits for a write, as POSIX requires, unless the object was
+//! created `EFD_NONBLOCK`: the caller's request is parked in `vfs::blocked` and `write`
+//! resumes it. (A `write` that would overflow the counter answers `EAGAIN` instead of
+//! waiting; reaching `u64::MAX` is not a case a consumer can hit.)
 
 use core::cell::UnsafeCell;
 
@@ -153,19 +153,30 @@ pub fn do_create() -> i32 {
 /// and the counter decremented; otherwise the whole counter is returned and
 /// reset to 0.
 ///
+/// A counter of zero answers `EAGAIN`; the caller (`vfs::call::read_fd`) turns that into a
+/// suspended request unless the object was created `EFD_NONBLOCK`.
+///
 /// # Safety
 ///
 /// `vp` must be a live eventfd vnode; VFS dispatch only.
 pub unsafe fn read(vp: *mut Vnode, ep: i32, buf: u64, count: usize) -> i32 {
+    unsafe { read_id((*vp).v_inode_nr, ep, buf, count) }
+}
+
+/// [`read`], by object id: what a suspended request is resumed with, since its vnode is
+/// only reachable again through the descriptor the caller still holds.
+///
+/// # Safety
+///
+/// VFS dispatch only; `ep` must name the caller.
+pub unsafe fn read_id(id: u32, ep: i32, buf: u64, count: usize) -> i32 {
     if count < 8 {
         return EINVAL;
     }
-    let id = (*vp).v_inode_nr;
     let Some(obj) = lookup(id) else {
         return EBADF;
     };
     if obj.counter == 0 {
-        // Not blocking (see the module docs): the caller polls first.
         return EAGAIN;
     }
     let value = if obj.flags & EFD_SEMAPHORE != 0 {
@@ -216,7 +227,52 @@ pub unsafe fn write(vp: *mut Vnode, ep: i32, buf: u64, count: usize) -> i32 {
     obj.counter += value;
     // The counter became nonzero: wake any blocked reader.
     crate::vfs::select::wake_eventfd(id);
+    unsafe { resume(id) };
     8
+}
+
+/// Whether the object asked not to block (`EFD_NONBLOCK`).
+///
+/// # Safety
+///
+/// `vp` must be a live eventfd vnode; VFS dispatch only.
+pub unsafe fn is_nonblocking(vp: *const Vnode) -> bool {
+    match lookup((*vp).v_inode_nr) {
+        Some(o) => o.flags & EFD_NONBLOCK != 0,
+        None => false,
+    }
+}
+
+/// Answer every request suspended on the object with this id, now that its counter can be
+/// read. Returns how many were answered; one still waiting stays parked.
+///
+/// # Safety
+///
+/// VFS dispatch only.
+pub unsafe fn resume(id: u32) -> usize {
+    let mut answered = 0;
+    for slot in 0..crate::vfs::blocked::SLOTS {
+        let Some(p) = (unsafe { crate::vfs::blocked::peek(slot) }) else {
+            continue;
+        };
+        if p.kind != crate::vfs::blocked::EVENTFD || p.id != id as i32 {
+            continue;
+        }
+        let Some(p) = (unsafe { crate::vfs::blocked::take(slot, crate::vfs::blocked::EVENTFD) })
+        else {
+            continue;
+        };
+        let ep = (*unsafe { crate::vfs::blocked::fproc(slot) }).fp_endpoint;
+        let r = unsafe { read_id(id, ep, p.buf, p.count) };
+        if r == EAGAIN {
+            // Another reader took the counter first: wait again.
+            unsafe { crate::vfs::blocked::restore(slot, p) };
+            continue;
+        }
+        unsafe { crate::vfs::misc::reply_endpoint(ep, r) };
+        answered += 1;
+    }
+    answered
 }
 
 /// Release the object a closed vnode held. Called from `put_vnode` when the last

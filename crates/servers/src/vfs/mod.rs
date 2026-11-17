@@ -24,6 +24,7 @@
 #![allow(unsafe_op_in_unsafe_fn)]
 
 pub mod anon;
+pub mod blocked;
 pub mod call;
 pub mod consts;
 pub mod device;

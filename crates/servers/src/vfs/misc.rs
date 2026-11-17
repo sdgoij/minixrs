@@ -19,6 +19,32 @@ fn fp() -> *mut Fproc {
     unsafe { (*vfs_global()).fp }
 }
 
+/// Answer a process blocked in `sendrec(VFS)` when only its endpoint is known.
+///
+/// The main loop's `reply` needs the caller's slot; a *deferred* completion (a pipe
+/// release, a suspended select) has only the endpoint the request came from. VFS's
+/// reply convention puts the status in `m_type` at byte 4, which is what those callers
+/// already build.
+///
+/// # Safety
+///
+/// VFS dispatch only.
+#[cfg(target_os = "minix")]
+pub unsafe fn reply_endpoint(endpt: i32, result: i32) {
+    let mut out = [0u8; 64];
+    out[4..8].copy_from_slice(&result.to_le_bytes());
+    const SEND_CALL: u64 = 46;
+    if endpt >= 0 {
+        unsafe { minix_rt::syscall2(SEND_CALL, endpt as u64, out.as_mut_ptr() as u64) };
+    }
+}
+
+/// # Safety
+///
+/// VFS dispatch only.
+#[cfg(not(target_os = "minix"))]
+pub unsafe fn reply_endpoint(_endpt: i32, _result: i32) {}
+
 /// Convert an endpoint to an fproc slot number.
 pub(crate) fn endpoint_to_slot(endpt: i32) -> Option<usize> {
     let slot = (endpt & 0xFF) as usize;
@@ -46,6 +72,12 @@ fn fproc_by_endpoint(endpt: i32) -> Option<*mut Fproc> {
 ///
 /// Source: `.refs/minix-3.3.0/minix/servers/vfs/misc.c` (free_proc)
 fn free_proc(rfp: &mut Fproc, flags: u32) {
+    // A process suspended on a pipe cannot be answered once its own fds are closed, and
+    // closing them resumes the *other* end, which would then try to answer this slot. Drop
+    // the request first, whether this is an exit or a shutdown that only releases
+    // resources.
+    unsafe { crate::vfs::blocked::clear(rfp) };
+
     // Close all open file descriptors. Use the full close_fd so pipe
     // reader/writer counts and file locks are released (matching C).
     for i in 0..OPEN_MAX {

@@ -317,13 +317,15 @@ fn select_request_pipe(filp: &Filp, ops: u32) -> u32 {
     let mut ready = 0u32;
     if ops & SEL_RD != 0 {
         let r = pipe::pipe_check(filp, pipe::READING, 0, 1, true);
-        if r != EAGAIN {
+        // `SUSPEND` is what a blocking read of an empty pipe with a writer answers, and
+        // it means "not ready" here; `EAGAIN` is the same state on a non-blocking fd.
+        if r != EAGAIN && r != SUSPEND {
             ready |= SEL_RD;
         }
     }
     if ops & SEL_WR != 0 {
         let r = pipe::pipe_check(filp, pipe::WRITING, 0, 1, true);
-        if r != EPIPE && r != EAGAIN {
+        if r != EPIPE && r != EAGAIN && r != SUSPEND {
             ready |= SEL_WR;
         }
     }
@@ -1080,18 +1082,9 @@ unsafe fn user_copy_out(_endpt: i32, _dst: u64, _src: &[u8]) -> i32 {
 
 /// Send the final select/poll result to the caller (blocked in `sendrec(VFS)`).
 /// VFS reply convention: result in m_type @ 4 (matches `main.rs reply()`).
-#[cfg(target_os = "minix")]
 unsafe fn send_reply(endpt: i32, result: i32) {
-    let mut out = [0u8; 64];
-    out[4..8].copy_from_slice(&result.to_le_bytes());
-    const SEND_CALL: u64 = 46;
-    if endpt >= 0 {
-        let _ = minix_rt::syscall2(SEND_CALL, endpt as u64, out.as_mut_ptr() as u64);
-    }
+    unsafe { crate::vfs::misc::reply_endpoint(endpt, result) }
 }
-
-#[cfg(not(target_os = "minix"))]
-unsafe fn send_reply(_endpt: i32, _result: i32) {}
 
 #[cfg(test)]
 mod tests {

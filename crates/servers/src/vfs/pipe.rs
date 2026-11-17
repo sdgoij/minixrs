@@ -8,9 +8,11 @@
 //! derives reader/writer presence from its own filp table (`find_filp_vp`),
 //! exactly like C.
 //!
-//! Blocking is not ported: C's `SUSPEND`/`revive` machinery is absent, so an
-//! empty pipe with writers returns `EAGAIN` and a full pipe returns `EAGAIN`
-//! instead of suspending the caller.
+//! Blocking is ported the way C does it, without C's worker framework: a read of an
+//! empty pipe with a writer open (or a write that cannot fit) parks the caller's request
+//! in [`Parked`] and returns `SUSPEND`, so the main loop does not reply; `release` re-runs
+//! the request when the other end moves. A descriptor opened `O_NONBLOCK` still gets
+//! `EAGAIN` at once, as POSIX requires.
 
 use crate::vfs::consts::*;
 use crate::vfs::filedes;
@@ -24,12 +26,16 @@ pub const WRITING: i32 = 1;
 ///
 /// Returns the number of bytes that may be transferred (clamped to the
 /// available space), 0 for EOF (read on an empty pipe with no writers),
-/// or a negative errno (`EAGAIN` when the operation would block — this port
-/// has no suspension — or `EPIPE` when writing with no readers).
+/// `SUSPEND` when the caller must block, or a negative errno (`EAGAIN` for the
+/// same conditions on a descriptor opened `O_NONBLOCK`, `EPIPE` when writing
+/// with no readers).
 ///
-/// `notouch` matches C's select path (check readiness only).
+/// `notouch` marks a readiness check. It suppresses nothing here: the side
+/// effects C performs inside this function (waking the opposite direction)
+/// live in [`rw_pipe`], which the readiness path never calls.
 // Reference: pipe.c pipe_check()
-pub fn pipe_check(filp: &Filp, rw_flag: i32, _oflags: i32, bytes: i32, _notouch: bool) -> i32 {
+pub fn pipe_check(filp: &Filp, rw_flag: i32, oflags: i32, bytes: i32, _notouch: bool) -> i32 {
+    let nonblock = oflags & O_NONBLOCK != 0;
     unsafe {
         let vp = filp.filp_vno;
         if vp.is_null() {
@@ -37,28 +43,46 @@ pub fn pipe_check(filp: &Filp, rw_flag: i32, _oflags: i32, bytes: i32, _notouch:
         }
         if rw_flag == READING {
             if (*vp).v_size == 0 {
-                // Empty pipe: EOF once the last writer closes; EAGAIN while
-                // a writer is still open (C would SUSPEND here).
+                // Empty pipe: EOF once the last writer closes, otherwise the read waits
+                // for data (C suspends here; a non-blocking descriptor gets EAGAIN).
                 if filedes::find_filp_vp(vp, crate::vfs::protect::W_BIT).is_null() {
-                    0
-                } else {
-                    EAGAIN
+                    return 0;
                 }
-            } else {
-                bytes
+                return if nonblock { EAGAIN } else { SUSPEND };
             }
-        } else {
-            // Writing: EPIPE without a reader; otherwise clamp to space.
-            if filedes::find_filp_vp(vp, crate::vfs::protect::R_BIT).is_null() {
-                return EPIPE;
-            }
-            let space = PIPE_BUF_SIZE as i64 - (*vp).v_size;
-            if space <= 0 {
-                return EAGAIN;
-            }
-            (bytes as i64).min(space) as i32
+            return bytes;
         }
+        // Writing: EPIPE without a reader; otherwise clamp to space.
+        if filedes::find_filp_vp(vp, crate::vfs::protect::R_BIT).is_null() {
+            return EPIPE;
+        }
+        write_allowance((*vp).v_size, bytes, nonblock)
     }
+}
+
+/// How much of a `bytes` write may be transferred with `used` bytes in the pipe.
+///
+/// `PIPE_BUF` is the atomicity bound as well as the capacity: a write that fits is
+/// transferred whole, a smaller write that does not fit waits for room rather than being
+/// cut (POSIX requires a write of at most `PIPE_BUF` to be all or nothing), and only a
+/// write larger than `PIPE_BUF` is split at the space available, which is how a producer
+/// larger than the buffer makes progress at all.
+fn write_allowance(used: i64, bytes: i32, nonblock: bool) -> i32 {
+    let capacity = PIPE_BUF_SIZE as i64;
+    let space = capacity - used;
+    let len = bytes as i64;
+    if space <= 0 {
+        return if nonblock { EAGAIN } else { SUSPEND };
+    }
+    if used + len <= capacity {
+        return bytes;
+    }
+    // It does not fit. An atomic-sized write waits for room; only one larger than the
+    // buffer is split, which is how a producer bigger than the pipe makes progress.
+    if len > capacity {
+        return space as i32;
+    }
+    if nonblock { EAGAIN } else { SUSPEND }
 }
 
 /// Read from or write to a pipe end (C `rw_pipe`).
@@ -109,13 +133,90 @@ pub fn rw_pipe(filp: &Filp, rw_flag: i32, user_e: i32, buf: u64, req_size: usize
         }
         // C caches the pipe size from the reply's seek_pos.
         (*vp).v_size = new_pos;
-        // The pipe's readiness changed — a read freed space for a writer, a write gave
-        // a reader something. Nothing else reports that (this port's drivers notify for
-        // character devices; a pipe is VFS's own), so a suspended wait watching a pipe
-        // is completed here or waits for its deadline.
+        // The transfer changed what the other end can do: a read freed space for a writer,
+        // a write gave a reader something. Nothing else reports that for a pipe (a
+        // character device notifies; a pipe is VFS's own), so the opposite direction's
+        // suspended requests are resumed and a suspended wait watching a pipe is
+        // completed here or waits for its deadline.
+        release(vp, if rw_flag == READING { WRITING } else { READING });
         crate::vfs::select::wake_pipes();
         r2
     }
+}
+
+/// Suspend the current caller's pipe request (C `pipe_suspend`).
+///
+/// Returns `SUSPEND`, which the caller returns upwards so the main loop does not reply;
+/// [`release`] resumes the request and sends the answer. A second request from a
+/// suspended process cannot arrive, because it is blocked in its `sendrec`.
+///
+/// # Safety
+///
+/// VFS dispatch only, for the process named by `fp`.
+pub unsafe fn suspend(fp: *mut Fproc, filp_idx: i32, buf: u64, count: usize, op: i32) -> i32 {
+    crate::vfs::blocked::park(
+        fp,
+        crate::vfs::blocked::Parked {
+            kind: crate::vfs::blocked::PIPE,
+            id: filp_idx,
+            op,
+            buf,
+            count,
+        },
+    )
+}
+
+/// Resume `slot`'s suspended pipe request and answer it, or put it back if it still
+/// cannot proceed. Returns true when the request was answered.
+///
+/// # Safety
+///
+/// VFS dispatch only.
+unsafe fn pending(slot: usize) -> bool {
+    let Some(p) = (unsafe { crate::vfs::blocked::take(slot, crate::vfs::blocked::PIPE) }) else {
+        return false;
+    };
+    let filp_arr =
+        core::ptr::addr_of_mut!((*crate::vfs::glo::vfs_global()).filp) as *mut Filp;
+    let ep = (*unsafe { crate::vfs::blocked::fproc(slot) }).fp_endpoint;
+    let r = rw_pipe(&*filp_arr.add(p.id as usize), p.op, ep, p.buf, p.count);
+    if r == SUSPEND {
+        // Still would block: park exactly as before, so the next release finds it.
+        unsafe { crate::vfs::blocked::restore(slot, p) };
+        return false;
+    }
+    unsafe { crate::vfs::misc::reply_endpoint(ep, r) };
+    true
+}
+
+/// Wake every process suspended on `vp` in direction `op`, now that it may be able to
+/// proceed (C `release`). Returns how many requests were answered.
+///
+/// `op` is the direction of the *suspended* request, which is the opposite of the one
+/// that just moved.
+///
+/// # Safety
+///
+/// VFS dispatch only. `vp` may be compared but not dereferenced.
+pub unsafe fn release(vp: *mut Vnode, op: i32) -> usize {
+    let mut answered = 0;
+    for slot in 0..crate::vfs::blocked::SLOTS {
+        let Some(p) = (unsafe { crate::vfs::blocked::peek(slot) }) else {
+            continue;
+        };
+        if p.kind != crate::vfs::blocked::PIPE || p.op != op || p.id < 0 {
+            continue;
+        }
+        let glob = crate::vfs::glo::vfs_global();
+        let filp_arr = core::ptr::addr_of_mut!((*glob).filp) as *mut Filp;
+        if (*filp_arr.add(p.id as usize)).filp_vno != vp {
+            continue;
+        }
+        if unsafe { pending(slot) } {
+            answered += 1;
+        }
+    }
+    answered
 }
 
 /// Reader/writer pairing for a FIFO open (C `pipe_open` in open.c).
@@ -187,8 +288,10 @@ mod tests {
         vp
     }
 
+    /// A read of an empty pipe with a writer open waits for data (C suspends); a
+    /// non-blocking descriptor gets the old answer at once.
     #[test]
-    fn test_pipe_check_read_empty_with_writer_returns_eagain() {
+    fn test_pipe_check_read_empty_with_writer_blocks() {
         init();
         unsafe {
             let vp = make_pipe_vnode(0);
@@ -196,7 +299,11 @@ mod tests {
             set_pipe_filp(1, vp, W_BIT);
             let glob = vfs_global();
             let filp_arr = core::ptr::addr_of_mut!((*glob).filp) as *mut Filp;
-            assert_eq!(pipe_check(&*filp_arr.add(0), READING, 0, 16, false), EAGAIN);
+            assert_eq!(pipe_check(&*filp_arr.add(0), READING, 0, 16, false), SUSPEND);
+            assert_eq!(
+                pipe_check(&*filp_arr.add(0), READING, O_NONBLOCK, 16, false),
+                EAGAIN
+            );
         }
     }
 
@@ -237,8 +344,9 @@ mod tests {
         }
     }
 
+    /// A full pipe blocks a writer; a non-blocking one is told to come back.
     #[test]
-    fn test_pipe_check_write_full_returns_eagain() {
+    fn test_pipe_check_write_full_blocks() {
         init();
         unsafe {
             let vp = make_pipe_vnode(crate::vfs::consts::PIPE_BUF_SIZE as i64);
@@ -246,25 +354,125 @@ mod tests {
             set_pipe_filp(1, vp, W_BIT);
             let glob = vfs_global();
             let filp_arr = core::ptr::addr_of_mut!((*glob).filp) as *mut Filp;
-            assert_eq!(pipe_check(&*filp_arr.add(1), WRITING, 0, 16, false), EAGAIN);
+            assert_eq!(pipe_check(&*filp_arr.add(1), WRITING, 0, 16, false), SUSPEND);
+            assert_eq!(
+                pipe_check(&*filp_arr.add(1), WRITING, O_NONBLOCK, 16, false),
+                EAGAIN
+            );
         }
     }
 
+    /// A write of at most `PIPE_BUF` is all or nothing: it waits for room rather than
+    /// being cut, which is what POSIX requires of a write that small.
     #[test]
-    fn test_pipe_check_write_clamps_to_space() {
+    fn test_pipe_check_write_small_that_does_not_fit_blocks() {
         init();
         unsafe {
-            // 100 bytes buffered; space = PIPE_BUF - 100.
+            let buf = crate::vfs::consts::PIPE_BUF_SIZE;
             let vp = make_pipe_vnode(100);
             set_pipe_filp(0, vp, R_BIT);
             set_pipe_filp(1, vp, W_BIT);
             let glob = vfs_global();
             let filp_arr = core::ptr::addr_of_mut!((*glob).filp) as *mut Filp;
-            let space = crate::vfs::consts::PIPE_BUF_SIZE as i64 - 100;
+            let small = buf - 50;
             assert_eq!(
-                pipe_check(&*filp_arr.add(1), WRITING, 0, (space + 50) as i32, false),
+                pipe_check(&*filp_arr.add(1), WRITING, 0, small, false),
+                SUSPEND
+            );
+            assert_eq!(
+                pipe_check(&*filp_arr.add(1), WRITING, O_NONBLOCK, small, false),
+                EAGAIN
+            );
+        }
+    }
+
+    /// A write larger than the buffer is split at the space available, in both modes:
+    /// that is the only way a producer bigger than the pipe makes progress.
+    #[test]
+    fn test_pipe_check_write_large_is_split_at_the_space() {
+        init();
+        unsafe {
+            let space = crate::vfs::consts::PIPE_BUF_SIZE as i64 - 100;
+            let vp = make_pipe_vnode(100);
+            set_pipe_filp(0, vp, R_BIT);
+            set_pipe_filp(1, vp, W_BIT);
+            let glob = vfs_global();
+            let filp_arr = core::ptr::addr_of_mut!((*glob).filp) as *mut Filp;
+            let big = crate::vfs::consts::PIPE_BUF_SIZE + 100;
+            assert_eq!(
+                pipe_check(&*filp_arr.add(1), WRITING, 0, big, false),
                 space as i32
             );
+            assert_eq!(
+                pipe_check(&*filp_arr.add(1), WRITING, O_NONBLOCK, big, false),
+                space as i32
+            );
+        }
+    }
+
+    /// A suspended request is forgotten when its process goes away, so the slot cannot be
+    /// resumed and answered after it is reused.
+    #[test]
+    fn test_pipe_suspend_then_cancel_clears_the_slot() {
+        init();
+        unsafe {
+            let glob = vfs_global();
+            let fp = (core::ptr::addr_of_mut!((*glob).fproc) as *mut Fproc).add(3);
+            (*fp).fp_endpoint = 3;
+            (*fp).fp_pid = 42;
+
+            assert_eq!(suspend(fp, 1, 0x1000, 16, READING), SUSPEND);
+            assert_eq!((*fp).fp_blocked_on, FP_BLOCKED_ON_PIPE);
+            let p = crate::vfs::blocked::peek(3).expect("parked");
+            assert_eq!((p.id, p.count, p.op), (1, 16, READING));
+
+            crate::vfs::blocked::clear(&mut *fp);
+            assert_eq!((*fp).fp_blocked_on, FP_BLOCKED_ON_NONE);
+            assert!(
+                crate::vfs::blocked::peek(3).is_none(),
+                "the entry must not outlive the process"
+            );
+        }
+    }
+
+    /// The whole shape a shell's pipeline relies on: a reader suspends on an empty pipe, and
+    /// the writer closing its end resumes it with EOF. This is the guest deadlock in miniature
+    /// (`just test-pipeblock`): without the release, neither end can ever finish.
+    #[test]
+    fn test_close_of_the_write_end_resumes_a_suspended_reader() {
+        init();
+        unsafe {
+            let vp = make_pipe_vnode(0);
+            set_pipe_filp(0, vp, R_BIT);
+            set_pipe_filp(1, vp, W_BIT);
+            let glob = vfs_global();
+            let filp_arr = core::ptr::addr_of_mut!((*glob).filp) as *mut Filp;
+            let fproc_arr = core::ptr::addr_of_mut!((*glob).fproc) as *mut Fproc;
+
+            let reader = fproc_arr.add(3);
+            (*reader).fp_endpoint = 3;
+            (*reader).fp_pid = 30;
+            (*reader).fp_filp[0] = 0;
+            let writer = fproc_arr.add(4);
+            (*writer).fp_endpoint = 4;
+            (*writer).fp_pid = 40;
+            (*writer).fp_filp[1] = 1;
+
+            assert_eq!(pipe_check(&*filp_arr.add(0), READING, 0, 16, false), SUSPEND);
+            assert_eq!(suspend(reader, 0, 0x1000, 16, READING), SUSPEND);
+
+            let _ = crate::vfs::stadir::close_fd(&mut *writer, 1);
+
+            assert_eq!(
+                (*reader).fp_blocked_on,
+                FP_BLOCKED_ON_NONE,
+                "the last writer closing must resume the reader"
+            );
+            assert!(
+                crate::vfs::blocked::peek(3).is_none(),
+                "and its parked request is gone"
+            );
+            assert_eq!((*reader).fp_filp[0], 0, "the reader's own fd is untouched");
         }
     }
 

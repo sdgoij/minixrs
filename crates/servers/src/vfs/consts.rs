@@ -370,8 +370,14 @@ pub fn fp_is_blocked(fp_flags: i32) -> bool {
 /// value was harmless until req_newnode started SENDRECing to it.
 pub const PFS_PROC_NR: i32 = arch_common::com::PFS_PROC_NR;
 
-/// Pipe buffer size in bytes (POSIX PIPE_BUF, minimum atomic write size).
-pub const PIPE_BUF_SIZE: i32 = 7168;
+/// Pipe capacity in bytes, which is also the atomic write size (POSIX `PIPE_BUF`).
+///
+/// PFS holds a pipe's bytes in one `Buf`, whose data array is `crates/fs/src/pfs/consts.rs`'s
+/// `PIPE_BUF` (4096); a write VFS allows past that is refused by PFS with `EFBIG`. This was
+/// 7168, so any write between the two numbers failed: a blocked writer resumed with the rest
+/// of a large buffer tripped it every time (`just test-pipeblock`). The number is a pipe-wide
+/// property, not a VFS one, so keep the two in step.
+pub const PIPE_BUF_SIZE: i32 = 4096;
 
 // Open flags, MINIX 3.3.0's `sys/sys/fcntl.h` (NetBSD's) values. They live
 // here rather than beside each handler: when the same flag was defined in two

@@ -179,17 +179,6 @@ are arch-specific, `[env]` is tooling/platform, not kernel.
     than resolved. (`crates/servers/src/vfs/scm.rs`, `crates/servers/src/vfs/call.rs::do_copyfd`,
     `crates/drivers/src/storage/vnd.rs`)
 
-32. **`read` never blocks in VFS, so an `eventfd`/`timerfd` read on a zero count returns
-    `EAGAIN` (2026-09-28, open, deliberate).** The port has no suspend/revive for reads
-    (item 31's sibling: `vfs::pipe` reads return `EAGAIN` rather than suspending), and
-    `vfs::eventfd` and `vfs::timerfd` follow it — a POSIX read of a zero `eventfd` counter,
-    or of a `timerfd` whose timer has not expired, would block until it is nonzero / expires.
-    The expected consumer (`calloop`/smithay) polls before it reads, and `EFD_NONBLOCK` /
-    `TFD_NONBLOCK` is the common mode, so the deviation is recorded rather than papered over
-    with a busy retry. Fixing it properly means a general deferred-read mechanism, not a
-    per-object special case. (`crates/servers/src/vfs/eventfd.rs`,
-    `crates/servers/src/vfs/timerfd.rs`, `crates/servers/src/vfs/pipe.rs`)
-
 35. **`epoll` is level-triggered only, an instance is bounded to 64 interests, and a closed
     registration is pruned lazily (2026-09-28, open, deliberate).** `vfs::epoll`
     (`crates/servers/src/vfs/epoll.rs`) is net-new — MINIX emulates `poll` over `select` and
@@ -296,6 +285,41 @@ as this file's header says a skill-captured limitation does.
    nothing is written back. That is recorded as item 47.
    (`crates/servers/src/vm/mod.rs`, `crates/userland/src/lib.rs`,
    `tools/smoke/mmapanon.tsv`, `Justfile`)
+
+32. **~~A `read` never blocked in VFS~~: FIXED (2026-11-17).** A pipe read of an empty pipe
+    with a writer open, a write that did not fit the buffer, an `eventfd` read on a zero
+    counter and a `timerfd` read before its expiry all answered `EAGAIN` instead of waiting,
+    because VFS had no way to suspend a request that could not proceed. A pipeline whose
+    consumer ran before its producer therefore failed at random.
+
+    The mechanism is C's, without C's worker threads, because this port's VFS is one thread:
+    a handler that cannot proceed parks the request in `crates/servers/src/vfs/blocked.rs` and
+    returns `SUSPEND`, which the main loop already reads as "do not reply"; whatever makes
+    progress resumes the request and sends the answer through `misc::reply_endpoint`. The
+    resumers are `pipe::release` (called after a transfer moves the other direction and from
+    `close_filp` when an end goes away), `eventfd::resume` (called by `write`) and
+    `timerfd::resume` (called by `expire`, so the alarm tick answers a waiting read).
+    `free_proc` drops a parked request before it closes the dying process's fds, and
+    `EPOLL`/`EAGAIN`-style callers are unaffected: `O_NONBLOCK` still answers at once, which
+    is what `select`, `poll` and `epoll` are built on.
+
+    Two defects surfaced while making it work. `close_filp` released the *wrong* direction
+    (closing a write end resumed writers rather than readers), which deadlocked the first
+    `sleep | cat`; and VFS believed a pipe held `PIPE_BUF_SIZE` = 7168 bytes while
+    `crates/fs/src/pfs/consts.rs` gives the buffer 4096, so any write between the two numbers
+    failed with `EFBIG` the moment a blocked writer was resumed with the rest of a large
+    buffer. They are now the same number, named once in each place.
+
+    Gates: `just test-pipeblock <arch>` runs `/bin/pipetest`, which forks with the other side
+    standing still for 200 ms and requires a read of an empty pipe to receive a late write and
+    a 20 KB write to push through a 4 KB buffer (it fails without the fix: "a blocking read did
+    not wait for its writer"); `eventfdtest` and `timerfdtest` gained the same read cases, and
+    three new host tests pin the release direction, the park/discard bookkeeping and the
+    readiness rule that treats `SUSPEND` as "not ready".
+
+    Still deliberate, and not reads: a *blocking open* of a named FIFO with no peer answers
+    `EAGAIN` (`pipe::pipe_open`), and an `eventfd` write that would overflow the counter
+    answers `EAGAIN`; neither is reachable from this port's consumers.
 
 13. **~~Free slots are left not-quite-free~~ — FIXED (2026-11-01).** `Proc::is_empty` tests the
     `SLOT_FREE` bit, the way C's `get_free_proc` does (`RTS_ISSET`), instead of equality with it, so

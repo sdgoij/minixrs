@@ -4,8 +4,13 @@
 //! named-pipe inode on PFS, `fstat` on the fds must report S_IFIFO with
 //! size 0 (routing to PFS `fs_stat`), bytes flow write→read through the
 //! block-cache buffer, and `ftruncate`/`fchmod` on the fds round-trip to
-//! PFS `fs_ftrunc`/`fs_chmod` instead of erroring. Expect `pipetest: OK`
-//! and exit 0.
+//! PFS `fs_ftrunc`/`fs_chmod` instead of erroring.
+//!
+//! It is also the gate for a pipe that *blocks* (KNOWN_ISSUES.md item 32): a read of an
+//! empty pipe with a writer open, and a write that does not fit, both wait for the other
+//! end instead of answering `EAGAIN`. Each case forks, and the other side deliberately
+//! does not move for a moment, so the waiting is what makes the exchange work rather than
+//! an accident of scheduling. Expect `pipetest: OK` and exit 0.
 
 #![no_std]
 #![no_main]
@@ -213,6 +218,184 @@ pub unsafe fn main(_argc: i32, _argv: *const *const u8) -> i32 {
     let _ = minix_std::fs::close(fr2);
     let _ = minix_rt::unlink(b"/pipetest.fifo");
 
+    if let Some(code) = blocking_cases() {
+        return code;
+    }
+
     userland::write_out(b"pipetest: OK\n");
     0
+}
+
+/// Busy-wait `ms` of the monotonic clock. True when the clock was readable.
+///
+/// The port has no `nanosleep` (it answers `ENOSYS`), and both cases below only need the
+/// *other* side to stand still for a moment, so a spin on a clock that already works is
+/// enough: an implementation that skipped the delay has to fail rather than pass, and the
+/// caller checks that it did not.
+#[cfg(target_os = "minix")]
+fn spin_ms(ms: i64) -> bool {
+    use minix_std::time::{CLOCK_MONOTONIC, clock_gettime};
+    let Ok(start) = clock_gettime(CLOCK_MONOTONIC) else {
+        return false;
+    };
+    loop {
+        let Ok(now) = clock_gettime(CLOCK_MONOTONIC) else {
+            return false;
+        };
+        let ms_secs = (now.tv_sec - start.tv_sec) * 1000;
+        let ms_nanos = (now.tv_nsec - start.tv_nsec) / 1_000_000;
+        if ms_secs + ms_nanos >= ms {
+            return true;
+        }
+    }
+}
+
+
+
+/// Say which errno a `minix_std` result carried, for a failure a boot gate has to report.
+#[cfg(target_os = "minix")]
+fn write_errno(prefix: &[u8], e: minix_std::MinixErr) {
+    let mut msg = [0u8; 64];
+    let n = prefix.len().min(48);
+    msg[..n].copy_from_slice(&prefix[..n]);
+    let mut i = n;
+    let mut v = e.0 as i64;
+    if v < 0 {
+        msg[i] = b'-';
+        i += 1;
+        v = -v;
+    }
+    let mut digits = [0u8; 20];
+    let mut k = 0usize;
+    loop {
+        digits[k] = b'0' + (v % 10) as u8;
+        v /= 10;
+        k += 1;
+        if v == 0 {
+            break;
+        }
+    }
+    while k > 0 {
+        k -= 1;
+        msg[i] = digits[k];
+        i += 1;
+    }
+    msg[i] = b'\n';
+    userland::write_err(&msg[..i + 1]);
+}
+
+/// The 20 KB a blocked writer has to push through a 7 KB pipe.
+#[cfg(target_os = "minix")]
+static BIG: [u8; 20_000] = [b'x'; 20_000];
+
+/// How long the other end stands still, comfortably longer than the microseconds it takes
+/// this process to reach the call that must wait, and short enough not to slow the gate.
+#[cfg(target_os = "minix")]
+const STILL_MS: i64 = 200;
+
+/// A read that waits for its writer, and a write that waits for its reader.
+///
+/// Returns an exit code on failure, `None` when both exchanges completed.
+#[cfg(target_os = "minix")]
+fn blocking_cases() -> Option<i32> {
+    use minix_std::fs::{close, pipe, read, write};
+
+    // The reader must get the mark that only arrives after it has started waiting. The child
+    // reports whether it managed to stand still first, so a broken clock cannot make this
+    // pass by accident: without the delay the mark may already be there.
+    let (br, bw) = match pipe() {
+        Ok(p) => p,
+        Err(_) => {
+            userland::write_err(b"pipetest: blocking pipe failed\n");
+            return Some(26);
+        }
+    };
+    let pid = minix_rt::fork();
+    if pid == 0 {
+        let _ = close(br);
+        let waited = spin_ms(STILL_MS);
+        let wrote = unsafe { write(bw, b"late") } == Ok(4);
+        let _ = close(bw);
+        minix_rt::exit(if waited && wrote { 0 } else { 1 });
+    }
+    if pid < 0 {
+        userland::write_err(b"pipetest: fork failed\n");
+        return Some(27);
+    }
+    let _ = close(bw);
+    let mut late = [0u8; 8];
+    let n = unsafe { read(br, &mut late) };
+    let _ = close(br);
+    if n != Ok(4) || &late[..4] != b"late" {
+        userland::write_err(b"pipetest: blocking read did not wait for its writer\n");
+        return Some(28);
+    }
+    if minix_rt::waitpid_status(pid) != 0 {
+        userland::write_err(b"pipetest: the writer could not stand still first\n");
+        return Some(29);
+    }
+
+    // The writer must push 20 000 bytes through a 7 168-byte pipe, so at least part of the
+    // write has to wait for the reader, which does not start reading for a moment.
+    let (wr, ww) = match pipe() {
+        Ok(p) => p,
+        Err(_) => {
+            userland::write_err(b"pipetest: blocking pipe failed\n");
+            return Some(30);
+        }
+    };
+    let pid = minix_rt::fork();
+    if pid == 0 {
+        let _ = close(ww);
+        let waited = spin_ms(STILL_MS);
+        let mut buf = [0u8; 512];
+        let mut total = 0usize;
+        let mut failed = false;
+        loop {
+            match unsafe { read(wr, &mut buf) } {
+                Ok(0) => break,
+                Ok(n) => total += n as usize,
+                Err(_) => {
+                    failed = true;
+                    break;
+                }
+            }
+        }
+        let _ = close(wr);
+        let ok = waited && !failed && total == BIG.len();
+        minix_rt::exit(if ok { 0 } else { 1 });
+    }
+    if pid < 0 {
+        userland::write_err(b"pipetest: fork failed\n");
+        return Some(31);
+    }
+    let _ = close(wr);
+    let mut off = 0usize;
+    while off < BIG.len() {
+        match unsafe { write(ww, &BIG[off..]) } {
+            Ok(0) => break,
+            Ok(n) => off += n as usize,
+            Err(e) => {
+                let _ = close(ww);
+                write_errno(b"pipetest: blocking write was refused, errno ", e);
+                return Some(32);
+            }
+        }
+    }
+    let _ = close(ww);
+    if off != BIG.len() {
+        userland::write_err(b"pipetest: the write stopped early\n");
+        return Some(33);
+    }
+    if minix_rt::waitpid_status(pid) != 0 {
+        userland::write_err(b"pipetest: the reader did not receive every byte\n");
+        return Some(34);
+    }
+
+    None
+}
+
+#[cfg(not(target_os = "minix"))]
+fn blocking_cases() -> Option<i32> {
+    None
 }

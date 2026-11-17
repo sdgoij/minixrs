@@ -189,6 +189,10 @@ pub unsafe fn close_filp(owner: i32, filp_idx: i32) -> i32 {
         // Last reference: tell the driver about character-device closes.
         // Use the filp's device number so socket clone minors are released.
         let vp = f.filp_vno;
+        // Captured before the vnode is put: the release below needs the direction, and
+        // C's `close_filp` reads the same bit. Closing a *read* end leaves writers with no
+        // reader (`EPIPE`), closing a *write* end leaves readers at end of file.
+        let is_read_end = (f.filp_mode & crate::vfs::protect::R_BIT) != 0;
         if f.filp_dev != 0 && !vp.is_null() && ((*vp).v_mode & S_IFMT) == S_IFCHR {
             unsafe {
                 crate::vfs::device::cdev_close(owner, f.filp_dev);
@@ -205,9 +209,20 @@ pub unsafe fn close_filp(owner: i32, filp_idx: i32) -> i32 {
         *f = Filp::default();
         // A pipe end going away changes the *other* end's readiness — a reader sees
         // EOF, a writer EPIPE — and nothing else reports that, so a suspended wait on
-        // that pipe is completed here rather than left for its deadline.
+        // that pipe is completed here rather than left for its deadline. A request
+        // *suspended* on it is resumed for the same reason, once the count above has
+        // already dropped this end out of `find_filp_vp` (C suspends the retry against
+        // its own dying end because it releases before the decrement).
         if is_fifo {
-            unsafe { crate::vfs::select::wake_pipes() };
+            let blocked_op = if is_read_end {
+                crate::vfs::pipe::WRITING
+            } else {
+                crate::vfs::pipe::READING
+            };
+            unsafe {
+                crate::vfs::pipe::release(vp, blocked_op);
+                crate::vfs::select::wake_pipes();
+            }
         }
     }
 

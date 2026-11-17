@@ -658,15 +658,20 @@ fn read_fd(at: Option<u64>) -> i32 {
             Err(err) => return err,
         };
         // Pipes route through PFS (C rw_pipe): readiness check, then
-        // req_read into PFS's block cache.
+        // req_read into PFS's block cache. A read that must wait is suspended here, so
+        // the main loop does not answer it: `pipe::release` does, when a writer moves.
         if ((*vp).v_mode & S_IFMT) == S_IFIFO {
-            return crate::vfs::pipe::rw_pipe(
+            let r = crate::vfs::pipe::rw_pipe(
                 filp,
                 crate::vfs::pipe::READING,
                 fp.fp_endpoint,
                 buf_addr,
                 count,
             );
+            if r == SUSPEND {
+                return crate::vfs::pipe::suspend(fp, filp_idx, buf_addr, count, crate::vfs::pipe::READING);
+            }
+            return r;
         }
         // Character devices: route through the registered driver.
         if ((*vp).v_mode & S_IFMT) == S_IFCHR {
@@ -686,13 +691,40 @@ fn read_fd(at: Option<u64>) -> i32 {
         if ((*vp).v_mode & S_IFMT) == S_IFBLK {
             return block_io(crate::vfs::pipe::READING, vp, filp, fp, buf_addr, count);
         }
-        // An eventfd is a counter, not a byte stream: VFS answers it directly.
+        // An eventfd is a counter, not a byte stream: VFS answers it directly. A zero
+        // counter waits for the write that raises it, unless the object asked not to.
         if crate::vfs::eventfd::is_eventfd(vp) {
-            return crate::vfs::eventfd::read(vp, fp.fp_endpoint, buf_addr, count);
+            let r = crate::vfs::eventfd::read(vp, fp.fp_endpoint, buf_addr, count);
+            if r == EAGAIN && !crate::vfs::eventfd::is_nonblocking(vp) {
+                return crate::vfs::blocked::park(
+                    fp,
+                    crate::vfs::blocked::Parked {
+                        kind: crate::vfs::blocked::EVENTFD,
+                        id: (*vp).v_inode_nr as i32,
+                        op: 0,
+                        buf: buf_addr,
+                        count,
+                    },
+                );
+            }
+            return r;
         }
-        // A timerfd returns its expiration count.
+        // A timerfd returns its expiration count, and waits for the timer while it is 0.
         if crate::vfs::timerfd::is_timerfd(vp) {
-            return crate::vfs::timerfd::read(vp, fp.fp_endpoint, buf_addr, count);
+            let r = crate::vfs::timerfd::read(vp, fp.fp_endpoint, buf_addr, count);
+            if r == EAGAIN && !crate::vfs::timerfd::is_nonblocking(vp) {
+                return crate::vfs::blocked::park(
+                    fp,
+                    crate::vfs::blocked::Parked {
+                        kind: crate::vfs::blocked::TIMERFD,
+                        id: (*vp).v_inode_nr as i32,
+                        op: 0,
+                        buf: buf_addr,
+                        count,
+                    },
+                );
+            }
+            return r;
         }
         // An epoll instance is neither readable nor writable: it has no data,
         // only interests (Linux answers EINVAL too).
@@ -785,15 +817,19 @@ fn write_fd(at: Option<u64>) -> i32 {
             Err(err) => return err,
         };
         // Pipes route through PFS (C rw_pipe): readiness check, then
-        // req_write into PFS's block cache.
+        // req_write into PFS's block cache. A full pipe suspends the writer.
         if ((*vp).v_mode & S_IFMT) == S_IFIFO {
-            return crate::vfs::pipe::rw_pipe(
+            let r = crate::vfs::pipe::rw_pipe(
                 filp,
                 crate::vfs::pipe::WRITING,
                 fp.fp_endpoint,
                 buf_addr,
                 count,
             );
+            if r == SUSPEND {
+                return crate::vfs::pipe::suspend(fp, filp_idx, buf_addr, count, crate::vfs::pipe::WRITING);
+            }
+            return r;
         }
         // Character devices: route through the registered driver.
         if ((*vp).v_mode & S_IFMT) == S_IFCHR {

@@ -8,9 +8,10 @@
 //! never-reused id), no filesystem, and VFS answering `read`/`fstat` and the
 //! `timerfd_settime`/`timerfd_gettime` calls directly.
 //!
-//! A `read` returns the number of expirations since the previous read (or
-//! `settime`); 0 expirations is `EAGAIN` rather than a block, matching the
-//! version use (`poll` first) and the port's pipes.
+//! A `read` returns the number of expirations since the previous read (or `settime`). With 0
+//! expirations it waits for the timer, as POSIX requires, unless the object was created
+//! `TFD_NONBLOCK`: the request is parked in `vfs::blocked` and [`expire`] resumes it with the
+//! count.
 //!
 //! The timer itself rides the one process alarm VFS already owns for
 //! `select`/`poll` deadlines (`crate::alarm`): the earliest pending timerfd
@@ -64,6 +65,8 @@ struct TimerFd {
     interval: u64,
     /// Expirations since the last read.
     fired: u64,
+    /// Creation flags; only `TFD_NONBLOCK` is consulted.
+    flags: i32,
     used: bool,
 }
 
@@ -75,6 +78,7 @@ impl TimerFd {
             next: 0,
             interval: 0,
             fired: 0,
+            flags: 0,
             used: false,
         }
     }
@@ -183,6 +187,7 @@ pub unsafe fn expire(now: u64) {
     // that re-enters the table.
     for &id in &woke[..nw] {
         crate::vfs::select::wake_timerfd(id);
+        unsafe { resume(id) };
     }
 }
 
@@ -267,6 +272,7 @@ pub fn do_create() -> i32 {
     o.next = 0;
     o.interval = 0;
     o.fired = 0;
+    o.flags = flags;
     o.used = true;
 
     if flags & TFD_CLOEXEC != 0 {
@@ -367,16 +373,23 @@ pub fn do_gettime() -> i32 {
 ///
 /// `vp` must be a live timerfd vnode; VFS dispatch only.
 pub unsafe fn read(vp: *mut Vnode, ep: i32, buf: u64, count: usize) -> i32 {
+    unsafe { read_id((*vp).v_inode_nr, ep, buf, count) }
+}
+
+/// [`read`], by object id: what a suspended request is resumed with.
+///
+/// # Safety
+///
+/// VFS dispatch only; `ep` must name the caller.
+pub unsafe fn read_id(id: u32, ep: i32, buf: u64, count: usize) -> i32 {
     if count < 8 {
         return EINVAL;
     }
-    let id = (*vp).v_inode_nr;
     let Some(o) = lookup(id) else {
         return EBADF;
     };
     expire(alarm::now());
     if o.fired == 0 {
-        // Not blocking (see the module docs): the caller polls first.
         return EAGAIN;
     }
     let bytes = o.fired.to_ne_bytes();
@@ -386,6 +399,49 @@ pub unsafe fn read(vp: *mut Vnode, ep: i32, buf: u64, count: usize) -> i32 {
     }
     o.fired = 0;
     8
+}
+
+/// Whether the object asked not to block (`TFD_NONBLOCK`).
+///
+/// # Safety
+///
+/// `vp` must be a live timerfd vnode; VFS dispatch only.
+pub unsafe fn is_nonblocking(vp: *const Vnode) -> bool {
+    match lookup((*vp).v_inode_nr) {
+        Some(o) => o.flags & TFD_NONBLOCK != 0,
+        None => false,
+    }
+}
+
+/// Answer every request suspended on the object with this id. Returns how many were
+/// answered; a reader that lost the count to another stays parked.
+///
+/// # Safety
+///
+/// VFS dispatch only.
+pub unsafe fn resume(id: u32) -> usize {
+    let mut answered = 0;
+    for slot in 0..crate::vfs::blocked::SLOTS {
+        let Some(p) = (unsafe { crate::vfs::blocked::peek(slot) }) else {
+            continue;
+        };
+        if p.kind != crate::vfs::blocked::TIMERFD || p.id != id as i32 {
+            continue;
+        }
+        let Some(p) = (unsafe { crate::vfs::blocked::take(slot, crate::vfs::blocked::TIMERFD) })
+        else {
+            continue;
+        };
+        let ep = (*unsafe { crate::vfs::blocked::fproc(slot) }).fp_endpoint;
+        let r = unsafe { read_id(id, ep, p.buf, p.count) };
+        if r == EAGAIN {
+            unsafe { crate::vfs::blocked::restore(slot, p) };
+            continue;
+        }
+        unsafe { crate::vfs::misc::reply_endpoint(ep, r) };
+        answered += 1;
+    }
+    answered
 }
 
 /// Release the object a closed vnode held. Called from `put_vnode`.

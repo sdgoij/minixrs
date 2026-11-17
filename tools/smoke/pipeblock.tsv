@@ -1,0 +1,11 @@
+# Blocking pipe reads and writes (KNOWN_ISSUES.md item 32).
+#
+# `read` on a pipe used to answer `EAGAIN` instead of waiting, because VFS had no way to
+# suspend a request that could not proceed; a write that did not fit did the same. A
+# pipeline whose consumer ran before its producer therefore failed at random, and nothing in
+# the suite noticed because every pipeline step was short enough to fit the 7 KB buffer.
+#
+# `/bin/pipetest` owns the checks (it is the image's pipe gate): it forks, the other end
+# stands still for a moment, and the read of an empty pipe and a 20 KB write through a 7 KB
+# buffer both have to wait. The marker is the whole evidence, and no other step can print it.
+pipetest	pipetest: OK

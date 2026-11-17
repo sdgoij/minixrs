@@ -2696,6 +2696,28 @@ fn uptime_ms() -> i64 {
     }
 }
 
+/// Busy-wait `ms` of the monotonic clock. True when the clock was readable.
+///
+/// The port has no `nanosleep` (it answers `ENOSYS`), and the tests below that need the
+/// *other* side to stand still for a moment only need a delay the scheduler honours, so a
+/// spin on a clock that already works is enough. A caller must treat `false` as a failure:
+/// without the delay the exchange it is testing could pass by accident.
+pub fn spin_ms(ms: i64) -> bool {
+    let Ok(start) = minix_std::time::clock_gettime(minix_std::time::CLOCK_MONOTONIC) else {
+        return false;
+    };
+    loop {
+        let Ok(now) = minix_std::time::clock_gettime(minix_std::time::CLOCK_MONOTONIC) else {
+            return false;
+        };
+        let secs = (now.tv_sec - start.tv_sec) * 1000;
+        let nanos = (now.tv_nsec - start.tv_nsec) / 1_000_000;
+        if secs + nanos >= ms {
+            return true;
+        }
+    }
+}
+
 /// eventfd smoke test (Wayland Phase 0): the counter semantics an event loop
 /// relies on, and — the point of the object — a write from another process
 /// waking a blocked `poll`.
@@ -2815,6 +2837,34 @@ pub fn eventfd_test(_args: &[&str]) -> i32 {
         _ => return fail(b"eventfdtest: the wake value is wrong\r\n"),
     }
     let _ = minix_std::process::waitpid(pid, 0);
+    // A *read* of a zero counter waits too, rather than answering EAGAIN: the child stands
+    // still, so the value only arrives if the read suspended. Not a `poll`, so this is VFS's
+    // deferred-read path (`vfs::blocked`), which the pipe gate covers from the other side.
+    let pid = match unsafe { minix_std::process::fork() } {
+        Ok(p) => p,
+        Err(_) => return fail(b"eventfdtest: fork failed\r\n"),
+    };
+    if pid == 0 {
+        #[cfg(target_os = "minix")]
+        let delayed = {
+            let t0 = uptime_ms();
+            while uptime_ms() - t0 < 50 {}
+            true
+        };
+        #[cfg(not(target_os = "minix"))]
+        let delayed = true;
+        let wrote = write_u64(fd, 9);
+        minix_std::process::exit(if delayed && wrote { 0 } else { 1 });
+    }
+    let mut r = [0u8; 8];
+    match unsafe { minix_std::fs::read(fd, &mut r) } {
+        Ok(8) if u64::from_ne_bytes(r) == 9 => {}
+        _ => return fail(b"eventfdtest: a blocking read did not wait for its writer\r\n"),
+    }
+    match minix_std::process::waitpid(pid, 0) {
+        Ok((_, 0)) => {}
+        _ => return fail(b"eventfdtest: the writer could not stand still first\r\n"),
+    }
     let _ = minix_std::fs::close(fd);
 
     write_out(b"eventfdtest: PASS\r\n");
@@ -2953,6 +3003,22 @@ pub fn timerfd_test(_args: &[&str]) -> i32 {
             let _ = read_count(fd);
         }
         Err(_) => return fail(b"timerfdtest: clock_gettime failed\r\n"),
+    }
+
+    // A read with no expiry yet waits for the timer, rather than answering EAGAIN: the
+    // elapsed time is what proves it waited, since a count of 1 alone could also come from
+    // a read that raced the expiry.
+    let one_shot = its((0, 0), (0, 100_000_000));
+    if minix_std::fs::timerfd_settime(fd, 0, &one_shot, None).is_err() {
+        return fail(b"timerfdtest: settime before the blocking read failed\r\n");
+    }
+    let t0 = uptime_ms();
+    if read_count(fd) < 1 {
+        return fail(b"timerfdtest: a blocking read did not wait for the timer\r\n");
+    }
+    let dt = uptime_ms() - t0;
+    if !(50..2000).contains(&dt) {
+        return fail(b"timerfdtest: the blocking read returned too soon\r\n");
     }
 
     let _ = minix_std::fs::close(fd);
