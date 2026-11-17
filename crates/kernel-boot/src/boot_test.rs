@@ -1366,9 +1366,16 @@ fn test_user_and_kernel_mappings_do_not_overlap() -> u32 {
             // The ramdisk image is the one deliberate exception: the kernel maps it at
             // `RAMDISK_IMAGE_VA` (4 GiB, above every arch's user window — see its comment) so the
             // filesystem server can read it directly, and that is the only user mapping the port
-            // places outside the window.
+            // places outside the window. The span is the image's own length rounded to pages, the
+            // same computation `load_and_prepare_all` maps: `MINIXFS_BLOCKS` can make the image
+            // larger than `RAMDISK_IMAGE_SIZE`, which is only the default.
             let ramdisk_lo = arch_common::com::RAMDISK_IMAGE_VA;
-            let ramdisk_hi = ramdisk_lo + arch_common::com::RAMDISK_IMAGE_SIZE as u64;
+            let image_len = kernel::minixfs::minixfs_image_len() as u64;
+            let ramdisk_hi = ramdisk_lo + if image_len > 0 {
+                image_len.div_ceil(4096) * 4096
+            } else {
+                4096
+            };
 
             let report_user_mapping = |va: u64| {
                 serial_write("  FAIL: ");

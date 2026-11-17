@@ -69,13 +69,10 @@ fn assemble(
         if matches!(dest, "/bin/helloc" | "/bin/ctest" | "/bin/cabi") && t.arch != "x86_64" {
             continue;
         }
-        // The uutils multicall is embedded on x86_64 and riscv64. aarch64 *builds*
-        // it (`just coreutils-aarch64`, which needs the port's own `cc` for
-        // blake3's NEON path) but must not carry it yet: `coreutils seq 200` on
-        // aarch64 silently writes an empty file (KNOWN_ISSUES aarch64 #9).
-        if dest == "/bin/coreutils" && t.arch == "aarch64" {
-            continue;
-        }
+        // The uutils multicall is embedded on every arch. aarch64 needs the port's
+        // own `cc` for blake3's NEON path (see `just coreutils-aarch64`) and a
+        // 32 MiB embedded filesystem (`MINIXFS_BLOCKS=8192`, set by `build-aarch64`)
+        // because the AArch64 userland plus the 6 MB multicall does not fit 16 MiB.
         let src = release.join(bin_name);
         let data = match std::fs::read(&src) {
             Ok(d) => d,

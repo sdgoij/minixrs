@@ -188,7 +188,7 @@ coreutils-aarch64:
     # port's own, told the arch (`tools/cc-minix.py`), with an archiver for the object:
     # `llvm-ar` where it exists (MSYS has no `ar`), binutils' `ar` otherwise (a Linux
     # runner). Both are named bare, so cc-rs resolves them on PATH.
-    AR_aarch64_unknown_minix="$(command -v llvm-ar >/dev/null 2>&1 && echo llvm-ar || echo ar)" CC_aarch64_unknown_minix="python3 {{ROOT}}/tools/cc-minix.py aarch64" RUSTC="{{stage1-rustc}}" RUSTFLAGS="-C link-arg=-T../tools/minix-user.ld -C link-arg=--no-eh-frame-hdr --cfg getrandom_backend=\"custom\" -C strip=symbols -C opt-level=z" cargo build --manifest-path coreutils/Cargo.toml --release --target aarch64-unknown-minix --no-default-features --features feat_minix
+    AR_aarch64_unknown_minix="$(command -v llvm-ar >/dev/null 2>&1 && echo llvm-ar || echo ar)" CC_aarch64_unknown_minix="python {{ROOT}}/tools/cc-minix.py aarch64" RUSTC="{{stage1-rustc}}" RUSTFLAGS="-C link-arg=-T../tools/minix-user.ld -C link-arg=--no-eh-frame-hdr --cfg getrandom_backend=\"custom\" -C strip=symbols -C opt-level=z" cargo build --manifest-path coreutils/Cargo.toml --release --target aarch64-unknown-minix --no-default-features --features feat_minix
     cp coreutils/target/aarch64-unknown-minix/release/coreutils target/aarch64-unknown-minix/release/coreutils
 
 # ---------- build ----------
@@ -327,8 +327,8 @@ test-interactive-bash-aarch64 boot-timeout="60": system-image-aarch64
 build-riscv64: userland-riscv64 coreutils-riscv64 dynlib-riscv64
     RUSTC="{{stage1-rustc}}" cargo build -p kernel-boot --bin kernel-boot-riscv64 --target riscv64gc-unknown-minix --features embed_initramfs,embed_minixfs,riscv64 --release
 
-build-aarch64: userland-aarch64 dynlib-aarch64
-    RUSTC="{{stage1-rustc}}" cargo build -p kernel-boot --bin kernel-boot-aarch64 --target aarch64-unknown-minix --features embed_initramfs,embed_minixfs,aarch64 --release
+build-aarch64: userland-aarch64 coreutils-aarch64 dynlib-aarch64
+    MINIXFS_BLOCKS="${MINIXFS_BLOCKS:-8192}" RUSTC="{{stage1-rustc}}" cargo build -p kernel-boot --bin kernel-boot-aarch64 --target aarch64-unknown-minix --features embed_initramfs,embed_minixfs,aarch64 --release
 
 # ---------- run ----------
 
@@ -585,6 +585,14 @@ test-coreutils-wedge boot-timeout="20": build-x86
     @just _assert-qemu-version qemu-system-x86_64
     FEED_SCENARIO=tools/smoke/coreutils-wedge.tsv sh tools/smoke/feed.sh target/test-coreutils-wedge.log {{boot-timeout}} qemu-system-x86_64 -nographic -m 256M -no-reboot -vga none -device bochs-display,id=fb0 -kernel target/images/x86_64-pc-minix/minix-x86.elf -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0 -device virtio-tablet-pci,display=fb0
     @echo "coreutils-wedge: no child was left wedged"
+
+# The aarch64 half of the coreutils gate: the multicall is embedded on aarch64 now, and
+# `seq 200 > file` is the sequence that used to write an empty file when a context switch
+# dropped the caller's SIMD registers (KNOWN_ISSUES aarch64 #9).
+test-coreutils-wedge-aarch64 boot-timeout="30": build-aarch64
+    @just _assert-qemu-version qemu-system-aarch64
+    FEED_SCENARIO=tools/smoke/coreutils-wedge.tsv sh tools/smoke/feed.sh target/test-coreutils-wedge-aarch64.log {{boot-timeout}} qemu-system-aarch64 -machine virt -cpu cortex-a57 -m 256M -nographic -no-reboot -global virtio-mmio.force-legacy=off -netdev user,id=net0 -device virtio-net-device,netdev=net0 -device virtio-gpu-device -device virtio-keyboard-device -kernel target/aarch64-unknown-minix/release/kernel-boot-aarch64
+    @echo "coreutils-wedge: no child was left wedged (aarch64)"
 
 # Long paths must resolve. KNOWN_ISSUES.md item 19: a pathname of 24 bytes or more
 # killed VFS — it wrote the REQ_LOOKUP terminator one byte past the 56-byte message
@@ -1303,7 +1311,8 @@ probe-dso-share-riscv64: dynlink-riscv64
 # riscv64's bash is the one that does not fit the default embedded filesystem: the release
 # injects it (`MINIXFS_EXTRA`) and the image is embedded in the kernel, where 16 MiB is full
 # before bash goes in, so the build panics with `zone 4096 out of bounds`. The image is built
-# at the system images' 32 MiB instead; the other arches' bash fits and they keep 16 MiB.
+# at the system images' 32 MiB instead; the other arches' bash fits in 16 MiB. (aarch64's
+# own embedded image is 32 MiB for the uutils multicall, not for bash.)
 image-riscv64 boot-timeout="15":
     MINIXFS_BLOCKS="${MINIXFS_BLOCKS:-8192}" just build-riscv64
     mkdir -p target/images/riscv64gc-unknown-minix
@@ -1390,14 +1399,14 @@ _assert-qemu-version emulator:
 build-riscv64-test: userland-riscv64 coreutils-riscv64 dynlib-riscv64
     RUSTC="{{stage1-rustc}}" cargo build -p kernel-boot --bin kernel-boot-riscv64-test --target riscv64gc-unknown-minix --features embed_initramfs,embed_minixfs,riscv64,integration-tests --release
 
-build-aarch64-test: userland-aarch64 dynlib-aarch64
-    RUSTC="{{stage1-rustc}}" cargo build -p kernel-boot --bin kernel-boot-aarch64-test --target aarch64-unknown-minix --features embed_initramfs,embed_minixfs,aarch64,integration-tests --release
+build-aarch64-test: userland-aarch64 coreutils-aarch64 dynlib-aarch64
+    MINIXFS_BLOCKS="${MINIXFS_BLOCKS:-8192}" RUSTC="{{stage1-rustc}}" cargo build -p kernel-boot --bin kernel-boot-aarch64-test --target aarch64-unknown-minix --features embed_initramfs,embed_minixfs,aarch64,integration-tests --release
 
 build-riscv64-boot: userland-riscv64 coreutils-riscv64 dynlib-riscv64
     RUSTC="{{stage1-rustc}}" cargo build -p kernel-boot --bin kernel-boot-riscv64-boot --target riscv64gc-unknown-minix --features embed_initramfs,embed_minixfs,riscv64,boot-test --release
 
-build-aarch64-boot: userland-aarch64 dynlib-aarch64
-    RUSTC="{{stage1-rustc}}" cargo build -p kernel-boot --bin kernel-boot-aarch64-boot --target aarch64-unknown-minix --features embed_initramfs,embed_minixfs,aarch64,boot-test --release
+build-aarch64-boot: userland-aarch64 coreutils-aarch64 dynlib-aarch64
+    MINIXFS_BLOCKS="${MINIXFS_BLOCKS:-8192}" RUSTC="{{stage1-rustc}}" cargo build -p kernel-boot --bin kernel-boot-aarch64-boot --target aarch64-unknown-minix --features embed_initramfs,embed_minixfs,aarch64,boot-test --release
 
 test-qemu target="x86":
     @just test-qemu-{{target}}
@@ -1490,6 +1499,7 @@ test-arches:
     @just test-winprobe aarch64
     @just test-burst aarch64
     @just test-ttytimeout aarch64
+    @just test-coreutils-wedge-aarch64
 
 # Fork isolation, per arch: `tools/smoke/fork.tsv` runs `/bin/forktest`, which forks and checks
 # all three directions of the copy - the child's write must not reach the parent, the parent's

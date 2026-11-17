@@ -47,17 +47,8 @@ fn main() -> ExitCode {
     let mut files: Vec<(&'static str, Vec<u8>)> = Vec::new();
     for &(dest, bin_name) in wanted {
         // The C smoke tests are x86_64-only (their builders are), so an image for
-        // another arch never has them to carry. `coreutils` is carried on every other
-        // arch, but aarch64's multicall loses output (KNOWN_ISSUES aarch64 #9) and is
-        // therefore opt-in there: set `MINIXFS_COREUTILS_AARCH64` to include it while
-        // chasing the bug.
+        // another arch never has them to carry.
         if matches!(dest, "/bin/helloc" | "/bin/ctest" | "/bin/cabi") && t.arch != "x86_64" {
-            continue;
-        }
-        if dest == "/bin/coreutils"
-            && t.arch == "aarch64"
-            && std::env::var_os("MINIXFS_COREUTILS_AARCH64").is_none()
-        {
             continue;
         }
         let src = release.join(bin_name);

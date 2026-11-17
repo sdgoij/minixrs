@@ -316,32 +316,6 @@ the burst-overflow reading in item 37, are under `# Resolved issues`.
    (`VM_PAGING_MEMINFO`) — the exec-2 hang was exactly this class of bug.
    (aarch64-debugging skill gotcha 9/10)
 
-9. **`/bin/coreutils` is built but not embedded on aarch64: it loses output
-   (2026-09-25, open — measured).** `coreutils seq 3` prints its three lines, but
-   `coreutils seq 20` (and 100/200/1000) intermittently writes **nothing** — an
-   empty file when redirected, no error, no signal the shell reports — while the
-   same scenario passes 10/10 on riscv64 and is the green gate on x86_64. Over
-   three boots the prompt-paced `tools/smoke/coreutils-wedge.tsv` scenario failed
-   all three times on aarch64 (it never got past `seq 200`) and the riscv64 runs
-   of it were 6/6. A whole output going missing with no diagnostic is the shape of
-   KNOWN_ISSUES 12 — whose x86 cause was the kernel clobbering a live process's XMM
-   registers on entry — but aarch64 is *not* that mechanism: its EL0 sync and IRQ
-   handlers already save and restore the caller-saved SIMD registers (`q0`-`q7`,
-   `q16`-`q31`) on every trap (`crates/arch-aarch64/src/exception.rs`), and `seq 3`
-   working while larger runs do not points at the allocation-heavy startup path, not
-   at a register. So the multicall *builds* for aarch64 (`just coreutils-aarch64`,
-   which needs an explicit `CC`/`AR` for blake3's NEON C — x86 falls back to Rust
-   intrinsics when no `cc` is found and riscv64 has no SIMD path, so aarch64 is the
-   only target whose multicall needs a C compiler at all) but the image deliberately
-   does not carry it: `crates/kernel/build.rs` skips `/bin/coreutils` on aarch64
-   alone, and the recipe is left in place for the bug hunt. Reproducer:
-   `just coreutils-aarch64`, then `FEED_SCENARIO=tools/smoke/coreutils-wedge.tsv sh
-   tools/smoke/feed.sh <log> 90 qemu-system-aarch64 -machine virt -cpu cortex-a57 -m
-   256M -nographic -no-reboot -global virtio-mmio.force-legacy=off -netdev
-   user,id=net0 -device virtio-net-device,netdev=net0 -device virtio-gpu-device
-   -device virtio-keyboard-device -kernel
-   target/aarch64-unknown-minix/release/kernel-boot-aarch64`.
-
 ---
 
 # Resolved issues
@@ -2248,6 +2222,26 @@ the burst-overflow reading in item 37, are under `# Resolved issues`.
    `Mcontext::from_frame`/`write_into_frame` where the host can test it.
    `tpidr_el0` is not in the frame at all: the kernel keeps it in `Proc::p_tls`
    and reloads it on every switch.
+
+9. **~~`/bin/coreutils` is built but not embedded on aarch64: it loses output~~: FIXED
+   (2026-11-17).** The loss was the same class as item 42's winprobe corruption: the
+   exception frames saved only the caller-saved `q0`-`q7`/`q16`-`q31`, so a context
+   switch left the callee-saved `q8`-`q15` holding the previous process's values, and
+   the multicall's allocation-heavy startup kept a live value there across a trap.
+   `976981af8` saves `q8`-`q15` and swaps the frame's SIMD block with the per-process
+   image on every switch; its date (2026-10-02) is after this entry's measurement, which
+   is why the entry was stale. The image now carries the multicall on aarch64:
+   `crates/kernel/build.rs` and `mkminixfs` no longer skip it, `build-aarch64` depends
+   on `coreutils-aarch64` and raises the embedded filesystem to
+   `MINIXFS_BLOCKS=8192` (32 MiB, because the AArch64 userland plus the 6 MB multicall
+   does not fit 16 MiB), and `just test-coreutils-wedge-aarch64` runs the same scenario
+   in `test-arches`. Verified: 14 consecutive aarch64 boots of
+   `tools/smoke/coreutils-wedge.tsv` green (`seq 3`, `seq 200 > file`, `wc -l`, `pwd`,
+   `WEDGE-OK`), where the entry recorded three consecutive failures.
+   (`crates/arch-aarch64/src/exception.rs`, `crates/kernel/src/fpu.rs`,
+   `crates/kernel-boot/src/aarch64.rs`, `crates/kernel/build.rs`,
+   `crates/boot-image/src/bin/mkminixfs.rs`, `Justfile`,
+   `tools/smoke/coreutils-wedge.tsv`)
 
 ---
 
