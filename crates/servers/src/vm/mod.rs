@@ -1265,6 +1265,13 @@ pub struct PageState {
     fault: Fault,
     page_addr: u64,
     pa: u64,
+    /// VM's own temporary mapping of `pa` while VFS fills it, or 0.
+    ///
+    /// The fill writes into *VM's* address space through this mapping, so the faulting process has
+    /// nothing mapped at `page_addr` until the content is the file's. A thread that reaches the
+    /// page during the fill therefore takes an ordinary page fault and parks on `page_pending`,
+    /// rather than running a zero frame that happens to be reachable.
+    host_va: u64,
     file_off: u64,
     file_size: u64,
     writable: bool,
@@ -1358,23 +1365,25 @@ fn start_file_page(va: u64, fault: &Fault) -> PageOutcome {
     let cr3 = fault.cr3;
     let page_addr = va & !(page_size - 1);
 
+    // Is another fault of this process already waiting for this page's fill? Nothing is mapped at
+    // `page_addr` while a fill is in flight (the frame lives in VM's own space until the file has
+    // been read into it), so this is the only way to tell a pending page from an absent one. It has
+    // to come before anything else: without it each thread that faults here would start a fill of
+    // its own, and the last one to land would win.
+    if crate::vm::vfs_request::page_pending(ep, page_addr) {
+        return PageOutcome::Pending;
+    }
+
     // The exec pre-fault may have mapped this page already (the faulting page lies in a
     // non-executable region it covered); skip it so the page isn't double-allocated. In the
     // plain demand-fault path only PROT faults arrive with a present page, which map as before.
     let pte = crate::vm::vm_walk_page(cr3, page_addr);
     if pte & kernel::pagetable::PG_P != 0 {
-        // Unless VFS is still filling it. The frame that is present then is the placeholder below:
-        // zero, and mapped without the user bit precisely so nothing may run it, so a present PTE
-        // is not evidence the page is the file's yet. A thread that faults on it has to stay
-        // blocked like the thread whose fill it is — the completion clears the whole group, which
-        // is what releases both.
-        if crate::vm::vfs_request::page_pending(ep, page_addr) {
-            return PageOutcome::Pending;
-        }
         // A finished file page is always mapped with the user bit (`finish_page`), so a present
-        // page without it is a placeholder whose fill is gone: the fill failed, or its request
-        // could not be sent, and the release path that should have taken the placeholder away did
-        // not. Answering `Done` here makes the fault unrepairable: the thread retries the same
+        // page without it is an orphan: the fill failed, or its request could not be sent, and the
+        // release path that should have taken the placeholder away did not. (A page whose fill is
+        // still in flight is not present at all any more, and `page_pending` above is what catches
+        // it.) Answering `Done` here makes the fault unrepairable: the thread retries the same
         // instruction, faults identically, and VM clears the fault again, for as long as the
         // process lives. Measured on x86: two worker threads at the entry of a `.text` page never
         // touched by the main thread, ~6000 faults a second, the process suspended behind a
@@ -1435,6 +1444,7 @@ fn start_file_page(va: u64, fault: &Fault) -> PageOutcome {
         fault: *fault,
         page_addr,
         pa: 0,
+        host_va: 0,
         file_off,
         file_size,
         writable,
@@ -1471,37 +1481,31 @@ fn start_file_page(va: u64, fault: &Fault) -> PageOutcome {
         return PageOutcome::Killed;
     }
 
-    // Zero-fill the page via a temporary mapping in VM's own address space.
-    let tmp_va = crate::vm::vm_mappage(
+    // Zero the page and *keep it mapped in VM's own address space*: that mapping is where the FDIO
+    // copy lands. Nothing is mapped at `page_addr` in the faulting process until the content is the
+    // file's, so a thread that reaches the page during the fill takes an ordinary page fault and
+    // parks in `page_pending` above, instead of running the zeros. Mapping the frame into the
+    // process first and relying on its permissions to refuse the access was the old shape, and is
+    // what item 49 was: on aarch64 the fetch ran the zeros and died on `udf #0`.
+    let host_va = crate::vm::vm_mappage(
         pa,
         kernel::pagetable::MAP_USER | kernel::pagetable::MAP_WRITE,
     );
-    if tmp_va == 0 {
+    if host_va == 0 {
         crate::vm::vm_free_pages(pa, 1);
         kill_faulting(ep);
         return PageOutcome::Killed;
     }
     unsafe {
-        core::ptr::write_bytes(tmp_va as *mut u8, 0, page_size as usize);
-    }
-    crate::vm::vm_unmappage(tmp_va);
-
-    // Map the destination of the FDIO copy. The read VFS performs is a kernel-mode safecopy that
-    // runs on this process's CR3, so the PTE has to be present and writable — but deliberately
-    // *not* user-accessible. While the fill is in flight the frame holds zeros, and a user thread
-    // of this process (page faults block one thread, not the group) that reached the page would run
-    // those zeros: as code that is a #GP from a garbage operand, as data it is whatever the
-    // zero bytes mean to the reader. Measured on x86: a child fetched a zero-filled `.text` page
-    // this way and faulted in `SipHash`; the same window is why a `clap` value could downcast to a
-    // type id that was nowhere in the binary. `finish_page` puts the region's permissions on.
-    if crate::vm::vm_map_page_in(cr3, page_addr, pa, kernel::pagetable::MAP_WRITE) != 0 {
-        crate::vm::vm_free_pages(pa, 1);
-        kill_faulting(ep);
-        return PageOutcome::Killed;
+        core::ptr::write_bytes(host_va as *mut u8, 0, page_size as usize);
     }
 
-    // The frame this page will arrive in.
-    let state = PageState { pa, ..state };
+    // The frame this page will arrive in, with the mapping that will receive it.
+    let state = PageState {
+        pa,
+        host_va,
+        ..state
+    };
 
     // A memfd page has no file to read. The object *is* these frames: the cache
     // entry `finish_page` is about to create is what every mapping of the object
@@ -1512,9 +1516,12 @@ fn start_file_page(va: u64, fault: &Fault) -> PageOutcome {
         match crate::vm::vfs_request::send(
             arch_common::com::VMVFSREQ_FDIO as i32,
             fd,
-            ep,
+            // The copy lands in *VM* (`host_va`), not in the faulting process. `vm_call_reply`
+            // always answers VM, whatever this field says, so the request protocol is unchanged;
+            // this is the same shape `vm/writeback.rs` uses for FDWRITE.
+            arch_common::com::VM_PROC_NR,
             file_off,
-            page_addr,
+            host_va,
             page_size as u32,
             job,
         ) {
@@ -1522,7 +1529,7 @@ fn start_file_page(va: u64, fault: &Fault) -> PageOutcome {
                 return PageOutcome::Pending;
             }
             Err(_) => {
-                let _ = crate::vm::vm_unmap_page_in(cr3, page_addr);
+                crate::vm::vm_unmappage(host_va);
                 crate::vm::vm_free_pages(pa, 1);
                 kill_faulting(ep);
                 return PageOutcome::Killed;
@@ -1553,10 +1560,18 @@ fn finish_page(state: &PageState, tail_zero: bool) -> bool {
         // past the in-file end.
         let in_file = state.file_size - state.file_off;
         if in_file < page_size {
-            let tmp_va = crate::vm::vm_mappage(
-                state.pa,
-                kernel::pagetable::MAP_USER | kernel::pagetable::MAP_WRITE,
-            );
+            // The fill already has the frame mapped in VM's own space (`host_va`); use that rather
+            // than mapping it again. A caller with no fill behind it (a cache hit, a page past the
+            // file's end) maps it just for this.
+            let borrowed = state.host_va != 0;
+            let tmp_va = if borrowed {
+                state.host_va
+            } else {
+                crate::vm::vm_mappage(
+                    state.pa,
+                    kernel::pagetable::MAP_USER | kernel::pagetable::MAP_WRITE,
+                )
+            };
             if tmp_va == 0 {
                 let _ = crate::vm::vm_unmap_page_in(state.fault.cr3, state.page_addr);
                 crate::vm::vm_free_pages(state.pa, 1);
@@ -1570,8 +1585,16 @@ fn finish_page(state: &PageState, tail_zero: bool) -> bool {
                     (page_size - in_file) as usize,
                 );
             }
-            crate::vm::vm_unmappage(tmp_va);
+            if !borrowed {
+                crate::vm::vm_unmappage(tmp_va);
+            }
         }
+    }
+
+    // The fill's destination in VM's space is done with. Release it before the page becomes
+    // reachable from the process, so nothing can write the frame behind the process's back.
+    if state.host_va != 0 {
+        crate::vm::vm_unmappage(state.host_va);
     }
 
     // Downgrade to the region's permissions (read-only exec pages must not stay writable; writable
@@ -1585,9 +1608,10 @@ fn finish_page(state: &PageState, tail_zero: bool) -> bool {
         pt_flags |= kernel::pagetable::MAP_EXEC;
     }
     if crate::vm::vm_map_page_in(state.fault.cr3, state.page_addr, state.pa, pt_flags) != 0 {
-        // The process cannot be given this page. Leaving the fill placeholder in place would
-        // leave the instruction it is stuck on faulting forever, with no request behind it to
-        // ever finish the page, so release both the mapping and the frame and end the process.
+        // The process cannot be given this page, and it has no mapping of it at all (the fill's
+        // frame lived in VM's space), so leaving it out would leave the thread that faulted on it
+        // circling with no request behind it to ever finish the page. Release the frame and end
+        // the process.
         let _ = crate::vm::vm_unmap_page_in(state.fault.cr3, state.page_addr);
         crate::vm::vm_free_pages(state.pa, 1);
         kill_faulting(state.fault.ep);
@@ -1626,6 +1650,11 @@ pub fn finish_file_page(state: PageState, reply: &[u8; 64]) {
             .unwrap_or([0; 4]),
     );
     let landed = if result != 0 {
+        // The fill failed. The frame never became visible to the process, but it is still mapped in
+        // VM's space while the request was outstanding, so release that first.
+        if state.host_va != 0 {
+            crate::vm::vm_unmappage(state.host_va);
+        }
         let _ = crate::vm::vm_unmap_page_in(state.fault.cr3, state.page_addr);
         crate::vm::vm_free_pages(state.pa, 1);
         kill_faulting(state.fault.ep);

@@ -682,6 +682,7 @@ mod tests {
             fault: crate::vm::Fault::for_page(ep, 0, off),
             page_addr: off,
             pa: 0,
+            host_va: 0,
             file_off: off,
             file_size: off + 4096,
             writable: false,

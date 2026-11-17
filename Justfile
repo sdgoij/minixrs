@@ -1599,8 +1599,7 @@ test-arches:
     @just test-burst aarch64
     @just test-ttytimeout aarch64
     @just test-pipeblock aarch64
-    # `test-threads aarch64` is deliberately absent: it reproduces KNOWN_ISSUES item 49, so it
-    # stays a command a person runs, not a gate CI would fail on every push.
+    @just test-threads aarch64
     @just test-coreutils-wedge-aarch64
 
 # Fork isolation, per arch: `tools/smoke/fork.tsv` runs `/bin/forktest`, which forks and checks

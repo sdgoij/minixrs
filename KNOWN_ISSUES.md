@@ -217,102 +217,7 @@ the burst-overflow reading in item 37, are under `# Resolved issues`.
 
 ## AArch64 (`[aarch64]`)
 
-49. **`/bin/threadtest` takes an unhandled EL0 exception on aarch64 once a worker runs
-    (2026-11-17, open, reproduced).** `just test-threads aarch64` runs `tools/smoke/threads.tsv`
-    against `/bin/threadtest`, which spawns four kernel threads that block in PM IPC, bump a
-    shared counter and are joined. The same binary and the same scenario pass on x86_64 and
-    riscv64. On aarch64 the command prints at most one byte of its `threadtest: spawned` line and
-    the shell is back at its prompt: no error from the program itself, so it was killed. With the
-    report fixed below, it halts and prints the exception class instead.
-
-    Two faults were in the way of seeing this, and both are now fixed (this commit). The
-    unknown-exception report in `arch-aarch64/src/exception.rs` wrote a bare `X` to the UART's
-    **physical** address `0x0900_0000`. With the MMU on that address is not mapped (devices are
-    reached through the physmap), so the report itself took a kernel-mode store fault, which
-    `handle_page_fault` forwards to VM as a user address, and VM answered `sys_kill(SIGSEGV)` to
-    whichever process was running: the trace showed the same kill at `0x0900_0000` repeating
-    forever, which read as a wild user store and was not one. The report now goes through
-    `serial_write_byte` and prints the class, ELR, SPSR, ESR and FAR.
-
-    With that fixed the real event is visible: `EL0 unhandled exception, EC=0x00`, `ESR=0x02000000`
-    (ISS zero), `ELR=FAR=0x0000_0000_0100_3060`, `SPSR=0x8000_0000` (EL0t). EC 0 is ARMv8's
-    "unknown reason", the class an **undefined instruction** reports, and `0x1003060` is the first
-    instruction of `memcpy` in that build, where the linked word is `5f 40 00 f1`
-    (`cmp x2, #0x10`), which every ARMv8.0 core decodes. EC 0x20, an instruction abort, is what an
-    unmapped fetch reports and the vector handles it, so by the time this exception is taken the
-    CPU had a translation for the page and retired something that was not the file's instruction.
-
-    Also fixed in the course of this, and not the cause: `/bin/threadtest` and `/bin/forkthread`
-    computed their initial thread stack top as `(base + size) & !0xF - 8` on every arch. That is
-    x86_64's entry convention (as if a return address had been pushed); AArch64 wants SP 16-byte
-    aligned, and RISC-V's ABI wants the same, so both now take the aligned top itself. The same
-    EC=0 appears with the aligned stack, which rules alignment out as the cause.
-
-    What is known now, and where the next session starts. A worker that volatile-reads `0x1003060`
-    and `0x1003000` before anything else gets exactly the file's words (`0x3940056b`, `0x8b224502`),
-    and with those two reads in front the whole run passes with `counter=4`: a *data* fault on that
-    file-backed text page is filled from the file and the worker proceeds. Without them the worker's
-    first access is an *instruction fetch* of the same page, and that produces the same EC=0x00
-    report with FAR equal to ELR, first at `0x1003060` and, in a rebuilt binary, at `0x1003050`;
-    the linked word at both addresses is again a valid ARMv8.0 instruction. So the same page
-    resolves one way for a read and another for a fetch.
-
-    A stale I-cache or TLB entry is ruled out, and QEMU says what actually happens. `-d int` records
-    `Taking exception 1 [Undefined Instruction] ... with ESR 0x0/0x2000000 ... with ELR 0x1003050`,
-    so the fetch was not an abort at all: it succeeded and the word was zero. `-d in_asm` shows the
-    translation QEMU built from guest memory at that moment: `0x01003050: 00000000 udf #0`. So the
-    page held zeros when the worker fetched it, while a *data* fault on the same page reads the
-    file's bytes. That is the zero-filled fill window `start_file_page` describes: it maps the frame
-    with `vm_map_page_in(cr3, va, pa, MAP_WRITE)` before asking VFS for the file's block
-    (`crates/servers/src/vm/mod.rs`, the comment above that call says the placeholder is
-    "deliberately *not* user-accessible" so no user thread can run its zeros).
-
-    On aarch64 that intent does not hold, and the measurement says so. A probe in
-    `start_file_page`, right after the placeholder's `vm_map_page_in`, walked the PTE and printed
-    it: `0x0000_47d3_2f03` for VA `0x1003000` (`0x47f62f03` and `0x48382f03` in the next two fills,
-    so only the frame moves). The low bits are `0x...f03`: VALID, TYPE, SH_INNER, AF and NG, with
-    **AP = 0**, which is the value `pte_is_user` reports as kernel-only, and the probe printed `K`
-    for it. The worker still fetched that mapping and ran its zeros. So the placeholder is not the
-    page this port calls non-user, and a fetch of it does not take the permission fault that would
-    park the thread in `PageOutcome::Pending` until VFS finishes the fill.
-
-    The remaining pieces are measured too, and they close the loop. The fetch that dies is a
-    **file-backed** fault: a probe printed the region it found for `0x1003050` as flags `0xc2`,
-    which includes `VR_FILE`, so VM took the fill path rather than the zero-fill heap path. The fill
-    itself is correct: a probe read the first word of the frame `finish_page` had just installed
-    (`0x...2f43`, AP `0b01`) and found the file's instruction (`0xf100054a`, `0xf94012a8`,
-    `0x912c8000` for the three boot pages it saw), so the bytes arrive. What the worker executed was
-    therefore the **placeholder**, during the window, and not a bad fill: the PTE it fetched was
-    `0x...2f03` with AP zero, the value `pte_is_user` calls kernel-only.
-
-    That is the whole defect: the thread runs on the placeholder before its own page completes. The
-    design expects the opposite. `VMCTL_CLEAR_PAGEFAULT` sweeps the *whole group*, and
-    `handle_page_fault` documents that a still-unresolved thread then "re-faults and gets its turn",
-    which is only true while the placeholder refuses the access. On x86 the U/S bit refuses it (the
-    comment above the placeholder says the page is "deliberately *not* user-accessible"); on aarch64
-    the fetch runs and executes zeros.
-
-    A direct read of a kernel-mapped address cannot settle what AP value would refuse EL0 here: that
-    experiment (`read_volatile` of `0x0900_0000` from a user program) faults, but the address is
-    *unmapped* for a user process since the identity window was closed (resolved item 16), so it
-    tests the absence of a mapping, not the permission. The port's own convention treats AP `0b01`
-    as user read-write and `0b11` as user read-only (COW leaves), and both are in use and working,
-    so the value that denies EL0 has to be settled against the ARM ARM rather than guessed.
-
-    Two fixes, and the second does not depend on that answer. One: give the placeholder the AP value
-    that actually refuses EL0 on this arch, once the encoding is confirmed. Two, structural and
-    encoding-free: have the FDIO fill write the file's bytes through a VM-owned temporary mapping
-    instead of into an address space the process can reach, and map the page only when its content
-    is the file's. Then an early resume takes an ordinary translation fault, `start_file_page`
-    answers `Pending`, and the thread parks until the fill really completes, which is the property
-    the design already documents.
-
-    Also unchanged, and separate: an unhandled EL0 class reports and **halts** the machine, which is
-    the pre-existing policy for a class the dispatcher does not know. Delivering SIGILL to the
-    process would be the user-visible behaviour to aim for, and it needs a kernel-side path from
-    the vector, not a report.
-
-The two standing notes (probe/stub traps, and the dual page-table
+No open issues. The two standing notes (probe/stub traps, and the dual page-table
 layout) are captured in the `aarch64-debugging` skill and sit under `# Resolved issues`,
 as this file's header says a skill-captured limitation does.
 
@@ -340,9 +245,8 @@ as this file's header says a skill-captured limitation does.
    IPC, bump a shared counter and are joined, then a fork from a worker whose child must be a
    copy of that worker rather than of the main thread.
 
-   `test-threads x86` and `test-threads riscv64` are in `test-arches` and pass. `aarch64`
-   fails, now open as item 49, so its recipe stays a command a person runs until that is
-   fixed.
+   `test-threads` runs on all three arches in `test-arches` and passes: the aarch64 failure
+   that this gate found first is fixed, recorded as item 49.
 
    Still deferred and unchanged: per-thread sigreturn. Signals are delivered per process, so
    a signal lands on the main thread's frame, which is what every consumer in the tree uses.
@@ -2376,6 +2280,35 @@ as this file's header says a skill-captured limitation does.
 ---
 
 ## AArch64 (`[aarch64]`)
+
+49. **~~`/bin/threadtest` took an unhandled EL0 exception on aarch64~~: FIXED (2026-11-17).** The
+    process died on `udf #0` at the first instruction of `memcpy`. Five measurements ran it down:
+    QEMU's `-d in_asm` showed the core translating that address as zeros; `-d int` showed no
+    abort, only an undefined instruction; the fault's region was file-backed (flags `0xc2`); the
+    frame `finish_page` installed held the file's bytes; and the PTE the worker actually fetched
+    was the zero-filled *placeholder* (`0x...2f03`, AP zero) VM mapped into the process before
+    asking VFS for the page. `VMCTL_CLEAR_PAGEFAULT` sweeps the whole group, so a second thread
+    resumed while the fill was in flight. The design's assumption - that the placeholder refuses
+    the access and the thread re-faults - holds on x86, where the U/S bit refuses it, and did not
+    hold here.
+
+    The fix removes the assumption rather than restating it. The FDIO fill now writes into a
+    **VM-owned temporary mapping** of the frame, and nothing is mapped in the faulting process
+    until the content is the file's: a thread that reaches the page during the fill takes an
+    ordinary page fault, `page_pending` answers `Pending`, and it parks until the fill completes.
+    The request protocol is unchanged, because `vm_call_reply` always answers VM whatever the
+    address-space field says, and `vm/writeback.rs` already used the same shape for FDWRITE.
+
+    The pieces: `PageState` carries the fill's `host_va`; `start_file_page` checks `page_pending`
+    before anything else and sends FDIO with `VM_PROC_NR` and that VA instead of mapping a
+    placeholder into the target; `finish_page` zeroes the page's tail through the held mapping and
+    releases it before the page becomes reachable, and both failure paths release it too. The
+    orphan-`pte_is_user` branch stays as the safety net for a mapping nothing installed.
+
+    Gates: `just test-threads aarch64` passes and is now in `test-arches` with the x86_64 and
+    riscv64 recipes; `just test-arches`, `just image x86` and the host suite cover the fill path on
+    every arch, which is where this change's risk lies.
+    (`crates/servers/src/vm/mod.rs`, `crates/servers/src/vm/vfs_request.rs`, `Justfile`)
 
 1. **Fork is a proper COW fork (was deep copy).** x86/riscv fork by clearing
    the child's write bit; aarch64 does the same, with the access encoding expressed
