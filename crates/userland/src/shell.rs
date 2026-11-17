@@ -1392,7 +1392,7 @@ fn try_exec(args: &[&str], cmd_path: &mut [u8; 256]) -> Option<i32> {
 
     // Try /sbin/<cmd> as fallback, but only when /bin/<cmd> was simply not there. Any other
     // error is about the command the user asked for, and retrying a path that cannot exist
-    // would replace it with the fallback's own ENOENT (item 38).
+    // would replace it with the fallback's own ENOENT (item 50).
     if should_try_sbin(r) && cmd_start > 1 && 6 + cmd_name_len < cmd_path.len() {
         cmd_path[..6].copy_from_slice(b"/sbin/");
         cmd_path[6..6 + cmd_name_len].copy_from_slice(&cmd_name[..cmd_name_len]);
@@ -1421,7 +1421,7 @@ const ENOENT: i32 = -2;
 /// (the heap, the loader, a page it cannot read) is about the command the user asked for, and
 /// retrying a path that cannot exist replaced it with the fallback's own `ENOENT`: the random
 /// `/bin/bash` failure was reported as `/sbin/bash: -2` for exactly that reason, and the errno
-/// owed to item 38 was never the real one.
+/// owed to item 50 was never the real one.
 #[cfg(any(target_os = "minix", test))]
 fn should_try_sbin(primary: i32) -> bool {
     primary == ENOENT

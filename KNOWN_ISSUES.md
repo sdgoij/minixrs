@@ -119,28 +119,6 @@ are arch-specific, `[env]` is tooling/platform, not kernel.
     than resolved. (`crates/servers/src/vfs/scm.rs`, `crates/servers/src/vfs/call.rs::do_copyfd`,
     `crates/drivers/src/storage/vnd.rs`)
 
-38. **An `exec` of a command can fail at random (2026-11-16, open, measured).** The
-    interactive-bash gate failed in CI on aarch64 and on riscv64 (`bash never printed its
-    prompt`), the console showing the prompt's reprint of the line and then a message for a
-    `/bin/bash` that is in the image: `mkminixfs` reported it as part of `100 files` with no
-    missing-bash warning, and `mkfs` copies that image straight to the disk the guest boots. So
-    the file was there and the `exec` returned. Reproduced once locally in 3 runs, then not in 26
-    consecutive runs since. Suspects, in order: `minix-rt::execve`'s own `sbrk` of the argument
-    frame, which can return `ENOMEM` before the syscall is made; VM's loader on the 1.6 MB image;
-    and the allocation-heavy-path class aarch64 item 9 describes. The `execve` offset-table
-    overflow in item 45 is one candidate for this class and is fixed.
-
-    *Both layers that hid the errno are now fixed, so the next occurrence reports the real one.*
-    The shell printed `not found` for every failure of `try_exec` (`report_exec_failure`/
-    `format_errno` in `crates/userland/src/shell.rs` now print the path and the kernel's number),
-    and `minix_rt::execve` returned the SENDREC's *return value* rather than PM's reply, so even
-    that number was the replier's endpoint, positive, reported as `-1`. It reads the reply's
-    `m_type` now (`exec_reply_status`, host-tested beside `chdir`/`fork`/`brk`), and the `/sbin`
-    fallback is tried only when `/bin/<cmd>` was `ENOENT`, so a substantive error is no longer
-    replaced by the fallback's own `-2` (`should_try_sbin`, host-tested). Next step: read the
-    errno from the next failing gate, in CI or locally. It has not failed in 26 runs since the
-    first half of the diagnostic landed, so the errno is still owed.
-
 ---
 
 ## RISC-V (`[riscv]`)
@@ -1916,7 +1894,7 @@ as this file's header says a skill-captured limitation does.
     filled once per argv entry and then once per envp entry, but each scan was capped at 63
     independently (`argc < 63`, `envc < 63`), so the pair could make 126 writes through a
     64-slot array: a 63-argument command with two environment variables corrupted the stack
-    around the frame. It is on the path an exec failure (item 38) would traverse, which is why
+    around the frame. It is on the path an exec failure (item 50) would traverse, which is why
     it was inspected. The table is now `2 * MAX_EXEC_ENTRIES` (126), a const assertion keeps it
     at least that large, and a scan that stops at the cap with entries remaining returns
     `E2BIG` instead of silently truncating argv or envp. Pinned by
@@ -1996,6 +1974,30 @@ as this file's header says a skill-captured limitation does.
     (`crates/servers/src/vm/{cache,writeback,vfs_request,mod}.rs`,
     `crates/servers/src/vfs/{call,consts}.rs`, `crates/arch-common/src/com.rs`,
     `crates/userland/src/lib.rs`, `tools/smoke/writeback.tsv`, `Justfile`)
+
+50. **~~An `exec` of a command can fail at random~~: FIXED (2026-11-17).** The
+    interactive-bash gate failed about once in four runs with
+    `sh: 'bash' not found (/bin/bash: -208)` for a `/bin/bash` that was in the image.
+    `-208` is `ELOCKED`, so the call never reached the loader, and every suspect the
+    entry listed (`minix-rt`'s frame `sbrk`, VM's loader, aarch64 item 9's allocation
+    paths) was past the failing point. LLDB over QEMU's gdbstub caught the chain: a
+    hardware breakpoint in `mini_send`'s blocking branch, then a walk of the `Proc`
+    table from the inlined `deadlock()` site, showed PM sending `VFS_PM_EXEC` (mtype
+    2310) to VFS while VFS was `SENDING|RECEIVING` a reply to an earlier PM request.
+    `do_exec` forwarded the exec with a blocking SENDREC, so PM could enter its send
+    phase while VFS was in the send phase of a reply, and `will_receive_sendrec`
+    refuses to deliver to a sender: both waited on a send. `do_exec` now sends with
+    `asynsend3(..., AMF_NOREPLY)` and `VFS_CALL` and returns `EDONTREPLY`, which is C's
+    `tell_vfs` and what this port already did for fork and exit; `handle_vfs_reply`'s
+    `VFS_PM_EXEC_REPLY` arm applies the exec's credentials and calls `exec_restart`,
+    which answers the caller on failure and does nothing on success. Measured: the
+    probe reproduced the deadlock in three of four runs before the change and in none
+    of five after, and `just test-interactive-bash-{x86,riscv64,aarch64}` pass. The
+    entry was filed under item 38's number, which the physmap entry already held, so it
+    is recorded here as 50 and the comments that cite it say so. `forward_cred_to_vfs`
+    (`setuid`/`setgid`/`setgroups`/`setsid`) still uses the blocking form: same shape,
+    no measured occurrence, and converting it needs matching `VFS_PM_*_REPLY` arms.
+    (`.notes/exec_deadlock.md`, `crates/servers/src/pm.rs`)
 
 ---
 

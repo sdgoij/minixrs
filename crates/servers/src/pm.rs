@@ -4258,6 +4258,48 @@ pub unsafe fn handle_vfs_reply(_vfs_ep: i32, msg: &mut Message) {
             }
         }
 
+        arch_common::com::VFS_PM_EXEC_REPLY => {
+            // The exec's async round-trip is done: apply the setuid/setgid the
+            // exec carried (only on success), then finish the exec. On failure
+            // `exec_restart` answers the waiting caller itself.
+            let raw = unsafe { &msg.m_payload.raw };
+            let status = i32::from_le_bytes(
+                raw[EXEC_REPLY_STATUS_OFF - 8..EXEC_REPLY_STATUS_OFF - 8 + 4]
+                    .try_into()
+                    .unwrap_or([0; 4]),
+            );
+            let partial = i32::from_le_bytes(
+                raw[EXEC_REPLY_PARTIAL_OFF - 8..EXEC_REPLY_PARTIAL_OFF - 8 + 4]
+                    .try_into()
+                    .unwrap_or([0; 4]),
+            ) != 0;
+            let euid = i32::from_le_bytes(
+                raw[EXEC_REPLY_EUID_OFF - 8..EXEC_REPLY_EUID_OFF - 8 + 4]
+                    .try_into()
+                    .unwrap_or([0; 4]),
+            );
+            let egid = i32::from_le_bytes(
+                raw[EXEC_REPLY_EGID_OFF - 8..EXEC_REPLY_EGID_OFF - 8 + 4]
+                    .try_into()
+                    .unwrap_or([0; 4]),
+            );
+            let pc = u64::from_le_bytes(
+                raw[EXEC_REPLY_PC_OFF - 8..EXEC_REPLY_PC_OFF - 8 + 8]
+                    .try_into()
+                    .unwrap_or([0; 8]),
+            );
+            let newsp = u64::from_le_bytes(
+                raw[EXEC_REPLY_NEWSP_OFF - 8..EXEC_REPLY_NEWSP_OFF - 8 + 8]
+                    .try_into()
+                    .unwrap_or([0; 8]),
+            );
+            if status == OK {
+                let rmp_mut = unsafe { &mut *base.add(proc_n) };
+                unsafe { apply_exec_creds(rmp_mut, euid, egid) };
+            }
+            unsafe { exec_restart(proc_n, status, partial, pc, newsp) };
+        }
+
         _ => {
             // Unknown VFS reply — ignore (C panics here)
         }
@@ -4563,10 +4605,14 @@ pub unsafe fn do_exec(caller_slot: usize, msg: &mut Message) -> i32 {
     rmp.mp_frame_addr = frame_ptr;
     rmp.mp_frame_len = frame_len as u64;
 
-    // Forward the exec request to VFS (VFS_PM_EXEC). Use a blocking SENDREC:
-    // our VFS services PM requests synchronously, so the reply arrives here.
-    // (C suspends the request and handles VFS_PM_EXEC_REPLY in the main loop;
-    // the blocking form is equivalent for our single-threaded servers.)
+    // Forward the exec request to VFS (VFS_PM_EXEC) asynchronously, matching C's
+    // `tell_vfs`: `asynsend3` with `AMF_NOREPLY`, `VFS_CALL` set, and the reply
+    // handled in the main loop (`handle_vfs_reply`). A blocking SENDREC here
+    // deadlocks against VFS's own reply: VFS can be in the send phase of a reply
+    // to PM while PM is in the send phase of this request, and neither is then
+    // receiving, so the kernel's deadlock detector answers `ELOCKED` and the
+    // exec fails. Measured on the first exec after `/bin/session` starts the
+    // desktop (KNOWN_ISSUES.md item 50).
     let mut vfs_msg = [0u8; 64];
     vfs_msg[VFS_MSG_TYPE_OFF..VFS_MSG_TYPE_OFF + 4]
         .copy_from_slice(&(arch_common::com::VFS_PM_EXEC as i32).to_le_bytes());
@@ -4578,68 +4624,18 @@ pub unsafe fn do_exec(caller_slot: usize, msg: &mut Message) -> i32 {
     vfs_msg[VFS_M7_I5_OFF..VFS_M7_I5_OFF + 8].copy_from_slice(&_ps_str.to_le_bytes());
     vfs_msg[VFS_M7_P1_OFF..VFS_M7_P1_OFF + 8].copy_from_slice(&name_ptr.to_le_bytes());
     vfs_msg[VFS_M7_P2_OFF..VFS_M7_P2_OFF + 8].copy_from_slice(&frame_ptr.to_le_bytes());
-    let sendrec_result = unsafe {
-        minix_rt::syscall2(
-            minix_rt::SENDREC_CALL,
-            arch_common::com::VFS_PROC_NR as u64,
-            vfs_msg.as_mut_ptr() as u64,
+    let asend = unsafe {
+        minix_rt::asynsend3(
+            arch_common::com::VFS_PROC_NR,
+            vfs_msg.as_ptr(),
+            arch_common::ipc::AMF_NOREPLY,
         )
     };
-    if sendrec_result < 0 {
-        // VFS unreachable — fail the exec.
-        return sendrec_result as i32;
+    if asend != 0 {
+        return asend;
     }
-
-    // Parse the VFS_PM_EXEC_REPLY (delivered into vfs_msg by SENDREC).
-    let reply_type = i32::from_le_bytes(
-        vfs_msg[VFS_MSG_TYPE_OFF..VFS_MSG_TYPE_OFF + 4]
-            .try_into()
-            .unwrap_or([0; 4]),
-    );
-    if reply_type != arch_common::com::VFS_PM_EXEC_REPLY as i32 {
-        return EINVAL;
-    }
-    let status = i32::from_le_bytes(
-        vfs_msg[EXEC_REPLY_STATUS_OFF..EXEC_REPLY_STATUS_OFF + 4]
-            .try_into()
-            .unwrap_or([0; 4]),
-    );
-    let partial = i32::from_le_bytes(
-        vfs_msg[EXEC_REPLY_PARTIAL_OFF..EXEC_REPLY_PARTIAL_OFF + 4]
-            .try_into()
-            .unwrap_or([0; 4]),
-    ) != 0;
-    let pc = u64::from_le_bytes(
-        vfs_msg[EXEC_REPLY_PC_OFF..EXEC_REPLY_PC_OFF + 8]
-            .try_into()
-            .unwrap_or([0; 8]),
-    );
-    let newsp = u64::from_le_bytes(
-        vfs_msg[EXEC_REPLY_NEWSP_OFF..EXEC_REPLY_NEWSP_OFF + 8]
-            .try_into()
-            .unwrap_or([0; 8]),
-    );
-
-    // exec_restart is unsafe: it mutates shared mproc state.
-    let new_euid = i32::from_le_bytes(
-        vfs_msg[EXEC_REPLY_EUID_OFF..EXEC_REPLY_EUID_OFF + 4]
-            .try_into()
-            .unwrap_or([0; 4]),
-    );
-    let new_egid = i32::from_le_bytes(
-        vfs_msg[EXEC_REPLY_EGID_OFF..EXEC_REPLY_EGID_OFF + 4]
-            .try_into()
-            .unwrap_or([0; 4]),
-    );
-    if status == OK {
-        // The image loaded: apply setuid/setgid from the exec (C applies
-        // them in do_newexec, which VFS sends only after a successful
-        // load; the port passes the ids inline in the reply).
-        let base = MPROC.as_ptr();
-        let rmp = unsafe { &mut *base.add(caller_slot) };
-        unsafe { apply_exec_creds(rmp, new_euid, new_egid) };
-    }
-    unsafe { exec_restart(caller_slot, status, partial, pc, newsp) }
+    rmp.mp_flags |= VFS_CALL;
+    EDONTREPLY
 }
 
 /// Finish an exec after VFS has loaded the image — matching C `exec_restart()`

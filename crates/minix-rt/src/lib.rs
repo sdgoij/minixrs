@@ -426,7 +426,7 @@ pub unsafe fn execve(
 /// A SENDREC returns the *replier's endpoint*, which is positive; the status travels in the
 /// reply's `m_type`. This used to return the endpoint, so every exec failure was reported as
 /// `-1` (EPERM) whatever the cause, and the failing gate could not be chased (KNOWN_ISSUES
-/// item 38). `chdir`, `fork` and `waitpid` beside this read the same field.
+/// item 50). `chdir`, `fork` and `waitpid` beside this read the same field.
 ///
 /// `sendrec` is negative only when the call itself failed. A reply with a non-negative
 /// status cannot happen (PM answers only a failure, and on success the image is already
@@ -1965,7 +1965,7 @@ mod tests {
     fn test_exec_reply_status_reads_pm_reply() {
         // PM answers a failed exec with the negative status in `m_type`, while SENDREC's own
         // return is the replier's *endpoint* (positive). Reading the wrong one turned every
-        // failure into -1, whatever the cause (item 38).
+        // failure into -1, whatever the cause (item 50).
         let mut msg = [0u8; 64];
         msg[4..8].copy_from_slice(&(-12i32).to_le_bytes());
         assert_eq!(exec_reply_status(&msg, 3), -12);
