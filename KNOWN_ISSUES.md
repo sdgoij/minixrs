@@ -190,20 +190,6 @@ are arch-specific, `[env]` is tooling/platform, not kernel.
     per-object special case. (`crates/servers/src/vfs/eventfd.rs`,
     `crates/servers/src/vfs/timerfd.rs`, `crates/servers/src/vfs/pipe.rs`)
 
-33. **`CLOCK_MONOTONIC` is time since boot, *not* `boottime + uptime` (2026-09-28,
-    deliberate deviation).** MINIX 3.3.0's `do_gettime` adds `boottime` to **both** clocks
-    (`servers/pm/time.c`: `sec = boottime + clock / system_hz`), so its `CLOCK_MONOTONIC` is
-    offset by the epoch seconds at boot — and moves if the wall clock is reset, which a
-    monotonic clock must not do. This port returns the uptime tick count alone for
-    `CLOCK_MONOTONIC` (`crates/servers/src/pm.rs`, `clock_gettime_reply`), matching POSIX and
-    the port's own `clock_server` (`clock_time_to_ts`). The concrete reason: an absolute
-    `CLOCK_MONOTONIC` deadline (`TFD_TIMER_ABSTIME`, exactly how `calloop`'s timer arms) is
-    named in the same units `clock_gettime(CLOCK_MONOTONIC)` returns, and that has to be the
-    kernel tick timeline `vfs::alarm` (`SYS_SETALARM`) arms against. With MINIX's offset the
-    deadline landed `boottime` seconds away (~1.79e9 ticks on the x86 image) and the timer
-    `CLOCK_REALTIME` keeps the `boottime` offset. (`crates/servers/src/pm.rs`,
-    `crates/servers/src/alarm.rs`, `crates/servers/src/vfs/timerfd.rs`)
-
 35. **`epoll` is level-triggered only, an instance is bounded to 64 interests, and a closed
     registration is pruned lazily (2026-09-28, open, deliberate).** `vfs::epoll`
     (`crates/servers/src/vfs/epoll.rs`) is net-new — MINIX emulates `poll` over `select` and
@@ -1456,6 +1442,24 @@ as this file's header says a skill-captured limitation does.
     no deadline: a forked child writes, and the poll must come back with the byte.
     (`crates/servers/src/vfs/select.rs`, `crates/servers/src/vfs/pipe.rs`,
     `crates/servers/src/vfs/filedes.rs`, `crates/userland/src/lib.rs`)
+
+33. **~~`CLOCK_MONOTONIC` is time since boot, *not* `boottime + uptime`~~: accepted deviation,
+    recorded in `.notes` (2026-09-28; resolved as an inventory entry 2026-11-17).** MINIX
+    3.3.0's `do_gettime` adds `boottime` to **both** clocks (`servers/pm/time.c`:
+    `sec = boottime + clock / system_hz`), so its `CLOCK_MONOTONIC` is offset by the epoch
+    seconds at boot, and moves if the wall clock is reset, which a monotonic clock must not
+    do. This port returns the uptime tick count alone for `CLOCK_MONOTONIC`
+    (`crates/servers/src/pm.rs`, `clock_gettime_reply`), matching POSIX and the port's own
+    `clock_server` (`clock_time_to_ts`); `CLOCK_REALTIME` keeps the `boottime` offset. The
+    concrete reason is an absolute `CLOCK_MONOTONIC` deadline (`TFD_TIMER_ABSTIME`, exactly
+    how `calloop`'s timer arms): it is named in the same units
+    `clock_gettime(CLOCK_MONOTONIC)` returns, and that has to be the kernel tick timeline
+    `vfs::alarm` (`SYS_SETALARM`) arms against. With MINIX's offset the deadline landed
+    `boottime` seconds away (~1.79e9 ticks on the x86 image). The deviation, its rationale
+    and the consequence of undoing it are in `.notes/wayland.md` §5 row 22 and §9; this is
+    not a defect waiting for a fix, so it no longer belongs in the open list.
+    (`crates/servers/src/pm.rs`, `crates/servers/src/alarm.rs`,
+    `crates/servers/src/vfs/timerfd.rs`)
 
 34. **A kernel timer must leave its queue before it is re-armed (2026-09-28, FIXED).**
     `tmrs_settimer` re-inserts a timer, and the reference *removes it first*
