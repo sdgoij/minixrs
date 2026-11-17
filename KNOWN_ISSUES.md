@@ -274,19 +274,9 @@ the burst-overflow reading in item 37, are under `# Resolved issues`.
 
 ## AArch64 (`[aarch64]`)
 
-5. **Least-tested port** — standing gotchas (aarch64-debugging skill):
-   re-derive every probe address after a rebuild (symbols move), verify the
-   embedded initramfs matches the on-disk binaries before suspecting the
-   kernel, and check for silent HAL stubs that fail kernel calls
-   (`Not implemented`/`TODO` in `crates/arch-aarch64/src/hal.rs` — none
-   remain today, but the pattern is the port's classic trap).
-
-6. **Per-process table layout is dual** — boot procs carry PUD[1] as a PMD
-   table of 2 MiB blocks; exec'd processes carry a 1 GiB block + the
-   low-GB alias PMD. Any generic 4-level walk must handle both, and the
-   low-GB alias window must come from the cached kernel geometry
-   (`VM_PAGING_MEMINFO`) — the exec-2 hang was exactly this class of bug.
-   (aarch64-debugging skill gotcha 9/10)
+No open issues. The two standing notes (probe/stub traps, and the dual page-table
+layout) are captured in the `aarch64-debugging` skill and sit under `# Resolved issues`,
+as this file's header says a skill-captured limitation does.
 
 ---
 
@@ -2263,6 +2253,26 @@ the burst-overflow reading in item 37, are under `# Resolved issues`.
    a partial count is a real delivery drop, not a boot-timing artifact.
    The `-qmp` drops are the QEMU chardev artifact (see `[riscv]` #1).
    Matrix recipe: `tools/piped_matrix.py <arch> <mode>`.
+
+5. **~~Least-tested port: standing gotchas~~: captured in the `aarch64-debugging` skill
+   (2026-11-17).** The three traps this entry carried are procedures, not defects, and
+   the policy in this file's header puts a skill-captured limitation here: re-derive
+   every probe address after a rebuild (skill: "Re-derive every probe address after
+   each rebuild"), verify the embedded initramfs matches the on-disk binaries before
+   suspecting the kernel (skill gotchas 2 and 3), and check for silent HAL stubs that
+   fail kernel calls (skill gotcha 8, which records the `vm_paging_fork` stub that hung
+   every fork). None of the stubs remain in
+   `crates/arch-aarch64/src/hal.rs`, and the pattern is the skill's to keep.
+
+6. **~~Per-process table layout is dual~~: documented in the `aarch64-debugging` skill
+   (2026-11-17).** Both layouts and the consequence for a generic walk are skill
+   gotchas 9 and 10: boot procs carry PUD[1] as a PMD table of 2 MiB blocks, exec'd
+   processes carry a 1 GiB block plus the low-GB alias PMD, block entries are shared
+   verbatim while table entries are deep-copied, and the low-GB alias window must come
+   from the cached kernel geometry (`VM_PAGING_MEMINFO`), because VM's own copy of the
+   arch allocator is not initialised. Gotcha 10 records the exec-2 hang that this
+   class of bug caused. The code that must honour it is `pte_user_owned` and the
+   teardown walks, gated by `just test-boot-aarch64`.
 
 7. **Boot stack vs. physical allocator overlap — FIXED (2026-09).**
    `tools/minix-raw-aarch64.ld` reserved the 64 KiB boot stack *before*
