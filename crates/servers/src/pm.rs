@@ -2545,6 +2545,12 @@ pub unsafe fn pm_register_sender(endpoint: i32) -> Option<usize> {
 // Dispatch table + main loop
 
 use arch_common::ipc::Message;
+use arch_common::types::ProcTabEntry;
+
+/// `getsysinfo(PM_PROC_NR, SI_PROC_TAB, ...)`, the code C's `do_getsysinfo` answers from PM's
+/// table (`minix/sysinfo.h`). VFS answers the same code from its own fproc table
+/// (`vfs/misc.rs`); the code is interpreted per server, which is how C's call works too.
+const SI_PROC_TAB: i32 = 2;
 
 /// PM call numbers (from `.refs/minix-3.3.0/minix/include/minix/callnr.h`).
 pub const PM_BASE: i32 = 0x000;
@@ -3240,6 +3246,95 @@ pub unsafe fn handle_getprocnr(caller_slot: usize, msg: &mut Message) -> i32 {
     }
     ESRCH
 }
+
+/// Handler for PM_GETSYSINFO — hand a reader a table of the processes PM knows.
+///
+/// Matching C: `do_getsysinfo()` in `servers/pm/misc.c`, which copies the raw `mproc` array for
+/// `SI_PROC_TAB`. The record here is `arch_common::types::ProcTabEntry` rather than `MProc`
+/// itself: `MProc` lives in this crate, a filesystem server cannot depend on it, and a mirrored
+/// copy would drift without anything failing to build. Request: what@12, where@16, size@24
+/// (C's `mess_lsys_getsysinfo` union). Reply: OK, or EINVAL/EPERM.
+///
+/// Root only, as in C, and the size must be exactly one table: a caller that guessed wrong gets
+/// an error rather than a truncated table.
+///
+/// # Safety
+///
+/// `caller_slot` must be a valid, in-use process slot; `msg` must point to a valid message.
+pub unsafe fn handle_getsysinfo(caller_slot: usize, msg: &mut Message) -> i32 {
+    const WHAT_OFF: usize = 12;
+    const WHERE_OFF: usize = 16;
+    const SIZE_OFF: usize = 24;
+
+    let base = MPROC.as_ptr();
+    let caller = unsafe { &*base.add(caller_slot) };
+    if caller.mp_effuid != SUPER_USER {
+        return EPERM;
+    }
+
+    let raw = msg as *const Message as *const u8;
+    let what = unsafe { core::ptr::read_unaligned(raw.add(WHAT_OFF).cast::<i32>()) };
+    let where_ = unsafe { core::ptr::read_unaligned(raw.add(WHERE_OFF).cast::<u64>()) };
+    let size = unsafe { core::ptr::read_unaligned(raw.add(SIZE_OFF).cast::<u64>()) };
+
+    let len = core::mem::size_of::<ProcTabEntry>() * NR_PROCS;
+    if what != SI_PROC_TAB || size != len as u64 {
+        return EINVAL;
+    }
+
+    // One entry per slot, in slot order, with unused slots left empty (`flags` clear), so the
+    // reader can iterate and filter. Built here because the caller's entry layout is not `MProc`'s.
+    unsafe {
+        let tab = &mut *PROC_TAB_BUF.get();
+        for (i, entry) in tab.iter_mut().enumerate() {
+            let rmp = &*base.add(i);
+            *entry = proc_tab_entry(rmp);
+        }
+        minix_rt::sys_vircopy(
+            minix_rt::SELF,
+            tab.as_ptr() as u64,
+            caller.mp_endpoint,
+            where_,
+            len,
+        )
+    }
+}
+
+/// One `MProc` as the table reader sees it.
+///
+/// `mp_name` is `[i8; PROC_NAME_LEN]` in this port's PM and `[u8; PROC_NAME_LEN]` in the record,
+/// so the bytes are copied one at a time; a name that fills the field is not terminated and
+/// `ProcTabEntry::name_str` then returns all of it.
+fn proc_tab_entry(rmp: &MProc) -> ProcTabEntry {
+    let mut name = [0u8; arch_common::types::PROC_NAME_LEN];
+    for (k, b) in name.iter_mut().enumerate() {
+        *b = rmp.mp_name[k] as u8;
+    }
+    ProcTabEntry {
+        pid: rmp.mp_pid,
+        ppid: rmp.mp_parent,
+        endpoint: rmp.mp_endpoint,
+        euid: rmp.mp_effuid,
+        flags: rmp.mp_flags,
+        name,
+    }
+}
+
+/// One table's worth of `ProcTabEntry`, assembled for `PM_GETSYSINFO`.
+///
+/// Static rather than a local: `NR_PROCS` entries are ~9 KiB, which is more than a server's
+/// stack headroom should be asked for.
+struct ProcTabBuf(UnsafeCell<[ProcTabEntry; NR_PROCS]>);
+unsafe impl Sync for ProcTabBuf {}
+impl ProcTabBuf {
+    const fn new() -> Self {
+        Self(UnsafeCell::new([ProcTabEntry::empty(); NR_PROCS]))
+    }
+    fn get(&self) -> *mut [ProcTabEntry; NR_PROCS] {
+        self.0.get()
+    }
+}
+static PROC_TAB_BUF: ProcTabBuf = ProcTabBuf::new();
 
 // ---- PM_PTRACE (servers/pm/trace.c do_trace) ----
 
@@ -4023,6 +4118,7 @@ pub fn pm_dispatch(caller_slot: usize, msg: &mut Message) -> i32 {
         44 => unsafe { handle_execrestart(caller_slot, msg) }, // PM_EXEC_RESTART
         45 => unsafe { handle_getepinfo(caller_slot, msg) }, // PM_GETEPINFO
         46 => unsafe { handle_getprocnr(caller_slot, msg) }, // PM_GETPROCNR
+        47 => unsafe { handle_getsysinfo(caller_slot, msg) }, // PM_GETSYSINFO
         _ => unsafe { no_sys(caller_slot, msg) },
     }
 }
@@ -5136,6 +5232,30 @@ mod tests {
         assert!(mp.mp_name.iter().all(|&c| c == 0));
         assert!(mp.mp_sgroups.iter().all(|&g| g == 0));
         assert!(mp.mp_interval.iter().all(|&t| t == 0));
+    }
+
+    /// The `SI_PROC_TAB` record carries what `/proc/<pid>/status` prints, and the name crosses
+    /// the `i8` to `u8` boundary intact.
+    #[test]
+    fn proc_tab_entry_carries_the_fields_procfs_reads() {
+        let mut mp = MProc::zeroed();
+        mp.mp_pid = 42;
+        mp.mp_parent = 7;
+        mp.mp_endpoint = 0x1002a;
+        mp.mp_effuid = 1000;
+        mp.mp_flags = IN_USE;
+        let name = b"procfs";
+        for (i, &c) in name.iter().enumerate() {
+            mp.mp_name[i] = c as i8;
+        }
+
+        let e = proc_tab_entry(&mp);
+        assert_eq!(e.pid, 42);
+        assert_eq!(e.ppid, 7);
+        assert_eq!(e.endpoint, 0x1002a);
+        assert_eq!(e.euid, 1000);
+        assert_eq!(e.flags & IN_USE, IN_USE);
+        assert_eq!(e.name_str(), "procfs");
     }
 
     #[test]

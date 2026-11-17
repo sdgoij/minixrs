@@ -148,6 +148,47 @@ pub struct MinixMemRange {
 
 pub const PROC_NAME_LEN: usize = 16;
 
+/// One process as PM hands it to a reader of `/proc` (the `SI_PROC_TAB` answer).
+///
+/// C's `procfs` asks PM for the raw `mproc` array and parses it against
+/// `minix/servers/pm/mproc.h`. This port hands out a compact record instead: `MProc` lives in the
+/// `servers` crate, which a filesystem server cannot depend on, and a mirrored copy of a
+/// several-hundred-byte struct would drift from the original without anything failing to compile.
+/// The fields below are exactly the ones `procfs` prints, so adding or renaming one breaks both
+/// sides at build time.
+///
+/// `flags` is PM's `mp_flags` (the `IN_USE`/`ZOMBIE`/`STOPPED`/`UNPAUSED` bits), which is what
+/// `/proc/<pid>/status` turns into its state letter.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ProcTabEntry {
+    pub pid: i32,
+    pub ppid: i32,
+    pub endpoint: i32,
+    pub euid: i32,
+    pub flags: u32,
+    pub name: [u8; PROC_NAME_LEN],
+}
+
+impl ProcTabEntry {
+    pub const fn empty() -> Self {
+        Self {
+            pid: 0,
+            ppid: 0,
+            endpoint: 0,
+            euid: 0,
+            flags: 0,
+            name: [0; PROC_NAME_LEN],
+        }
+    }
+
+    /// The name as a string slice, stopping at the first NUL.
+    pub fn name_str(&self) -> &str {
+        let end = self.name.iter().position(|&b| b == 0).unwrap_or(PROC_NAME_LEN);
+        core::str::from_utf8(&self.name[..end]).unwrap_or("")
+    }
+}
+
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 pub struct BootImage {
@@ -271,5 +312,31 @@ mod tests {
         assert_eq!(KERNINFO_MAGIC, 0xfc3b84bf);
         assert_eq!(PROC_NAME_LEN, 16);
         assert_eq!(LOAD_HISTORY, 150);
+    }
+
+    #[test]
+    fn proc_tab_entry_has_the_expected_layout() {
+        // Five i32 fields and the name: 36 bytes, with nothing padded between them.
+        assert_eq!(size_of::<ProcTabEntry>(), 36);
+        assert_eq!(offset_of!(ProcTabEntry, name), 20);
+        let e = ProcTabEntry {
+            pid: 7,
+            ppid: 1,
+            endpoint: 0x10007,
+            euid: 0,
+            flags: 1,
+            name: *b"init\0\0\0\0\0\0\0\0\0\0\0\0",
+        };
+        assert_eq!(e.name_str(), "init");
+        assert_eq!(ProcTabEntry::empty().name_str(), "");
+    }
+
+    #[test]
+    fn proc_tab_entry_name_without_a_nul_is_the_whole_field() {
+        let e = ProcTabEntry {
+            name: [b'x'; PROC_NAME_LEN],
+            ..ProcTabEntry::empty()
+        };
+        assert_eq!(e.name_str().len(), PROC_NAME_LEN);
     }
 }
