@@ -94,7 +94,19 @@ are arch-specific, `[env]` is tooling/platform, not kernel.
    (or the resume rebuilt the way `#PF` does it) before any of the coverage
    above can be added.
 
-7. **Server Phase 12/13 stubs** (not arch bugs, but known gaps):
+7. **Server Phase 12/13 stubs** (not arch bugs, but known gaps). Only one gap is still open:
+   **`procfs` is ported but not wired, and several of its handlers return fixed text**. The
+   other bullets below describe work that has since landed and are kept as the record of what
+   the port does now; `devman`'s main loop is one of them, and its old "is a TODO" wording is
+   corrected here.
+
+   `crates/fs/src/procfs` has the VTreeFS tree, the inode table and the buffer helpers, and
+   `procfs_main` starts a real loop, but nothing calls it: there is no `procfs` bin, no
+   `BOOT_BINS` entry, and VFS mounts no `/proc`. Its content handlers also return a fixed string
+   where C's procfs asks PM, VM or the kernel (`root.rs` uptime, loadinfo, kinfo and vminfo;
+   `cpuinfo.rs` machine and cpuinfo; `pid.rs` cmdline, environ and psinfo; `misc.rs` load
+   averages). Wiring it is a boot slot, a VFS mount and those queries, and no consumer needs it
+   yet, so this is recorded rather than started.
    - `tty` — `sys_safecopyto/from` (SYS_SAFECOPYTO/FROM kernel calls) and
      `chardriver_reply_task`/`chardriver_reply_select` (CDEV_REPLY /
      CDEV_SEL2_REPLY builders) are implemented and wired into `dev_ioctl`
@@ -119,12 +131,11 @@ are arch-specific, `[env]` is tooling/platform, not kernel.
      and that rule is also what honours `VMIN` in raw mode. Gate:
      `just test-ttytimeout-<arch>` runs `/bin/ttytimeout`, a raw console read
      with `VMIN=0` and `VTIME=2` that must return zero bytes in its window.
-   - `devman` main loop is a TODO — needs `start_vtreefs`'s VFS message
-     loop, which is itself a TODO. Sized: the C libvtreefs is a full FS
-     server (inode/link/mount/path/read/stadir/table ≈ 10 files), the
-     port's `libs/vtreefs` has only the inode table, and neither procfs nor
-     devman is wired to a boot bin or mounted by VFS — a multi-session port
-     (NEXT.md Phase A2).
+   - `devman` main loop **landed**: `crates/servers/src/devman.rs` (1792 lines) serves the
+     device tree through `vtreefs::start_vtreefs`, whose message loop
+     (`crates/libs/src/vtreefs/mod.rs`) answers the port's FS protocol and RS's init request;
+     `/sbin/devman` is a `BOOT_BINS` entry and VFS mounts it at `/devices`. `procfs` is the
+     part of this entry that is still open, above.
    - `clock_server` main loop is implemented (real RECEIVE → `dispatch_clock`
      → SENDNB loop, `CLOCK_GETTIME` reads the kernel clock via SYS_TIMES,
      `CLOCK_SETTIME` forwards to SYS_SETTIME); note userland
