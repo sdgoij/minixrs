@@ -1105,11 +1105,9 @@ fn run_command_inline(parsed: &ParsedCommand) -> i32 {
         write_err(b"' not found\r\n");
         return 1;
     }
-    try_exec(args, &mut cmd_path);
-    // If we get here, exec failed.
-    write_err(b"sh: '");
-    write_err(cmd.as_bytes());
-    write_err(b"' not found\r\n");
+    // If this returns, exec failed; say what the kernel said.
+    let error = try_exec(args, &mut cmd_path);
+    report_exec_failure(cmd, &cmd_path, error);
     1
 }
 
@@ -1178,11 +1176,9 @@ fn run_parsed_command(parsed: &ParsedCommand) -> i32 {
                         write_err(b"' not found\r\n");
                         minix_rt::exit(1);
                     }
-                    try_exec(args, &mut cmd_path);
-                    // If we get here, exec failed.
-                    write_err(b"sh: '");
-                    write_err(cmd.as_bytes());
-                    write_err(b"' not found\r\n");
+                    // If this returns, exec failed; say what the kernel said.
+                    let error = try_exec(args, &mut cmd_path);
+                    report_exec_failure(cmd, &cmd_path, error);
                     minix_rt::exit(1);
                 };
                 minix_rt::exit(status);
@@ -1293,11 +1289,9 @@ fn run_external(cmd: &str, args: &[&str]) -> i32 {
         return 1;
     }
     if pid == 0 {
-        try_exec(args, &mut cmd_path);
-        // If we get here, exec failed.
-        write_err(b"sh: '");
-        write_err(cmd.as_bytes());
-        write_err(b"' not found\r\n");
+        // If this returns, exec failed; say what the kernel said.
+        let error = try_exec(args, &mut cmd_path);
+        report_exec_failure(cmd, &cmd_path, error);
         minix_rt::exit(1);
     }
 
@@ -1355,9 +1349,12 @@ fn pack_args(buf: &mut [u8], args: &[&str], argv: &mut [*const u8]) -> bool {
 }
 
 /// In the child process, try to exec the command.
-/// Falls through if exec fails, so the caller can retry `/sbin/<cmd>`.
+///
+/// Returns `None` when the argument frame could not be built (the caller's line is bounded, so
+/// that is a bug rather than a full argv), otherwise the kernel's error for the last path tried:
+/// `Some(errno)`, which is never 0 because a successful exec does not return.
 #[cfg(target_os = "minix")]
-fn try_exec(args: &[&str], cmd_path: &mut [u8; 256]) {
+fn try_exec(args: &[&str], cmd_path: &mut [u8; 256]) -> Option<i32> {
     let child_path_len = cmd_path.iter().position(|&b| b == 0).unwrap_or(255) + 1;
     let cmd_end = child_path_len - 1;
     let cmd_start = (0..cmd_end)
@@ -1381,7 +1378,7 @@ fn try_exec(args: &[&str], cmd_path: &mut [u8; 256]) {
     let mut arg_buf = [0u8; 4 * EDIT_MAX];
     let argc = args.len().min(32);
     if !pack_args(&mut arg_buf, &args[1..argc], &mut argv_buf[..argc]) {
-        return;
+        return None;
     }
 
     let r = unsafe {
@@ -1398,7 +1395,7 @@ fn try_exec(args: &[&str], cmd_path: &mut [u8; 256]) {
         cmd_path[..6].copy_from_slice(b"/sbin/");
         cmd_path[6..6 + cmd_name_len].copy_from_slice(&cmd_name[..cmd_name_len]);
         cmd_path[6 + cmd_name_len] = 0;
-        let _ = unsafe {
+        let r2 = unsafe {
             minix_rt::execve(
                 cmd_path.as_ptr(),
                 6 + cmd_name_len + 1,
@@ -1406,7 +1403,58 @@ fn try_exec(args: &[&str], cmd_path: &mut [u8; 256]) {
                 core::ptr::null(),
             )
         };
+        return Some(r2);
     }
+    Some(r)
+}
+
+/// Say why an external command did not run.
+///
+/// Every failure used to read `not found`, which is true only for `ENOENT`. `execve` can also
+/// fail on the heap (`minix-rt` builds the argument frame with `sbrk` before the syscall), on an
+/// ELF the loader rejects, or on a page it cannot read, and a gate that cannot tell those apart
+/// cannot be chased: the aarch64 interactive-bash flake reported `not found` for a `/bin/bash`
+/// that was on the disk. The path is printed because the last thing tried may be `/sbin/<cmd>`.
+#[cfg(target_os = "minix")]
+fn report_exec_failure(cmd: &str, cmd_path: &[u8; 256], error: Option<i32>) {
+    write_err(b"sh: '");
+    write_err(cmd.as_bytes());
+    write_err(b"' not found");
+    match error {
+        None => write_err(b" (the arguments did not fit)\r\n"),
+        Some(errno) => {
+            let path_end = cmd_path.iter().position(|&b| b == 0).unwrap_or(0);
+            write_err(b" (");
+            write_err(&cmd_path[..path_end]);
+            write_err(b": ");
+            let mut buf = [0u8; 12];
+            write_err(format_errno(&mut buf, errno));
+            write_err(b")\r\n");
+        }
+    }
+}
+
+/// Write `errno` into `buf` as its signed decimal, returning the slice it occupies.
+///
+/// The kernel's errors are negative, so the sign is part of the message; `unsigned_abs` keeps
+/// `i32::MIN` from overflowing.
+#[cfg(any(target_os = "minix", test))]
+fn format_errno(buf: &mut [u8; 12], errno: i32) -> &[u8] {
+    let mut v = errno.unsigned_abs();
+    let mut i = buf.len();
+    loop {
+        i -= 1;
+        buf[i] = b'0' + (v % 10) as u8;
+        v /= 10;
+        if v == 0 {
+            break;
+        }
+    }
+    if errno < 0 {
+        i -= 1;
+        buf[i] = b'-';
+    }
+    &buf[i..]
 }
 
 // ---------------------------------------------------------------------------
@@ -1684,5 +1732,16 @@ mod tests {
             assert_eq!(got.to_bytes(), want.as_bytes());
         }
         assert!(argv[0].is_null(), "argv[0] belongs to the caller");
+    }
+
+    /// The kernel's errors are negative and `i32::MIN` must not overflow, so the message carries
+    /// the sign and the formatter has room for ten digits plus it.
+    #[test]
+    fn a_kernel_error_formats_with_its_sign() {
+        let mut buf = [0u8; 12];
+        assert_eq!(format_errno(&mut buf, 0), b"0");
+        assert_eq!(format_errno(&mut buf, -2), b"-2");
+        assert_eq!(format_errno(&mut buf, 12345), b"12345");
+        assert_eq!(format_errno(&mut buf, i32::MIN), b"-2147483648");
     }
 }

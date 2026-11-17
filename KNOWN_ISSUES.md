@@ -262,8 +262,8 @@ are arch-specific, `[env]` is tooling/platform, not kernel.
     named in the same units `clock_gettime(CLOCK_MONOTONIC)` returns, and that has to be the
     kernel tick timeline `vfs::alarm` (`SYS_SETALARM`) arms against. With MINIX's offset the
     deadline landed `boottime` seconds away (~1.79e9 ticks on the x86 image) and the timer
-    never fired. `CLOCK_REALTIME` keeps the `boottime` offset. (`crates/servers/src/pm.rs`,
-    `crates/servers/src/vfs/alarm.rs`, `crates/servers/src/vfs/timerfd.rs`)
+    `CLOCK_REALTIME` keeps the `boottime` offset. (`crates/servers/src/pm.rs`,
+    `crates/servers/src/alarm.rs`, `crates/servers/src/vfs/timerfd.rs`)
 
 35. **`epoll` is level-triggered only, an instance is bounded to 64 interests, and a closed
     registration is pruned lazily (2026-09-28, open, deliberate).** `vfs::epoll`
@@ -300,6 +300,22 @@ are arch-specific, `[env]` is tooling/platform, not kernel.
     gates (`cabi`, `hello`/`ctest`, `gbmtest`, the EGL probes), because Mesa is compiled against
     this include directory too. (`tools/c-include/fcntl.h`,
     `.refs/minix-3.3.0/sys/sys/fcntl.h`)
+
+38. **An `exec` of a command can fail at random, and the shell called every failure "not found"
+    (2026-11-16, open, measured).** The interactive-bash gate failed in CI on aarch64 and on
+    riscv64 (`bash never printed its prompt`), the console showing the prompt's reprint of the
+    line and then `sh: 'bash' not found` for a `/bin/bash` that is in the image: `mkminixfs`
+    reported it as part of `100 files` with no missing-bash warning, and `mkfs` copies that image
+    straight to the disk the guest boots. So the file was there and the `exec` returned. The
+    message was the shell's for *every* failure of `try_exec`, and the errno was discarded (the
+    `/sbin` fallback's with `let _ =`), which is why this could not be chased. It now prints the
+    last path tried and the kernel's error, `sh: 'bash' not found (/bin/bash: -2)`, from
+    `report_exec_failure`/`format_errno` in `crates/userland/src/shell.rs`. Reproduced once
+    locally in 3 runs before the diagnostic, then not in 16 consecutive runs after it, so the
+    errno of the one occurrence was not captured. Suspects, in order: `minix-rt::execve`'s own
+    `sbrk` of the argument frame, which can return `ENOMEM` before the syscall is made; VM's
+    loader on the 1.6 MB image; and the allocation-heavy-path class aarch64 item 9 describes.
+    Next step: read the errno from the next failing gate, in CI or locally.
 
 ---
 
