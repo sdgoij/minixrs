@@ -2390,6 +2390,15 @@ fn do_mmap(msg: &mut Message) -> i32 {
         return EINVAL;
     }
 
+    // A `MAP_SHARED` anonymous object has no (dev, ino) for the file cache to key,
+    // so it is the one mapping whose frames are allocated here, before the first
+    // access. Fork then shares them: the kernel aliases the present writable pages
+    // and `cow_setup_fork` takes the reference, and a write in either process
+    // re-enables writability on the same frame through the region's `VR_SHARED`.
+    // Lazy allocation would give a page faulted after the fork its own frame,
+    // which is exactly what a shared mapping must not do.
+    let shared_anon = map_flags as u32 & MAP_SHARED != 0;
+
     // Check for overlap with existing regions.
     if let Some(vmp) = unsafe { proc::vmproc_lookup(ep) } {
         let new_r = region::VirRegion::new(page_addr, len_aligned, region::VR_ANON);
@@ -2404,6 +2413,9 @@ fn do_mmap(msg: &mut Message) -> i32 {
         if prot & 0x04 != 0 {
             region.flags |= region::VR_EXEC;
         }
+        if shared_anon {
+            region.flags |= region::VR_SHARED | region::VR_PRESENT;
+        }
 
         if vmp.vm_regions.insert(region).is_some() {
             return EAGAIN;
@@ -2412,15 +2424,82 @@ fn do_mmap(msg: &mut Message) -> i32 {
         return EINVAL;
     }
 
-    // Lazy region: no physical pages are allocated at map time. Pages are
-    // faulted in on access (user-mode faults, and kernel-mode faults via the
-    // Phase 1-4 fault machinery). The per-process page tables copy the
-    // kernel's 0..32 GiB identity map; windows above 1 GiB are supervisor-
-    // only, so without clearing them a kernel-mode copy into the region
-    // would silently alias the identity mapping (writes land beyond RAM,
-    // reads return garbage) instead of faulting. Clear the region's entries
-    // so every access — user or kernel — faults and VM maps a real page.
+    // The per-process page tables copy the kernel's 0..32 GiB identity map;
+    // windows above 1 GiB are supervisor-only, so without clearing them a
+    // kernel-mode copy into the region would silently alias the identity mapping
+    // (writes land beyond RAM, reads return garbage) instead of faulting. Clear
+    // the region's entries so every access, user or kernel, sees the region's own
+    // pages.
     let _ = crate::vm::vm_clear_range(cr3, page_addr, len_aligned / PAGE_SIZE);
+
+    // Lazy regions stop here: no physical page is allocated until a fault, and the
+    // cleared entries make both user-mode and kernel-mode accesses fault. A shared
+    // anonymous region is the exception, and its frames are allocated now.
+    if shared_anon {
+        let mut pt_flags = kernel::pagetable::MAP_USER;
+        if prot & 0x02 != 0 {
+            pt_flags |= kernel::pagetable::MAP_WRITE;
+        }
+        if prot & 0x04 != 0 {
+            pt_flags |= kernel::pagetable::MAP_EXEC;
+        }
+        let mut va = page_addr;
+        while va < end_addr {
+            let pa = crate::vm::vm_alloc_pages(1);
+            if pa == 0 {
+                break;
+            }
+            // The allocator does not promise a zeroed frame; zero it through a
+            // temporary mapping before the process can see it.
+            let tmp = crate::vm::vm_mappage(
+                pa,
+                kernel::pagetable::MAP_USER | kernel::pagetable::MAP_WRITE,
+            );
+            if tmp == 0 {
+                crate::vm::vm_free_pages(pa, 1);
+                break;
+            }
+            unsafe {
+                core::ptr::write_bytes(tmp as *mut u8, 0, PAGE_SIZE as usize);
+            }
+            crate::vm::vm_unmappage(tmp);
+            if crate::vm::vm_map_page_in(cr3, va, pa, pt_flags) != 0 {
+                crate::vm::vm_free_pages(pa, 1);
+                break;
+            }
+            crate::vm::pb::pb_new(pa);
+            if let Some(vmp) = unsafe { proc::vmproc_lookup(ep) }
+                && let Some(r) = vmp.vm_regions.find_mut(va)
+            {
+                r.note_page();
+            }
+            va += PAGE_SIZE;
+        }
+        if va != end_addr {
+            // Out of memory part way through: unmap and release what was mapped,
+            // and drop the region, so a failed mmap leaves neither a half-shared
+            // range nor a region the caller never received.
+            let mut undo = page_addr;
+            while undo < va {
+                let pte = crate::vm::vm_walk_page(cr3, undo);
+                if pte != 0 && pte & kernel::pagetable::PG_P != 0 {
+                    let frame = kernel::hal::pte_to_phys(pte);
+                    let _ = crate::vm::vm_unmap_page_in(cr3, undo);
+                    match crate::vm::pb::pb_find(frame) {
+                        Some(idx) => crate::vm::pb::pb_unref(idx),
+                        None => {
+                            let _ = crate::vm::vm_free_pages(frame, 1);
+                        }
+                    }
+                }
+                undo += PAGE_SIZE;
+            }
+            if let Some(vmp) = unsafe { proc::vmproc_lookup(ep) } {
+                let _ = vmp.vm_regions.remove(page_addr);
+            }
+            return EAGAIN;
+        }
+    }
 
     // Write mapped address into m1i1|m1i2 (u64 at message bytes 8..16)
     // for vm_call to read.

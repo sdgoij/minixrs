@@ -1,0 +1,5 @@
+# The MAP_SHARED|MAP_ANONYMOUS gate (KNOWN_ISSUES.md item 3): the child's first
+# store after the fork must land in the frame the parent reads. Nothing touches
+# the mapping before the fork, so a lazy implementation would give the child its
+# own frame and the parent would read zero.
+mmapfd anon-shared	mmapfd: shared anonymous mapping verified: cross-process visibility

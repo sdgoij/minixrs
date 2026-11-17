@@ -933,6 +933,9 @@ pub fn cat(args: &[&str]) -> i32 {
 /// verify a writable private mapping takes writes without modifying the
 /// file. Takes an optional path (default /bin/hello).
 pub fn mmapfd(args: &[&str]) -> i32 {
+    if args.contains(&"anon-shared") {
+        return mmapfd_anon_shared();
+    }
     let shared = args.contains(&"shared");
     let path = args
         .iter()
@@ -1154,6 +1157,71 @@ fn mmapfd_shared(path: &str) -> i32 {
         let _ = minix_std::fs::close(fd);
     }
     write_out(b"mmapfd: shared mapping verified (cross-process visibility)\n");
+    0
+}
+
+/// `MAP_SHARED|MAP_ANONYMOUS` mode: the child's first store after the fork must
+/// land in the frame the parent reads.
+///
+/// Nothing touches the mapping before the fork, so a lazy implementation would
+/// give the child's fault its own frame and the parent would read zero. VM
+/// allocates a shared anonymous region's frames at map time for this reason.
+fn mmapfd_anon_shared() -> i32 {
+    const SIZE: usize = 4096;
+    let p = unsafe {
+        minix_std::vmem::mmap(
+            core::ptr::null_mut(),
+            SIZE,
+            minix_std::vmem::PROT_READ | minix_std::vmem::PROT_WRITE,
+            minix_std::vmem::MAP_SHARED | minix_std::vmem::MAP_ANONYMOUS,
+            -1,
+            0,
+        )
+    };
+    if p == minix_std::vmem::MAP_FAILED {
+        write_err(b"mmapfd: mmap anon-shared failed\n");
+        return 1;
+    }
+    let pid = match unsafe { minix_std::process::fork() } {
+        Ok(pid) => pid,
+        Err(_) => {
+            write_err(b"mmapfd: fork failed (anon-shared)\n");
+            let _ = unsafe { minix_std::vmem::munmap(p, SIZE) };
+            return 1;
+        }
+    };
+    if pid == 0 {
+        const MARKER: u8 = 0x5A;
+        unsafe {
+            core::ptr::write_volatile(p, MARKER);
+        }
+        if unsafe { core::ptr::read_volatile(p) } != MARKER {
+            write_err(b"mmapfd: anon-shared write did not persist\n");
+            minix_std::process::exit(1);
+        }
+        minix_std::process::exit(0);
+    }
+    let (_, status) = match minix_std::process::waitpid(pid, 0) {
+        Ok(w) => w,
+        Err(_) => {
+            write_err(b"mmapfd: waitpid failed (anon-shared)\n");
+            return 1;
+        }
+    };
+    if status != 0 {
+        write_err(b"mmapfd: child failed (status ");
+        print_dec(status as u32);
+        write_err(b")\n");
+        return 2;
+    }
+    if unsafe { core::ptr::read_volatile(p) } != 0x5A {
+        write_err(b"mmapfd: parent did not see anon-shared write\n");
+        return 3;
+    }
+    unsafe {
+        let _ = minix_std::vmem::munmap(p, SIZE);
+    }
+    write_out(b"mmapfd: shared anonymous mapping verified: cross-process visibility\n");
     0
 }
 

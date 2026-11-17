@@ -594,6 +594,15 @@ test-coreutils-wedge-aarch64 boot-timeout="30": build-aarch64
     FEED_SCENARIO=tools/smoke/coreutils-wedge.tsv sh tools/smoke/feed.sh target/test-coreutils-wedge-aarch64.log {{boot-timeout}} qemu-system-aarch64 -machine virt -cpu cortex-a57 -m 256M -nographic -no-reboot -global virtio-mmio.force-legacy=off -netdev user,id=net0 -device virtio-net-device,netdev=net0 -device virtio-gpu-device -device virtio-keyboard-device -kernel target/aarch64-unknown-minix/release/kernel-boot-aarch64
     @echo "coreutils-wedge: no child was left wedged (aarch64)"
 
+# The shared anonymous mapping gate: VM allocates the frames at map time, so a
+# store the child makes after the fork is visible in the parent's view.
+test-mmapanon-x86 boot-timeout="20": build-x86
+    mkdir -p target/images/x86_64-pc-minix
+    cp target/trampoline.elf target/images/x86_64-pc-minix/minix-x86.elf
+    @just _assert-qemu-version qemu-system-x86_64
+    FEED_SCENARIO=tools/smoke/mmapanon.tsv sh tools/smoke/feed.sh target/test-mmapanon-x86.log {{boot-timeout}} qemu-system-x86_64 -nographic -m 256M -no-reboot -vga none -device bochs-display,id=fb0 -kernel target/images/x86_64-pc-minix/minix-x86.elf -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0 -device virtio-tablet-pci,display=fb0
+    @echo "mmapanon: MAP_SHARED|MAP_ANONYMOUS is shared across fork (x86_64)"
+
 # Long paths must resolve. KNOWN_ISSUES.md item 19: a pathname of 24 bytes or more
 # killed VFS — it wrote the REQ_LOOKUP terminator one byte past the 56-byte message
 # at exactly 24, and truncated anything longer to 24 and resolved the wrong name.
@@ -1481,6 +1490,7 @@ test-arches:
     @just test-fork x86
     @just test-waitid x86
     @just test-cabi x86
+    @just test-mmapanon-x86
     @just test-winprobe x86
     @just test-burst x86
     @just test-ttytimeout x86

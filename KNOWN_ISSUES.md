@@ -11,16 +11,6 @@ are arch-specific, `[env]` is tooling/platform, not kernel.
 
 ## Cross-arch (`[all]`)
 
-3. **`mmap(fd)` MAP_SHARED semantics** — implemented (MAP_SHARED sets
-   `VR_SHARED`, the pages are file-cache frames shared between processes) and
-   exercised by `mmapfd shared`, which forks and checks that the child's write is
-   visible in the parent's view. It is deliberately the *only* place a frame is
-   shared for writing: the fork keeps such a page aliased (item 27) and
-   `handle_cow_fault` re-enables writability in place instead of copying. What
-   is still unbuilt is the *reverse* case — a shared *anonymous* mapping, or a
-   file mapping whose cache page is evicted underneath it (item 1's stub cache).
-   (.notes/filemmap.md §6)
-
 5. **Kernel-mode fault attribution** — `handle_page_fault`
    attributes by `current_proc()`, which is wrong during a
    cross-address-space `virtual_copy` (CR3 owner vs. executor). The exec
@@ -291,6 +281,21 @@ are arch-specific, `[env]` is tooling/platform, not kernel.
     offset-table overflow in item 45 is one candidate for this class and is fixed; the gate has
     not failed since the diagnostic, so the errno is still owed.
 
+47. **A `MAP_SHARED` file page has no writeback, and a cache-evicted page diverges
+    (2026-11-17, open, deliberate).** The file page cache (`vm/cache.rs`, 4096 entries)
+    holds one `PhysBlock` reference per cached page, and a mapping holds its own, so
+    eviction (`insert_entry`'s `pb_unref` of the LRU victim) leaves the mapping's frame
+    alive but drops the file key. A later fault of the same `(dev, ino, offset)` reads
+    the file into a new frame, so the two mappings no longer share the page and nothing
+    writes the dirty frame back to the file. No ported consumer does this today
+    (`wl_shm` uses a memfd, whose pages are the object rather than a file cache entry),
+    and fixing it needs a writeback path from VM to VFS's FDIO and a dirty bit on the
+    cache entry, so it is recorded rather than synthesized. A shorter-term mitigation
+    would be to skip a mapped victim during eviction; it trades cache capacity for
+    coherence and is not done here.
+    (`crates/servers/src/vm/cache.rs`, `crates/servers/src/vm/mod.rs`,
+    `.notes/filemmap.md` §6)
+
 ---
 
 ## RISC-V (`[riscv]`)
@@ -348,6 +353,23 @@ the burst-overflow reading in item 37, are under `# Resolved issues`.
    `FULL_DATA_BLOCK`) were reverted correctly: neither was the defect. One measurement note:
    the trace backend perturbs the stdio console badly enough that a traced run must verify
    its command's own output before the counts are believed. (`.notes/filemmap.md` §7)
+
+3. **~~`mmap(fd)` MAP_SHARED semantics~~: FIXED (2026-11-17).** File-backed
+   `MAP_SHARED` has set `VR_SHARED` and shared the file-cache frames since the cache
+   landed, and `mmapfd shared` checks the child's write in the parent's view. The
+   reverse case, a shared *anonymous* mapping, is now implemented too: `do_mmap`
+   allocates a `MAP_SHARED|MAP_ANONYMOUS` region's frames at map time (a lazy page
+   faulted after the fork would get its own frame), marks it `VR_SHARED|VR_PRESENT`,
+   and leaves the existing `VR_SHARED` COW exception to re-enable writability on the
+   shared frame. `just test-mmapanon-x86` runs `mmapfd anon-shared`, which touches
+   nothing before the fork and requires the child's first store to be visible in the
+   parent; it fails on the old lazy path (`parent did not see anon-shared write`).
+   The remaining limitation is the file page cache: an evicted `MAP_SHARED` page is
+   dropped from the cache while a mapping keeps its frame, and a later mapping of the
+   same file page reads the file again, so the shared write is not visible there and
+   nothing is written back. That is recorded as item 47.
+   (`crates/servers/src/vm/mod.rs`, `crates/userland/src/lib.rs`,
+   `tools/smoke/mmapanon.tsv`, `Justfile`)
 
 13. **~~Free slots are left not-quite-free~~ — FIXED (2026-11-01).** `Proc::is_empty` tests the
     `SLOT_FREE` bit, the way C's `get_free_proc` does (`RTS_ISSET`), instead of equality with it, so
