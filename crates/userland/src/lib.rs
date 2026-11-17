@@ -3031,8 +3031,8 @@ pub fn timerfd_test(_args: &[&str]) -> i32 {
 /// blocked `epoll_wait` woken by another process.
 pub fn epoll_test(_args: &[&str]) -> i32 {
     use minix_std::fs::{
-        EPOLL_CTL_ADD, EPOLL_CTL_DEL, EPOLL_CTL_MOD, EPOLLIN, EpollEvent, epoll_create1, epoll_ctl,
-        epoll_wait,
+        EPOLL_CTL_ADD, EPOLL_CTL_DEL, EPOLL_CTL_MOD, EPOLLIN, EPOLLONESHOT, EpollEvent,
+        epoll_create1, epoll_ctl, epoll_wait,
     };
 
     fn fail(msg: &[u8]) -> i32 {
@@ -3156,6 +3156,48 @@ pub fn epoll_test(_args: &[&str]) -> i32 {
     if epoll_ctl(ep, 99, ev, &EpollEvent::default()).is_ok() {
         return fail(b"epolltest: an unknown op succeeded\r\n");
     }
+
+    // EPOLLONESHOT reports an interest once and stops watching it until `MOD` re-arms it.
+    // Without that rule a consumer that takes one event and deliberately does not drain
+    // would be woken again by every level-triggered re-scan, forever.
+    let os = match minix_std::fs::eventfd(0, 0) {
+        Ok(f) => f,
+        Err(_) => return fail(b"epolltest: oneshot eventfd failed\r\n"),
+    };
+    if !write_u64(os, 5) {
+        return fail(b"epolltest: oneshot write failed\r\n");
+    }
+    let once = EpollEvent {
+        events: EPOLLIN | EPOLLONESHOT,
+        data: 0xD4D4,
+    };
+    if epoll_ctl(ep, EPOLL_CTL_ADD, os, &once).is_err() {
+        return fail(b"epolltest: ADD (oneshot) failed\r\n");
+    }
+    match epoll_wait(ep, &mut events, 0) {
+        Ok(1) if events[0].data == 0xD4D4 && events[0].events & EPOLLIN != 0 => {}
+        _ => return fail(b"epolltest: the oneshot interest did not report\r\n"),
+    }
+    // The counter is still nonzero, because a report is not a read: the disarmed interest
+    // must not report it again.
+    match epoll_wait(ep, &mut events, 0) {
+        Ok(0) => {}
+        _ => return fail(b"epolltest: a disarmed oneshot interest reported again\r\n"),
+    }
+    if epoll_ctl(ep, EPOLL_CTL_MOD, os, &once).is_err() {
+        return fail(b"epolltest: MOD (oneshot) failed\r\n");
+    }
+    match epoll_wait(ep, &mut events, 0) {
+        Ok(1) if events[0].data == 0xD4D4 => {}
+        _ => return fail(b"epolltest: MOD did not re-arm the oneshot interest\r\n"),
+    }
+    if !drain_u64(os) {
+        return fail(b"epolltest: oneshot read failed\r\n");
+    }
+    if epoll_ctl(ep, EPOLL_CTL_DEL, os, &EpollEvent::default()).is_err() {
+        return fail(b"epolltest: DEL (oneshot) failed\r\n");
+    }
+    let _ = minix_std::fs::close(os);
 
     // The property an event loop needs: a blocked `epoll_wait` wakes when
     // another process makes a registered fd ready. The child waits so the parent

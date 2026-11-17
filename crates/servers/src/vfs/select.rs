@@ -156,8 +156,9 @@ fn ops_to_poll(ops: u32) -> i16 {
 
 /// `epoll` event bits → the SEL_* ops the scanner understands. `EPOLLIN`,
 /// `EPOLLPRI` and `EPOLLOUT` coincide with the `poll` bits, so this mirrors
-/// `poll_events_to_ops`; the level-triggering and one-shot flags (`EPOLLET`,
-/// `EPOLLONESHOT`, ...) carry no readiness op and are ignored.
+/// `poll_events_to_ops`; the trigger flags (`EPOLLET`, `EPOLLONESHOT`) carry no
+/// readiness op and are not mapped here. `EPOLLONESHOT` is acted on after the
+/// report instead, by `epoll::after_report`.
 fn epoll_events_to_ops(events: u32) -> u32 {
     use crate::vfs::epoll::{EPOLLIN, EPOLLOUT, EPOLLPRI};
     let mut ops = 0u32;
@@ -214,6 +215,9 @@ struct WaitEntry {
     edata: [u64; MAX_WATCH],
     /// `epoll_wait`'s `maxevents`: the most events written back in one call.
     maxevents: i32,
+    /// `epoll_wait`'s instance id, so a reported event can disarm an
+    /// `EPOLLONESHOT` interest (`0` = not an epoll wait, ids start at 1).
+    epoll_id: u32,
     /// Character-device minor watched per fd (`u32::MAX` = none), for matching a
     /// later `CDEV_SEL2_REPLY`.
     minor: [u32; MAX_WATCH],
@@ -250,6 +254,7 @@ impl WaitEntry {
             pevents: [0; MAX_WATCH],
             edata: [0; MAX_WATCH],
             maxevents: 0,
+            epoll_id: 0,
             minor: [u32::MAX; MAX_WATCH],
             rkind: [0; MAX_WATCH],
             rid: [0; MAX_WATCH],
@@ -501,6 +506,11 @@ unsafe fn write_pollfds(e: &WaitEntry) {
 /// Write a completed `epoll_wait`'s ready events back to the caller's packed
 /// `struct epoll_event` array (`u32 events`, `u64 data` — 12 bytes each), at
 /// most `maxevents` of them, in interest order. Returns the number written.
+///
+/// A reported `EPOLLONESHOT` interest is disarmed here, because the *report* is what
+/// disarms it on Linux: the caller is expected to stop watching until it re-arms with
+/// `EPOLL_CTL_MOD`. Only the events actually written count, not the ones `maxevents`
+/// pushed out of this call.
 unsafe fn write_epoll_events(e: &WaitEntry) -> i32 {
     let cap = crate::vfs::epoll::EPOLL_EVENT_SIZE;
     let mut buf = [0u8; MAX_WATCH * crate::vfs::epoll::EPOLL_EVENT_SIZE];
@@ -515,6 +525,9 @@ unsafe fn write_epoll_events(e: &WaitEntry) -> i32 {
         let off = k * cap;
         buf[off..off + 4].copy_from_slice(&ops_to_epoll(e.got[i]).to_ne_bytes());
         buf[off + 4..off + 12].copy_from_slice(&e.edata[i].to_ne_bytes());
+        if e.epoll_id != 0 {
+            unsafe { crate::vfs::epoll::after_report(e.epoll_id, e.fds[i]) };
+        }
         k += 1;
     }
     if e.vir_pollfds != 0 && k > 0 {
@@ -809,6 +822,7 @@ pub unsafe fn do_epoll_wait() -> i32 {
     e.reset(fp, caller_ep, KIND_EPOLL, n as i32);
     e.vir_pollfds = events_p;
     e.maxevents = maxevents;
+    e.epoll_id = epid;
     for (i, it) in interests.iter().enumerate().take(n) {
         e.fds[i] = it.fd;
         e.want[i] = epoll_events_to_ops(it.events);

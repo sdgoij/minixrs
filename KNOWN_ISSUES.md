@@ -179,26 +179,6 @@ are arch-specific, `[env]` is tooling/platform, not kernel.
     than resolved. (`crates/servers/src/vfs/scm.rs`, `crates/servers/src/vfs/call.rs::do_copyfd`,
     `crates/drivers/src/storage/vnd.rs`)
 
-35. **`epoll` is level-triggered only, an instance is bounded to 64 interests, and a closed
-    registration is pruned lazily (2026-09-28, open, deliberate).** `vfs::epoll`
-    (`crates/servers/src/vfs/epoll.rs`) is net-new — MINIX emulates `poll` over `select` and
-    has no `epoll`. An instance holds a persistent interest set, and `epoll_wait` re-scans
-    the whole set through the shared readiness engine (`vfs::select`), so readiness is
-    level-triggered by construction. Deliberate limits, all in `.notes/wayland.md` §5 row 23:
-    `EPOLLET` and `EPOLLONESHOT` are accepted in the event mask but not honoured; an instance
-    holds at most `MAX_INTERESTS` (64) registrations (the wait entry's `MAX_WATCH`),
-    answering `ENOSPC` beyond that; and an interest whose fd the waiter has closed is dropped
-    lazily at the next `epoll_wait`, not at `close` (there is no close hook on a
-    VFS-internal object). `EPOLLERR`/`EPOLLHUP`/`EPOLLRDHUP` are not synthesised, matching
-    what the engine reports for `poll`. Two further edges: an epoll fd registered in
-    `epoll_ctl` is refused with `EINVAL` (no nesting), but one appearing in a *`poll`/`select`*
-    watch is treated as a regular file and reads as always-ready; and an instance whose
-    registrations were made by one process then waited on by another resolves them in the
-    *waiter's* fd table. `calloop` (and so smithay) uses level-triggered `EPOLLIN`,
-    deregisters before closing, and registers and waits in one process, so none of these bites
-    it. (`crates/servers/src/vfs/epoll.rs`, `crates/servers/src/vfs/select.rs`,
-    `crates/servers/src/vfs/call.rs`)
-
 38. **An `exec` of a command can fail at random (2026-11-16, open, measured).** The
     interactive-bash gate failed in CI on aarch64 and on riscv64 (`bash never printed its
     prompt`), the console showing the prompt's reprint of the line and then a message for a
@@ -241,6 +221,34 @@ as this file's header says a skill-captured limitation does.
 # Resolved issues
 
 ## Cross-arch (`[all]`)
+
+35. **~~`epoll` ignores `EPOLLONESHOT`~~: FIXED (2026-11-17).** An `EPOLLONESHOT`
+    interest is now disarmed by its own report, as on Linux: it stays in the set
+    (`EPOLL_CTL_MOD` re-arms it, `EPOLL_CTL_DEL` removes it) but no wait scans it until
+    then. `Interest` carries an `armed` flag that `snapshot` skips, `EPOLL_CTL_ADD` and
+    `MOD` arm it, and `write_epoll_events` calls `epoll::after_report` for each event it
+    actually writes back, so a report the `maxevents` cap pushed out of the call does not
+    disarm. Without the rule a consumer that takes one event and deliberately does not
+    drain is woken again by every level-triggered re-scan, forever.
+
+    The rest of the entry is a deliberate limit, not a defect, and stays recorded in
+    `.notes/wayland.md` §5 row 23: `EPOLLET` is accepted and served level-triggered (the
+    engine keeps no ready list, so a true edge cannot be told from a repeat; a consumer that
+    drains to `EAGAIN` sees no difference beyond the extra reports); an instance holds at
+    most `MAX_INTERESTS` (64) registrations, answering `ENOSPC` beyond that; a registration
+    whose fd the waiter has closed is pruned at the next `epoll_wait` rather than at `close`;
+    `EPOLLERR`/`EPOLLHUP`/`EPOLLRDHUP` are not synthesised, matching `poll`; an epoll fd in a
+    *`poll`/`select`* watch reads as always-ready; and an instance's interests resolve in the
+    *waiter's* fd table. `calloop` (and so smithay) uses level-triggered `EPOLLIN`,
+    deregisters before closing, and registers and waits in one process, so none of these
+    bites it.
+
+    Gates: `just test-epoll-x86` now requires the oneshot case (report once, a `wait` with
+    the counter still nonzero returns 0, `MOD` re-arms and it reports again) and fails
+    without the fix ("a disarmed oneshot interest reported again"); two host tests pin
+    `snapshot`/`after_report` for a oneshot and a level interest.
+    (`crates/servers/src/vfs/epoll.rs`, `crates/servers/src/vfs/select.rs`,
+    `crates/userland/src/lib.rs`, `crates/minix-std/src/fs.rs`)
 
 1. **~~VM block cache is a stub~~ — FIXED (2026-11-01).** The entry was stale: `do_mapcache` maps the
    cached blocks into the caller, `do_setcache` registers caller-owned pages with their own

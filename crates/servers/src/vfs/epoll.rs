@@ -16,12 +16,12 @@
 //! construction — each wait re-scans the whole set.
 //!
 //! Deviations from Linux, all recorded in `.notes/wayland.md` §5: the instance holds at
-//! most [`MAX_INTERESTS`] registrations (the wait engine's per-entry bound);
-//! `EPOLLET`/`EPOLLONESHOT` are accepted in the mask but behave level-triggered;
-//! an interest whose fd the waiter has closed is dropped lazily at the next
-//! `epoll_wait` (`prune`) rather than at close; and `EPOLLERR`/`EPOLLHUP`/
-//! `EPOLLRDHUP` are not synthesised (the engine does not produce them for `poll`
-//! either).
+//! most [`MAX_INTERESTS`] registrations (the wait engine's per-entry bound); `EPOLLET` is
+//! accepted in the mask but every wait re-scans the set, so readiness is level-triggered
+//! (`EPOLLONESHOT` *is* honoured: its report disarms the interest until `EPOLL_CTL_MOD`);
+//! an interest whose fd the waiter has closed is dropped lazily at the next `epoll_wait`
+//! (`prune`) rather than at close; and `EPOLLERR`/`EPOLLHUP`/`EPOLLRDHUP` are not
+//! synthesised (the engine does not produce them for `poll` either).
 
 use core::cell::UnsafeCell;
 
@@ -52,6 +52,12 @@ pub const EPOLLERR: u32 = 0x008;
 pub const EPOLLHUP: u32 = 0x010;
 pub const EPOLLNVAL: u32 = 0x020;
 pub const EPOLLRDHUP: u32 = 0x2000;
+/// Report this interest once, then stop watching it until `EPOLL_CTL_MOD` re-arms it.
+pub const EPOLLONESHOT: u32 = 1 << 30;
+/// Edge-triggered. Accepted, but every wait re-scans the set, so it is served
+/// level-triggered: a consumer that drains to `EAGAIN` on each event sees no difference
+/// beyond the extra reports, and a true edge needs a ready list this engine does not keep.
+pub const EPOLLET: u32 = 1 << 31;
 
 /// `struct epoll_event` is packed on Linux (`__attribute__((packed))`):
 /// `u32 events; u64 data;` is 12 bytes, not 16. The ABI is shared, so match it.
@@ -71,6 +77,10 @@ pub struct Interest {
     pub fd: i32,
     pub events: u32,
     pub data: u64,
+    /// False once an `EPOLLONESHOT` interest has been reported: it stays in the set
+    /// (`EPOLL_CTL_MOD` re-arms it, `EPOLL_CTL_DEL` removes it) but no longer
+    /// watches its descriptor.
+    pub armed: bool,
 }
 
 impl Interest {
@@ -79,6 +89,7 @@ impl Interest {
             fd: -1,
             events: 0,
             data: 0,
+            armed: false,
         }
     }
 }
@@ -279,7 +290,12 @@ pub fn do_ctl() -> i32 {
             if ep.n >= MAX_INTERESTS {
                 return ENOSPC;
             }
-            ep.interests[ep.n] = Interest { fd, events, data };
+            ep.interests[ep.n] = Interest {
+                fd,
+                events,
+                data,
+                armed: true,
+            };
             ep.n += 1;
             OK
         }
@@ -292,6 +308,9 @@ pub fn do_ctl() -> i32 {
             };
             ep.interests[idx].events = events;
             ep.interests[idx].data = data;
+            // Re-arming is what `MOD` means to an `EPOLLONESHOT` interest, and it is
+            // harmless for every other kind.
+            ep.interests[idx].armed = true;
             OK
         }
         EPOLL_CTL_DEL => {
@@ -343,14 +362,46 @@ pub unsafe fn prune(id: u32) {
 /// Copy an instance's interest set into `out`, returning how many were copied
 /// (at most `out.len()`), or `None` if `id` is not a live epoll.
 ///
+/// A disarmed `EPOLLONESHOT` interest is in the set but is not watching, so it is
+/// left out of the wait: it is what keeps a consumer that reports one event and then
+/// does not drain from being woken again for the same readiness.
+///
 /// # Safety
 ///
 /// VFS dispatch only.
 pub unsafe fn snapshot(id: u32, out: &mut [Interest]) -> Option<usize> {
     let ep = lookup(id)?;
-    let n = ep.n.min(out.len());
-    out[..n].copy_from_slice(&ep.interests[..n]);
+    let mut n = 0usize;
+    for i in 0..ep.n {
+        if !ep.interests[i].armed {
+            continue;
+        }
+        if n >= out.len() {
+            break;
+        }
+        out[n] = ep.interests[i];
+        n += 1;
+    }
     Some(n)
+}
+
+/// Record that a wait reported an event for `fd`: an `EPOLLONESHOT` interest stops
+/// watching until `EPOLL_CTL_MOD` re-arms it (Linux's rule: the report itself is
+/// what disarms it).
+///
+/// # Safety
+///
+/// VFS dispatch only.
+pub unsafe fn after_report(id: u32, fd: i32) {
+    let Some(ep) = lookup(id) else {
+        return;
+    };
+    let Some(idx) = find(ep, fd) else {
+        return;
+    };
+    if ep.interests[idx].events & EPOLLONESHOT != 0 {
+        ep.interests[idx].armed = false;
+    }
 }
 
 /// Release the object a closed vnode held. Called from `put_vnode`.
@@ -395,4 +446,62 @@ fn r_i32(buf: &[u8; 64], off: usize) -> i32 {
 
 fn r_u64(buf: &[u8; 64], off: usize) -> u64 {
     u64::from_ne_bytes(buf[off..off + 8].try_into().unwrap_or([0; 8]))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Put one instance in slot 0, watching `fd` with `events`.
+    unsafe fn instance(id: u32, fd: i32, events: u32) {
+        let ep = slot(0);
+        *ep = Epoll::new();
+        ep.id = id;
+        ep.n = 1;
+        ep.interests[0] = Interest {
+            fd,
+            events,
+            data: 0x7A,
+            armed: true,
+        };
+        ep.used = true;
+    }
+
+    /// The report is what disarms an `EPOLLONESHOT` interest, and it stays in the set so
+    /// `EPOLL_CTL_MOD` can re-arm it. This is the difference between a consumer that
+    /// reports one event and stops draining (and must not be woken again) and one that is
+    /// woken on every level-triggered re-scan, forever.
+    #[test]
+    fn a_oneshot_interest_is_disarmed_by_its_report() {
+        unsafe {
+            instance(7, 4, EPOLLIN | EPOLLONESHOT);
+            let mut out = [Interest::new(); MAX_INTERESTS];
+            assert_eq!(
+                snapshot(7, &mut out),
+                Some(1),
+                "an armed interest is watched"
+            );
+
+            after_report(7, 4);
+            assert_eq!(snapshot(7, &mut out), Some(0), "its report disarms it");
+            assert!(find(slot(0), 4).is_some(), "but it stays in the set");
+
+            // What `EPOLL_CTL_MOD` does.
+            slot(0).interests[0].armed = true;
+            assert_eq!(snapshot(7, &mut out), Some(1), "MOD re-arms it");
+        }
+    }
+
+    /// A level-triggered interest keeps watching: only `EPOLLONESHOT` changes the rule.
+    #[test]
+    fn a_level_interest_survives_its_report() {
+        unsafe {
+            instance(8, 5, EPOLLIN);
+            let mut out = [Interest::new(); MAX_INTERESTS];
+            after_report(8, 5);
+            assert_eq!(snapshot(8, &mut out), Some(1));
+            assert!(out[0].armed);
+            assert_eq!(out[0].fd, 5);
+        }
+    }
 }

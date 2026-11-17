@@ -1576,7 +1576,7 @@ pub const EPOLLNVAL: u32 = 0x020;
 pub const EPOLLRDHUP: u32 = 0x2000;
 /// Edge-triggered — accepted but served level-triggered (see `.notes/wayland.md` §5).
 pub const EPOLLET: u32 = 1 << 31;
-/// One-shot — accepted but served level-triggered (see `.notes/wayland.md` §5).
+/// One-shot — a report disarms the interest until `EPOLL_CTL_MOD` re-arms it.
 pub const EPOLLONESHOT: u32 = 1 << 30;
 
 /// `struct epoll_event` (Linux kernel ABI: packed, so 12 bytes): the ready
