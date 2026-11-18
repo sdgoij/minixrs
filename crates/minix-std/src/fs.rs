@@ -1240,9 +1240,19 @@ pub fn symlink(target: &[u8], linkpath: &[u8]) -> Result<(), MinixErr> {
 /// Change a file's owner and group (VFS_CHOWN — path at 8/len at 16, owner at 24, group
 /// at 32). The server truncates both ids to 16 bits, as the reference's `chown(2)` does.
 pub fn chown(path: &[u8], owner: u32, group: u32) -> Result<(), MinixErr> {
+    chown_flags(path, owner, group, 0)
+}
+
+/// Change ownership of a path, optionally acting on the link itself.
+///
+/// `flags` rides the port's own field at message offset 28, the same one
+/// `chmod_flags` uses; `AT_SYMLINK_NOFOLLOW` makes VFS resolve the link rather
+/// than what it names, which is what `lchown(2)` asks for. MINIX 3.3.0 has no
+/// `lchown`/`fchownat`, so the flag is a port addition.
+pub fn chown_flags(path: &[u8], owner: u32, group: u32, flags: i32) -> Result<(), MinixErr> {
     #[cfg(not(target_os = "minix"))]
     {
-        let _ = (path, owner, group, VFS_PROC_NR);
+        let _ = (path, owner, group, flags, VFS_PROC_NR);
         Err(MinixErr::ENOSYS)
     }
     #[cfg(target_os = "minix")]
@@ -1252,7 +1262,27 @@ pub fn chown(path: &[u8], owner: u32, group: u32) -> Result<(), MinixErr> {
         msg_set_u64(&mut msg, 8, path.as_ptr() as u64);
         msg_set_u32(&mut msg, 16, path.len() as u32);
         msg_set_u32(&mut msg, 24, owner);
+        msg_set_i32(&mut msg, 28, flags);
         msg_set_u32(&mut msg, 32, group);
+        let _ = vfs_call(&mut msg)?;
+        Ok(())
+    }
+}
+
+/// Change an open file's owner and group (VFS_FCHOWN — fd at 8, owner at 16, group at 24).
+pub fn fchown(fd: i32, owner: u32, group: u32) -> Result<(), MinixErr> {
+    #[cfg(not(target_os = "minix"))]
+    {
+        let _ = (fd, owner, group, VFS_PROC_NR);
+        Err(MinixErr::ENOSYS)
+    }
+    #[cfg(target_os = "minix")]
+    unsafe {
+        let mut msg = [0u8; 64];
+        msg_set_i32(&mut msg, OFF_CALL, VFS_FCHOWN as i32);
+        msg_set_i32(&mut msg, 8, fd);
+        msg_set_u32(&mut msg, 16, owner);
+        msg_set_u32(&mut msg, 24, group);
         let _ = vfs_call(&mut msg)?;
         Ok(())
     }

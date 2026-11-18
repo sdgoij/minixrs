@@ -1180,13 +1180,10 @@ pub unsafe extern "C" fn fchownat(
     if path.is_null() {
         return crate::fail(EINVAL);
     }
-    if flags != 0 {
-        return crate::fail(ENOSYS);
-    }
     let path_bytes = unsafe { core::ffi::CStr::from_ptr(path) }.to_bytes();
     let result = unsafe {
         with_dirfd(dirfd, path_bytes, || {
-            minix_std::fs::chown(path_bytes, owner, group)
+            minix_std::fs::chown_flags(path_bytes, owner, group, flags)
         })
     };
     match result {
@@ -1537,11 +1534,28 @@ pub unsafe extern "C" fn chown(path: *const c_char, owner: c_uint, group: c_uint
     }
 }
 
-/// Change an fd's owner. VFS chown is path-based only.
+/// C `lchown(2)`: change a link's own ownership, not its target's.
 #[cfg(target_os = "minix")]
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn fchown(_fd: c_int, _owner: c_uint, _group: c_uint) -> c_int {
-    crate::fail(ENOSYS)
+pub unsafe extern "C" fn lchown(path: *const c_char, owner: c_uint, group: c_uint) -> c_int {
+    if path.is_null() {
+        return crate::fail(EINVAL);
+    }
+    let path_bytes = unsafe { core::ffi::CStr::from_ptr(path) }.to_bytes();
+    match minix_std::fs::chown_flags(path_bytes, owner, group, AT_SYMLINK_NOFOLLOW) {
+        Ok(()) => 0,
+        Err(e) => crate::fail(e.0),
+    }
+}
+
+/// C `fchown(2)`: change an open file's owner and group (VFS_FCHOWN).
+#[cfg(target_os = "minix")]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn fchown(fd: c_int, owner: c_uint, group: c_uint) -> c_int {
+    match minix_std::fs::fchown(fd, owner, group) {
+        Ok(()) => 0,
+        Err(e) => crate::fail(e.0),
+    }
 }
 
 /// Sleep for `usec` microseconds (busy-wait on the monotonic clock — the

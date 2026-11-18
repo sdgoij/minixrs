@@ -62,6 +62,7 @@ int fchownat(int dirfd, const char *path, uid_t owner, gid_t group, int flags);
 int ftruncate(int fd, off_t length);
 int access(const char *path, int mode);
 int chown(const char *path, uid_t owner, gid_t group);
+int lchown(const char *path, uid_t owner, gid_t group);
 int fchown(int fd, uid_t owner, gid_t group);
 int usleep(unsigned int usec);
 

@@ -55,8 +55,29 @@ coreutils touch d2/f2
 coreutils chmod -R 700 d2 && coreutils echo CHMOD-R-OK	CHMOD-R-OK
 coreutils chmod 644 no-such-file && coreutils echo CHMOD-ENOENT-BAD	
 # `/etc/group` reached the image and reads back through VFS's open path: this
-# is the file the `grp.h` lookups (`getgrgid`/`getgrnam`, item 52) parse. No
-# applet in this set resolves a group name yet (chgrp/chown are still outside
-# `feat_minix`), so reading the first line back is the assertion, and `head -1`
-# gives one line the harness can match whole.
+# is the file the `grp.h` lookups (`getgrgid`/`getgrnam`, item 52) parse. One
+# applet now resolves names (`chown test:wheel` below), and reading the first
+# line back is the image-level assertion, one line the harness can match whole.
 coreutils head -1 /etc/group	root:x:0:
+# `chown`/`chgrp`. Unlike chmod, their recursive walk is shared with Linux and
+# goes through `wrap_chown` -> libc chown/lchown, so these exercise VFS_CHOWN,
+# lchown's AT_SYMLINK_NOFOLLOW, the passwd/group lookups, and (with -R) std's
+# read_dir -> WalkDir. The `-v` line is the assertion, and `--from` matches only
+# ids the file actually has, so it proves the earlier change took instead of
+# restating the request.
+coreutils touch o1.txt	
+coreutils chown -v test:wheel o1.txt	changed ownership of 'o1.txt' from root:root to test:wheel
+coreutils chown -v --from=test:wheel 0:0 o1.txt	changed ownership of 'o1.txt' from test:wheel to root:root
+coreutils chgrp -v wheel o1.txt	changed group of 'o1.txt' from root to wheel
+# A dangling symlink: only the link's own inode can be changed, so this is the
+# lchown/AT_SYMLINK_NOFOLLOW assertion (following the link would be ENOENT).
+coreutils ln -s nowhere olink	
+coreutils chown -vh 33:44 olink	changed ownership of 'olink' from root:root to 33:44
+# `-R` descends through std's read_dir into a subdirectory and the file under
+# it; the `--from` check on the nested file is what fails if the walk stops at
+# the first level (the bug item 53 records).
+coreutils mkdir og	
+coreutils mkdir og/sub	
+coreutils touch og/sub/g	
+coreutils chown -vR 7:8 og	changed ownership of 'og' from root:root to 7:8
+coreutils chown -v --from=7:8 0:0 og/sub/g	changed ownership of 'og/sub/g' from 7:8 to root:root

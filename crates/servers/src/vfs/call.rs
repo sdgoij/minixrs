@@ -2827,66 +2827,131 @@ pub fn do_chown() -> i32 {
         None => return EINVAL,
     };
     let glob = unsafe { &*vfs_global() };
-    let path_addr = r_u64(&glob.fs_m_in, 8);
-    let path_len = r_u32(&glob.fs_m_in, 16) as usize;
-    let owner = r_u32(&glob.fs_m_in, 24) as u16;
-    let group = r_u32(&glob.fs_m_in, 32) as u16;
-    let mut path_buf = [0u8; PATH_MAX];
-    let copy_len = path_len.min(PATH_MAX - 1);
-    unsafe {
-        if sys_vircopy(
-            fp.fp_endpoint,
-            path_addr,
-            SELF,
-            path_buf.as_mut_ptr() as u64,
-            copy_len,
-        ) != 0
-        {
+    // The same handler serves VFS_CHOWN (path) and VFS_FCHOWN (fd); the call
+    // number is stashed in req_nr by the main loop (C `job_call_nr`).
+    let is_fchown = glob.req_nr == VFS_FCHOWN;
+
+    // Resolve the target vnode: eat_path for chown(2), the filp's vnode for
+    // fchown(2). Only the path case owns a vnode reference to release.
+    let (vp, owns_ref) = if is_fchown {
+        let fd = r_i32(&glob.fs_m_in, FD_OFF);
+        if fd < 0 || (fd as usize) >= OPEN_MAX {
             return EBADF;
         }
-    }
-    let actual_len = path_buf[..copy_len]
-        .iter()
-        .position(|&b| b == 0)
-        .unwrap_or(copy_len);
-    let mut resolve = Lookup::default();
-    resolve.l_path[..actual_len].copy_from_slice(&path_buf[..actual_len]);
-    resolve.l_path_len = actual_len;
-    let vp = unsafe { path::eat_path(&resolve, fp) };
-    if vp.is_null() {
-        return ENOENT;
-    }
+        let filp_idx = fp.fp_filp[fd as usize];
+        if filp_idx < 0 {
+            return EBADF;
+        }
+        let filp_arr = unsafe { core::ptr::addr_of_mut!((*vfs_global()).filp) as *mut Filp };
+        let vp = unsafe { (*filp_arr.add(filp_idx as usize)).filp_vno };
+        if vp.is_null() {
+            return EBADF;
+        }
+        (vp, false)
+    } else {
+        let path_addr = r_u64(&glob.fs_m_in, 8);
+        let path_len = r_u32(&glob.fs_m_in, 16) as usize;
+        let mut path_buf = [0u8; PATH_MAX];
+        let copy_len = path_len.min(PATH_MAX - 1);
+        unsafe {
+            if sys_vircopy(
+                fp.fp_endpoint,
+                path_addr,
+                SELF,
+                path_buf.as_mut_ptr() as u64,
+                copy_len,
+            ) != 0
+            {
+                return EBADF;
+            }
+        }
+        let actual_len = path_buf[..copy_len]
+            .iter()
+            .position(|&b| b == 0)
+            .unwrap_or(copy_len);
+        let mut resolve = Lookup::default();
+        resolve.l_path[..actual_len].copy_from_slice(&path_buf[..actual_len]);
+        resolve.l_path_len = actual_len;
+        // `lchown(2)` asks for the link itself; `fchownat`'s
+        // AT_SYMLINK_NOFOLLOW rides the same field at 28 as chmod's flags.
+        let flags = r_i32(&glob.fs_m_in, 28);
+        if flags & !AT_SYMLINK_NOFOLLOW != 0 {
+            return EINVAL;
+        }
+        if flags & AT_SYMLINK_NOFOLLOW != 0 {
+            resolve.l_flags = PATH_RET_SYMLINK;
+        }
+        let vp = unsafe { path::eat_path(&resolve, fp) };
+        if vp.is_null() {
+            return ENOENT;
+        }
+        (vp, true)
+    };
+
+    // fchown(2) carries fd@8, owner@16, group@24; chown(2) carries
+    // path@8/len@16, owner@24, flags@28, group@32.
+    let (owner, group) = if is_fchown {
+        (r_u32(&glob.fs_m_in, 16), r_u32(&glob.fs_m_in, 24))
+    } else {
+        (r_u32(&glob.fs_m_in, 24), r_u32(&glob.fs_m_in, 32))
+    };
+    let owner_i = owner as i32;
+    let group_i = group as i32;
+
     // Permission check: ownership validation for non-root.
     let vp_ref = unsafe { &*vp };
-    let r = crate::vfs::protect::chown_allowed(fp, vp_ref, owner as i32, group as i32);
+    let r = crate::vfs::protect::chown_allowed(fp, vp_ref, owner_i, group_i);
     if r != OK {
-        unsafe { mount::put_vnode(vp) };
+        if owns_ref {
+            unsafe { mount::put_vnode(vp) };
+        }
         return r;
     }
+
+    // `-1` means "leave this id alone" (C do_chown); otherwise the port stores
+    // 16-bit ids, the same truncation req_chown applies.
+    let new_uid = if owner_i == -1 {
+        vp_ref.v_uid
+    } else {
+        owner as u16 as i32
+    };
+    let new_gid = if group_i == -1 {
+        vp_ref.v_gid
+    } else {
+        group as u16 as i32
+    };
+
     let fs_e = vp_ref.v_fs_e;
     let inode_nr = vp_ref.v_inode_nr;
     // A memfd has no filesystem to chown; its ownership lives in the vnode, and
     // the permission check above has already run.
     if unsafe { crate::vfs::memfd::is_memfd(vp) } {
         unsafe {
-            (*vp).v_uid = owner as i32;
-            (*vp).v_gid = group as i32;
+            (*vp).v_uid = new_uid;
+            (*vp).v_gid = new_gid;
             (*vp).v_mode &= !0o6000;
+        }
+        if owns_ref {
+            unsafe { mount::put_vnode(vp) };
         }
         return OK;
     }
-    let (r, new_mode) = unsafe { crate::vfs::request::req_chown(fs_e, inode_nr, owner, group) };
+    let (r, new_mode) = unsafe {
+        crate::vfs::request::req_chown(fs_e, inode_nr, new_uid as u16, new_gid as u16)
+    };
     if r == OK {
         // Refresh the cached vnode ownership/mode from the reply (C
         // protect.c do_chown sets v_uid/v_gid/v_mode) so later lookups
         // (e.g. exec's setuid check) see the chown's effects.
         unsafe {
-            (*vp).v_uid = owner as i32;
-            (*vp).v_gid = group as i32;
+            (*vp).v_uid = new_uid;
+            (*vp).v_gid = new_gid;
             (*vp).v_mode = new_mode;
         }
     }
-    unsafe { mount::put_vnode(vp) };
+    if owns_ref {
+        unsafe { mount::put_vnode(vp) };
+    }
     norm_fs_errno(r)
 }
 

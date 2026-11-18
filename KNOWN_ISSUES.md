@@ -2102,15 +2102,50 @@ as this file's header says a skill-captured limitation does.
       is deleted: the generic unix arm works because `os::minix::MetadataExt` has `mode`/`uid`/
       `gid` and rustix has `geteuid`/`getegid`.
 
-    **Remaining gap:** `fchownat` still answers `ENOSYS` for `AT_SYMLINK_NOFOLLOW`, so
-    `chgrp -R`/`chown -R` would hit the same class; both applets also stay outside `feat_minix`
-    (they are in `feat_require_unix_core`). The group half they need is now present, so they are
-    the natural next step.
+    **The gap this entry recorded is closed by item 53:** `fchownat` honours
+    `AT_SYMLINK_NOFOLLOW` and `chgrp`/`chown` are in `feat_minix`.
     (`coreutils/src/uucore/src/lib/features/{safe_traversal,safe_traversal_minix,fs}.rs`,
     `coreutils/src/uu/test`, `coreutils/Cargo.toml`, `crates/minix-std/src/{fs,group}.rs`,
     `crates/minix-libc/src/c_sys.rs`, `crates/servers/src/vfs/call.rs`,
     `crates/fs/src/mfs/link.rs`, `crates/boot-image/src/{manifest,minixfs}.rs`,
     `rust/library/std/src/sys/pal/minix/io_error.rs`, `tools/c-include/{grp,dirent}.h`,
+    `tools/smoke/coreutils-minix.tsv`, `Justfile`)
+
+53. **~~`read_dir` returned nothing on minix, so every recursive std walk was a no-op~~:
+    `chgrp` and `chown` are in the multicall on all three arches (2026-11-17).** The gate is
+    `just test-coreutils-minix-<arch>` (`tools/smoke/coreutils-minix.tsv`, 42 steps), green on
+    x86_64, riscv64 and aarch64.
+
+    - **The std PAL's `ReadDir` parsed the wrong `getdents` record.** It read `d_ino` as a `u32`
+      at 0, `d_reclen` at 4 and the name at 8, but MFS writes `d_fileno (u64 @0), d_reclen
+      (u16 @8), d_namlen (u16 @10), d_type (u8 @12), d_name @13`
+      (`crates/fs/src/mfs/protect.rs`), the layout `minix-libc`'s `readdir` already used. So
+      `d_reclen` read as 0 and `read_dir` yielded `None` immediately. It now parses the real
+      layout and slices to `filled` rather than the whole buffer.
+    - **It did not filter `.` and `..`.** std's `read_dir` contract omits them (the unix PAL
+      does), and MFS returns them; a walker such as `walkdir` therefore descended into `.`
+      until the process table was exhausted (`sh: fork failed`). They are filtered now.
+    - **`DirEntry::file_type` mapped MFS's `DT_UNKNOWN` (0) to no class.** MFS writes 0 rather
+      than the inode's class, so `walkdir` never descended: its descent test is
+      `file_type().is_dir()`. Unknown now falls back to `lstat`, which the entry's path allows.
+    - **uucore's `FileInformation` compared the wrong identity on minix.** Its cycle guard used
+      `len` + `mtime` as a stopgap, so two empty directories created in the same second
+      compared equal and `chmod -R` stopped at the first level (a false cycle). It now compares
+      `dev`/`ino` from `std::os::minix::fs::MetadataExt`, the same as the unix arm.
+    - The `chgrp`/`chown` half: `minix-libc` gains `lchown`, a real `fchown` (it answered
+      `ENOSYS`), and `fchownat` passes its flags through. `minix_std::fs` gains `chown_flags`
+      (flags at 28) and `fchown`. VFS's `do_chown` now serves `VFS_FCHOWN` as well as
+      `VFS_CHOWN`, turns `AT_SYMLINK_NOFOLLOW` into `PATH_RET_SYMLINK`, and treats `-1` as
+      "leave this id alone" (it previously truncated both ids to 16 bits first, so `-1`
+      became 65535). `tools/c-include/unistd.h` declares `lchown`.
+
+    The smoke steps assert the `-v` line, use `--from` so a step only passes on ids the file
+    actually has, chown a dangling symlink with `-h` (only the link's inode can change), and
+    check the nested file after `chown -R`.
+    (`rust/library/std/src/sys/pal/minix/fs.rs`, `coreutils/src/uucore/src/lib/features/fs.rs`,
+    `coreutils/src/uucore/src/lib/features/perms.rs`, `coreutils/Cargo.toml`,
+    `crates/minix-std/src/fs.rs`, `crates/minix-libc/src/c_sys.rs`,
+    `crates/servers/src/vfs/call.rs`, `tools/c-include/unistd.h`,
     `tools/smoke/coreutils-minix.tsv`, `Justfile`)
 
 ---
