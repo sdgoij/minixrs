@@ -2218,6 +2218,18 @@ as this file's header says a skill-captured limitation does.
     flake.
     (`coreutils/Cargo.toml`, `tools/smoke/coreutils-minix.tsv`, `Justfile`)
 
+58. **`mkfifo` is in the multicall on all three arches (2026-11-17).** The gate is
+    `just test-coreutils-minix-<arch>` (`tools/smoke/coreutils-minix.tsv`, 65 steps), green on
+    x86_64, riscv64 and aarch64.
+
+    No new port surface: VFS's `do_mknod` and `minix-libc`'s `mknod`/`mkfifo` already existed, and
+    `rustix`'s minix backend has `mknodat`, which `mkfifoat` (the applet's create call) builds on.
+    The smoke steps assert `test -p` after both the default and an explicit `-m 600`, so the inode
+    really is `S_IFIFO` and not just "the call returned 0".
+
+    `mknod` stays out: it calls `nix::sys::stat::mknod`, and `nix` has no minix arm.
+    (`coreutils/Cargo.toml`, `tools/smoke/coreutils-minix.tsv`, `Justfile`)
+
 ---
 
 ## x86_64 (`[x86]`)

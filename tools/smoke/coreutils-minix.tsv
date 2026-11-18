@@ -116,3 +116,10 @@ coreutils install -d idir/subdir && coreutils test -d idir/subdir && coreutils e
 coreutils install -v isrc idst3	'isrc' -> 'idst3'
 coreutils install -o test -g wheel isrc idst4	
 coreutils chown -v --from=test:wheel 0:0 idst4	changed ownership of 'idst4' from test:wheel to root:root
+# `mkfifo`: creates a FIFO through VFS_MKNOD (rustix's `mkfifoat` -> the minix
+# backend's `mknodat`). `test -p` is the assertion that the new inode really is
+# S_IFIFO, for the default mode and an explicit `-m`.
+coreutils mkfifo mf1	
+coreutils test -p mf1 && coreutils echo MKFIFO-P-OK	MKFIFO-P-OK
+coreutils mkfifo -m 600 mf2	
+coreutils test -p mf2 && coreutils echo MKFIFO-M-OK	MKFIFO-M-OK
