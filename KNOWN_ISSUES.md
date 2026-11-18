@@ -2202,6 +2202,22 @@ as this file's header says a skill-captured limitation does.
     whoami in `feat_common_core`), and the excluded-set comment is updated.
     (`coreutils/Cargo.toml`, `tools/smoke/coreutils-minix.tsv`, `Justfile`)
 
+57. **`install` is in the multicall on all three arches (2026-11-17).** The gate is
+    `just test-coreutils-minix-<arch>` (`tools/smoke/coreutils-minix.tsv`, 61 steps), green on
+    x86_64, riscv64 and aarch64.
+
+    No new port surface: `install` copies through the same safe-traversal `openat` path `rm`
+    uses, sets the mode with `fchmod` (item 52) and the owner with `fchown`/`fchownat` (item 53).
+    The smoke steps check the executable bit, `-m 644`, `-d`, the `-v` line, and that `-o`/`-g`
+    really changed the ids (a `chown --from` on the result).
+
+    The fixture growing to 61 steps exposed two harness issues, fixed here: `test-coreutils-minix`
+    forwarded a flat `boot-timeout=40` to every arch, overriding riscv64's and aarch64's 60, and
+    those two consoles drop bytes mid-line under a burst on a long fixture. Their recipes now keep
+    their own (120 s) budget and pace input with `FEED_PACE`; x86 keeps the default and does not
+    flake.
+    (`coreutils/Cargo.toml`, `tools/smoke/coreutils-minix.tsv`, `Justfile`)
+
 ---
 
 ## x86_64 (`[x86]`)

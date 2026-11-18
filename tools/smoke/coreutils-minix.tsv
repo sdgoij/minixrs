@@ -103,3 +103,16 @@ coreutils id -Gn test	test wheel
 # half of `entries`.
 coreutils logname	root
 coreutils whoami	root
+# `install`: copies through safe_traversal's openat path, sets the mode with
+# fchmod (`test -x` is the assertion) and the owner with fchown, none of which
+# needed new port surface after items 52-54. `-v` is the visible line; the
+# `--from` check on the `-o`/`-g` result proves the ids changed.
+coreutils touch isrc	
+coreutils install isrc idst	
+coreutils test -x idst && coreutils echo INSTALL-X-OK	INSTALL-X-OK
+coreutils install -m 644 isrc idst2	
+coreutils test -x idst2 && coreutils echo INSTALL-M-BAD	
+coreutils install -d idir/subdir && coreutils test -d idir/subdir && coreutils echo INSTALL-D-OK	INSTALL-D-OK
+coreutils install -v isrc idst3	'isrc' -> 'idst3'
+coreutils install -o test -g wheel isrc idst4	
+coreutils chown -v --from=test:wheel 0:0 idst4	changed ownership of 'idst4' from test:wheel to root:root
