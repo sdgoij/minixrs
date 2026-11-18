@@ -38,6 +38,10 @@ int unlink(const char *path);
 pid_t fork(void);
 int execve(const char *path, char *const argv[], char *const envp[]);
 int execv(const char *path, char *const argv[]);
+/* POSIX's name search: a name with no slash is looked up in PATH, which the
+ * port's libc provides (`crates/minix-libc`); MINIX 3.3.0's own libc has only
+ * `execve`. */
+int execvp(const char *file, char *const argv[]);
 pid_t setsid(void);
 void _exit(int status);
 char *getcwd(char *buf, size_t size);

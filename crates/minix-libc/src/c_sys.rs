@@ -411,6 +411,65 @@ pub unsafe extern "C" fn execv(path: *const c_char, argv: *const *const c_char) 
     unsafe { execve(path, argv, core::ptr::null()) }
 }
 
+/// `execvp(3)`: `execve` with a `PATH` search when `name` has no slash.
+///
+/// MINIX 3.3.0's own libc has no `execvp` (`.refs/minix-3.3.0/minix/lib/libc/sys/`
+/// holds `execve.c` alone), while `libc`'s minix module declares it, so a
+/// consumer that names it needs one here: `env` is the first.
+///
+/// The search is POSIX's: an empty `PATH` element means the current directory,
+/// a missing `PATH` falls back to the port's own `/bin:/sbin` (the image has no
+/// `/usr/bin`), a miss or a non-directory moves on to the next element, and a
+/// name that was found but not executable is remembered so that it, rather than
+/// `ENOENT`, is what the caller sees. Any other failure ends the search; the
+/// process image is already half replaced by then.
+#[cfg(target_os = "minix")]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn execvp(name: *const c_char, argv: *const *const c_char) -> c_int {
+    if name.is_null() {
+        return crate::fail(EINVAL);
+    }
+    let name = unsafe { core::ffi::CStr::from_ptr(name) }.to_bytes();
+    let envp = unsafe { crate::c_stdlib::environ as *const *const c_char };
+    if name.contains(&b'/') {
+        return unsafe { execve(name.as_ptr() as *const c_char, argv, envp) };
+    }
+
+    // C `errno.h` values, positive because this is what `fail` stores.
+    const ENOTDIR: i32 = 20;
+    const EACCES: i32 = 13;
+
+    let path = match unsafe { crate::c_stdlib::getenv(c"PATH".as_ptr()) } {
+        p if p.is_null() => &b"/bin:/sbin"[..],
+        p => unsafe { core::ffi::CStr::from_ptr(p) }.to_bytes(),
+    };
+
+    let mut candidate = [0u8; minix_std::fs::PATH_MAX];
+    let mut saw_eacces = false;
+    for dir in path.split(|&b| b == b':') {
+        let dir: &[u8] = if dir.is_empty() { b"." } else { dir };
+        let len = dir.len() + 1 + name.len() + 1;
+        if len > candidate.len() {
+            continue;
+        }
+        candidate[..dir.len()].copy_from_slice(dir);
+        candidate[dir.len()] = b'/';
+        candidate[dir.len() + 1..dir.len() + 1 + name.len()].copy_from_slice(name);
+        candidate[len - 1] = 0;
+        unsafe { execve(candidate.as_ptr() as *const c_char, argv, envp) };
+        // Only a failure returns here.
+        match minix_std::errno() {
+            ENOENT | ENOTDIR => continue,
+            EACCES => {
+                saw_eacces = true;
+                continue;
+            }
+            e => return crate::fail(e),
+        }
+    }
+    crate::fail(if saw_eacces { EACCES } else { ENOENT })
+}
+
 /// Create a new session. Minix has no session syscall yet.
 #[cfg(target_os = "minix")]
 #[unsafe(no_mangle)]
@@ -1683,6 +1742,33 @@ pub unsafe extern "C" fn utimes(
     path: *const c_char,
     tv: *const [crate::c_time::TimeVal; 2],
 ) -> c_int {
+    unsafe { utimes_common(path, tv, 0) }
+}
+
+/// `lutimes(2)`: as `utimes`, but act on the link itself when `path` names a
+/// symlink (`AT_SYMLINK_NOFOLLOW`, `sys/sys/fcntl.h`).
+#[cfg(target_os = "minix")]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn lutimes(
+    path: *const c_char,
+    tv: *const [crate::c_time::TimeVal; 2],
+) -> c_int {
+    unsafe { utimes_common(path, tv, minix_std::fs::AT_SYMLINK_NOFOLLOW) }
+}
+
+/// The body `utimes` and `lutimes` share; `flags` reaches VFS's `do_utimens`,
+/// which is where the named file is resolved.
+///
+/// # Safety
+///
+/// `path` must be a NUL-terminated string and `tv` either null or two valid
+/// `struct timeval`s.
+#[cfg(target_os = "minix")]
+unsafe fn utimes_common(
+    path: *const c_char,
+    tv: *const [crate::c_time::TimeVal; 2],
+    flags: c_int,
+) -> c_int {
     if path.is_null() {
         return crate::fail(EINVAL);
     }
@@ -1701,7 +1787,7 @@ pub unsafe extern "C" fn utimes(
             t[1].tv_usec * 1000,
         )
     };
-    match unsafe { minix_std::fs::utime(path_bytes, actime, modtime, acnsec, mnsec) } {
+    match unsafe { minix_std::fs::utime_flags(path_bytes, actime, modtime, acnsec, mnsec, flags) } {
         Ok(()) => 0,
         Err(e) => crate::fail(e.0),
     }

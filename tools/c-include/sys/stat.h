@@ -57,6 +57,12 @@ struct stat {
     time_t st_ctime;
 };
 
+/* UTIMENS sentinels, MINIX 3.3.0 `sys/sys/stat.h`'s values. VFS's
+ * `do_utimens` and `minix_std::fs` compare against these, so a caller passing
+ * one of them gets the documented behaviour rather than EINVAL. */
+#define UTIME_NOW ((1 << 30) - 1)
+#define UTIME_OMIT ((1 << 30) - 2)
+
 #ifdef __cplusplus
 extern "C" {
 #endif

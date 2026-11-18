@@ -205,8 +205,8 @@ pub const REQ_BWRITE: i32 = FS_BASE + 12;
 pub const REQ_UNLINK: i32 = FS_BASE + 13;
 pub const REQ_RMDIR: i32 = FS_BASE + 14;
 
-pub const UTIME_NOW: i64 = -1;
-pub const UTIME_OMIT: i64 = -2;
+pub const UTIME_NOW: i64 = 0x3fff_ffff;
+pub const UTIME_OMIT: i64 = 0x3fff_fffe;
 
 /// Largest file position (`<minix/const.h>`), used to clamp a readlink size
 /// before it is copied.

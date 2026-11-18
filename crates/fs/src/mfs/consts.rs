@@ -150,8 +150,8 @@ pub const REQ_RMDIR: i32 = FS_BASE + 14;
 pub const REQ_STAT: i32 = FS_BASE + 8;
 pub const REQ_STATVFS: i32 = FS_BASE + 10;
 
-pub const UTIME_NOW: i64 = -1;
-pub const UTIME_OMIT: i64 = -2;
+pub const UTIME_NOW: i64 = 0x3fff_ffff;
+pub const UTIME_OMIT: i64 = 0x3fff_fffe;
 
 pub const MAX_FILE_POS: i64 = 0x7FFFFFFF; // LONG_MAX
 

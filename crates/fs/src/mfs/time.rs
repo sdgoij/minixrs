@@ -10,9 +10,10 @@ use crate::mfs::protect::read_only;
 /// Matching C: `fs_utime()` in `minix/fs/mfs/time.c`. Wire layout (VFS
 /// `req_utime`, C `mess_vfs_fs_utime`): inode u32@payload[0], actime
 /// i64@8, modtime i64@16, acnsec u32@24, modnsec u32@28. A nanosecond
-/// field of UTIME_NOW (-1) flags the corresponding time so the inode
-/// write-back stamps the current clock; UTIME_OMIT (-2) leaves the field
-/// alone; any other value stores the given time (second resolution).
+/// field of UTIME_NOW ((1 << 30) - 1) flags the corresponding time so the
+/// inode write-back stamps the current clock; UTIME_OMIT ((1 << 30) - 2)
+/// leaves the field alone; any other value stores the given time (second
+/// resolution).
 pub fn fs_utime() -> i32 {
     unsafe {
         let mfs = glo::mfs_ptr();

@@ -61,10 +61,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_utime_mode_constants_are_negative_sentinels() {
+    fn test_utime_mode_constants_are_the_documented_sentinels() {
         // VFS sends these as the wire value of the nanosecond field, so they
-        // have to survive the narrowing to i32.
-        assert_eq!(UTIME_NOW as i32, -1);
-        assert_eq!(UTIME_OMIT as i32, -2);
+        // have to survive the narrowing to i32. The values are MINIX 3.3.0
+        // `sys/sys/stat.h`'s, not -1/-2: a caller that passes the documented
+        // `UTIME_NOW` must not be read as passing a bad nanosecond.
+        assert_eq!(UTIME_NOW as i32, 0x3fff_ffff);
+        assert_eq!(UTIME_OMIT as i32, 0x3fff_fffe);
     }
 }

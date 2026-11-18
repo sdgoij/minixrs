@@ -399,6 +399,11 @@ pub const O_CLOEXEC: u32 = 0o20000000;
 /// Open flag mask for the access mode (read-only, write-only, read-write).
 pub const O_ACCMODE: u32 = 0o3;
 
+/// Lookup flag for `utimens`: act on the link itself (`AT_SYMLINK_NOFOLLOW`,
+/// `tools/c-include/fcntl.h`). `lutimes` is the only caller; C's `do_utimens`
+/// turns it into `PATH_RET_SYMLINK`.
+pub const AT_SYMLINK_NOFOLLOW: i32 = 0o1000;
+
 // fcntl lock commands
 pub const F_SETLK: i32 = 6;
 pub const F_SETLKW: i32 = 7;

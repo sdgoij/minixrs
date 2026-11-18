@@ -2907,8 +2907,11 @@ const OFF_UT_FD: usize = 56;
 const OFF_UT_FLAGS: usize = 60;
 
 /// `utimensat(2)` nanosecond sentinels (sys/stat.h).
-const UTIME_NOW: i64 = -1;
-const UTIME_OMIT: i64 = -2;
+// `(1 << 30) - 1` and `- 2`, MINIX 3.3.0's `sys/sys/stat.h` values, which
+// are also what `libc` and rustix declare for minix. They are not -1/-2: a
+// caller that passes the documented constant must not be read as a bad one.
+const UTIME_NOW: i64 = 0x3fff_ffff;
+const UTIME_OMIT: i64 = 0x3fff_fffe;
 
 /// Perform the `utimens(path, times, flag)` system call (and its friends).
 ///
@@ -2931,8 +2934,10 @@ pub fn do_utimens() -> i32 {
     let fd = r_i32(m, OFF_UT_FD);
     let flags = r_i32(m, OFF_UT_FLAGS);
 
-    if flags != 0 {
-        return EINVAL; // unknown flag (AT_SYMLINK_NOFOLLOW unsupported)
+    // C accepts `AT_SYMLINK_NOFOLLOW` here (`do_utimens` tests
+    // `flags & ~AT_SYMLINK_NOFOLLOW`); the lookup below is what honours it.
+    if flags & !AT_SYMLINK_NOFOLLOW != 0 {
+        return EINVAL; // unknown flag
     }
 
     // `futimens` names an already-open descriptor instead of a path, which is the
@@ -2961,6 +2966,11 @@ pub fn do_utimens() -> i32 {
         let mut resolve = Lookup::default();
         resolve.l_path[..actual_len].copy_from_slice(&path_buf[..actual_len]);
         resolve.l_path_len = actual_len;
+        // `lutimes`: stop at the link instead of following it, as C's
+        // `lookup_flags = PATH_RET_SYMLINK` does.
+        if flags & AT_SYMLINK_NOFOLLOW != 0 {
+            resolve.l_flags = PATH_RET_SYMLINK;
+        }
         unsafe { path::eat_path(&resolve, fp) }
     } else {
         let filp_idx = unsafe { crate::vfs::filedes::get_filp(fd, fp) };

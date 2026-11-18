@@ -106,8 +106,8 @@ pub const VFS_DUP2: u32 = VFS_BASE + 49;
 pub const VFS_UTIMENS: u32 = VFS_BASE + 37;
 
 /// `utimensat(2)` nanosecond sentinels (sys/stat.h).
-pub const UTIME_NOW: i64 = -1;
-pub const UTIME_OMIT: i64 = -2;
+pub const UTIME_NOW: i64 = 0x3fff_ffff;
+pub const UTIME_OMIT: i64 = 0x3fff_fffe;
 
 // fcntl commands (from `minix/include/fcntl.h`).
 
@@ -573,9 +573,31 @@ pub unsafe fn utime(
     acnsec: i64,
     mnsec: i64,
 ) -> Result<(), MinixErr> {
+    unsafe { utime_flags(path, actime, modtime, acnsec, mnsec, 0) }
+}
+
+/// `lutimes`: act on the link itself rather than on what it names.
+///
+/// The value is NetBSD's (`sys/sys/fcntl.h`), which is what VFS's
+/// `do_utimens` tests for.
+pub const AT_SYMLINK_NOFOLLOW: i32 = 0x200;
+
+/// [`utime`], with the `utimensat(2)` lookup flags the request carries.
+///
+/// # Safety
+///
+/// Must be called in a context where the VFS server is running.
+pub unsafe fn utime_flags(
+    path: &[u8],
+    actime: i64,
+    modtime: i64,
+    acnsec: i64,
+    mnsec: i64,
+    flags: i32,
+) -> Result<(), MinixErr> {
     #[cfg(not(target_os = "minix"))]
     {
-        let _ = (path, actime, modtime, acnsec, mnsec);
+        let _ = (path, actime, modtime, acnsec, mnsec, flags);
         Err(MinixErr::ENOSYS)
     }
     #[cfg(target_os = "minix")]
@@ -591,7 +613,7 @@ pub unsafe fn utime(
         msg_set_u64(&mut msg, 40, path.len() as u64); // len
         msg_set_u64(&mut msg, 48, path.as_ptr() as u64); // name
         msg_set_i32(&mut msg, 56, 0); // fd (unused)
-        msg_set_i32(&mut msg, 60, 0); // flags
+        msg_set_i32(&mut msg, 60, flags);
         vfs_call(&mut msg)?;
         Ok(())
     }

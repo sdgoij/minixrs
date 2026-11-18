@@ -147,6 +147,27 @@ are arch-specific, `[env]` is tooling/platform, not kernel.
     needs (a second VFS thread, or VFS answering the ioctl itself as it does for the socket ones)
     is a decision for whoever first needs a file-backed block device.
 
+52. **`rm` and `chmod` are still outside the coreutils multicall (2026-11-17, measured).** Both
+    are blocked on the same module: uucore's `safe_traversal` is built on `nix` (`Dir`, `openat`,
+    `fstatat`, `mkdirat`, `fchmodat`, `fchownat`, `unlinkat`, `dup`, `fstat`, `fchmod`, and the
+    `OFlag`/`AtFlags`/`Mode`/`FileStat` types), and `nix` does not build for minix. Blocking it
+    out is not a one-line change: uucore's `perms` feature, which `chmod`, `chgrp`, `chown`,
+    `chcon` and `runcon` all enable, requires `safe-traversal`, so the module has to compile.
+
+    A minix arm is feasible. The port's C library implements every `*at` call the module uses
+    (`openat`, `fstatat`, `unlinkat`, `mkdirat`, `fchmodat`, `fchownat`, plus `fstat`, `fchmod`
+    and `dup`), so the arm can be written over `libc` the way `env`'s was (item 51). One piece has
+    no answer yet: `safe_traversal` opens a symlink *itself* with `O_PATH | O_NOFOLLOW` (its
+    `fchmodat`-on-a-link path), and the port has no `O_PATH`, so that call site needs a decision
+    (skip the link with a warning, or add an `O_PATH`-equivalent to VFS's open).
+
+    `chmod` also pulls `uucore::entries`, whose group half needs `getgrgid`/`getgrnam`/`struct
+    group`; the port's libc has the `passwd` family (parsed from `/etc/passwd`) but no group
+    equivalent, so that is a second, smaller piece (a `/etc/group` parser beside it).
+
+    Until both land the image keeps shipping its own `/bin/rm` and `/bin/chmod`, and both applets
+    stay out of `feat_minix` with this reason in that feature's comment.
+
 ---
 
 ## RISC-V (`[riscv]`)
@@ -2026,6 +2047,41 @@ as this file's header says a skill-captured limitation does.
     (`setuid`/`setgid`/`setgroups`/`setsid`) still uses the blocking form: same shape,
     no measured occurrence, and converting it needs matching `VFS_PM_*_REPLY` arms.
     (`.notes/exec_deadlock.md`, `crates/servers/src/pm.rs`)
+
+51. **~~`env` and `touch` were outside the coreutils multicall~~: both are in it, on all three
+    arches (2026-11-17).** The gate is `just test-coreutils-minix-<arch>`
+    (`tools/smoke/coreutils-minix.tsv`, 11 steps), green on x86_64, riscv64 and aarch64. What was
+    missing, and what the work turned up:
+
+    - `touch` needs `filetime`, which needs `libc::utimes`/`lutimes` and
+      `std::os::unix::fs::MetadataExt`'s times. The libc fork now declares `utimes`, `lutimes`,
+      `suseconds_t`, `termios`, `winsize`, `TIOCGWINSZ` and the `select`/`fd_set` family, all of
+      which the port's own C library already implemented; `minix-libc` gained `lutimes`, and
+      VFS's `do_utimens` now honours `AT_SYMLINK_NOFOLLOW` with `PATH_RET_SYMLINK` instead of
+      answering `EINVAL`; and `std::os::minix::fs::MetadataExt` gained `atime`, `mtime` and
+      `ctime` with their `_nsec` fields (the port's `stat` carries whole seconds, so those are 0).
+    - `touch -t`/`-a` go through `rustix::fs::utimensat`, whose minix arm returned `NOSYS` on the
+      comment "nothing in the port's tree sets a timestamp through rustix", which is no longer
+      true. It now calls `minix_std::fs::utime_flags`, and `futimens` likewise.
+    - **That exposed a deviation: the port's `UTIME_NOW`/`UTIME_OMIT` were `-1`/`-2`.** MINIX
+      3.3.0's `sys/sys/stat.h` says `(1 << 30) - 1` and `- 2`, which is also what `libc` and
+      rustix declare for minix, so a caller passing the documented constant was read as an
+      invalid nanosecond and answered `EINVAL`. VFS, `minix_std::fs`, MFS and ext2 now use the
+      documented values, they are in `tools/c-include/sys/stat.h`, and ext2's test pins them.
+    - `env` needs `execvp` and the `signal`/`sigprocmask` family. `nix` does not build for minix
+      (its `Signal` enum and errno tables assume a Linux-shaped libc), so the applet has a minix
+      arm over the port's libc. **It passes its own `envp`**: std's minix PAL keeps the
+      environment in its own map, not in C's `environ`, so a `set_var` followed by a C `execvp`
+      would silently lose the change, which is a trap anything else doing the same will hit.
+      `minix-libc` gained `execvp` for C callers (`/bin:/sbin` when there is no `PATH`, the image
+      having no `/usr/bin`), and `libc` gained `execve`/`execv`.
+
+    `rm` and `chmod` are the remaining two, and are item 52.
+    (`coreutils/Cargo.toml`, `coreutils/src/uu/env`, `coreutils/src/uucore/Cargo.toml`,
+    `libc/src/minix/{terminal,event,time,process}.rs`, `crates/minix-libc`,
+    `rustix/src/backend/minix/fs/syscalls.rs`, `rust/library/std/src/os/minix/fs.rs`,
+    `crates/servers/src/vfs/{call,consts}.rs`, `crates/minix-std/src/fs.rs`,
+    `crates/fs/src/{mfs,ext2}`, `tools/smoke/coreutils-minix.tsv`, `Justfile`)
 
 ---
 

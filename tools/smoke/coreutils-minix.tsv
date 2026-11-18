@@ -1,0 +1,35 @@
+# The coreutils applets that were excluded from `feat_minix` for platform
+# reasons and are in the multicall now: `touch` and `env`.
+#
+# `touch` is the filetime path: `libc::utimes`/`lutimes` (the port's own
+# `utimes`/`lutimes` in `crates/minix-libc`) and `stat`'s whole-second times
+# through `std::os::unix::fs::MetadataExt`. `-a` is the step that matters: it
+# reads the modification time back to keep it, so it exercises the std change.
+#
+# `env` is the exec and signal path: `execvp` with a `PATH` search, `signal`,
+# `sigprocmask` and the `sigset_t` operations, all from the port's C library
+# (there is no `nix` on minix).
+coreutils touch t1.txt	
+coreutils wc -c t1.txt	0 t1.txt
+coreutils touch -t 202001010000 t2.txt	
+coreutils wc -c t2.txt	0 t2.txt
+# Reads the mtime back before setting the atime, so it needs the MetadataExt
+# times as well as utimes.
+coreutils touch -a t1.txt	
+coreutils wc -c t1.txt	0 t1.txt
+# A symlink's own times: this is `libc::lutimes`, VFS's `AT_SYMLINK_NOFOLLOW`
+# and `PATH_RET_SYMLINK`. The link is dangling, so nothing but the link's
+# inode can be the target.
+coreutils ln -s nowhere thelink	
+coreutils touch -h -t 202001010000 thelink	
+coreutils wc -c t1.txt	0 t1.txt
+# An environment variable env sets reaches the child it execs.
+coreutils env HOME=/tmp coreutils printenv HOME	/tmp
+# `-i` clears the environment, so the exec has no PATH to search and takes the
+# port's own `/bin:/sbin` default.
+coreutils env -i coreutils echo ENV-CLEAR-OK	ENV-CLEAR-OK
+coreutils env -u HOME coreutils echo ENV-UNSET-OK	ENV-UNSET-OK
+# The two signal actions that need the port's libc: `SIG_IGN` before the exec,
+# which an exec preserves, and a blocked mask.
+coreutils env --ignore-signal=PIPE coreutils echo ENV-IGNORE-OK	ENV-IGNORE-OK
+coreutils env --block-signal=PIPE coreutils echo ENV-BLOCK-OK	ENV-BLOCK-OK
