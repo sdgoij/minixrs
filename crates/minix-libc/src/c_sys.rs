@@ -2268,8 +2268,9 @@ pub struct Group {
 ///
 /// # Safety
 ///
-/// `grp` must be a valid pointer; `buf` must be the buffer the entry's field
-/// slices borrow from, with `buflen` its length.
+/// `grp` must be a valid pointer; `buf` must point to `buflen` writable bytes
+/// that the entry's field slices either live in or do not overlap (the copies
+/// are `copy_nonoverlapping`).
 #[cfg(target_os = "minix")]
 unsafe fn fill_group(
     grp: *mut Group,
@@ -2441,6 +2442,85 @@ pub unsafe extern "C" fn getgrgid(gid: c_uint) -> *mut Group {
         )
     };
     if r != 0 { core::ptr::null_mut() } else { result }
+}
+
+/// The `getgrent` walk: all of `/etc/group`, how much of it has been read, and
+/// whether it has been loaded yet.
+///
+/// The whole file is held rather than a descriptor because `setgrent` rewinds
+/// and the image's `/etc/group` is a few lines. The bound is generous for that;
+/// an entry that still does not fit `GRP_WALK_BUF` ends the walk the way an I/O
+/// error does, because `getgrent` has no way to report a skipped entry.
+#[cfg(target_os = "minix")]
+const GRP_FILE_LEN: usize = 4096;
+#[cfg(target_os = "minix")]
+static mut GRP_FILE: [u8; GRP_FILE_LEN] = [0; GRP_FILE_LEN];
+#[cfg(target_os = "minix")]
+static mut GRP_FILE_END: usize = 0;
+#[cfg(target_os = "minix")]
+static mut GRP_FILE_POS: usize = 0;
+#[cfg(target_os = "minix")]
+static mut GRP_FILE_LOADED: bool = false;
+#[cfg(target_os = "minix")]
+static mut GRP_WALK_BUF: [c_char; GRP_FILE_LEN] = [0; GRP_FILE_LEN];
+
+/// POSIX `setgrent`: rewind the walk, re-reading `/etc/group`.
+///
+/// A missing or unreadable file leaves an empty walk rather than an error,
+/// which is the same answer the lookups above give it.
+#[cfg(target_os = "minix")]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn setgrent() {
+    let buf = unsafe { &mut *core::ptr::addr_of_mut!(GRP_FILE) };
+    let end = unsafe { minix_std::group::read_group(buf) }.unwrap_or(0);
+    unsafe {
+        GRP_FILE_END = end;
+        GRP_FILE_POS = 0;
+        GRP_FILE_LOADED = true;
+    }
+}
+
+/// POSIX `getgrent`: the next entry of `/etc/group`, or NULL at the end.
+///
+/// The result points at shared storage, as the non-reentrant lookups do. A walk
+/// that was never rewound starts at the beginning, which makes `getgrent` after
+/// `endgrent` well defined here.
+#[cfg(target_os = "minix")]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn getgrent() -> *mut Group {
+    if !unsafe { GRP_FILE_LOADED } {
+        unsafe { setgrent() };
+    }
+    let mut pos = unsafe { GRP_FILE_POS };
+    let end = unsafe { GRP_FILE_END };
+    let data = unsafe { &*core::ptr::addr_of!(GRP_FILE) };
+    let Some(entry) = minix_std::group::next_group(&data[..end], &mut pos) else {
+        return core::ptr::null_mut();
+    };
+    unsafe { GRP_FILE_POS = pos };
+    let r = unsafe {
+        fill_group(
+            core::ptr::addr_of_mut!(GRP_ENTRY),
+            core::ptr::addr_of_mut!(GRP_WALK_BUF).cast::<c_char>(),
+            GRP_FILE_LEN,
+            &entry,
+        )
+    };
+    if r != 0 {
+        return core::ptr::null_mut();
+    }
+    core::ptr::addr_of_mut!(GRP_ENTRY)
+}
+
+/// POSIX `endgrent`: finish the walk and release what it held.
+#[cfg(target_os = "minix")]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn endgrent() {
+    unsafe {
+        GRP_FILE_END = 0;
+        GRP_FILE_POS = 0;
+        GRP_FILE_LOADED = false;
+    }
 }
 
 /// `getgrouplist(3)`: the gids `user` belongs to, with `group` (the primary gid)

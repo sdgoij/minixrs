@@ -18,8 +18,10 @@
  *      and a read on the empty pipe must answer EAGAIN rather than block.
  *   3. `mmap(MAP_ANONYMOUS)`: the pointer must be usable and `munmap` must take
  *      it back.
+ *   4. `setgrent`/`getgrent`/`endgrent`: the walk must see every entry of
+ *      `/etc/group` and `setgrent` must rewind it.
  *
- * The last line is printed only after all three passed, so it is what a gate
+ * The last line is printed only after all four passed, so it is what a gate
  * asserts; each failure prints its own diagnostic instead.
  */
 #include <stdio.h>
@@ -27,6 +29,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <unistd.h>
+#include <grp.h>
 #include <sys/mman.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
@@ -136,6 +139,42 @@ static int check_mmap(void)
     return 0;
 }
 
+static int check_grent(void)
+{
+    struct group *g;
+    int entries = 0;
+    int saw_root = 0;
+    int saw_wheel = 0;
+
+    setgrent();
+    while ((g = getgrent()) != NULL) {
+        entries++;
+        if (strcmp(g->gr_name, "root") == 0 && g->gr_gid == 0)
+            saw_root = 1;
+        if (strcmp(g->gr_name, "wheel") == 0 && g->gr_mem &&
+            g->gr_mem[0] && strcmp(g->gr_mem[0], "test") == 0)
+            saw_wheel = 1;
+    }
+    endgrent();
+
+    if (!saw_root || !saw_wheel || entries < 3) {
+        printf("cabi: grent entries=%d root=%d wheel=%d\n", entries, saw_root,
+               saw_wheel);
+        return 1;
+    }
+
+    /* setgrent rewinds: the next walk starts at the first entry again. */
+    setgrent();
+    g = getgrent();
+    endgrent();
+    if (g == NULL || strcmp(g->gr_name, "root") != 0) {
+        printf("cabi: grent rewind first=%s\n", g ? g->gr_name : "(null)");
+        return 1;
+    }
+    printf("cabi: getgrent walk ok\n");
+    return 0;
+}
+
 int main(void)
 {
     if (check_sockaddr() != 0)
@@ -143,6 +182,8 @@ int main(void)
     if (check_pipe2() != 0)
         return 1;
     if (check_mmap() != 0)
+        return 1;
+    if (check_grent() != 0)
         return 1;
     printf("cabi: socket layout, pipe2 flags and anon mmap ok\n");
     return 0;

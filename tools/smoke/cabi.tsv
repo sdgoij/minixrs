@@ -5,8 +5,8 @@
 # the Rust userland binaries go through `minix-std` and never touch the symbols
 # or the struct layouts the headers declare.
 #
-# Three phases, each a place where a header and an implementation can drift
-# apart with no compiler noticing:
+# Four phases of runtime behaviour, each a place where a header and an
+# implementation can drift apart with no compiler noticing:
 #
 #   1. `sockaddr_in` — built from the header, bound, read back through
 #      getsockname; the family and port must survive.
@@ -14,8 +14,9 @@
 #      pipe's read path consults (VFS `F_SETFL`), so `F_GETFL` reports it and a
 #      read on the empty pipe answers EAGAIN instead of blocking.
 #   3. `mmap(MAP_ANONYMOUS)` — zero-filled, writable, and releasable.
+#   4. `getgrent`: every `/etc/group` entry is walked, and `setgrent` rewinds.
 #
-# One step, asserting the last line: it is printed only after all three passed,
+# One step, asserting the last line: it is printed only after all four passed,
 # and each failure prints a diagnostic instead. A single invocation, because
 # phase 1 binds a fixed port — a second run in the same boot would race the
 # first one's socket.

@@ -27,6 +27,12 @@ int getgrgid_r(gid_t gid, struct group *grp, char *buf, size_t buflen,
                struct group **result);
 struct group *getgrnam(const char *name);
 struct group *getgrgid(gid_t gid);
+/* Walk /etc/group in file order. A consumer that sees grp.h assumes these
+ * exist (bash's group-name completion does), so they are part of the header
+ * rather than optional. */
+struct group *getgrent(void);
+void setgrent(void);
+void endgrent(void);
 int getgrouplist(const char *user, gid_t group, gid_t *groups, int *ngroups);
 
 #ifdef __cplusplus

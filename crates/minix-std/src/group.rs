@@ -71,6 +71,26 @@ pub fn find_group_gid<'a>(data: &'a [u8], gid: u32) -> Option<GroupEntry<'a>> {
     None
 }
 
+/// The next entry at or after `*offset`, advancing `offset` past it.
+///
+/// Blank and malformed lines are skipped, as in the lookups above, and `None`
+/// means the end of `data`. This is the walk behind `getgrent(3)`.
+pub fn next_group<'a>(data: &'a [u8], offset: &mut usize) -> Option<GroupEntry<'a>> {
+    while *offset < data.len() {
+        let rest = &data[*offset..];
+        let end = rest
+            .iter()
+            .position(|&b| b == b'\n')
+            .map_or(rest.len(), |i| i + 1);
+        let line = rest[..end].strip_suffix(b"\n").unwrap_or(&rest[..end]);
+        *offset += end;
+        if let Some(e) = parse_group_line(line) {
+            return Some(e);
+        }
+    }
+    None
+}
+
 /// Read `/etc/group` into `buf`; returns the number of bytes read.
 ///
 /// A guest with no `/etc/group` is not an error: the lookups then simply find
@@ -185,6 +205,22 @@ mod tests {
     fn test_find_skips_blank_and_malformed_lines() {
         let data = b"\nbadline\ntest:x:1000:\n";
         assert_eq!(find_group(data, b"test").unwrap().gid, 1000);
+    }
+
+    #[test]
+    fn test_next_group_walks_every_entry() {
+        let data = b"\nbadline\nroot:x:0:\ntest:x:1000:alice,bob";
+        let mut at = 0;
+        let mut gids = [0u32; 4];
+        let mut n = 0;
+        while let Some(e) = next_group(data, &mut at) {
+            gids[n] = e.gid;
+            n += 1;
+        }
+        assert_eq!(&gids[..n], &[0, 1000]);
+        // A rewind is just the offset: the same data yields the same entries.
+        at = 0;
+        assert_eq!(next_group(data, &mut at).unwrap().name, b"root");
     }
 
     #[test]

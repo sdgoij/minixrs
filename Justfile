@@ -1761,7 +1761,7 @@ test-cabi-x86 boot-timeout="40": (build-c-hello "x86") build-x86
     cp target/trampoline.elf target/images/x86_64-pc-minix/minix-x86.elf
     @just _assert-qemu-version qemu-system-x86_64
     FEED_SCENARIO=tools/smoke/cabi.tsv sh tools/smoke/feed.sh target/test-cabi-x86.log {{boot-timeout}} qemu-system-x86_64 -nographic -m 256M -no-reboot -vga none -device bochs-display,id=fb0 -kernel target/images/x86_64-pc-minix/minix-x86.elf -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0 -device virtio-tablet-pci,display=fb0
-    @echo "cabi: the C socket, pipe2 and mmap ABIs held (x86_64)"
+    @echo "cabi: the C socket, pipe2, group and mmap ABIs held (x86_64)"
 
 test target="x86":
     @just test-{{target}}
