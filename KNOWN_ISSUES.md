@@ -2148,6 +2148,29 @@ as this file's header says a skill-captured limitation does.
     `crates/servers/src/vfs/call.rs`, `tools/c-include/unistd.h`,
     `tools/smoke/coreutils-minix.tsv`, `Justfile`)
 
+54. **`groups` is in the multicall on all three arches (2026-11-17).** The gate is
+    `just test-coreutils-minix-<arch>` (`tools/smoke/coreutils-minix.tsv`, 45 steps), green on
+    x86_64, riscv64 and aarch64.
+
+    - **`uucore::process::unix` is gated out for minix.** That module is built on `nix` (no
+      minix arm) and POSIX timers, and only `timeout` uses its `ChildExt`; nothing in
+      `feat_minix` does. The `process` feature itself stays on, because
+      `entries::get_groups_gnu` needs `rustix/process`.
+    - **`getgrouplist(3)` was declared inline in `entries.rs` and never defined.** It is now in
+      `minix-libc`: the primary gid first, then every `/etc/group` entry whose member list
+      names the user, without duplicates. `crates/minix-std/src/group.rs` grows the host-tested
+      `user_groups` that builds the list, and `tools/c-include/grp.h` declares the C call. A
+      `*ngroups` too small is answered with -1 and the required count, as POSIX says.
+    - The image's `/etc/group` now puts `test` in `wheel`, so `groups test` exercises the member
+      scan end to end and prints `test : test wheel`, not just the primary group.
+
+    `stat`, the other near-term candidate, is still outside `feat_minix`: it pulls uucore's
+    `fsext`, whose `statfs`/`strerror` half the port does not serve yet.
+    (`coreutils/src/uucore/src/lib/features/process/mod.rs`, `coreutils/Cargo.toml`,
+    `crates/minix-std/src/group.rs`, `crates/minix-libc/src/c_sys.rs`,
+    `crates/boot-image/src/manifest.rs`, `tools/c-include/grp.h`,
+    `tools/smoke/coreutils-minix.tsv`, `Justfile`)
+
 ---
 
 ## x86_64 (`[x86]`)

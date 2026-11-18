@@ -2427,6 +2427,43 @@ pub unsafe extern "C" fn getgrgid(gid: c_uint) -> *mut Group {
     if r != 0 { core::ptr::null_mut() } else { result }
 }
 
+/// `getgrouplist(3)`: the gids `user` belongs to, with `group` (the primary gid)
+/// first.
+///
+/// A `*ngroups` too small for the list is answered with -1 and the required
+/// count, as POSIX specifies, rather than an errno. The list is capped at
+/// `NGROUPS_MAX`, the most the port can hold.
+#[cfg(target_os = "minix")]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn getgrouplist(
+    user: *const c_char,
+    group: c_uint,
+    groups: *mut c_uint,
+    ngroups: *mut c_int,
+) -> c_int {
+    if user.is_null() || groups.is_null() || ngroups.is_null() {
+        return -1;
+    }
+    let capacity = unsafe { *ngroups };
+    if capacity < 0 {
+        return -1;
+    }
+    let user = unsafe { core::ffi::CStr::from_ptr(user) }.to_bytes();
+    let mut buf = [0u8; 2048];
+    let len = unsafe { minix_std::group::read_group(&mut buf) }.unwrap_or(0);
+    let mut list = [0u32; minix_std::process::NGROUPS_MAX];
+    let n = minix_std::group::user_groups(&buf[..len], user, group, &mut list);
+    if n > capacity as usize {
+        unsafe { *ngroups = n as c_int };
+        return -1;
+    }
+    for (i, &gid) in list[..n].iter().enumerate() {
+        unsafe { *groups.add(i) = gid };
+    }
+    unsafe { *ngroups = n as c_int };
+    n as c_int
+}
+
 /// POSIX `sleep(seconds)`: whole seconds, returning the unslept remainder.
 ///
 /// The port's `usleep` is a busy-wait on the monotonic clock (PM has no

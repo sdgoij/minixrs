@@ -101,6 +101,39 @@ pub unsafe fn read_group(buf: &mut [u8]) -> Result<usize, crate::MinixErr> {
     Ok(total)
 }
 
+/// The gids `user` belongs to: `primary` first, then every entry in `data`
+/// whose member list names `user`, without duplicates.
+///
+/// Writes into `out` and returns the count, capped at `out.len()`. Callers
+/// pass a `NGROUPS_MAX`-sized buffer, which is the most the port can hold, so
+/// the cap is the whole logical list rather than a truncation. This is the
+/// list `getgrouplist(3)` builds.
+pub fn user_groups(data: &[u8], user: &[u8], primary: u32, out: &mut [u32]) -> usize {
+    if out.is_empty() {
+        return 0;
+    }
+    out[0] = primary;
+    let mut n = 1usize;
+    for line in data.split(|&b| b == b'\n') {
+        if n == out.len() {
+            break;
+        }
+        let Some(e) = parse_group_line(line) else {
+            continue;
+        };
+        // An exact field, so "al" does not match "alice".
+        if !e.members.split(|&b| b == b',').any(|m| m == user) {
+            continue;
+        }
+        if out[..n].contains(&e.gid) {
+            continue;
+        }
+        out[n] = e.gid;
+        n += 1;
+    }
+    n
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -152,5 +185,33 @@ mod tests {
     fn test_find_skips_blank_and_malformed_lines() {
         let data = b"\nbadline\ntest:x:1000:\n";
         assert_eq!(find_group(data, b"test").unwrap().gid, 1000);
+    }
+
+    #[test]
+    fn test_user_groups() {
+        let data = b"root:x:0:\nwheel:x:10:alice,bob\ntest:x:1000:alice\n";
+        let mut out = [0u32; 8];
+
+        // Primary first, then the listed group; `test` repeats the primary and
+        // is deduplicated.
+        let n = user_groups(data, b"alice", 1000, &mut out);
+        assert_eq!(&out[..n], &[1000, 10]);
+
+        let n = user_groups(data, b"bob", 7, &mut out);
+        assert_eq!(&out[..n], &[7, 10]);
+
+        // No membership still yields the primary group.
+        let n = user_groups(data, b"carol", 5, &mut out);
+        assert_eq!(&out[..n], &[5]);
+
+        // A prefix of a member name is not a member.
+        let n = user_groups(data, b"ali", 5, &mut out);
+        assert_eq!(&out[..n], &[5]);
+
+        // The output is capped at its length.
+        let mut two = [0u32; 1];
+        let n = user_groups(data, b"alice", 1000, &mut two);
+        assert_eq!(n, 1);
+        assert_eq!(two[0], 1000);
     }
 }

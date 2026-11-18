@@ -81,3 +81,10 @@ coreutils mkdir og/sub
 coreutils touch og/sub/g	
 coreutils chown -vR 7:8 og	changed ownership of 'og' from root:root to 7:8
 coreutils chown -v --from=7:8 0:0 og/sub/g	changed ownership of 'og/sub/g' from 7:8 to root:root
+# `groups`: the current process takes `getgroups`; `groups USER` resolves the
+# passwd entry and calls `getgrouplist`, whose list is the primary gid plus
+# every `/etc/group` member line (the image puts `test` in `wheel`). This is
+# the end-to-end check of the group half item 52 added.
+coreutils groups	root
+coreutils groups test	test : test wheel
+coreutils groups root	root : root

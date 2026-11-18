@@ -404,10 +404,12 @@ test:$5$minix$ccc32ce88881621a7b1b6bc05c4880ad85c63114ccda648b1f23b5afe4a21ab5:1
     ("/etc/secret", b"top secret\n", 0o600, 0, 0),
     // The group half of the `grp.h` lookups (`getgrgid`/`getgrnam`), which
     // `chmod --reference` and the `id`/`chown` family use. Same ids as
-    // `/etc/passwd` above, so a lookup by name and by id agree.
+    // `/etc/passwd` above, so a lookup by name and by id agree. `wheel` names
+    // `test` as a member so `groups test` exercises `getgrouplist`'s member
+    // scan as well as the primary group.
     (
         "/etc/group",
-        b"root:x:0:\ntest:x:1000:\nwheel:x:10:\n",
+        b"root:x:0:\ntest:x:1000:\nwheel:x:10:test\n",
         0o644,
         0,
         0,
