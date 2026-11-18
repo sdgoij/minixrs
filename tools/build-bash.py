@@ -147,6 +147,30 @@ def log_tail(path: pathlib.Path, lines: int = 25) -> str:
     return "\n".join(text[-lines:])
 
 
+def log_failure(path: pathlib.Path, lines: int = 25, error_limit: int = 20) -> str:
+    """A failed build's tail, plus the error lines the tail scrolled past.
+
+    `make -j4` prints the failing object's diagnostics and only then the
+    warnings from the jobs it waits for, so a 25-line tail can hide every
+    error: four of `bashline.c`'s did exactly that in CI, and the run read as
+    warnings that happened to stop the build. The tail is still printed first,
+    because the error lines alone lose the source excerpt under them.
+    """
+    tail = log_tail(path, lines)
+    report = f"tail of {path}:\n{tail}"
+    if not path.is_file():
+        return report
+    shown = tail.splitlines()
+    errors = [
+        line
+        for line in path.read_text(encoding="utf-8", errors="replace").splitlines()
+        if (": error: " in line or ": fatal error: " in line) and line not in shown
+    ]
+    if errors:
+        report += "\nerror lines above the tail:\n" + "\n".join(errors[:error_limit])
+    return report
+
+
 # ---------------------------------------------------------------- Windows host
 
 def run_in_wsl(argv: list[str]) -> int:
@@ -290,8 +314,7 @@ def configure(arch: Arch, force: bool) -> None:
         rc = run([str(SRC / "configure"), *flags], cwd=build, env=env,
                  stdout=log, stderr=subprocess.STDOUT)
     if rc != 0:
-        die(f"configure failed (rc={rc}); tail of {configure_log(arch)}:\n"
-            f"{log_tail(configure_log(arch))}")
+        die(f"configure failed (rc={rc}); {log_failure(configure_log(arch))}")
     build_marker(arch).write_text(want, encoding="utf-8")
     note(f"configure ok (log: {configure_log(arch).name})")
 
@@ -311,7 +334,7 @@ def make(arch: Arch, jobs: int) -> None:
         rc = run(["make", f"-j{jobs}", f"CC_FOR_BUILD={cc_for_build()}"], cwd=build,
                  env=env, stdout=log, stderr=subprocess.STDOUT)
     if rc != 0:
-        die(f"make failed (rc={rc}); tail of {make_log(arch)}:\n{log_tail(make_log(arch))}")
+        die(f"make failed (rc={rc}); {log_failure(make_log(arch))}")
 
 
 # ------------------------------------------------------------------ publish
