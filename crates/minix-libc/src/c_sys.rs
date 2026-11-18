@@ -815,6 +815,20 @@ pub unsafe extern "C" fn chdir(path: *const c_char) -> c_int {
     }
 }
 
+/// Change this process's root directory (VFS chroot); root-only.
+#[cfg(target_os = "minix")]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn chroot(path: *const c_char) -> c_int {
+    if path.is_null() {
+        return crate::fail(EINVAL);
+    }
+    let path_bytes = unsafe { core::ffi::CStr::from_ptr(path) }.to_bytes();
+    match minix_std::fs::chroot(path_bytes) {
+        Ok(()) => 0,
+        Err(e) => crate::fail(e.0),
+    }
+}
+
 /// Create a hard link (VFS link).
 #[cfg(target_os = "minix")]
 #[unsafe(no_mangle)]

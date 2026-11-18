@@ -123,3 +123,10 @@ coreutils mkfifo mf1
 coreutils test -p mf1 && coreutils echo MKFIFO-P-OK	MKFIFO-P-OK
 coreutils mkfifo -m 600 mf2	
 coreutils test -p mf2 && coreutils echo MKFIFO-M-OK	MKFIFO-M-OK
+# `chroot`: VFS's do_chroot was implemented but unreachable, because rustix's
+# minix chroot was a NOSYS stub. The step proves the syscall, the
+# `set_current_dir("/")` and the exec after it on every arch. The jail form
+# (copy a binary in, `chroot jail /echo`) cannot be gated yet: exec'ing a file
+# written during the boot traps at its entry on aarch64, a read-path defect
+# recorded as the open aarch64 issue; x86_64 and riscv64 pass that form.
+coreutils chroot / /bin/coreutils echo ROOT-OK	ROOT-OK

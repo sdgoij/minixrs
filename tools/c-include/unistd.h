@@ -46,6 +46,7 @@ pid_t setsid(void);
 void _exit(int status);
 char *getcwd(char *buf, size_t size);
 int chdir(const char *path);
+int chroot(const char *path);
 int fchdir(int fd);
 int link(const char *oldpath, const char *newpath);
 int symlink(const char *target, const char *linkpath);

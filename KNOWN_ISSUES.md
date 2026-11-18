@@ -158,9 +158,25 @@ the burst-overflow reading in item 37, are under `# Resolved issues`.
 
 ## AArch64 (`[aarch64]`)
 
-No open issues. The two standing notes (probe/stub traps, and the dual page-table
-layout) are captured in the `aarch64-debugging` skill and sit under `# Resolved issues`,
-as this file's header says a skill-captured limitation does.
+60. **A file read twice can return different bytes, so exec of a freshly copied binary traps
+    (2026-11-17, measured).** `coreutils install /bin/echo /e2` then `coreutils md5sum /bin/echo
+    /e2` prints `d811e16d...  /bin/echo` and `a5133cf6...  /e2` on aarch64; x86_64 and riscv64
+    agree. The same image's text copies are byte-identical (a 21-byte `seq 1 10` and a 48 KiB
+    `seq 1 10000` both match), and the first 16 bytes of `/e2` are the correct ELF magic, so the
+    difference is not size alone or the header. Exec'ing the copy then traps before any syscall:
+    `EL0 unhandled exception, EC=0x00 E=0000000001000000 ...`, i.e. an undefined instruction at the
+    entry (`0x01000000`), which is what a text page that differs from the source looks like.
+
+    It is independent of `chroot`: the same `/e2` exec traps outside a jail. The most likely shape
+    is a read-path cache incoherence for a file created at image-build time (the two reads are
+    `md5sum`'s and `install`'s), because the source file is never written during the boot. That is
+    a hypothesis from these measurements, not traced to the block or file cache yet.
+
+    Until it is fixed, the `chroot` gate uses the no-op-root form (`chroot / ...`) and the
+    jail-with-a-copied-binary form is absent (item 59). A first step is to find the first offset
+    where two `od`/`md5sum` reads of `/bin/echo` disagree, then follow that read in MFS's block
+    cache.
+    (`coreutils/src/uu/install`, `crates/fs/src/mfs`, `crates/servers/src/vm`)
 
 ---
 
@@ -2229,6 +2245,26 @@ as this file's header says a skill-captured limitation does.
 
     `mknod` stays out: it calls `nix::sys::stat::mknod`, and `nix` has no minix arm.
     (`coreutils/Cargo.toml`, `tools/smoke/coreutils-minix.tsv`, `Justfile`)
+
+59. **`chroot` is in the multicall on all three arches (2026-11-17).** The gate is
+    `just test-coreutils-minix-<arch>` (`tools/smoke/coreutils-minix.tsv`, 66 steps), green on
+    x86_64, riscv64 and aarch64.
+
+    VFS's `do_chroot` was implemented from the start but unreachable: `rustix`'s minix `chroot`
+    answered `NOSYS`, `minix-std` had no sender, and `minix-libc` had no `chroot`. This adds
+    `minix_std::fs::chroot` (VFS_CHROOT, path at 8/len at 16), points rustix's minix arm at it,
+    implements the C `chroot` and declares it in `tools/c-include/unistd.h`. `chroot.rs` also
+    needed minix in the `setgroups` `size_t` arm.
+
+    The gate uses the no-op-root form, `chroot / /bin/coreutils echo ROOT-OK`, which exercises
+    the syscall, the `set_current_dir("/")` and the exec after it. The jail form (copy a binary
+    in, then `chroot jail /echo`) passes on x86_64 and riscv64 but traps on aarch64 before any
+    syscall, because exec'ing a file written during the boot is broken there for a separate
+    reason (open aarch64 item 60). So it is not in the shared scenario until that is fixed.
+    (`coreutils/Cargo.toml`, `coreutils/src/uu/chroot/src/chroot.rs`,
+    `crates/minix-std/src/fs.rs`, `crates/minix-libc/src/c_sys.rs`,
+    `rustix/src/backend/minix/process/syscalls.rs`, `tools/c-include/unistd.h`,
+    `tools/smoke/coreutils-minix.tsv`, `Justfile`)
 
 ---
 

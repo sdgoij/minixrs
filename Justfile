@@ -600,8 +600,8 @@ test-coreutils-wedge-aarch64 boot-timeout="30": build-aarch64
 # path over the C library's `openat` family, `chgrp`/`chown` the `wrap_chown` path over
 # VFS_CHOWN and `lchown`'s `AT_SYMLINK_NOFOLLOW`, `groups` the `getgrouplist` path,
 # `id` the passwd/group name lookups plus `getlogin`, `logname`/`whoami` the
-# same lookups from one id each, `install` the copy/mode/owner path, and
-# `mkfifo` the VFS_MKNOD path.
+# same lookups from one id each, `install` the copy/mode/owner path,
+# `mkfifo` the VFS_MKNOD path, and `chroot` the VFS_CHROOT path.
 # `tools/smoke/coreutils-minix.tsv` says which step covers which.
 #
 # riscv64 and aarch64 pace their input (`FEED_PACE`): their consoles drop
@@ -617,20 +617,20 @@ test-coreutils-minix-x86 boot-timeout="40": build-x86
     cp target/trampoline.elf target/images/x86_64-pc-minix/minix-x86.elf
     @just _assert-qemu-version qemu-system-x86_64
     FEED_SCENARIO=tools/smoke/coreutils-minix.tsv sh tools/smoke/feed.sh target/test-coreutils-minix-x86.log {{boot-timeout}} qemu-system-x86_64 -nographic -m 256M -no-reboot -vga none -device bochs-display,id=fb0 -kernel target/images/x86_64-pc-minix/minix-x86.elf -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0 -device virtio-tablet-pci,display=fb0
-    @if grep -qE "^(touch|env|ln|chgrp|chown|groups|id|logname|whoami|install|mkfifo|coreutils):|^(RM-STILL-THERE|RMR-STILL-THERE|CHMOD-X-BAD|CHMOD-ENOENT-BAD|INSTALL-M-BAD)$" target/test-coreutils-minix-x86.log; then echo "!! a tool reported an error:"; grep -nE "^(touch|env|ln|chgrp|chown|groups|id|logname|whoami|install|mkfifo|coreutils):|^(RM-STILL-THERE|RMR-STILL-THERE|CHMOD-X-BAD|CHMOD-ENOENT-BAD|INSTALL-M-BAD)$" target/test-coreutils-minix-x86.log; exit 1; fi
-    @echo "coreutils-minix: touch, env, rm, chmod, chgrp, chown, groups, id, logname, whoami, install and mkfifo ran (x86_64)"
+    @if grep -qE "^(touch|env|ln|chgrp|chown|groups|id|logname|whoami|install|mkfifo|chroot|coreutils):|^(RM-STILL-THERE|RMR-STILL-THERE|CHMOD-X-BAD|CHMOD-ENOENT-BAD|INSTALL-M-BAD)$" target/test-coreutils-minix-x86.log; then echo "!! a tool reported an error:"; grep -nE "^(touch|env|ln|chgrp|chown|groups|id|logname|whoami|install|mkfifo|chroot|coreutils):|^(RM-STILL-THERE|RMR-STILL-THERE|CHMOD-X-BAD|CHMOD-ENOENT-BAD|INSTALL-M-BAD)$" target/test-coreutils-minix-x86.log; exit 1; fi
+    @echo "coreutils-minix: touch, env, rm, chmod, chgrp, chown, groups, id, logname, whoami, install, mkfifo and chroot ran (x86_64)"
 
 test-coreutils-minix-riscv64 boot-timeout="120": build-riscv64
     @just _assert-qemu-version qemu-system-riscv64
     FEED_PACE=0.003 FEED_SCENARIO=tools/smoke/coreutils-minix.tsv sh tools/smoke/feed.sh target/test-coreutils-minix-riscv64.log {{boot-timeout}} qemu-system-riscv64 -machine virt -m 256M -nographic -global virtio-mmio.force-legacy=off -netdev user,id=net0 -device virtio-net-device,netdev=net0 -device virtio-gpu-device -device virtio-keyboard-device -kernel target/riscv64gc-unknown-minix/release/kernel-boot-riscv64
-    @if grep -qE "^(touch|env|ln|chgrp|chown|groups|id|logname|whoami|install|mkfifo|coreutils):|^(RM-STILL-THERE|RMR-STILL-THERE|CHMOD-X-BAD|CHMOD-ENOENT-BAD|INSTALL-M-BAD)$" target/test-coreutils-minix-riscv64.log; then echo "!! a tool reported an error:"; grep -nE "^(touch|env|ln|chgrp|chown|groups|id|logname|whoami|install|mkfifo|coreutils):|^(RM-STILL-THERE|RMR-STILL-THERE|CHMOD-X-BAD|CHMOD-ENOENT-BAD|INSTALL-M-BAD)$" target/test-coreutils-minix-riscv64.log; exit 1; fi
-    @echo "coreutils-minix: touch, env, rm, chmod, chgrp, chown, groups, id, logname, whoami, install and mkfifo ran (riscv64)"
+    @if grep -qE "^(touch|env|ln|chgrp|chown|groups|id|logname|whoami|install|mkfifo|chroot|coreutils):|^(RM-STILL-THERE|RMR-STILL-THERE|CHMOD-X-BAD|CHMOD-ENOENT-BAD|INSTALL-M-BAD)$" target/test-coreutils-minix-riscv64.log; then echo "!! a tool reported an error:"; grep -nE "^(touch|env|ln|chgrp|chown|groups|id|logname|whoami|install|mkfifo|chroot|coreutils):|^(RM-STILL-THERE|RMR-STILL-THERE|CHMOD-X-BAD|CHMOD-ENOENT-BAD|INSTALL-M-BAD)$" target/test-coreutils-minix-riscv64.log; exit 1; fi
+    @echo "coreutils-minix: touch, env, rm, chmod, chgrp, chown, groups, id, logname, whoami, install, mkfifo and chroot ran (riscv64)"
 
 test-coreutils-minix-aarch64 boot-timeout="120": build-aarch64
     @just _assert-qemu-version qemu-system-aarch64
     FEED_PACE=0.003 FEED_SCENARIO=tools/smoke/coreutils-minix.tsv sh tools/smoke/feed.sh target/test-coreutils-minix-aarch64.log {{boot-timeout}} qemu-system-aarch64 -machine virt -cpu cortex-a57 -m 256M -nographic -no-reboot -global virtio-mmio.force-legacy=off -netdev user,id=net0 -device virtio-net-device,netdev=net0 -device virtio-gpu-device -device virtio-keyboard-device -kernel target/aarch64-unknown-minix/release/kernel-boot-aarch64
-    @if grep -qE "^(touch|env|ln|chgrp|chown|groups|id|logname|whoami|install|mkfifo|coreutils):|^(RM-STILL-THERE|RMR-STILL-THERE|CHMOD-X-BAD|CHMOD-ENOENT-BAD|INSTALL-M-BAD)$" target/test-coreutils-minix-aarch64.log; then echo "!! a tool reported an error:"; grep -nE "^(touch|env|ln|chgrp|chown|groups|id|logname|whoami|install|mkfifo|coreutils):|^(RM-STILL-THERE|RMR-STILL-THERE|CHMOD-X-BAD|CHMOD-ENOENT-BAD|INSTALL-M-BAD)$" target/test-coreutils-minix-aarch64.log; exit 1; fi
-    @echo "coreutils-minix: touch, env, rm, chmod, chgrp, chown, groups, id, logname, whoami, install and mkfifo ran (aarch64)"
+    @if grep -qE "^(touch|env|ln|chgrp|chown|groups|id|logname|whoami|install|mkfifo|chroot|coreutils):|^(RM-STILL-THERE|RMR-STILL-THERE|CHMOD-X-BAD|CHMOD-ENOENT-BAD|INSTALL-M-BAD)$" target/test-coreutils-minix-aarch64.log; then echo "!! a tool reported an error:"; grep -nE "^(touch|env|ln|chgrp|chown|groups|id|logname|whoami|install|mkfifo|chroot|coreutils):|^(RM-STILL-THERE|RMR-STILL-THERE|CHMOD-X-BAD|CHMOD-ENOENT-BAD|INSTALL-M-BAD)$" target/test-coreutils-minix-aarch64.log; exit 1; fi
+    @echo "coreutils-minix: touch, env, rm, chmod, chgrp, chown, groups, id, logname, whoami, install, mkfifo and chroot ran (aarch64)"
 
 # The shared anonymous mapping gate: VM allocates the frames at map time, so a
 # store the child makes after the fork is visible in the parent's view.

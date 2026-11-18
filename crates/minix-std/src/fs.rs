@@ -46,6 +46,7 @@ pub const VFS_CLOSE: u32 = VFS_BASE + 5;
 pub const VFS_LINK: u32 = VFS_BASE + 6;
 pub const VFS_UNLINK: u32 = VFS_BASE + 7;
 pub const VFS_CHDIR: u32 = VFS_BASE + 8;
+pub const VFS_CHROOT: u32 = VFS_BASE + 28;
 pub const VFS_RENAME: u32 = VFS_BASE + 17;
 pub const VFS_FCHDIR: u32 = VFS_BASE + 31;
 pub const VFS_ACCESS: u32 = VFS_BASE + 15;
@@ -968,6 +969,26 @@ pub fn chdir(path: &[u8]) -> Result<(), MinixErr> {
     unsafe {
         let mut msg = [0u8; 64];
         msg_set_i32(&mut msg, OFF_CALL, VFS_CHDIR as i32);
+        msg_set_u64(&mut msg, OFF_STAT_NAME, path.as_ptr() as u64);
+        msg_set_u32(&mut msg, OFF_STAT_NAME_LEN, path.len() as u32);
+        let _ = vfs_call(&mut msg)?;
+        Ok(())
+    }
+}
+
+/// Change this process's root directory (VFS_CHROOT — path at 8, length at 16,
+/// the layout `do_chroot` reads). Root-only: VFS answers `EPERM` for anyone
+/// else.
+pub fn chroot(path: &[u8]) -> Result<(), MinixErr> {
+    #[cfg(not(target_os = "minix"))]
+    {
+        let _ = (path, VFS_PROC_NR);
+        Err(MinixErr::ENOSYS)
+    }
+    #[cfg(target_os = "minix")]
+    unsafe {
+        let mut msg = [0u8; 64];
+        msg_set_i32(&mut msg, OFF_CALL, VFS_CHROOT as i32);
         msg_set_u64(&mut msg, OFF_STAT_NAME, path.as_ptr() as u64);
         msg_set_u32(&mut msg, OFF_STAT_NAME_LEN, path.len() as u32);
         let _ = vfs_call(&mut msg)?;
