@@ -176,26 +176,33 @@ the burst-overflow reading in item 37, are under `# Resolved issues`.
     - The pipe is always right: `coreutils seq 1 10000 | coreutils md5sum` gives the true hash, and
       routing the same bytes through `cat` to a file reproduces the bad read, so it is not `seq`.
     - Small files never showed it (`seq 1 10`, `seq 1 1000`, `seq 1 5000` read back true), and
-      neither did 16-64 KiB written through `yes | head -c`; `seq 1 8000` (~39 KiB) onward
-      corrupts, so it needs enough data to fill/cross pages but is not a plain size cap.
+      16-64 KiB written through `yes | head -c` read back true. But `seq 1 8000` (~39 KiB) and
+      `seq 1 10000` (~49 KiB) written directly to a file read back wrong. So it is not size alone
+      but **write timing**: a paced pipe writer (`head` draining `yes`) is fine, a fast direct
+      writer (`seq > file`) is not, which is what a writeback/eviction race looks like.
     - It is **independent of `chroot`** and of content class: all-zero (`truncate -s 100000`,
       hash `0019d23b...`) and all-`0xff` files read back correctly.
 
-    So a large `read(2)` of a file written during this boot returns frame contents that were not
-    yet the file's, while the file itself is right; exec maps the same wrong view and runs
-    `0x00000000`. A small read is correct and a large one is not, and MFS serves a large read
-    block by block in `fs_readwrite` with a `SAFECOPYTO` per block (`cum_io` as the grant offset),
-    so the first suspect is that multi-chunk loop and the kernel's `safecopyto` for a chunk after
-    the first, plus an aarch64-only incoherence there (e.g. a physmap alias with different cache
-    attributes, `minix-physmap`). x86_64 and riscv64 serve the same reads correctly.
+    So a large read of a file written during this boot returns block contents that were not yet
+    the file's, while the file itself is right; exec maps the same wrong view and runs `0x00000000`.
+    A small read is correct and a large one is not, every large-read tool agrees, and the wrong
+    value varies per boot, so the suspect is MFS's block cache under a fast multi-block write:
+    a read that lands after eviction but before writeback completes sees the pre-write block, and
+    a paced writer, whose writeback finishes first, does not. x86_64 and riscv64 serve the same
+    reads correctly.
 
     Until it is fixed, the `chroot` gate uses the no-op-root form (`chroot / ...`) and the
     jail-with-a-copied-binary form is absent (item 59); that form passes on x86_64 and riscv64.
-    Next step: an LLDB run that breaks on the second block's `SAFECOPYTO` in `fs_readwrite` while
-    `md5sum f1` is retried, and compares the block buffer it sends with the same block read by
-    `od`; the wrong hash moving per boot means it must be caught live, not by offset.
-    (`crates/fs/src/mfs`, `crates/servers/src/vfs`, `crates/servers/src/vm`,
-    `crates/kernel/src/`, `crates/arch-aarch64/src/`)
+    Next step: an LLDB run that breaks in MFS's write-then-read on a fast `seq 1 10000` and follows
+    a block from `lmfs_markdirty`/`lmfs_put_block` through eviction to the read that serves it, to
+    see whether the read gets the dirty cache block or an evicted one whose writeback is pending.
+    The code already shows where to look: `lmfs_put_block` flushes `FULL_DATA_BLOCK` and
+    `INODE_BLOCK` before release, but the eviction path in `lmfs_get_block_ino` calls `freeblock`
+    on the LRU head without flushing a dirty buffer, and `cache_heuristic_check`'s own comment says
+    the pool can stay at `MINBUFS` (6) and "evict dirty blocks before they are written back". The
+    wrong hash moving per boot means it must be caught live, not by offset.
+    (`crates/libs/src/libminixfs/cache.rs`, `crates/fs/src/mfs/read.rs`,
+    `crates/fs/src/mfs/inode.rs`, `crates/servers/src/vfs`, `crates/kernel/src/`)
 
 ---
 
