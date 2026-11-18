@@ -2192,6 +2192,16 @@ as this file's header says a skill-captured limitation does.
     `crates/minix-libc/src/c_sys.rs`, `tools/c-include/unistd.h`,
     `tools/smoke/coreutils-minix.tsv`, `Justfile`)
 
+56. **`logname` and `whoami` are in the multicall on all three arches (2026-11-17).** The gate
+    is `just test-coreutils-minix-<arch>` (`tools/smoke/coreutils-minix.tsv`, 52 steps), green on
+    x86_64, riscv64 and aarch64.
+
+    No new port surface: item 55's `getlogin` already serves both. `logname` calls `libc::getlogin`
+    and prints it, and `whoami` is `uid2usr(geteuid())` through `entries`, which the port already
+    had. `Cargo.toml` moves both into `feat_minix` (logname was in `feat_require_unix_core`,
+    whoami in `feat_common_core`), and the excluded-set comment is updated.
+    (`coreutils/Cargo.toml`, `tools/smoke/coreutils-minix.tsv`, `Justfile`)
+
 ---
 
 ## x86_64 (`[x86]`)

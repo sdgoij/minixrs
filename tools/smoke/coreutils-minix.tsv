@@ -98,3 +98,8 @@ coreutils id -u	0
 coreutils id -un	root
 coreutils id test	uid=1000\(test\) gid=1000\(test\) groups=1000\(test\),10\(wheel\)
 coreutils id -Gn test	test wheel
+# `logname` prints `getlogin`'s name and `whoami` the effective user's passwd
+# name. Both are `root` in the shipped shell, and both go through the passwd
+# half of `entries`.
+coreutils logname	root
+coreutils whoami	root
