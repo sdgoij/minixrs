@@ -2171,6 +2171,27 @@ as this file's header says a skill-captured limitation does.
     `crates/boot-image/src/manifest.rs`, `tools/c-include/grp.h`,
     `tools/smoke/coreutils-minix.tsv`, `Justfile`)
 
+55. **`id` is in the multicall on all three arches (2026-11-17).** The gate is
+    `just test-coreutils-minix-<arch>` (`tools/smoke/coreutils-minix.tsv`, 50 steps), green on
+    x86_64, riscv64 and aarch64.
+
+    - **`uucore::libc` was re-exported only for non-minix targets.** `libc` had become a
+      dependency for minix already (the signal arm and the panic hook use it directly), so the
+      re-export is unconditional now. `id` uses `libc::getlogin` through it.
+    - **`getlogin(3)` was declared nowhere for minix and defined nowhere at all.** The port has
+      no utmp, so it is the real user's `/etc/passwd` name via `getpwuid(getuid())`; it is
+      declared in `libc/src/minix/process.rs` and `tools/c-include/unistd.h`.
+    - **Two `id` arms had no minix in their cfg lists.** `pline` (the standard passwd-line form)
+      now applies, and `auditid` takes the no-op arm: minix has no audit, so the `audit` module
+      is not compiled and no `getaudit` symbol is referenced.
+
+    The default output prints ids as `uid=0(root)`, whose parentheses are ERE metacharacters,
+    so the smoke expectations escape them (the harness matches an expectation as an ERE).
+    (`coreutils/src/uucore/src/lib/lib.rs`, `coreutils/src/uu/id/src/id.rs`,
+    `coreutils/Cargo.toml`, `libc/src/minix/process.rs`,
+    `crates/minix-libc/src/c_sys.rs`, `tools/c-include/unistd.h`,
+    `tools/smoke/coreutils-minix.tsv`, `Justfile`)
+
 ---
 
 ## x86_64 (`[x86]`)

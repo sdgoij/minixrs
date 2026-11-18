@@ -64,6 +64,7 @@ int access(const char *path, int mode);
 int chown(const char *path, uid_t owner, gid_t group);
 int lchown(const char *path, uid_t owner, gid_t group);
 int fchown(int fd, uid_t owner, gid_t group);
+char *getlogin(void);
 int usleep(unsigned int usec);
 
 #define F_OK 0

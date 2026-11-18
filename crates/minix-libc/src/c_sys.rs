@@ -2234,6 +2234,22 @@ pub unsafe extern "C" fn getpwnam(name: *const c_char) -> *mut Passwd {
     }
 }
 
+/// C `getlogin(3)`: the name the controlling terminal logged in with.
+///
+/// The port has no utmp, so this is the real user's `/etc/passwd` name, which
+/// is what `getpwuid(getuid())` reports. A missing entry answers null, which
+/// callers such as `id` treat as "unknown".
+#[cfg(target_os = "minix")]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn getlogin() -> *mut c_char {
+    let pw = unsafe { getpwuid(getuid()) };
+    if pw.is_null() {
+        core::ptr::null_mut()
+    } else {
+        unsafe { (*pw).pw_name }
+    }
+}
+
 /// `struct group` — matches grp.h.
 #[repr(C)]
 pub struct Group {

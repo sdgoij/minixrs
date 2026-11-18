@@ -88,3 +88,13 @@ coreutils chown -v --from=7:8 0:0 og/sub/g	changed ownership of 'og/sub/g' from 
 coreutils groups	root
 coreutils groups test	test : test wheel
 coreutils groups root	root : root
+# `id`: the default form names every id from `/etc/passwd`/`/etc/group`, and
+# `id USER` appends the groups `getgrouplist` finds, so the `wheel` membership
+# shows up as `10(wheel)`. `-un` exercises `getlogin` (the port has no utmp, so
+# it is the real user's passwd name). The expectations escape `(` and `)`
+# because `feed.sh` matches an expectation as an ERE.
+coreutils id	uid=0\(root\) gid=0\(root\) groups=0\(root\)
+coreutils id -u	0
+coreutils id -un	root
+coreutils id test	uid=1000\(test\) gid=1000\(test\) groups=1000\(test\),10\(wheel\)
+coreutils id -Gn test	test wheel
