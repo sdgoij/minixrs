@@ -1,5 +1,5 @@
 # The coreutils applets that were excluded from `feat_minix` for platform
-# reasons and are in the multicall now: `touch` and `env`.
+# reasons and are in the multicall now: `touch`, `env`, `rm` and `chmod`.
 #
 # `touch` is the filetime path: `libc::utimes`/`lutimes` (the port's own
 # `utimes`/`lutimes` in `crates/minix-libc`) and `stat`'s whole-second times
@@ -33,3 +33,30 @@ coreutils env -u HOME coreutils echo ENV-UNSET-OK	ENV-UNSET-OK
 # which an exec preserves, and a blocked mask.
 coreutils env --ignore-signal=PIPE coreutils echo ENV-IGNORE-OK	ENV-IGNORE-OK
 coreutils env --block-signal=PIPE coreutils echo ENV-BLOCK-OK	ENV-BLOCK-OK
+# `rm` and `chmod`, the two uucore's safe-traversal arm unblocked (item 52).
+# Nothing here asserts a message: the shell runs as root, so a mode change has
+# no observable *effect*, and the markers are what the recipe's log check reads.
+# A `test`-driven marker is the exit status, not a printed line, so it cannot
+# pass on an earlier step's output.
+coreutils touch r1.txt	
+coreutils rm r1.txt	
+coreutils test -e r1.txt && coreutils echo RM-STILL-THERE	
+coreutils mkdir d1	
+coreutils touch d1/f1	
+coreutils rm -r d1	
+coreutils test -e d1/f1 && coreutils echo RMR-STILL-THERE	
+coreutils touch c1.txt	
+coreutils chmod 755 c1.txt	
+coreutils test -x c1.txt && coreutils echo CHMOD-X-OK	CHMOD-X-OK
+coreutils chmod 644 c1.txt	
+coreutils test -x c1.txt && coreutils echo CHMOD-X-BAD	
+coreutils mkdir d2	
+coreutils touch d2/f2	
+coreutils chmod -R 700 d2 && coreutils echo CHMOD-R-OK	CHMOD-R-OK
+coreutils chmod 644 no-such-file && coreutils echo CHMOD-ENOENT-BAD	
+# `/etc/group` reached the image and reads back through VFS's open path: this
+# is the file the `grp.h` lookups (`getgrgid`/`getgrnam`, item 52) parse. No
+# applet in this set resolves a group name yet (chgrp/chown are still outside
+# `feat_minix`), so reading the first line back is the assertion, and `head -1`
+# gives one line the harness can match whole.
+coreutils head -1 /etc/group	root:x:0:

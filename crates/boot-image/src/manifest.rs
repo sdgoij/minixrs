@@ -31,9 +31,9 @@ pub const BOOT_BINS: &[(&str, &str)] = &[
     ("/bin/keytest", "keytest"),
     // `/bin/coreutils` is the uutils multicall binary, built from the
     // coreutils submodule. `just coreutils-<arch>` builds the `feat_minix`
-    // feature set (60 applets: text tools, checksums, filesystem basics), and the
-    // kernel embeds it on x86_64 and riscv64 — not aarch64 yet, where it still
-    // loses output (KNOWN_ISSUES aarch64 #9).
+    // feature set (text tools, checksums, filesystem basics, `rm` and `chmod`),
+    // and the kernel embeds it on all three archs; `just test-coreutils-minix-<arch>`
+    // is the gate.
     ("/bin/coreutils", "coreutils"),
     // `/bin/hello` is the std smoke-test binary: it is NOT a `userland`
     // cargo bin. Rebuild it with `tools/build-std-hello.py [target]`
@@ -402,6 +402,16 @@ test:$5$minix$ccc32ce88881621a7b1b6bc05c4880ad85c63114ccda648b1f23b5afe4a21ab5:1
     // Root-owned 0600 file for the permission-enforcement probe: the
     // `test` user must be denied, root must be allowed.
     ("/etc/secret", b"top secret\n", 0o600, 0, 0),
+    // The group half of the `grp.h` lookups (`getgrgid`/`getgrnam`), which
+    // `chmod --reference` and the `id`/`chown` family use. Same ids as
+    // `/etc/passwd` above, so a lookup by name and by id agree.
+    (
+        "/etc/group",
+        b"root:x:0:\ntest:x:1000:\nwheel:x:10:\n",
+        0o644,
+        0,
+        0,
+    ),
 ];
 
 /// Device nodes to create in the initramfs: (path, mode, major, minor).

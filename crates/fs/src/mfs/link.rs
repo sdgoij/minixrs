@@ -208,15 +208,27 @@ pub fn fs_link() -> i32 {
 
 pub fn fs_unlink() -> i32 {
     unsafe {
-        let dir_ino = (*glo::mfs_ptr()).cch[0] as u32;
+        // The directory inode and the name arrive in this request. `mfs_main`
+        // unpacks neither for REQ_UNLINK/REQ_RMDIR, so `cch[0]` and
+        // `user_path` hold whatever the previous request left there; the same
+        // defect on the link path is `KNOWN_ISSUES.md` item 37, and this reads
+        // its payload the way `fs_link` does.
+        //
+        // Message layout (VFS `req_unlink`/`req_rmdir`): directory inode at
+        // payload[0], name grant at payload[8], name length at payload[16].
+        let raw = (*glo::mfs_ptr()).m_in.m_payload.raw;
+        let dir_ino = payload_u32(&raw, 0);
+        let grant_path = payload_i32(&raw, 8);
+        let path_len = payload_u64(&raw, 16) as usize;
         let dev = (*glo::mfs_ptr()).fs_dev;
         let req_nr = (*glo::mfs_ptr()).req_nr;
-        let user_path = &(*glo::mfs_ptr()).user_path;
-        let len = user_path
-            .iter()
-            .position(|&c| c == 0)
-            .unwrap_or(user_path.len());
-        let string = &user_path[..len];
+
+        let mut name_buf = [0u8; MFS_NAME_MAX];
+        let name_len = match copy_name(&mut name_buf, grant_path, path_len) {
+            Ok(n) => n,
+            Err(e) => return e,
+        };
+        let string = &name_buf[..name_len];
 
         let rldirp = match get_inode(dev, dir_ino) {
             Some(d) => d,

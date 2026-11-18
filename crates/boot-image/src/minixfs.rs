@@ -724,10 +724,10 @@ mod tests {
         let itable_off = (2 + imap_blocks as usize + zmap_blocks as usize) * BLOCK_SIZE;
 
         // Inode numbering: root(1) bin(2) sbin(3) etc(4) tmp(5) dev(6)
-        // devices(7), then BOOT_FILES rc(8) session(9) passwd(10) secret(11),
-        // then devices: tty00(12) tty01(13) null(14) console(15) ip(16) udp(17)
-        // tcp(18).
-        let console_ino = 15usize;
+        // devices(7), then BOOT_FILES rc(8) session(9) passwd(10) secret(11)
+        // group(12), then devices: tty00(13) tty01(14) null(15) console(16)
+        // ip(17) udp(18) tcp(19).
+        let console_ino = 16usize;
         let off = itable_off + (console_ino - 1) * INODE_SIZE;
         let mode = u16::from_le_bytes(image[off..off + 2].try_into().unwrap());
         let dev = u32::from_le_bytes(image[off + 24..off + 28].try_into().unwrap());
@@ -739,8 +739,8 @@ mod tests {
         assert_eq!(mode & 0o777, 0o600);
         assert_eq!(dev, 5u32 << 16, "console major 5 minor 0");
 
-        // /dev/tty00: major 3 minor 0 (inode 12 → slot 11).
-        let tty00_off = itable_off + 11 * INODE_SIZE;
+        // /dev/tty00: major 3 minor 0 (inode 13 → slot 12).
+        let tty00_off = itable_off + 12 * INODE_SIZE;
         let tty00_dev =
             u32::from_le_bytes(image[tty00_off + 24..tty00_off + 28].try_into().unwrap());
         assert_eq!(tty00_dev, 3u32 << 16);
@@ -906,27 +906,27 @@ mod tests {
         let zmap_blocks = i16::from_le_bytes(image[1024 + 10..1024 + 12].try_into().unwrap());
         let itable_off = (2 + imap_blocks as usize + zmap_blocks as usize) * BLOCK_SIZE;
 
-        // Console is inode 13 in the empty image (root, bin, sbin, etc, tmp,
-        // dev, devices + passwd, secret + tty00, tty01, null). Its imap bit
-        // (13) must be set, bit 0 must be reserved, and bit 1 (inode 1,
+        // Console is inode 14 in the empty image (root, bin, sbin, etc, tmp,
+        // dev, devices + passwd, secret, group + tty00, tty01, null). Its imap
+        // bit (14) must be set, bit 0 must be reserved, and bit 1 (inode 1,
         // root) must be set.
         let imap = &image[2 * BLOCK_SIZE..3 * BLOCK_SIZE];
         assert_eq!(imap[0] & 1, 1, "bit 0 must be reserved (no inode 0)");
         assert_eq!((imap[0] >> 1) & 1, 1, "inode 1 (root) must be in use");
         assert_eq!(
-            (imap[13 / 8] >> (13 % 8)) & 1,
+            (imap[14 / 8] >> (14 % 8)) & 1,
             1,
-            "inode 13 (console) must be in use"
+            "inode 14 (console) must be in use"
         );
 
         // Every inode in the table must be marked in use (bit N), so MFS's
         // alloc_bit never hands out an inode that already has table data.
         // The builder writes slot N-1 for inode N; walk the table. The
         // empty image has 9 dirs (root, bin, sbin, etc, tmp, dev, devices,
-        // dri, proc) + 4 data files (rc, session, passwd, secret) + 19 devices (tty00, tty01, null,
+        // dri, proc) + 5 data files (rc, session, passwd, secret, group) + 19 devices (tty00, tty01, null,
         // console, ip, udp, tcp, fb, kbd, the 8 pty nodes ttyp0-3/ptyp0-3, uds,
-        // and dri/renderD128) + the /link symlink = 33 inodes.
-        let n_inodes = 33usize;
+        // and dri/renderD128) + the /link symlink = 34 inodes.
+        let n_inodes = 34usize;
         for ino in 1..=n_inodes {
             assert_eq!(
                 (imap[ino / 8] >> (ino % 8)) & 1,
@@ -934,11 +934,11 @@ mod tests {
                 "inode {ino} must be marked in use at bit {ino}"
             );
         }
-        // And the next bit (inode 34) is free, the first allocatable inode.
+        // And the next bit (inode 35) is free, the first allocatable inode.
         assert_eq!(
-            imap[34 / 8] & (1 << (34 % 8)),
+            imap[35 / 8] & (1 << (35 % 8)),
             0,
-            "inode 34 must be free for the first create"
+            "inode 35 must be free for the first create"
         );
         let _ = itable_off;
     }

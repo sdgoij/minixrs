@@ -130,6 +130,31 @@ pub unsafe extern "C" fn opendir(path: *const c_char) -> *mut DIR {
     d
 }
 
+/// Open a stream over an already-open descriptor, which it takes ownership of.
+///
+/// POSIX's `fdopendir`: no open, no read, just the descriptor this port's `DIR`
+/// is built around. The caller must not close `fd` afterwards.
+#[cfg(target_os = "minix")]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn fdopendir(fd: c_int) -> *mut DIR {
+    if fd < 0 {
+        crate::set_errno(EINVAL);
+        return core::ptr::null_mut();
+    }
+    let d = unsafe { crate::malloc(core::mem::size_of::<DIR>()) } as *mut DIR;
+    if d.is_null() {
+        crate::set_errno(ENOMEM);
+        return core::ptr::null_mut();
+    }
+    unsafe {
+        (*d).fd = fd;
+        (*d).buf_len = 0;
+        (*d).off = 0;
+        (*d).cur = core::mem::zeroed();
+    }
+    d
+}
+
 /// Read the next directory entry, or NULL at the end.
 #[cfg(target_os = "minix")]
 #[unsafe(no_mangle)]
@@ -1130,12 +1155,12 @@ pub unsafe extern "C" fn fchmodat(
     if path.is_null() {
         return crate::fail(EINVAL);
     }
-    if flags != 0 {
-        return crate::fail(ENOSYS);
+    if flags & !AT_SYMLINK_NOFOLLOW != 0 {
+        return crate::fail(EINVAL);
     }
     let path_bytes = unsafe { core::ffi::CStr::from_ptr(path) }.to_bytes();
     let result =
-        unsafe { with_dirfd(dirfd, path_bytes, || minix_std::fs::chmod(path_bytes, mode)) };
+        unsafe { with_dirfd(dirfd, path_bytes, || minix_std::fs::chmod_flags(path_bytes, mode, flags)) };
     match result {
         Ok(()) => 0,
         Err(e) => crate::fail(e.0),
@@ -2193,6 +2218,199 @@ pub unsafe extern "C" fn getpwnam(name: *const c_char) -> *mut Passwd {
     } else {
         result
     }
+}
+
+/// `struct group` — matches grp.h.
+#[repr(C)]
+pub struct Group {
+    gr_name: *mut c_char,
+    gr_passwd: *mut c_char,
+    gr_gid: c_uint,
+    gr_mem: *mut *mut c_char,
+}
+
+/// Fill a `Group` from a parsed entry whose field slices live in `buf`.
+///
+/// The member list is one comma-separated field; `gr_mem` is the NULL-terminated
+/// pointer array POSIX requires, so the array is laid out after every string:
+/// name, password, each member's name, then the pointers (aligned to one).
+/// Returns ERANGE when the buffer cannot hold all of that.
+///
+/// # Safety
+///
+/// `grp` must be a valid pointer; `buf` must be the buffer the entry's field
+/// slices borrow from, with `buflen` its length.
+#[cfg(target_os = "minix")]
+unsafe fn fill_group(
+    grp: *mut Group,
+    buf: *mut c_char,
+    buflen: usize,
+    entry: &minix_std::group::GroupEntry,
+) -> c_int {
+    // Up to 32 members; a longer list is a buffer too small, not an entry to
+    // truncate.
+    let mut members: [&[u8]; 32] = [&[]; 32];
+    let mut member_count = 0usize;
+    if !entry.members.is_empty() {
+        for name in entry.members.split(|&b| b == b',') {
+            if member_count == members.len() {
+                return ERANGE;
+            }
+            members[member_count] = name;
+            member_count += 1;
+        }
+    }
+
+    let mut strings_len = entry.name.len() + 1 + entry.passwd.len() + 1;
+    for m in &members[..member_count] {
+        strings_len += m.len() + 1;
+    }
+    let ptr_size = core::mem::size_of::<*mut c_char>();
+    let array_off = strings_len.div_ceil(ptr_size) * ptr_size;
+    let need = array_off + (member_count + 1) * ptr_size;
+    if need > buflen {
+        return ERANGE;
+    }
+
+    unsafe {
+        // SAFETY: `need <= buflen` reserves room for every string above, and the
+        // pointer array is inside the same buffer.
+        let bytes = buf.cast::<u8>();
+        let mut off = 0usize;
+        let put = |field: &[u8], off: &mut usize| -> *mut c_char {
+            core::ptr::copy_nonoverlapping(field.as_ptr(), bytes.add(*off), field.len());
+            *bytes.add(*off + field.len()) = 0;
+            let at = bytes.add(*off) as *mut c_char;
+            *off += field.len() + 1;
+            at
+        };
+        let name = put(entry.name, &mut off);
+        let passwd = put(entry.passwd, &mut off);
+        let mut member_ptrs = [core::ptr::null_mut::<c_char>(); 32];
+        for (i, m) in members[..member_count].iter().enumerate() {
+            member_ptrs[i] = put(m, &mut off);
+        }
+        let array = bytes.add(array_off) as *mut *mut c_char;
+        for (i, ptr) in member_ptrs[..member_count].iter().enumerate() {
+            *array.add(i) = *ptr;
+        }
+        *array.add(member_count) = core::ptr::null_mut();
+
+        (*grp).gr_name = name;
+        (*grp).gr_passwd = passwd;
+        (*grp).gr_gid = entry.gid;
+        (*grp).gr_mem = array;
+    }
+    0
+}
+
+/// Look up a group by name in /etc/group (reentrant POSIX contract).
+#[cfg(target_os = "minix")]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn getgrnam_r(
+    name: *const c_char,
+    grp: *mut Group,
+    buf: *mut c_char,
+    buflen: usize,
+    result: *mut *mut Group,
+) -> c_int {
+    if name.is_null() || result.is_null() || grp.is_null() || buf.is_null() {
+        return crate::fail(EINVAL);
+    }
+    unsafe { *result = core::ptr::null_mut() };
+    let want = unsafe { core::ffi::CStr::from_ptr(name) }.to_bytes();
+    let data = unsafe { core::slice::from_raw_parts_mut(buf.cast::<u8>(), buflen) };
+    let n = match unsafe { minix_std::group::read_group(data) } {
+        Ok(n) => n,
+        Err(e) => return crate::fail(e.0),
+    };
+    let entry = match minix_std::group::find_group(&data[..n], want) {
+        Some(e) => e,
+        None => return crate::fail(ENOENT),
+    };
+    let r = unsafe { fill_group(grp, buf, buflen, &entry) };
+    if r != 0 {
+        return crate::fail(r);
+    }
+    unsafe { *result = grp };
+    0
+}
+
+/// Look up a group by gid in /etc/group (reentrant POSIX contract).
+#[cfg(target_os = "minix")]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn getgrgid_r(
+    gid: c_uint,
+    grp: *mut Group,
+    buf: *mut c_char,
+    buflen: usize,
+    result: *mut *mut Group,
+) -> c_int {
+    if result.is_null() || grp.is_null() || buf.is_null() {
+        return crate::fail(EINVAL);
+    }
+    unsafe { *result = core::ptr::null_mut() };
+    let data = unsafe { core::slice::from_raw_parts_mut(buf.cast::<u8>(), buflen) };
+    let n = match unsafe { minix_std::group::read_group(data) } {
+        Ok(n) => n,
+        Err(e) => return crate::fail(e.0),
+    };
+    let entry = match minix_std::group::find_group_gid(&data[..n], gid) {
+        Some(e) => e,
+        None => return crate::fail(ENOENT),
+    };
+    let r = unsafe { fill_group(grp, buf, buflen, &entry) };
+    if r != 0 {
+        return crate::fail(r);
+    }
+    unsafe { *result = grp };
+    0
+}
+
+/// Shared storage for the non-reentrant group lookups, as for `getpwuid`.
+const GRP_BUF_LEN: usize = 1024;
+#[cfg(target_os = "minix")]
+static mut GRP_BUF: [c_char; GRP_BUF_LEN] = [0; GRP_BUF_LEN];
+#[cfg(target_os = "minix")]
+static mut GRP_ENTRY: Group = Group {
+    gr_name: core::ptr::null_mut(),
+    gr_passwd: core::ptr::null_mut(),
+    gr_gid: 0,
+    gr_mem: core::ptr::null_mut(),
+};
+
+/// POSIX `getgrnam`: the non-reentrant form of `getgrnam_r`.
+#[cfg(target_os = "minix")]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn getgrnam(name: *const c_char) -> *mut Group {
+    let mut result: *mut Group = core::ptr::null_mut();
+    let r = unsafe {
+        getgrnam_r(
+            name,
+            core::ptr::addr_of_mut!(GRP_ENTRY),
+            core::ptr::addr_of_mut!(GRP_BUF).cast::<c_char>(),
+            GRP_BUF_LEN,
+            &mut result,
+        )
+    };
+    if r != 0 { core::ptr::null_mut() } else { result }
+}
+
+/// POSIX `getgrgid`: the non-reentrant form of `getgrgid_r`.
+#[cfg(target_os = "minix")]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn getgrgid(gid: c_uint) -> *mut Group {
+    let mut result: *mut Group = core::ptr::null_mut();
+    let r = unsafe {
+        getgrgid_r(
+            gid,
+            core::ptr::addr_of_mut!(GRP_ENTRY),
+            core::ptr::addr_of_mut!(GRP_BUF).cast::<c_char>(),
+            GRP_BUF_LEN,
+            &mut result,
+        )
+    };
+    if r != 0 { core::ptr::null_mut() } else { result }
 }
 
 /// POSIX `sleep(seconds)`: whole seconds, returning the unslept remainder.

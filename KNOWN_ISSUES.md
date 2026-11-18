@@ -147,27 +147,6 @@ are arch-specific, `[env]` is tooling/platform, not kernel.
     needs (a second VFS thread, or VFS answering the ioctl itself as it does for the socket ones)
     is a decision for whoever first needs a file-backed block device.
 
-52. **`rm` and `chmod` are still outside the coreutils multicall (2026-11-17, measured).** Both
-    are blocked on the same module: uucore's `safe_traversal` is built on `nix` (`Dir`, `openat`,
-    `fstatat`, `mkdirat`, `fchmodat`, `fchownat`, `unlinkat`, `dup`, `fstat`, `fchmod`, and the
-    `OFlag`/`AtFlags`/`Mode`/`FileStat` types), and `nix` does not build for minix. Blocking it
-    out is not a one-line change: uucore's `perms` feature, which `chmod`, `chgrp`, `chown`,
-    `chcon` and `runcon` all enable, requires `safe-traversal`, so the module has to compile.
-
-    A minix arm is feasible. The port's C library implements every `*at` call the module uses
-    (`openat`, `fstatat`, `unlinkat`, `mkdirat`, `fchmodat`, `fchownat`, plus `fstat`, `fchmod`
-    and `dup`), so the arm can be written over `libc` the way `env`'s was (item 51). One piece has
-    no answer yet: `safe_traversal` opens a symlink *itself* with `O_PATH | O_NOFOLLOW` (its
-    `fchmodat`-on-a-link path), and the port has no `O_PATH`, so that call site needs a decision
-    (skip the link with a warning, or add an `O_PATH`-equivalent to VFS's open).
-
-    `chmod` also pulls `uucore::entries`, whose group half needs `getgrgid`/`getgrnam`/`struct
-    group`; the port's libc has the `passwd` family (parsed from `/etc/passwd`) but no group
-    equivalent, so that is a second, smaller piece (a `/etc/group` parser beside it).
-
-    Until both land the image keeps shipping its own `/bin/rm` and `/bin/chmod`, and both applets
-    stay out of `feat_minix` with this reason in that feature's comment.
-
 ---
 
 ## RISC-V (`[riscv]`)
@@ -2082,6 +2061,57 @@ as this file's header says a skill-captured limitation does.
     `rustix/src/backend/minix/fs/syscalls.rs`, `rust/library/std/src/os/minix/fs.rs`,
     `crates/servers/src/vfs/{call,consts}.rs`, `crates/minix-std/src/fs.rs`,
     `crates/fs/src/{mfs,ext2}`, `tools/smoke/coreutils-minix.tsv`, `Justfile`)
+
+52. **~~`rm` and `chmod` were outside the coreutils multicall~~: both are in it, on all three
+    arches (2026-11-17).** The gate is `just test-coreutils-minix-<arch>`
+    (`tools/smoke/coreutils-minix.tsv`, 31 steps), green on x86_64, riscv64 and aarch64. The
+    applet half is small; the port's defects underneath it were not.
+
+    - uucore's `safe_traversal` has a minix arm, `features/safe_traversal_minix.rs`, that stands
+      a `nix`-shaped surface up over the port's C library: `OFlag`, `AtFlags`, `Mode`,
+      `Uid`/`Gid`, `FchmodatFlags`/`UnlinkatFlags`, `FileStat = libc::stat`, a `Dir` over
+      `fdopendir`/`readdir`/`closedir`, and `dup`/`open`/`openat`/`fstat`/`fstatat`/`fchmod`/
+      `fchmodat`/`fchown`/`fchownat`/`mkdirat`/`unlinkat`. `Errno` is a raw `c_int`. The
+      `O_PATH` question this entry used to raise is answered by the fix below: the port's
+      `fchmodat` now honours `AT_SYMLINK_NOFOLLOW`, so `chmod_at`'s Linux-only
+      `O_PATH`/`/proc/self/fd` fallback is never reached, and a non-Linux caller just gets the
+      call's own error back.
+    - `unlink(2)`/`rmdir(2)` failed for *every* caller, the port's own `/bin/rm` included:
+      VFS's `do_unlink`/`do_rmdir` sent a null name and MFS then read a stale `cch[0]`, so a
+      removal either missed or removed the wrong entry. Both now send the last path component
+      (as `do_mkdir` did), `last_dir`'s vnode is checked to be a directory (`ENOTDIR`), and
+      `fs_unlink` reads the directory inode, name grant and name length from the payload rather
+      than from `cch[]`/`user_path`. This is the item 37 class.
+    - `fchmodat` answered `ENOSYS` for any nonzero flags. VFS's `do_chmod` now reads the flags
+      (message offset 28) and turns `AT_SYMLINK_NOFOLLOW` into `PATH_RET_SYMLINK` (other flags
+      are `EINVAL`), `minix_std::fs::chmod_flags` carries them, and the libc shim passes them
+      through. uucore's `safe_chmod_file` otherwise reports *every* failure as
+      `PermissionDenied`, so a real errno had to be instrumented in the shim, not read from the
+      message.
+    - `chmod` also pulls `uucore::entries`, whose group half needs `getgrgid`/`getgrnam`/`struct
+      group`. The port now has them: `crates/minix-std/src/group.rs` parses `/etc/group`
+      (host-tested), `minix-libc` fills `struct group` and offers `getgrnam_r`/`getgrgid_r`/
+      `getgrnam`/`getgrgid`, `tools/c-include/grp.h` is the C contract, and the image carries
+      `/etc/group`. No applet in `feat_minix` resolves a group name yet, so the smoke step only
+      asserts the file is readable (`head -1 /etc/group`); the lookups are groundwork for
+      chgrp/chown.
+    - **`std::io::Error::last_os_error` was meaningless on minix:** the PAL's `errno()` returned
+      `0` unconditionally, so every failure printed "Unknown error 0". It now forwards
+      `minix_std::errno()`.
+    - `test -x` had a degraded minix fallback that answered `false` and then hung the shell. It
+      is deleted: the generic unix arm works because `os::minix::MetadataExt` has `mode`/`uid`/
+      `gid` and rustix has `geteuid`/`getegid`.
+
+    **Remaining gap:** `fchownat` still answers `ENOSYS` for `AT_SYMLINK_NOFOLLOW`, so
+    `chgrp -R`/`chown -R` would hit the same class; both applets also stay outside `feat_minix`
+    (they are in `feat_require_unix_core`). The group half they need is now present, so they are
+    the natural next step.
+    (`coreutils/src/uucore/src/lib/features/{safe_traversal,safe_traversal_minix,fs}.rs`,
+    `coreutils/src/uu/test`, `coreutils/Cargo.toml`, `crates/minix-std/src/{fs,group}.rs`,
+    `crates/minix-libc/src/c_sys.rs`, `crates/servers/src/vfs/call.rs`,
+    `crates/fs/src/mfs/link.rs`, `crates/boot-image/src/{manifest,minixfs}.rs`,
+    `rust/library/std/src/sys/pal/minix/io_error.rs`, `tools/c-include/{grp,dirent}.h`,
+    `tools/smoke/coreutils-minix.tsv`, `Justfile`)
 
 ---
 

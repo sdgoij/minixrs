@@ -2244,9 +2244,23 @@ pub fn do_unlink() -> i32 {
     if dirp.is_null() {
         return ENOENT;
     }
+    // C's `S_ISDIR(dirp->v_mode)` check: the last directory in the path must
+    // be one, whatever the lookup returned.
+    if unsafe { (*dirp).v_mode } & crate::vfs::consts::S_IFMT != crate::vfs::consts::S_IFDIR {
+        unsafe { mount::put_vnode(dirp) };
+        return ENOTDIR;
+    }
+    // The name, which is the last component: the filesystem resolves it in the
+    // directory the request names, exactly as `do_mkdir` sends it.
+    let file_name_ptr =
+        if let Some(slash_pos) = path_buf[..actual_len].iter().rposition(|&b| b == b'/') {
+            unsafe { path_buf.as_ptr().add(slash_pos + 1) }
+        } else {
+            path_buf.as_ptr()
+        };
     let fs_e = unsafe { (*dirp).v_fs_e };
     let dir_ino = unsafe { (*dirp).v_inode_nr };
-    let r = unsafe { crate::vfs::request::req_unlink(fs_e, dir_ino, core::ptr::null()) };
+    let r = unsafe { crate::vfs::request::req_unlink(fs_e, dir_ino, file_name_ptr) };
     unsafe { mount::put_vnode(dirp) };
     norm_fs_errno(r)
 }
@@ -2633,9 +2647,17 @@ pub fn do_rmdir() -> i32 {
     if dirp.is_null() {
         return ENOENT;
     }
-    let r = unsafe {
-        crate::vfs::request::req_rmdir((*dirp).v_fs_e, (*dirp).v_inode_nr, core::ptr::null())
-    };
+    if unsafe { (*dirp).v_mode } & crate::vfs::consts::S_IFMT != crate::vfs::consts::S_IFDIR {
+        unsafe { mount::put_vnode(dirp) };
+        return ENOTDIR;
+    }
+    let file_name_ptr =
+        if let Some(slash_pos) = path_buf[..actual_len].iter().rposition(|&b| b == b'/') {
+            unsafe { path_buf.as_ptr().add(slash_pos + 1) }
+        } else {
+            path_buf.as_ptr()
+        };
+    let r = unsafe { crate::vfs::request::req_rmdir((*dirp).v_fs_e, (*dirp).v_inode_nr, file_name_ptr) };
     unsafe { mount::put_vnode(dirp) };
     norm_fs_errno(r)
 }
@@ -2741,6 +2763,18 @@ pub fn do_chmod() -> i32 {
         let mut resolve = Lookup::default();
         resolve.l_path[..actual_len].copy_from_slice(&path_buf[..actual_len]);
         resolve.l_path_len = actual_len;
+        // `fchmodat(..., AT_SYMLINK_NOFOLLOW)`: change the link rather than what
+        // it names, which is the mode `chmod -R` asks for on every entry (it
+        // stats each one with the same flag first, so the pair cannot be
+        // swapped for a symlink in between). The flag is the port's own field
+        // at 28; MINIX 3.3.0 has no `fchmodat`.
+        let flags = r_i32(&glob.fs_m_in, 28);
+        if flags & !AT_SYMLINK_NOFOLLOW != 0 {
+            return EINVAL;
+        }
+        if flags & AT_SYMLINK_NOFOLLOW != 0 {
+            resolve.l_flags = PATH_RET_SYMLINK;
+        }
         let vp = unsafe { path::eat_path(&resolve, fp) };
         if vp.is_null() {
             return ENOENT;

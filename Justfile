@@ -595,9 +595,10 @@ test-coreutils-wedge-aarch64 boot-timeout="30": build-aarch64
     @echo "coreutils-wedge: no child was left wedged (aarch64)"
 
 # The applets that were excluded from `feat_minix` for platform reasons, on every arch:
-# `touch` is the filetime path (`utimes`/`lutimes` and `stat`'s times) and `env` the exec
-# and signal path (`execvp`, `sigprocmask`, `signal`). `tools/smoke/coreutils-minix.tsv`
-# says which step covers which.
+# `touch` is the filetime path (`utimes`/`lutimes` and `stat`'s times), `env` the exec
+# and signal path (`execvp`, `sigprocmask`, `signal`), and `rm`/`chmod` the `safe_traversal`
+# path over the C library's `openat` family. `tools/smoke/coreutils-minix.tsv` says which
+# step covers which.
 test-coreutils-minix arch="x86" boot-timeout="40":
     @just test-coreutils-minix-{{arch}} {{boot-timeout}}
 
@@ -606,20 +607,20 @@ test-coreutils-minix-x86 boot-timeout="40": build-x86
     cp target/trampoline.elf target/images/x86_64-pc-minix/minix-x86.elf
     @just _assert-qemu-version qemu-system-x86_64
     FEED_SCENARIO=tools/smoke/coreutils-minix.tsv sh tools/smoke/feed.sh target/test-coreutils-minix-x86.log {{boot-timeout}} qemu-system-x86_64 -nographic -m 256M -no-reboot -vga none -device bochs-display,id=fb0 -kernel target/images/x86_64-pc-minix/minix-x86.elf -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0 -device virtio-tablet-pci,display=fb0
-    @if grep -qE "^(touch|env|ln|coreutils):" target/test-coreutils-minix-x86.log; then echo "!! a tool reported an error:"; grep -nE "^(touch|env|ln|coreutils):" target/test-coreutils-minix-x86.log; exit 1; fi
-    @echo "coreutils-minix: touch and env ran (x86_64)"
+    @if grep -qE "^(touch|env|ln|coreutils):|^(RM-STILL-THERE|RMR-STILL-THERE|CHMOD-X-BAD|CHMOD-ENOENT-BAD)$" target/test-coreutils-minix-x86.log; then echo "!! a tool reported an error:"; grep -nE "^(touch|env|ln|coreutils):|^(RM-STILL-THERE|RMR-STILL-THERE|CHMOD-X-BAD|CHMOD-ENOENT-BAD)$" target/test-coreutils-minix-x86.log; exit 1; fi
+    @echo "coreutils-minix: touch, env, rm and chmod ran (x86_64)"
 
 test-coreutils-minix-riscv64 boot-timeout="60": build-riscv64
     @just _assert-qemu-version qemu-system-riscv64
     FEED_SCENARIO=tools/smoke/coreutils-minix.tsv sh tools/smoke/feed.sh target/test-coreutils-minix-riscv64.log {{boot-timeout}} qemu-system-riscv64 -machine virt -m 256M -nographic -global virtio-mmio.force-legacy=off -netdev user,id=net0 -device virtio-net-device,netdev=net0 -device virtio-gpu-device -device virtio-keyboard-device -kernel target/riscv64gc-unknown-minix/release/kernel-boot-riscv64
-    @if grep -qE "^(touch|env|ln|coreutils):" target/test-coreutils-minix-riscv64.log; then echo "!! a tool reported an error:"; grep -nE "^(touch|env|ln|coreutils):" target/test-coreutils-minix-riscv64.log; exit 1; fi
-    @echo "coreutils-minix: touch and env ran (riscv64)"
+    @if grep -qE "^(touch|env|ln|coreutils):|^(RM-STILL-THERE|RMR-STILL-THERE|CHMOD-X-BAD|CHMOD-ENOENT-BAD)$" target/test-coreutils-minix-riscv64.log; then echo "!! a tool reported an error:"; grep -nE "^(touch|env|ln|coreutils):|^(RM-STILL-THERE|RMR-STILL-THERE|CHMOD-X-BAD|CHMOD-ENOENT-BAD)$" target/test-coreutils-minix-riscv64.log; exit 1; fi
+    @echo "coreutils-minix: touch, env, rm and chmod ran (riscv64)"
 
 test-coreutils-minix-aarch64 boot-timeout="60": build-aarch64
     @just _assert-qemu-version qemu-system-aarch64
     FEED_SCENARIO=tools/smoke/coreutils-minix.tsv sh tools/smoke/feed.sh target/test-coreutils-minix-aarch64.log {{boot-timeout}} qemu-system-aarch64 -machine virt -cpu cortex-a57 -m 256M -nographic -no-reboot -global virtio-mmio.force-legacy=off -netdev user,id=net0 -device virtio-net-device,netdev=net0 -device virtio-gpu-device -device virtio-keyboard-device -kernel target/aarch64-unknown-minix/release/kernel-boot-aarch64
-    @if grep -qE "^(touch|env|ln|coreutils):" target/test-coreutils-minix-aarch64.log; then echo "!! a tool reported an error:"; grep -nE "^(touch|env|ln|coreutils):" target/test-coreutils-minix-aarch64.log; exit 1; fi
-    @echo "coreutils-minix: touch and env ran (aarch64)"
+    @if grep -qE "^(touch|env|ln|coreutils):|^(RM-STILL-THERE|RMR-STILL-THERE|CHMOD-X-BAD|CHMOD-ENOENT-BAD)$" target/test-coreutils-minix-aarch64.log; then echo "!! a tool reported an error:"; grep -nE "^(touch|env|ln|coreutils):|^(RM-STILL-THERE|RMR-STILL-THERE|CHMOD-X-BAD|CHMOD-ENOENT-BAD)$" target/test-coreutils-minix-aarch64.log; exit 1; fi
+    @echo "coreutils-minix: touch, env, rm and chmod ran (aarch64)"
 
 # The shared anonymous mapping gate: VM allocates the frames at map time, so a
 # store the child makes after the fork is visible in the parent's view.
@@ -690,8 +691,12 @@ test-long-path boot-timeout="30": build-x86
 # That is `tools/smoke/feed.sh`'s transport limitation, not the line discipline: `type_step` writes
 # a byte at a time and refuses to go on unless the whole command came back, so what this gate
 # measures stays the guest's behaviour.
-test-burst arch="x86" boot-timeout="30":
-    @just test-burst-{{arch}} {{boot-timeout}}
+#
+# The dispatcher passes no timeout: each arch recipe's own default is the budget it was measured
+# with. An earlier version forwarded a flat 30 s, which silently overrode riscv64's and aarch64's
+# 60 s and made the gate fail on a slow boot rather than on a dropped line.
+test-burst arch="x86":
+    @just test-burst-{{arch}}
 
 test-burst-x86 boot-timeout="30": build-x86
     mkdir -p target/images/x86_64-pc-minix

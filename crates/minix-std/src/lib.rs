@@ -14,6 +14,7 @@
 
 pub mod font;
 pub mod fs;
+pub mod group;
 pub mod net;
 pub mod passwd;
 pub mod process;

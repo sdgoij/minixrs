@@ -1305,9 +1305,21 @@ pub fn access(path: &[u8], amode: u32) -> Result<(), MinixErr> {
 
 /// Change file permissions (VFS_CHMOD — path at 8/len at 16, mode at 24).
 pub fn chmod(path: &[u8], mode: u32) -> Result<(), MinixErr> {
+    chmod_flags(path, mode, 0)
+}
+
+/// [`chmod`], with the `fchmodat(3)` lookup flags a request can carry.
+///
+/// `AT_SYMLINK_NOFOLLOW` asks VFS to change the link rather than what it names,
+/// which is what `chmod -R` needs on every entry it visits: it stats each one
+/// without following, then chmods it without following, so nothing can be
+/// swapped for a symlink in between. MINIX 3.3.0 has no `fchmodat` at all
+/// (only `chmod`/`fchmod`), so the flag is the port's own field at message
+/// offset 28, next to the mode.
+pub fn chmod_flags(path: &[u8], mode: u32, flags: i32) -> Result<(), MinixErr> {
     #[cfg(not(target_os = "minix"))]
     {
-        let _ = (path, mode, VFS_PROC_NR);
+        let _ = (path, mode, flags, VFS_PROC_NR);
         Err(MinixErr::ENOSYS)
     }
     #[cfg(target_os = "minix")]
@@ -1317,6 +1329,7 @@ pub fn chmod(path: &[u8], mode: u32) -> Result<(), MinixErr> {
         msg_set_u64(&mut msg, OFF_STAT_NAME, path.as_ptr() as u64);
         msg_set_u32(&mut msg, OFF_STAT_NAME_LEN, path.len() as u32);
         msg_set_u32(&mut msg, 24, mode);
+        msg_set_i32(&mut msg, 28, flags);
         let _ = vfs_call(&mut msg)?;
         Ok(())
     }

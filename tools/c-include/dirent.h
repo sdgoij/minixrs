@@ -30,6 +30,10 @@ struct dirent {
 #define DT_SOCK 12
 
 DIR *opendir(const char *name);
+/* A stream over an already-open descriptor, which it takes ownership of. The
+ * port's DIR is the descriptor plus its buffer, so this is `opendir` without
+ * the open (crates/minix-libc). */
+DIR *fdopendir(int fd);
 struct dirent *readdir(DIR *dirp);
 int closedir(DIR *dirp);
 void rewinddir(DIR *dirp);
