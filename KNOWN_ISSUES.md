@@ -158,25 +158,33 @@ the burst-overflow reading in item 37, are under `# Resolved issues`.
 
 ## AArch64 (`[aarch64]`)
 
-60. **A file read twice can return different bytes, so exec of a freshly copied binary traps
-    (2026-11-17, measured).** `coreutils install /bin/echo /e2` then `coreutils md5sum /bin/echo
-    /e2` prints `d811e16d...  /bin/echo` and `a5133cf6...  /e2` on aarch64; x86_64 and riscv64
-    agree. The same image's text copies are byte-identical (a 21-byte `seq 1 10` and a 48 KiB
-    `seq 1 10000` both match), and the first 16 bytes of `/e2` are the correct ELF magic, so the
-    difference is not size alone or the header. Exec'ing the copy then traps before any syscall:
-    `EL0 unhandled exception, EC=0x00 E=0000000001000000 ...`, i.e. an undefined instruction at the
-    entry (`0x01000000`), which is what a text page that differs from the source looks like.
+60. **Reading a freshly written binary can return different bytes, and its exec traps
+    (2026-11-17, measured; intermittent).** `coreutils install /bin/echo /e2` then
+    `coreutils md5sum /bin/echo /e2` printed `d811e16d...  /bin/echo` and `a5133cf6...  /e2` on
+    aarch64, with x86_64 and riscv64 agreeing; exec of `/e2` then trapped before any syscall,
+    `EL0 unhandled exception, EC=0x00 E=0000000001000000 ...` (an undefined instruction at the
+    entry `0x01000000`, i.e. a text page that differs from the source).
 
-    It is independent of `chroot`: the same `/e2` exec traps outside a jail. The most likely shape
-    is a read-path cache incoherence for a file created at image-build time (the two reads are
-    `md5sum`'s and `install`'s), because the source file is never written during the boot. That is
-    a hypothesis from these measurements, not traced to the block or file cache yet.
+    Measurements that narrow it:
+    - It is **independent of `chroot`**: `/e2` exec'd from `/` traps the same way.
+    - It is **not size or the header**: 21-byte (`seq 1 10`), 48 KiB (`seq 1 10000`) and 98 KiB
+      (`seq 1 20000`) text copies all read back byte-identical, and the first 16 bytes of the copy
+      are the correct ELF magic.
+    - The **read** is not uniformly wrong: `coreutils cat /bin/echo | coreutils md5sum` gives the
+      source's `d811...`, while `coreutils cat h1 | coreutils md5sum` of a copy gives `a513...`;
+      so a copy written by `head`/`cat`/`/bin/cp`/`install` reads back wrong to `cat` and `md5sum`.
+    - It is **intermittent**: in one boot `od -An -tx1 -v /bin/echo > d1` and the same dump of a
+      `head` copy wrote identical files (`md5sum d1 d2` matched), while in another boot the
+      `od`-to-pipe hashes differed. So the same commands produce a good and a bad copy in
+      different boots, which points at a race in the write/read cache path, not a fixed byte
+      transform.
 
     Until it is fixed, the `chroot` gate uses the no-op-root form (`chroot / ...`) and the
-    jail-with-a-copied-binary form is absent (item 59). A first step is to find the first offset
-    where two `od`/`md5sum` reads of `/bin/echo` disagree, then follow that read in MFS's block
-    cache.
-    (`coreutils/src/uu/install`, `crates/fs/src/mfs`, `crates/servers/src/vm`)
+    jail-with-a-copied-binary form is absent (item 59); that form passes on x86_64 and riscv64.
+    Next step: reproduce under LLDB (break on `mfs`'s write and the file-cache read) and catch the
+    differing block in the act, rather than guessing at an offset that moves between boots.
+    (`coreutils/src/uu/install`, `crates/fs/src/mfs`, `crates/servers/src/vm`,
+    `crates/kernel/src/`)
 
 ---
 
