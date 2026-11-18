@@ -158,33 +158,44 @@ the burst-overflow reading in item 37, are under `# Resolved issues`.
 
 ## AArch64 (`[aarch64]`)
 
-60. **Reading a freshly written binary can return different bytes, and its exec traps
-    (2026-11-17, measured; intermittent).** `coreutils install /bin/echo /e2` then
-    `coreutils md5sum /bin/echo /e2` printed `d811e16d...  /bin/echo` and `a5133cf6...  /e2` on
-    aarch64, with x86_64 and riscv64 agreeing; exec of `/e2` then trapped before any syscall,
-    `EL0 unhandled exception, EC=0x00 E=0000000001000000 ...` (an undefined instruction at the
-    entry `0x01000000`, i.e. a text page that differs from the source).
+60. **A large read of a file written this boot can return stale bytes, so exec of it traps
+    (2026-11-17, measured; aarch64 only).** Exec of a copied `/bin/echo` traps before any
+    syscall, `EL0 unhandled exception, EC=0x00 E=0000000001000000 ...` (an undefined instruction at
+    the entry `0x01000000`), with x86_64 and riscv64 running the same copy fine. The cause is in
+    the **read** path, not the write or the copy: the stored bytes are correct.
 
-    Measurements that narrow it:
-    - It is **independent of `chroot`**: `/e2` exec'd from `/` traps the same way.
-    - It is **not size or the header**: 21-byte (`seq 1 10`), 48 KiB (`seq 1 10000`) and 98 KiB
-      (`seq 1 20000`) text copies all read back byte-identical, and the first 16 bytes of the copy
-      are the correct ELF magic.
-    - The **read** is not uniformly wrong: `coreutils cat /bin/echo | coreutils md5sum` gives the
-      source's `d811...`, while `coreutils cat h1 | coreutils md5sum` of a copy gives `a513...`;
-      so a copy written by `head`/`cat`/`/bin/cp`/`install` reads back wrong to `cat` and `md5sum`.
-    - It is **intermittent**: in one boot `od -An -tx1 -v /bin/echo > d1` and the same dump of a
-      `head` copy wrote identical files (`md5sum d1 d2` matched), while in another boot the
-      `od`-to-pipe hashes differed. So the same commands produce a good and a bad copy in
-      different boots, which points at a race in the write/read cache path, not a fixed byte
-      transform.
+    What the probes established:
+    - `coreutils seq 1 10000 > f1` then `coreutils od -An -tx1 -v f1 > d1` and
+      `coreutils seq 1 10000 | coreutils od -An -tx1 -v > d2` write **identical** dumps
+      (`md5sum d1 d2` equal), so `f1` on disk is the true `seq` output (`72d4ff27...`).
+    - But `coreutils md5sum f1` reads back `78941700...` in one boot and `1af9c72a...` in another,
+      and `coreutils cat f1 | coreutils md5sum` and `coreutils head -c 48894 f1 | coreutils md5sum`
+      agree with it. So it is not one tool: every reader that issues one large `read(2)` sees the
+      same wrong bytes, and the wrong value varies per boot, which is what stale pages look like.
+      `od`, whose reads are small, sees the correct file.
+    - The pipe is always right: `coreutils seq 1 10000 | coreutils md5sum` gives the true hash, and
+      routing the same bytes through `cat` to a file reproduces the bad read, so it is not `seq`.
+    - Small files never showed it (`seq 1 10`, `seq 1 1000`, `seq 1 5000` read back true), and
+      neither did 16-64 KiB written through `yes | head -c`; `seq 1 8000` (~39 KiB) onward
+      corrupts, so it needs enough data to fill/cross pages but is not a plain size cap.
+    - It is **independent of `chroot`** and of content class: all-zero (`truncate -s 100000`,
+      hash `0019d23b...`) and all-`0xff` files read back correctly.
+
+    So a large `read(2)` of a file written during this boot returns frame contents that were not
+    yet the file's, while the file itself is right; exec maps the same wrong view and runs
+    `0x00000000`. A small read is correct and a large one is not, and MFS serves a large read
+    block by block in `fs_readwrite` with a `SAFECOPYTO` per block (`cum_io` as the grant offset),
+    so the first suspect is that multi-chunk loop and the kernel's `safecopyto` for a chunk after
+    the first, plus an aarch64-only incoherence there (e.g. a physmap alias with different cache
+    attributes, `minix-physmap`). x86_64 and riscv64 serve the same reads correctly.
 
     Until it is fixed, the `chroot` gate uses the no-op-root form (`chroot / ...`) and the
     jail-with-a-copied-binary form is absent (item 59); that form passes on x86_64 and riscv64.
-    Next step: reproduce under LLDB (break on `mfs`'s write and the file-cache read) and catch the
-    differing block in the act, rather than guessing at an offset that moves between boots.
-    (`coreutils/src/uu/install`, `crates/fs/src/mfs`, `crates/servers/src/vm`,
-    `crates/kernel/src/`)
+    Next step: an LLDB run that breaks on the second block's `SAFECOPYTO` in `fs_readwrite` while
+    `md5sum f1` is retried, and compares the block buffer it sends with the same block read by
+    `od`; the wrong hash moving per boot means it must be caught live, not by offset.
+    (`crates/fs/src/mfs`, `crates/servers/src/vfs`, `crates/servers/src/vm`,
+    `crates/kernel/src/`, `crates/arch-aarch64/src/`)
 
 ---
 
