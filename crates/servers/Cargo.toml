@@ -113,5 +113,10 @@ name = "procfs"
 path = "src/bin/procfs.rs"
 test = false
 
+[[bin]]
+name = "memory"
+path = "src/bin/memory.rs"
+test = false
+
 [lints]
 workspace = true

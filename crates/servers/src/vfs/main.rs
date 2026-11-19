@@ -26,6 +26,7 @@ const BOOT_ENDPOINTS: &[i32] = &[
     arch_common::com::PM_PROC_NR,         // 0: Process Manager
     arch_common::com::VFS_PROC_NR,        // 1: Virtual File System (self)
     arch_common::com::RS_PROC_NR,         // 2: Reincarnation Server
+    arch_common::com::MEM_PROC_NR,        // 3: memory driver (/dev/null, /dev/zero)
     arch_common::com::SCHED_PROC_NR,      // 4: Scheduler
     arch_common::com::TTY_PROC_NR,        // 5: Terminal driver
     arch_common::com::DS_PROC_NR,         // 6: Data Store
@@ -128,6 +129,17 @@ unsafe fn sef_cb_init_fresh() -> i32 {
         // (`70fbb3ff8`): it answers with `CDEV_REPLY` after a `SUSPEND`, so VFS hands
         // it requests without waiting. Every other driver still answers inline.
         dmap::mark_cdev_async(5);
+    }
+
+    // Register the memory driver as major 1: `/dev/null` and `/dev/zero`. It answers
+    // synchronously, so its dmap entry stays on the inline protocol (no
+    // `mark_cdev_async`).
+    unsafe {
+        dmap::map_driver(
+            b"mem",
+            arch_common::dmap::MEMORY_MAJOR as i32,
+            arch_common::com::MEM_PROC_NR,
+        );
     }
 
     // Register the tty server as the PTY (major 9) character driver so

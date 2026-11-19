@@ -228,6 +228,10 @@ pub const BOOT_BINS: &[(&str, &str)] = &[
     ("/sbin/devman", "devman"),
     // The procfs server (`.notes/procfs.md`): boot proc 21, mounted at `/proc`.
     ("/sbin/procfs", "procfs"),
+    // The memory driver (`memory` in C's driver set): boot proc 3, major 1, and what
+    // makes `/dev/null` and `/dev/zero` real. Listed right after `procfs` so the two
+    // VTreeFS/standalone servers stay together in the image order.
+    ("/sbin/memory", "memory"),
     ("/sbin/fb", "fb"),
     ("/sbin/input", "input"),
     // `/sbin/wlserver` is the Wayland server (.notes/wayland.md Phase 1): boot proc 20,
@@ -319,6 +323,7 @@ pub const INITRAMFS_BINS: &[&str] = &[
     "/sbin/pfs",
     "/sbin/devman",
     "/sbin/procfs",
+    "/sbin/memory",
     "/sbin/tty",
     "/sbin/fb",
     "/sbin/input",
@@ -448,6 +453,9 @@ pub const DEVICES: &[(&str, u32, u32, u32)] = &[
     // *directory*, and last for the same reason. Render nodes take minor 128 and up by
     // DRM's convention, so a client looking for one finds this where it expects it.
     ("/dev/dri/renderD128", 0o020666, 145, 128), // char device, major=145 (drm), minor=128
+    // Last for the same reason as /dev/uds: the layout tests pin the inode numbers of the
+    // nodes above it.
+    ("/dev/zero", 0o020666, 1, 5), // char device, major=1 (mem), minor=5
 ];
 
 #[cfg(test)]

@@ -213,6 +213,18 @@ pub extern "C" fn minix_server_procfs() -> i32 {
     0
 }
 
+/// The memory driver, `/dev/null` and `/dev/zero` (major 1).
+///
+/// `BOOT_IMAGE` names `memory` at `MEM_PROC_NR` on every target, and VFS maps major 1 to it,
+/// so a client that opens `/dev/null` here has to find an instance answering. The driver is
+/// synchronous and has no startup work, so where it sits in the list does not matter; it is
+/// here next to the other device servers.
+#[unsafe(no_mangle)]
+pub extern "C" fn minix_server_memory() -> i32 {
+    servers::memory::memory_server_main();
+    0
+}
+
 /// The framebuffer server: `/dev/fb` (major 19, minor 0 in the boot image).
 ///
 /// On wasm its backend is the host's canvas rather than a device on a bus, so the surface is

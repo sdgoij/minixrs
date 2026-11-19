@@ -121,6 +121,9 @@ export const SYSTEM_SPECS = [
   // VFS's init mounts `/proc` here too (`mount_procfs`, before `mount_devman`); without an
   // instance the mount waits on a peer that never answers and VFS never reaches devman.
   { slot: 21, entry: 'minix_server_procfs', label: 'procfs' },
+  // The memory driver, `/dev/null` and `/dev/zero` (major 1). VFS maps the major on every
+  // target, so a client that opens `/dev/null` needs an instance here too.
+  { slot: 3, entry: 'minix_server_memory', label: 'memory' },
   { slot: 1, entry: 'minix_server_vfs', label: 'vfs' },
   { slot: 16, entry: 'minix_server_fb', label: 'fb' },
   { slot: 17, entry: 'minix_server_input', label: 'input' },

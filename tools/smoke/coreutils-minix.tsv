@@ -45,6 +45,19 @@ coreutils env -u HOME coreutils echo ENV-UNSET-OK	ENV-UNSET-OK
 # which an exec preserves, and a blocked mask.
 coreutils env --ignore-signal=PIPE coreutils echo ENV-IGNORE-OK	ENV-IGNORE-OK
 coreutils env --block-signal=PIPE coreutils echo ENV-BLOCK-OK	ENV-BLOCK-OK
+# `nohup` ignores SIGHUP, replaces stdin with `/dev/null` and appends to `nohup.out`
+# when stdout is the console. It is also the one applet that creates a file with
+# `O_APPEND`, which the std PAL cannot do (`KNOWN_ISSUES.md` item 71); its own minix
+# open arm is what makes this work, so this is that arm's gate too. Note that
+# `nohup` prints its notice as `nohup: ...`, so it is deliberately absent from the
+# recipe's "a tool reported an error" regex.
+coreutils rm -f nohup.out	
+coreutils nohup coreutils echo NOHUP-OK	
+coreutils cat nohup.out	NOHUP-OK
+# With stdout already a file there is no notice and no redirect: the command's
+# output is the caller's redirection.
+coreutils nohup coreutils echo NH-PIPE-OK > nhpiped	
+coreutils cat nhpiped	NH-PIPE-OK
 # `rm` and `chmod`, the two uucore's safe-traversal arm unblocked (item 52).
 # Nothing here asserts a message: the shell runs as root, so a mode change has
 # no observable *effect*, and the markers are what the recipe's log check reads.

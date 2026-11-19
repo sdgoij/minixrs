@@ -443,6 +443,27 @@ pub fn do_creat() -> i32 {
         }
     }
 
+    // Character devices have to reach their driver from this entry point too. C's
+    // `common_open` does the same work for both, and a filp whose `filp_dev` is left at 0
+    // routes every later read, write, ioctl and close to major 0, the root filesystem.
+    // That is how `> /dev/null` used to succeed while discarding the write at a server
+    // that had nothing to do with the device.
+    let mut dev = unsafe { (*vp).v_dev };
+    let mut reply_flags = 0u32;
+    if unsafe { (*vp).v_mode & S_IFMT } == S_IFCHR {
+        let r = unsafe { crate::vfs::device::cdev_open(dev, open_flags as i32, &mut reply_flags) };
+        if r < 0 {
+            fp.fp_filp[fd as usize] = -1;
+            unsafe { mount::put_vnode(vp) };
+            return r;
+        }
+        dev = r as u32;
+    }
+    if unsafe { (*vp).v_mode & S_IFMT } == S_IFBLK {
+        let bfs_e = block_fs_endpoint(unsafe { (*vp).v_dev });
+        unsafe { (*vp).v_bfs_e = bfs_e };
+    }
+
     // Allocate a filp entry and wire up fd → filp → vnode.
     let filp_idx = unsafe { filedes::alloc_filp() };
     if filp_idx < 0 {
@@ -457,6 +478,12 @@ pub fn do_creat() -> i32 {
         (*filp_arr.add(filp_idx as usize)).filp_vno = vp;
         (*filp_arr.add(filp_idx as usize)).filp_flags = open_flags;
         (*filp_arr.add(filp_idx as usize)).filp_mode = mode_bits;
+        (*filp_arr.add(filp_idx as usize)).filp_dev = dev;
+        (*filp_arr.add(filp_idx as usize)).filp_dgram = if reply_flags & CDEV_DGRAM_OPEN != 0 {
+            CDEV_DGRAM
+        } else {
+            0
+        };
     }
     fp.fp_filp[fd as usize] = filp_idx;
     // As in `do_open`: the reference from `eat_path` belongs to the filp now.

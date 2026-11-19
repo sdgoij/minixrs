@@ -498,6 +498,9 @@ const specs = [
   // without an instance the mount's `REQ_READSUPER` waits on a peer that never answers and VFS
   // never reaches devman. Spawned before VFS for the same reason devman is.
   { slot: 21, entry: 'minix_server_procfs', label: 'procfs' },
+  // The memory driver (`MEM_PROC_NR`), `/dev/null` and `/dev/zero` on major 1. VFS maps the
+  // major on every target, so a client opening `/dev/null` needs an instance answering here.
+  { slot: 3, entry: 'minix_server_memory', label: 'memory' },
   // VFS last: its init calls `mount_root`, which asks MFS for the root superblock,
   // so MFS has to be alive and answering first.
   { slot: 1, entry: 'minix_server_vfs', label: 'vfs' },

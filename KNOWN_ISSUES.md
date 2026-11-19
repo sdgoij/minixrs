@@ -177,40 +177,22 @@ are arch-specific, `[env]` is tooling/platform, not kernel.
     `vtreefs::delete_inode`/`put_inode`, then add C's first pass to `construct_pid_dirs`.
     (`crates/libs/src/vtreefs/mod.rs`, `crates/fs/src/procfs/tree.rs`)
 
-69. **Opening a character device with `O_CREAT` skips `cdev_open`, so its I/O goes to
-    major 0 and is silently discarded (found 2026-11-19).** `do_creat` (`crates/servers/src/vfs/call.rs`)
-    resolves the existing vnode and wires a filp, but C's `common_open` also does the
-    character-device open, and this one does not: it never calls `cdev_open` and never sets
-    `filp_dev`, which stays at `Filp::default`'s 0. Every later read, write, ioctl and close
-    on that descriptor therefore goes to `cdev_io(dev = 0)`, and major 0 is the root
-    filesystem, so the operation is answered by the wrong server. Measured on x86_64:
-    `coreutils echo x > /dev/tty00` exits 0 (major 3 has no driver at all, so it should be
-    `ENXIO`), while `coreutils cat /dev/null` (no `O_CREAT`, so `do_open`) correctly fails
-    `ENXIO`. The silent-success half is the dangerous one: a program that writes to a device
-    opened this way cannot tell that nothing was written.
+71. **The std PAL drops `O_CREAT` whenever append is set, so no appender can create its
+    file (found 2026-11-19).** `rust/library/std/src/sys/pal/minix/fs.rs`'s
+    `get_creation_mode` returns `0` for any `(_, true)` pair, so
+    `OpenOptions::new().create(true).append(true)` opens with `O_APPEND` and no `O_CREAT`:
+    `minix_std::fs::open` then sends `VFS_OPEN` instead of `VFS_CREAT` and a file that does
+    not exist yet answers `ENOENT`. Reproducer: `coreutils seq 1 2 > src.txt; coreutils tee
+    -a app.txt < src.txt` (the shell has no `<`, so use a pipe) prints `tee: app.txt: No
+    such file or directory`. Upstream's unix `get_creation_mode` (`sys/fs/unix.rs`) allows
+    the combination and returns `O_CREAT`; the minix copy should mirror that three-arm
+    match, erroring only for `truncate && append`.
 
-    The fix is to give `do_creat` the same `S_IFCHR` block `do_open` has, including the
-    filp's `filp_dev`, and to do it in the same place. Its `forbidden` check already runs
-    for the existing-file case, so the block sits after that. That will make
-    `> /dev/null` fail until item 70's driver exists, which is the honest order.
-    (`crates/servers/src/vfs/call.rs`)
-
-70. **There is no memory driver, so `/dev/null` cannot be read and `/dev/zero` does not
-    exist (found 2026-11-19).** `crates/drivers/src/storage/memory.rs` is a port of C's
-    `memory` driver and nothing loads it: there is no `crates/servers/src/bin/memory.rs`, no
-    `/sbin/memory` in `BOOT_PROCS_ALL`, and VFS maps no major for `MEMORY_MAJOR` (1).
-    `com.rs` reserves `MEM_PROC_NR = 3` and `kernel/src/table.rs` names that slot `memory`,
-    so the slot is waiting for the server. Consequences measured in the guest: `cat
-    /dev/null` fails `ENXIO`, `/dev/zero` is `ENOENT`, and `nohup` cannot redirect stdin
-    (`Cannot replace STDIN: No such device or address`). `nohup` is the first applet blocked
-    on it and is deliberately not in `feat_minix` yet.
-
-    The work is: a server binary over `storage::memory`'s device loop, the boot-image
-    entries (manifest, the boot suite's process lists, the wasm front ends, since `BOOT_IMAGE`
-    is shared), and `dmap::map_driver(b"mem", MEMORY_MAJOR, MEM_PROC_NR)` in VFS's init.
-    It changes a boot configuration, so it waits for a decision rather than riding on an
-    applet. (`crates/drivers/src/storage/memory.rs`, `crates/boot-image/src/manifest.rs`,
-    `crates/servers/src/vfs/main.rs`)
+    It is recorded rather than fixed because the std PAL is compiled into the toolchain:
+    a change here needs `just bootstrap` and `just verify-stage1` before anything can
+    observe it, which is a toolchain batch, not an applet. `nohup` (item 70) carries a
+    minix arm that calls `rustix::fs::open` with the flags directly; remove that arm when
+    the PAL is fixed and the fixture still passes. (`rust/library/std/src/sys/pal/minix/fs.rs`)
 
 ---
 
@@ -2658,6 +2640,68 @@ the burst-overflow reading in item 37, are under `# Resolved issues`.
     (`libc/src/minix/process.rs`, `crates/minix-libc/src/c_sys.rs`,
     `coreutils/Cargo.toml`, `coreutils/src/uu/test/src/test.rs`,
     `coreutils/src/uu/test/Cargo.toml`, `tools/smoke/coreutils-minix.tsv`, `Justfile`)
+
+69. **~~Opening a character device with `O_CREAT` skipped `cdev_open`~~: FIXED
+    (2026-11-19).** `do_creat` now runs the same `S_IFCHR` block as `do_open`: `cdev_open`,
+    the clone minor in `filp_dev`, `filp_dgram`, and the `S_IFBLK` block beside it. It sits
+    after the existing-file permission and truncation checks and before the filp, so every
+    later read, write, ioctl and close reaches the device's own driver instead of major 0.
+    Measured after: `coreutils echo X > /dev/tty00` fails `ENXIO` (err 6) instead of
+    succeeding, and `> /dev/null` reaches the memory driver. The guest also shows the
+    difference this exposed: `> /dev/tty00` was reporting success and discarding the bytes.
+    (`crates/servers/src/vfs/call.rs`)
+
+70. **~~There is no memory driver~~: `/sbin/memory` serves `/dev/null` and `/dev/zero`
+    (2026-11-19).** `crates/servers/src/memory.rs` is a CDEV server over
+    `drivers::storage::memory`, at `MEM_PROC_NR` (3): `BOOT_PROCS_ALL` and
+    `INITRAMFS_BINS` name it, the boot suite's four process lists carry it, VFS maps major 1
+    (`MEMORY_MAJOR`) to it, and both wasm harnesses spawn it at slot 3. Its protocol is the
+    synchronous inline one VFS already uses for `net`/`input`: a read's bytes at payload[0]
+    with the count as the reply, a write's chunk at `CDEV_BUF_OFF`. `CDEV_SELECT` answers
+    both ops ready; `CDEV_IOCTL` is `EINVAL`, because VFS treats an unrouted ioctl as
+    success and a zero here would claim `/dev/null` is a terminal.
+
+    `/dev/mem` and `/dev/kmem` answer `ENXIO` at open. `memory::mem_read` casts the offset
+    straight to a pointer, which is only meaningful where the driver's VA equals the
+    physical one; C maps the pages with `vm_map_phys` and the port has no such call, so
+    serving them would hand a user process a wild read.
+
+    `/dev/zero` is a node now. It is last in `DEVICES`, like `/dev/uds` and the render node,
+    so the inode numbers the layout tests pin do not move; the inode-bitmap test's count
+    grew by the one node.
+
+    Measured in the guest: `cat /dev/null` exits immediately, `dd if=/dev/zero | od` reads
+    zeros, writes to either are taken, and `stat /dev/zero` reports a character device.
+    `nohup` followed (item 72). Gates: `just test-arches`, `just test-boot` on all three
+    arches, `just image` on all three, `sh tools/wasm-verify.sh` (83/83 boot, 22/22 run,
+    46/46 page), `just test-coreutils-minix` on all three (146 steps).
+    (`crates/servers/src/memory.rs`, `crates/servers/src/bin/memory.rs`,
+    `crates/servers/src/vfs/main.rs`, `crates/boot-image/src/manifest.rs`,
+    `crates/boot-image/src/minixfs.rs`, `crates/kernel-boot/src/{lib,boot_test}.rs`,
+    `crates/kernel/src/tests.rs`, `crates/wasm-servers/src/lib.rs`,
+    `tools/wasm-servers/boot.cjs`, `tools/wasm-browser/host.js`)
+
+72. **~~The libc and rustix forks gave the minix `O_*` flags a different set of values
+    from the port's ABI~~: ALIGNED, and `nohup` is in `feat_minix` (2026-11-19).**
+    `tools/c-include/fcntl.h`, `minix_std` and VFS all use one set (`O_APPEND` 0o10,
+    `O_CREAT` 0o1000, `O_TRUNC` 0o2000, `O_EXCL` 0o4000, `O_NONBLOCK` 0o4). The libc fork
+    and `rustix/src/backend/minix/c.rs` still carried MINIX 3.3.0's header values
+    (`O_CREAT` 0o100, `O_TRUNC` 0o1000, `O_APPEND` 0o2000), which `minix_std::fs::open`
+    reads to choose between `VFS_OPEN` and `VFS_CREAT`. The visible effect was
+    `rustix::fs::open(path, CREATE|APPEND)` answering `ENOENT` because `O_CREAT` was not
+    recognised at all. Both forks now carry the port's values, with the non-kernel flags
+    (`O_DIRECTORY`, `O_NOFOLLOW`, ...) on distinct bits.
+
+    `nohup` is in `feat_minix` and works: it opens `/dev/null` for stdin (item 70), ignores
+    `SIGHUP`, and appends to `nohup.out` when stdout is the console. It keeps one minix arm
+    of its own, calling `rustix::fs::open` for the nohup file, because the std PAL still
+    drops `O_CREAT` for append (item 71); remove that arm when the PAL is fixed.
+
+    The fixture gained the `nohup` steps (146 steps). `tee -a` is still broken by item 71
+    and is not in the fixture.
+    (`libc/src/minix/fs.rs`, `rustix/src/backend/minix/c.rs`,
+    `coreutils/Cargo.toml`, `coreutils/src/uu/nohup/`,
+    `tools/smoke/coreutils-minix.tsv`, `Justfile`)
 
 ---
 

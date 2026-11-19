@@ -15,6 +15,7 @@ pub mod fb;
 #[cfg(target_os = "minix")]
 pub mod input;
 pub mod ipc;
+pub mod memory;
 pub mod mutex;
 pub mod net;
 pub mod pm;
