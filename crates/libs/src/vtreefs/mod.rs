@@ -120,8 +120,30 @@ unsafe impl Sync for HookStorage {}
 /// server — no data races).
 static INODE_TABLE: InodeTable = InodeTable(UnsafeCell::new([ZERO_INODE; MAX_INODES]));
 
-/// Number of allocated inodes (root = 1).
+/// One past the highest id ever handed out (the root is id 0, so this starts at 1).
+///
+/// It is a high-water mark, not the number in use: a freed slot goes on [`FREE_INODES`]
+/// and is handed out again from there, the way C's `unused_inodes` list works.
 static INODE_COUNT: AtomicU32 = AtomicU32::new(0);
+
+/// Slots `delete_inode` freed, reused before [`INODE_COUNT`] grows.
+///
+/// Without this the table could only ever fill: a directory tree that creates and removes
+/// entries (procfs's per-PID directories) would walk the id space to `MAX_INODES` and stay
+/// there. A slot on this list holds no inode data, so nothing can reach it by name, index
+/// or id.
+struct FreeList(UnsafeCell<([u32; MAX_INODES], usize)>);
+unsafe impl Sync for FreeList {}
+impl FreeList {
+    const fn new() -> Self {
+        Self(UnsafeCell::new(([0; MAX_INODES], 0)))
+    }
+    fn get(&self) -> *mut ([u32; MAX_INODES], usize) {
+        self.0.get()
+    }
+}
+
+static FREE_INODES: FreeList = FreeList::new();
 
 /// Registered hook table.
 static HOOKS: HookStorage = HookStorage(UnsafeCell::new(None));
@@ -250,6 +272,7 @@ pub fn vtreefs_init(hooks: FsHooks, nr_inodes: u32, root_stat: InodeStat) -> i32
     let _ = nr_inodes.min(MAX_INODES as u32);
 
     INODE_COUNT.store(1, Ordering::Relaxed);
+    unsafe { (*FREE_INODES.get()).1 = 0 };
     FS_MOUNTED.store(false, Ordering::Relaxed);
     unsafe {
         (*get_table())[0] = INode {
@@ -280,13 +303,27 @@ pub fn vtreefs_init(hooks: FsHooks, nr_inodes: u32, root_stat: InodeStat) -> i32
 /// Allocate a new inode slot, link it under `parent_id`, and return the
 /// new inode ID. `u32::MAX` means the table is full.
 pub fn add_inode(parent_id: u32, name: &str, index: i32, stat: &InodeStat, cbdata: CbData) -> u32 {
-    let count = INODE_COUNT.load(Ordering::Relaxed) as usize;
-    if count >= MAX_INODES {
-        return u32::MAX;
-    }
-
-    let id = count as u32;
-    INODE_COUNT.store(count as u32 + 1, Ordering::Relaxed);
+    // A slot a deletion returned is used again before the high-water mark grows.
+    let reused = unsafe {
+        let (slots, len) = &mut *FREE_INODES.get();
+        if *len > 0 {
+            *len -= 1;
+            Some(slots[*len])
+        } else {
+            None
+        }
+    };
+    let id = match reused {
+        Some(id) => id,
+        None => {
+            let count = INODE_COUNT.load(Ordering::Relaxed) as usize;
+            if count >= MAX_INODES {
+                return u32::MAX;
+            }
+            INODE_COUNT.store(count as u32 + 1, Ordering::Relaxed);
+            count as u32
+        }
+    };
 
     unsafe {
         let table = &mut *get_table();
@@ -340,26 +377,54 @@ pub fn ref_inode(id: u32) {
 }
 
 /// Decrease an inode's reference count by `count`. A deleted inode whose
-/// count reaches zero is freed for real.
+/// count reaches zero is freed for real, and its slot returns to the free list.
 pub fn put_inode(id: u32, count: u32) {
+    if id as usize >= MAX_INODES {
+        return;
+    }
     unsafe {
         let node = &mut (*get_table())[id as usize];
         node.count = node.count.saturating_sub(count);
         if node.count == 0 && node.flags & I_DELETED != 0 {
-            delete_inode(id);
+            free_inode_slot(id);
         }
     }
 }
 
-/// Mark an inode as deleted and remove it (and its descendants) from the
-/// tree. The slot is zeroed immediately; callers must not hold references
-/// they intend to use afterwards.
+/// Return a deleted, unreferenced inode's slot to the free list.
+///
+/// # Safety
+///
+/// The caller must have established that no reference to `id` exists: the slot is cleared
+/// and will be handed out again by the next `add_inode`.
+unsafe fn free_inode_slot(id: u32) {
+    unsafe {
+        (*get_table())[id as usize] = ZERO_INODE;
+        let (slots, len) = &mut *FREE_INODES.get();
+        if *len < MAX_INODES {
+            slots[*len] = id;
+            *len += 1;
+        }
+    }
+}
+
+/// Unlink an inode (and its descendants) from the tree and mark it deleted.
+///
+/// The name, index and children are gone immediately, so nothing can find it; the slot is
+/// zeroed only once its reference count reaches zero (`put_inode`), because VFS may still
+/// be holding the vnode it resolved. C's `delete_inode` does the same with `I_DELETED` and
+/// `free_inode`.
 pub fn delete_inode(id: u32) -> i32 {
     if id == 0 || id as usize >= MAX_INODES {
         return -EINVAL;
     }
 
     unsafe {
+        // Already unlinked by an earlier call; there is nothing left to do.
+        if (*get_table())[id as usize].flags & I_DELETED != 0 {
+            return OK;
+        }
+
         let table = &mut *get_table();
 
         // Recursively delete children first.
@@ -383,8 +448,16 @@ pub fn delete_inode(id: u32) -> i32 {
             }
         }
 
-        table[id as usize] = ZERO_INODE;
-        INODE_COUNT.fetch_sub(1, Ordering::Relaxed);
+        // Mark it, and drop what would otherwise be reachable through the (now unlinked)
+        // id: a deleted inode is found by neither name nor index. The slot itself waits for
+        // the last reference.
+        table[id as usize].flags |= I_DELETED;
+        table[id as usize].first_child = None;
+        table[id as usize].next_sibling = None;
+
+        if table[id as usize].count == 0 {
+            free_inode_slot(id);
+        }
     }
 
     OK
@@ -1272,6 +1345,49 @@ mod tests {
             off += reclen;
         }
         n
+    }
+
+    /// `delete_inode` unlinks at once, but a slot VFS still holds must not be handed to a
+    /// new inode: the name is gone and the inode is flagged, and only the last `put_inode`
+    /// returns the slot to the free list.
+    #[test]
+    fn deletion_unlinks_at_once_and_frees_after_the_last_reference() {
+        vtreefs_init(null_hooks(), 64, test_root_stat());
+        let file = InodeStat {
+            mode: I_REGULAR as u32 | 0o444,
+            ..test_root_stat()
+        };
+        let id = add_inode(0, "doomed", NO_INDEX, &file, 0);
+        ref_inode(id); // VFS resolved it and has not put it back yet
+
+        assert_eq!(delete_inode(id), OK);
+        assert!(find_inode(0, "doomed").is_none(), "unfindable while held");
+        assert_eq!(nth_child(0, 0), None, "unenumerable while held");
+        assert!(get_inode(id).flags & I_DELETED != 0);
+
+        // A new inode cannot get the held slot.
+        let other = add_inode(0, "other", NO_INDEX, &file, 0);
+        assert_ne!(other, id);
+
+        // The holder releases it, and the slot is reused.
+        put_inode(id, 1);
+        let again = add_inode(0, "again", NO_INDEX, &file, 0);
+        assert_eq!(again, id, "the freed slot is handed out again");
+        assert!(find_inode(0, "again").is_some());
+    }
+
+    /// An unreferenced inode is freed by `delete_inode` itself.
+    #[test]
+    fn an_unreferenced_deletion_frees_its_slot_at_once() {
+        vtreefs_init(null_hooks(), 64, test_root_stat());
+        let file = InodeStat {
+            mode: I_REGULAR as u32 | 0o444,
+            ..test_root_stat()
+        };
+        let id = add_inode(0, "gone", NO_INDEX, &file, 0);
+        assert_eq!(delete_inode(id), OK);
+        let next = add_inode(0, "next", NO_INDEX, &file, 0);
+        assert_eq!(next, id);
     }
 
     /// A directory's indexed children are enumerated by index, once each, with an empty index

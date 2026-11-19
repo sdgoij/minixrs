@@ -110,6 +110,11 @@ pub fn set_table(entries: &[ProcTabEntry]) {
 }
 
 /// The inode of the directory named after `pid`, if it exists under `parent`.
+///
+/// Used by the tests and by a caller that already has a pid; `construct_pid_dirs` looks
+/// directories up by slot instead, because a reused slot's old directory carries the wrong
+/// name and must not be found by it.
+#[cfg(test)]
 fn find_pid_dir(parent: u32, pid: i32) -> Option<u32> {
     let mut name = [0u8; 12];
     let s = format_pid(&mut name, pid);
@@ -136,19 +141,43 @@ fn format_pid(buf: &mut [u8; 12], pid: i32) -> &str {
 
 /// Regenerate the set of PID directories in the root.
 ///
-/// C's `tree.c` does the same on `getdents` of the root, so a process that starts after the mount
-/// still appears. An entry that is already there is left alone: adding it twice would give the
-/// root two children with one name.
+/// C's `tree.c` does the same on `getdents` of the root, so a process that starts after the
+/// mount still appears. It runs in two passes, as C does (`tree.c:213`): a directory whose
+/// slot is free, or whose name is no longer the pid that slot holds, describes a process
+/// that is gone, and it is deleted before anything is added. A slot reused by a new pid
+/// would otherwise briefly have two directories with one index, and the name guard would
+/// hand the new process the old directory, whose index is the *old* slot.
 pub fn construct_pid_dirs() {
     let root = libs::vtreefs::get_root_inode();
+
+    // First pass: delete stale directories.
+    for slot in 0..NR_PROCS as i32 {
+        let Some(node) = libs::vtreefs::get_inode_by_index(root, slot) else {
+            continue;
+        };
+        if !slot_in_use(slot) {
+            libs::vtreefs::delete_inode(node);
+            continue;
+        }
+        let mut name_buf = [0u8; 12];
+        let want = format_pid(&mut name_buf, entry(slot).pid);
+        // The owner is not compared: every PID directory in this port is created with
+        // SUPER_USER, so there is nothing an owner change could alter (C reads PM's euid
+        // here, `tree.c:261`).
+        if libs::vtreefs::get_inode_name(node) != want {
+            libs::vtreefs::delete_inode(node);
+        }
+    }
+
+    // Second pass: add what is missing.
     for slot in 0..NR_PROCS as i32 {
         if !slot_in_use(slot) {
             continue;
         }
-        let pid = entry(slot).pid;
-        if find_pid_dir(root, pid).is_some() {
+        if libs::vtreefs::get_inode_by_index(root, slot).is_some() {
             continue;
         }
+        let pid = entry(slot).pid;
         let mut name_buf = [0u8; 12];
         let name = format_pid(&mut name_buf, pid);
         let stat = libs::vtreefs::InodeStat {
@@ -349,6 +378,46 @@ mod tests {
         let status = libs::vtreefs::get_inode_by_index(dir, 0).expect("status is indexed");
         assert_eq!(libs::vtreefs::get_inode_name(status), "status");
         assert_eq!(libs::vtreefs::get_inode(dir).indexed, 1);
+    }
+
+    #[test]
+    fn a_freed_slot_loses_its_directory() {
+        init();
+        set_table(&[live(42, "init")]);
+        construct_pid_dirs();
+        let root = libs::vtreefs::get_root_inode();
+        assert!(find_pid_dir(root, 42).is_some());
+
+        // The process exits: the slot is free on the next read of the root.
+        set_table(&[]);
+        construct_pid_dirs();
+        assert!(find_pid_dir(root, 42).is_none(), "a dead slot's directory goes");
+        assert!(libs::vtreefs::get_inode_by_index(root, 0).is_none());
+    }
+
+    #[test]
+    fn a_reused_slot_rebuilds_its_directory() {
+        // A slot given to a different pid must not keep the old directory: it carries the
+        // old slot in its index, and `construct_pid_entries` reads that index as the slot,
+        // so `status` would describe the previous process.
+        init();
+        set_table(&[live(42, "init")]);
+        construct_pid_dirs();
+        let root = libs::vtreefs::get_root_inode();
+        assert!(find_pid_dir(root, 42).is_some());
+
+        set_table(&[live(77, "shell")]);
+        construct_pid_dirs();
+        assert!(find_pid_dir(root, 42).is_none(), "the old name goes away");
+        let new = find_pid_dir(root, 77).expect("the new pid gets its own directory");
+        assert_eq!(libs::vtreefs::get_inode(new).index, 0);
+
+        construct_pid_entries(new);
+        let status = libs::vtreefs::find_inode(new, "status").expect("status exists");
+        let mut out = [0u8; 256];
+        let n = read_hook(status, 0, &mut out);
+        let text = core::str::from_utf8(&out[..n]).unwrap();
+        assert!(text.contains("Pid:    77"), "status names the new process: {text}");
     }
 
     #[test]

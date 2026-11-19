@@ -152,31 +152,6 @@ are arch-specific, `[env]` is tooling/platform, not kernel.
     needs (a second VFS thread, or VFS answering the ioctl itself as it does for the socket ones)
     is a decision for whoever first needs a file-backed block device.
 
-66. **A reused process slot leaves its old `/proc/<pid>` directory behind (found
-    2026-11-19).** `construct_pid_dirs` only adds: it checks `find_pid_dir(root, newpid)`
-    and, when the name is unknown, adds a directory whose inode index is the slot. C
-    instead runs two passes (`tree.c:213`): delete the directory of a slot that is no
-    longer in use or whose pid or owner changed, then add what is missing. Two defects
-    follow from the missing first pass.
-
-    The stale directory is unreachable, because `getdents` walks the indexed range and
-    `get_inode_by_index` returns one inode per index, but it still occupies an inode. With
-    `NR_INODES` at 144, a guest that recycles slots all day can fill the table.
-
-    Worse, the name guard can hand a *new* process the old directory: if pid 100 is
-    reused in a different slot while the old `/proc/100` inode survives, the guard finds
-    it by name and skips the add, so the directory's index (the old slot) does not match
-    the slot the process is in. `construct_pid_entries` reads the parent's index as the
-    process slot, so `/proc/100/status` would report the wrong process.
-
-    Fixing it needs reference-safe deletion first. `vtreefs::delete_inode` currently
-    zeroes the slot immediately; C marks `I_DELETED` and frees only when the reference
-    count reaches zero, and nothing in the port ever sets the flag. Dropping a directory
-    that VFS holds (a process with `/proc/<pid>` as its cwd, say) would then reuse that
-    inode under the holder. So the order is: implement deferred deletion in
-    `vtreefs::delete_inode`/`put_inode`, then add C's first pass to `construct_pid_dirs`.
-    (`crates/libs/src/vtreefs/mod.rs`, `crates/fs/src/procfs/tree.rs`)
-
 71. **The std PAL drops `O_CREAT` whenever append is set, so no appender can create its
     file (found 2026-11-19).** `rust/library/std/src/sys/pal/minix/fs.rs`'s
     `get_creation_mode` returns `0` for any `(_, true)` pair, so
@@ -2575,6 +2550,35 @@ the burst-overflow reading in item 37, are under `# Resolved issues`.
     (`crates/libs/src/vtreefs/mod.rs`, `crates/fs/src/procfs/main.rs`,
     `crates/fs/src/procfs/tree.rs`, `crates/userland/src/procfsprobe.rs`,
     `tools/smoke/procfs.tsv`, `Justfile`)
+
+66. **~~A reused process slot leaves its old `/proc/<pid>` directory behind~~: deletion is
+    deferred and the PID directories are rebuilt in two passes (2026-11-19).**
+    `vtreefs::delete_inode` freed the slot at once, so nothing could safely drop a
+    directory VFS still held, and `construct_pid_dirs` only ever added, so a reused slot
+    kept a stale `/proc/<pid>` inode and a reused pid could be handed the old directory by
+    the name guard.
+
+    `delete_inode` now marks the inode `I_DELETED`, clears its child and sibling links so
+    neither name nor index reaches it, and defers the slot to `put_inode` when the
+    reference count hits zero. A slot freed on the spot (count already zero) goes back
+    through the new `free_inode_slot`, and `add_inode` reuses a free slot before it raises
+    `INODE_COUNT`, which is now a high-water mark over a free list reset at
+    `vtreefs_init`.
+
+    `construct_pid_dirs` is C's two passes (`tree.c:213`): first delete a directory whose
+    slot is not in use or whose name no longer matches `entry(slot).pid`, then add what is
+    missing, keyed by `get_inode_by_index(root, slot)` rather than by name, so a reused
+    pid gets a directory under the *new* slot.
+
+    Host tests pin the behaviour:
+    `deletion_unlinks_at_once_and_frees_after_the_last_reference` and
+    `an_unreferenced_deletion_frees_its_slot_at_once` (`crates/libs/src/vtreefs/mod.rs`),
+    plus `a_freed_slot_loses_its_directory` and `a_reused_slot_rebuilds_its_directory`
+    (`crates/fs/src/procfs/tree.rs`, the last asserting `/proc/<newpid>/status` names the
+    new pid). Gates: `cargo test --workspace`, `cargo clippy --all-targets -- -D warnings`,
+    `just check`, `just test-arches` (test-procfs on all three arches),
+    `sh tools/wasm-verify.sh`, `just test-linux`.
+    (`crates/libs/src/vtreefs/mod.rs`, `crates/fs/src/procfs/tree.rs`)
 
 67. **~~The wasm system trapped on `cat /proc/hz`~~: a file handler's kind is the top bit
     of its callback data (2026-11-19).** `cat /proc/hz` in the browser system stopped the
