@@ -207,13 +207,27 @@ the burst-overflow reading in item 37, are under `# Resolved issues`.
     zero-filled placeholder mapped at the VA; `start_file_page` maps nothing there any more
     (the frame lives in VM's `host_va`), so that comment is stale.
 
-    Next step. Read VM's `POOL` (a BSS static) at the wedge to see whether a `Job::Page`
-    for `(ep, page_addr)` is still `busy` and whether its `PageState` matches the wedged
-    page. If it is, the question is why VFS never answered that FDIO (the reply goes through
-    `vm_call_reply` in VFS); if it is not, the fault is not parking on a fill and
+    Status at HEAD (2026-11-19, after item 64 added `uname` and `arch`). The reproducer no
+    longer hangs: the heavy scenario (the `ls` block, `cp`, `cp -R`, then `du`) and the
+    two-boot gate passed six times in a row, where the same sequence hung every time before
+    the multicall grew. The evidence above is from that earlier binary, and the fault address
+    `0x113d7b4` is specific to its layout (adding applets moves `.text`), so this is an
+    intermittent, layout-sensitive defect rather than one that is fixed. The fixture still
+    runs `du` first, because a later multicall can move the window back. Layout dependence
+    does not fit a lost reply well (that would not care where `.text` sits), so a
+    wrong-content fill from a cache-key collision, which would move where the garbage jump
+    lands, is the alternative to keep in view.
+
+    Probe, prepared but not run because no wedged guest was available. VM's `NEXT_REQID` is at
+    VA `0x10124a0` and `POOL` at `0x10124a8` (both in the server's `.data`); the physical
+    address is the `loaded phys` from the boot line `/sbin/vm: loaded phys=...` plus
+    `(VA - 0x1000000)`. Dumping 64 KiB from `NEXT_REQID` covers `POOL` and `PARKED`, and the
+    decisive search is for the fault's own values, `ep=0x28018` and `page_addr=0x113d000`, in
+    the same node. If both are present, a `Job::Page` is still in flight and the question is
+    why VFS never answered that FDIO; if neither is, the fault is not parked on a fill and
     `start_file_page` returned `Done` without mapping. A permanent diagnostic that reports a
     fault parked on a job no longer in flight would make that visible without a debugger.
-    Until it is fixed, `tools/smoke/coreutils-extra.tsv` runs `du` before the first listing.
+    Until then, `tools/smoke/coreutils-extra.tsv` runs `du` before the first listing.
 
 ---
 
