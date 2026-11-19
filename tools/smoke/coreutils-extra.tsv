@@ -54,6 +54,13 @@ coreutils link cpg lk1 && coreutils test -e lk1 && coreutils echo LINK-OK	LINK-O
 # `hostid` reads /etc/hostid or turns the nodename into an address; only the
 # shape of the printed id is stable here.
 coreutils hostid	[0-9a-f]+
+# `uname` and `arch` read PM's uts table through the C library's `uname`
+# (`platform-info`): sysname and nodename are fixed, and `-m`/`arch` report the
+# machine this image was built for.
+coreutils uname -s	Minix
+coreutils uname -n	minix
+coreutils uname -m	(x86_64|riscv64|aarch64)
+coreutils arch	(x86_64|riscv64|aarch64)
 # `nice` reads and writes the priority through PM, then execs the command.
 coreutils nice coreutils echo NICE-OK	NICE-OK
 # `date -d @0` reads a fixed instant, so the system clock is not the assertion.

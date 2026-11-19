@@ -2379,16 +2379,16 @@ the burst-overflow reading in item 37, are under `# Resolved issues`.
     `coreutils/src/uu/stty/src/minixterm.rs`, `coreutils/src/uu/stty/Cargo.toml`,
     `coreutils/Cargo.toml`, `Cargo.toml`)
 
-64. **Sixteen more applets are in `feat_minix`, so `ls`, `cp`, `mv`, `du` and the small unix
-    set run on all three arches (2026-11-19).** The gate is
+64. **Eighteen more applets are in `feat_minix`, so `ls`, `cp`, `mv`, `du`, `uname` and the
+    small unix set run on all three arches (2026-11-19).** The gate is
     `just test-coreutils-minix-<arch>`: `tools/smoke/coreutils-minix.tsv` (the original 86
-    steps) plus `tools/smoke/coreutils-extra.tsv` (44 steps), green on x86_64, riscv64 and
+    steps) plus `tools/smoke/coreutils-extra.tsv` (48 steps), green on x86_64, riscv64 and
     aarch64.
 
     `feat_minix` gained `ls`, `dir`, `vdir`, `cp`, `mv`, `expr`, `link`, `hostid`, `nice`,
-    `date`, `dd`, `tty`, `dircolors`, `csplit`, `du` and `kill`, and the workspace `rustix`
-    pin gained `minix`/`alloc` (`hostid` needs `rustix::system::uname`). Four applets needed a
-    port fix rather than a feature flip:
+    `date`, `dd`, `tty`, `dircolors`, `csplit`, `du`, `uname`, `arch` and `kill`, and the
+    workspace `rustix` pin gained `minix`/`alloc` (`hostid` needs `rustix::system::uname`).
+    Five applets needed a port fix rather than a feature flip:
 
     - `cp`/`mv` created FIFOs and special nodes through `nix`, which has no minix support.
       They now use `rustix::fs::mknodat` over `VFS_MKNOD` (the `mkfifo`/`mknod` pattern, items
@@ -2401,6 +2401,11 @@ the burst-overflow reading in item 37, are under `# Resolved issues`.
     - `ls` computed `SystemTime::now() - Duration::new(31_556_952/2, 0)`, which panicked on
       riscv64 (the guest clock at the epoch). `recent_time_range(now)` returns
       `UNIX_EPOCH..=now` before the half-year mark, with two host tests.
+    - `uname`/`arch` go through `platform-info`, which wants `Clone` on `libc::utsname`. The
+      minix `utsname` is hand-written rather than declared with the `s!` macro, so it lacked
+      the `Clone, Copy, Debug` every other backend's gets; it now derives them. Both read
+      PM's uts table through the C library's `uname` (sysname `Minix`, nodename `minix`, the
+      build's machine).
 
     VFS stripped a trailing separator only in C's `last_dir` (the port has
     `DO_POSIX_PATHNAME_RES` off), so `mkdir("x/")` left an empty last component and failed
@@ -2423,9 +2428,9 @@ the burst-overflow reading in item 37, are under `# Resolved issues`.
     check`, `just test-arches`, `just image x86`, `sh tools/wasm-verify.sh` and `just
     test-linux`.
     (`coreutils/Cargo.toml`, `coreutils/src/uu/{cp,mv,dd,ls}/`,
-    `coreutils/src/uucore/src/lib/features/fs.rs`, `crates/servers/src/vfs/call.rs`,
-    `crates/servers/src/vfs/path.rs`, `tools/smoke/coreutils-extra.tsv`,
-    `tools/smoke/feed.sh`, `Justfile`)
+    `coreutils/src/uucore/src/lib/features/fs.rs`, `libc/src/minix/process.rs`,
+    `crates/servers/src/vfs/call.rs`, `crates/servers/src/vfs/path.rs`,
+    `tools/smoke/coreutils-extra.tsv`, `tools/smoke/feed.sh`, `Justfile`)
 
 ---
 
