@@ -113,7 +113,9 @@ fn scanout_refused(why: &[u8]) {
 ///
 /// The arena is part of this server's image, so each entry of `MAX_OBJECTS` costs 4 MiB of
 /// guest RAM in one contiguous segment at load. Thirty-two entries is 128 MiB, which is what a
-/// virgl context and its clients need and what the 256 MiB gates still boot.
+/// virgl context and its clients need. It also leaves an x86 256 MiB guest only about 25 MB
+/// free at boot, which is why the long coreutils fixture runs at 512 MiB
+/// (`.notes/memory_budget.md`).
 ///
 /// x86-only, like the probe that fills it: it is the arch where the render device is a
 /// device of its own rather than the one already presenting (D3), so it is the only one with

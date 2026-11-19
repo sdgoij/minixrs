@@ -209,9 +209,9 @@ the burst-overflow reading in item 37, are under `# Resolved issues`.
     below.
 
     Status at HEAD (2026-11-19, after item 64 added `uname` and `arch`). The reproducer no
-    longer hangs: the heavy scenario (the `ls` block, `cp`, `cp -R`, then `du`) and the
-    two-boot gate passed six times in a row, where the same sequence hung every time before
-    the multicall grew. The evidence above is from that earlier binary, and the fault address
+    longer hangs: the gate and thirteen runs of the heavier scenario (more `ls`/`cp -R`
+    before `du`) all passed, where the same sequence hung every time before the multicall
+    grew. The evidence above is from that earlier binary, and the fault address
     `0x113d7b4` is specific to its layout (adding applets moves `.text`), so this is an
     intermittent, layout-sensitive defect rather than one that is fixed. The fixture still
     runs `du` first, because a later multicall can move the window back. Layout dependence
@@ -222,7 +222,8 @@ the burst-overflow reading in item 37, are under `# Resolved issues`.
     Probe, prepared but not run because no wedged guest was available. VM's `NEXT_REQID` is at
     VA `0x10124a0` and `POOL` at `0x10124a8` (both in the server's `.data`); the physical
     address is the `loaded phys` from the boot line `/sbin/vm: loaded phys=...` plus
-    `(VA - 0x1000000)`. Dumping 64 KiB from `NEXT_REQID` covers `POOL` and `PARKED`, and the
+    `(VA - 0x1000000)` on aarch64 (x86 userland links at `0x4000000`, so subtract that
+    there). Dumping 64 KiB from `NEXT_REQID` covers `POOL` and `PARKED`, and the
     decisive search is for the fault's own values, `ep=0x28018` and `page_addr=0x113d000`, in
     the same node. If both are present, a `Job::Page` is still in flight and the question is
     why VFS never answered that FDIO; if neither is, the fault is not parked on a fill and
@@ -237,7 +238,7 @@ the burst-overflow reading in item 37, are under `# Resolved issues`.
     does not false-positive on ordinary faults and file fills. The other half, a reply lost
     while the cr3 still matches, has no timestamp to compare and stays silent; catching it
     needs a watchdog, which the port has no periodic VM wakeup for today.
-    `tools/smoke/coreutils-extra.tsv` still runs `du` before the first listing, and the pool
+    `tools/smoke/coreutils-minix.tsv` still runs `du` before the first listing, and the pool
     dump above remains the way to see a same-cr3 stall.
 
 ---
@@ -2422,9 +2423,8 @@ the burst-overflow reading in item 37, are under `# Resolved issues`.
 
 64. **Eighteen more applets are in `feat_minix`, so `ls`, `cp`, `mv`, `du`, `uname` and the
     small unix set run on all three arches (2026-11-19).** The gate is
-    `just test-coreutils-minix-<arch>`: `tools/smoke/coreutils-minix.tsv` (the original 86
-    steps) plus `tools/smoke/coreutils-extra.tsv` (48 steps), green on x86_64, riscv64 and
-    aarch64.
+    `just test-coreutils-minix-<arch>`, one 134-step boot of
+    `tools/smoke/coreutils-minix.tsv`, green on x86_64, riscv64 and aarch64.
 
     `feat_minix` gained `ls`, `dir`, `vdir`, `cp`, `mv`, `expr`, `link`, `hostid`, `nice`,
     `date`, `dd`, `tty`, `dircolors`, `csplit`, `du`, `uname`, `arch` and `kill`, and the
@@ -2454,13 +2454,18 @@ the burst-overflow reading in item 37, are under `# Resolved issues`.
     path copy in `do_creat`, `do_link` (both names), `do_unlink`, `do_rename` (both),
     `do_mkdir`, `do_mknod`, `do_slink` and `do_rmdir`; a host test pins the rule.
 
-    Two boots per arch. The guest cannot drive ~130 execs of the 6 MB multicall in one run
-    (near the end a fork fails or a command prints nothing, while 200 `coreutils true` in one
-    boot still pass), so the fixture is split and each half stays well under that limit.
-    `feed.sh` now writes four bytes per `sleep` instead of one (per-byte pacing is a process
-    spawn each and made a long scenario take minutes under MSYS). The per-command read-cost
-    ceiling moved 1120 to 1200 because the multicall grew (1146 measured, one zone-sized
-    request per added page), recorded on item 5.
+    One boot at 512 MiB, not two. The split existed because the 256 MiB guest ran out of
+    memory: x86's fb server carries a 128 MiB `GEM_ARENA` static
+    (`crates/servers/src/fb.rs`) that the boot loader allocates with the image, so only
+    about 25 MB is free at boot and the fixture's first pipeline fails with EPIPE. It is
+    not an exec-count limit (`coreutils true` costs about a page each) and not a full
+    filp or process table. At 512 MiB the whole 134-step fixture passes on all three
+    arches in one boot, and the gate drives that. `.notes/memory_budget.md` has the
+    numbers and the free-path analysis. `feed.sh` now writes four bytes per `sleep`
+    instead of one (per-byte pacing is a process spawn each and made a long scenario
+    take minutes under MSYS). The per-command read-cost ceiling moved 1120 to 1200
+    because the multicall grew (1146 measured, one zone-sized request per added page),
+    recorded on item 5.
 
     `du` hangs on aarch64 after any directory listing. That is a port defect, not a missing
     applet, and is item 63; the fixture runs `du` first because of it.
@@ -2471,7 +2476,7 @@ the burst-overflow reading in item 37, are under `# Resolved issues`.
     (`coreutils/Cargo.toml`, `coreutils/src/uu/{cp,mv,dd,ls}/`,
     `coreutils/src/uucore/src/lib/features/fs.rs`, `libc/src/minix/process.rs`,
     `crates/servers/src/vfs/call.rs`, `crates/servers/src/vfs/path.rs`,
-    `tools/smoke/coreutils-extra.tsv`, `tools/smoke/feed.sh`, `Justfile`)
+    `tools/smoke/coreutils-minix.tsv`, `tools/smoke/feed.sh`, `Justfile`)
 
 ---
 
