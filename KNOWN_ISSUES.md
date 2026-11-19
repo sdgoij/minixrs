@@ -152,6 +152,31 @@ are arch-specific, `[env]` is tooling/platform, not kernel.
     needs (a second VFS thread, or VFS answering the ioctl itself as it does for the socket ones)
     is a decision for whoever first needs a file-backed block device.
 
+66. **A reused process slot leaves its old `/proc/<pid>` directory behind (found
+    2026-11-19).** `construct_pid_dirs` only adds: it checks `find_pid_dir(root, newpid)`
+    and, when the name is unknown, adds a directory whose inode index is the slot. C
+    instead runs two passes (`tree.c:213`): delete the directory of a slot that is no
+    longer in use or whose pid or owner changed, then add what is missing. Two defects
+    follow from the missing first pass.
+
+    The stale directory is unreachable, because `getdents` walks the indexed range and
+    `get_inode_by_index` returns one inode per index, but it still occupies an inode. With
+    `NR_INODES` at 144, a guest that recycles slots all day can fill the table.
+
+    Worse, the name guard can hand a *new* process the old directory: if pid 100 is
+    reused in a different slot while the old `/proc/100` inode survives, the guard finds
+    it by name and skips the add, so the directory's index (the old slot) does not match
+    the slot the process is in. `construct_pid_entries` reads the parent's index as the
+    process slot, so `/proc/100/status` would report the wrong process.
+
+    Fixing it needs reference-safe deletion first. `vtreefs::delete_inode` currently
+    zeroes the slot immediately; C marks `I_DELETED` and frees only when the reference
+    count reaches zero, and nothing in the port ever sets the flag. Dropping a directory
+    that VFS holds (a process with `/proc/<pid>` as its cwd, say) would then reuse that
+    inode under the holder. So the order is: implement deferred deletion in
+    `vtreefs::delete_inode`/`put_inode`, then add C's first pass to `construct_pid_dirs`.
+    (`crates/libs/src/vtreefs/mod.rs`, `crates/fs/src/procfs/tree.rs`)
+
 ---
 
 ## RISC-V (`[riscv]`)
