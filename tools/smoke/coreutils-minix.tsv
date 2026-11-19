@@ -23,6 +23,18 @@ coreutils wc -c t1.txt	0 t1.txt
 coreutils ln -s nowhere thelink	
 coreutils touch -h -t 202001010000 thelink	
 coreutils wc -c t1.txt	0 t1.txt
+# `du` spawns a printer thread, and a thread's first text-page fault after a
+# *second exec in one slot* is never resolved on any arch (`KNOWN_ISSUES.md` item
+# 63). `env` is the only applet here that execs twice: the shell forks and execs
+# coreutils/env, which execs coreutils/<applet> in the same slot. So `du` runs
+# before the `env` section below, and the whole sequence runs after it only where
+# the defect does not bite. Measured on x86_64: `coreutils env FOO=1 coreutils
+# true; coreutils du -b /etc/group` hangs, while the same `du` after a single
+# `coreutils true` prints `39\t/etc/group`.
+# `du` reads `stat` through uucore's fsext and the safe-traversal walk.
+coreutils cp /etc/group cpg	
+coreutils head -1 cpg	root:x:0:
+coreutils du -b cpg	[0-9]+[[:space:]]+cpg
 # An environment variable env sets reaches the child it execs.
 coreutils env HOME=/tmp coreutils printenv HOME	/tmp
 # `-i` clears the environment, so the exec has no PATH to search and takes the
@@ -177,16 +189,9 @@ coreutils chroot jail /echo JAIL-OK	JAIL-OK
 # long form reads the mode, owner, group and size back out of `stat`, and the
 # arrow is `readlink`, which is the symlink target.
 #
-# `du` spawns a printer thread, and on aarch64 a thread spawn after *any*
-# directory listing never finishes (KNOWN_ISSUES 63): the process faults on a
-# text page VM never maps and stays in RTS_PAGEFAULT. So `du` runs first, before
-# the first listing and before the recursive copies. Nothing else here threads.
 # `cp`: the ordinary copy is std's `fs::copy`; `-R` walks a directory through
 # uucore's safe-copy.
-coreutils cp /etc/group cpg	
-coreutils head -1 cpg	root:x:0:
-# `du` reads `stat` through uucore's fsext and the safe-traversal walk.
-coreutils du -b cpg	[0-9]+[[:space:]]+cpg
+# `du` already ran above (item 63): the `env` steps exec twice in one slot.
 coreutils mkdir lsd1	
 coreutils touch lsd1/only	
 coreutils ln -s nowhere lsd1/dangling	
@@ -228,6 +233,20 @@ coreutils uname -s	Minix
 coreutils uname -n	minix
 coreutils uname -m	(x86_64|riscv64|aarch64)
 coreutils arch	(x86_64|riscv64|aarch64)
+# `nproc` reports the CPUs the kernel runs, which is one (`CONFIGURED_CPUS` in the
+# C library's `sysconf`, the same answer `std`'s `available_parallelism` gives).
+# `--all` is the `sysconf(_SC_NPROCESSORS_CONF)` path; the plain form is std's,
+# and `OMP_NUM_THREADS` overrides only the plain form. `--ignore` is subtracted and
+# then clamped to at least 1, so 1 minus 5 is still 1.
+coreutils nproc	1
+coreutils nproc --all	1
+coreutils nproc --ignore=5	1
+coreutils env OMP_NUM_THREADS=4 coreutils nproc	4
+coreutils env OMP_NUM_THREADS=4 coreutils nproc --all	1
+# `test -t` asks rustix's minix `termios::isatty`, which reads the descriptor's
+# file type. Both streams are the console here, so both answer yes.
+coreutils test -t 0 && coreutils echo TTY0	TTY0
+coreutils test -t 1 && coreutils echo TTY1	TTY1
 # `nice` reads and writes the priority through PM, then execs the command.
 coreutils nice coreutils echo NICE-OK	NICE-OK
 # `date -d @0` reads a fixed instant, so the system clock is not the assertion.

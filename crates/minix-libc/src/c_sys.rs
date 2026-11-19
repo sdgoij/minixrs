@@ -546,6 +546,12 @@ const SC_CLK_TCK: c_int = 2;
 const SC_GETPW_R_SIZE_MAX: c_int = 69;
 const SC_PHYS_PAGES: c_int = 85;
 const SC_AVPHYS_PAGES: c_int = 86;
+/// `_SC_NPROCESSORS_CONF` and `_SC_NPROCESSORS_ONLN`, both answered with
+/// `CONFIGURED_CPUS`. The kernel starts one CPU (std's `available_parallelism`
+/// says the same), so this is the number a caller can use, not a guess.
+const SC_NPROCESSORS_CONF: c_int = 83;
+const SC_NPROCESSORS_ONLN: c_int = 84;
+const CONFIGURED_CPUS: c_long = 1;
 const OPEN_MAX: c_int = 32;
 
 /// The physical-memory answers: PM reports no RAM figure, so `_SC_PHYS_PAGES`
@@ -570,6 +576,7 @@ pub unsafe extern "C" fn sysconf(name: c_int) -> c_long {
         SC_CLK_TCK => CLK_TCK as c_long,
         SC_GETPW_R_SIZE_MAX => 16_384,
         SC_PHYS_PAGES | SC_AVPHYS_PAGES => PHYS_PAGES,
+        SC_NPROCESSORS_CONF | SC_NPROCESSORS_ONLN => CONFIGURED_CPUS,
         _ => {
             crate::set_errno(EINVAL);
             -1

@@ -188,12 +188,12 @@ the burst-overflow reading in item 37, are under `# Resolved issues`.
 
 ## AArch64 (`[aarch64]`)
 
-63. **A thread spawn after a directory listing faults on its own text page and stays in
-    `RTS_PAGEFAULT`, so the command never returns (found 2026-11-19).** `coreutils du` is the
+63. **A thread's first text-page fault is never resolved once another process has exec'd
+    twice in one slot, so the command never returns (found 2026-11-19).** `coreutils du` is the
     reproducer because it is the only applet in the smoke fixture that spawns a thread (its
     printer, `thread::spawn`). On aarch64, once any process has read a directory
     (`ls <dir>`, `cp -R`, or `du`'s own walk), a later `du` never answers; x86_64 and riscv64
-    run the same sequence and finish. Measured on a fresh aarch64 boot:
+    ran the same sequence and finished. Measured on a fresh aarch64 boot:
     `mkdir d1; touch d1/f; coreutils ls -1 d1; coreutils du -b cpg` hangs, while the same
     `du` with no listing first prints `39\tcpg`. `coreutils cp -R dsrc cdst` is an
     equivalent trigger, which is why the fixture's `du` step was moved ahead of both.
@@ -233,16 +233,34 @@ the burst-overflow reading in item 37, are under `# Resolved issues`.
     (the frame lives in VM's `host_va`), so that comment was corrected with the diagnostic
     below.
 
-    Status at HEAD (2026-11-19, after item 64 added `uname` and `arch`). The reproducer no
-    longer hangs: the gate and thirteen runs of the heavier scenario (more `ls`/`cp -R`
-    before `du`) all passed, where the same sequence hung every time before the multicall
-    grew. The evidence above is from that earlier binary, and the fault address
-    `0x113d7b4` is specific to its layout (adding applets moves `.text`), so this is an
-    intermittent, layout-sensitive defect rather than one that is fixed. The fixture still
-    runs `du` first, because a later multicall can move the window back. Layout dependence
-    does not fit a lost reply well (that would not care where `.text` sits), so a
-    wrong-content fill from a cache-key collision, which would move where the garbage jump
-    lands, is the alternative to keep in view.
+    Status at HEAD (2026-11-19, after `nproc` grew the multicall). The window moved back, this
+    time on x86_64, and the trigger is now known to be a **second exec in one slot**:
+
+        coreutils env FOO=1 coreutils true
+        coreutils du -b /etc/group        (hangs; a fresh 512 MiB boot)
+
+    A single exec does not do it: `coreutils true` followed by the same `du` prints
+    `39\t/etc/group`. `env` is the only applet that replaces its own image after the shell's
+    fork+exec. `coreutils env HOME=/tmp /bin/echo ENV-OK` triggers it too, so the second image
+    need not be the same file, and a `sleep 1` between the two commands changes nothing. The
+    fixture therefore runs `du` before its `env` section.
+
+    The pool probe was run against this guest (`target/probe63.py`, the recipe above corrected
+    for x86: VM's `NEXT_REQID` is `0x40134a0`, `POOL` `0x40134a8` and `PARKED` `0x4017ba8`, from
+    `llvm-nm` on `target/x86_64-pc-minix/release/vm`, and the physical address is `loaded phys
+    + VA - 0x4000000`). `PAGE_FAULT_INFO` (`0x235a30` in `kernel-boot`) held slot 24 with
+    `fault=0x41bc204, err=0x14` (not present, user, instruction fetch), and `NEXT_REQID` read
+    1151, so the window was the live pool. Neither `ep=0x28018` (generation 5, slot 24) nor
+    `page_addr=0x41bc000` occurs anywhere in it, so the fault is **not** parked on an in-flight
+    fill. That rules out the lost-FDIO-reply shape for this occurrence. What is left is a path
+    that returned `Done` without mapping the page, or a fault dropped before the pool saw it.
+
+    Status before that (after item 64 added `uname` and `arch`). The reproducer did not hang:
+    the gate and thirteen runs of the heavier scenario passed, where the same sequence hung
+    every time before the multicall grew. The fault address `0x113d7b4` was specific to that
+    binary's layout (adding applets moves `.text`), so this is intermittent and
+    layout-sensitive rather than fixed. Layout dependence does not fit a lost reply well (that
+    would not care where `.text` sits), which is part of why the pool probe above mattered.
 
     Probe, prepared but not run because no wedged guest was available. VM's `NEXT_REQID` is at
     VA `0x10124a0` and `POOL` at `0x10124a8` (both in the server's `.data`); the physical
@@ -2573,6 +2591,38 @@ the burst-overflow reading in item 37, are under `# Resolved issues`.
     (46/46, and 22/22 in `run.js`), `just test-linux`.
     (`crates/fs/src/procfs/main.rs`, `crates/fs/src/procfs/tree.rs`,
     `tools/smoke/scenario.tsv`)
+
+68. **`nproc` is in `feat_minix`, and `test -t` is a real check (2026-11-19).** Two pieces
+    were missing, both small because the machinery underneath already existed.
+
+    `nproc`'s default path is `std::thread::available_parallelism`, which the minix PAL
+    already answers with 1 (`rust/library/std/src/sys/thread/minix.rs`). Its `--all` path is
+    `libc::sysconf(_SC_NPROCESSORS_CONF)`, and neither that name nor
+    `_SC_NPROCESSORS_ONLN` was declared or answered: the libc fork gained both constants
+    (`libc/src/minix/process.rs`) and `crates/minix-libc` answers both with
+    `CONFIGURED_CPUS = 1`, which is the same number the PAL reports and the number the
+    single-CPU kernel starts.
+
+    `test -t` returned a hardcoded false on minix. It now asks rustix's minix
+    `termios::isatty`, which reads the descriptor's file type, so both console streams answer
+    true. The std PAL's `IsTerminal` is still false for every stream (it predates any tty
+    check, and fixing it means a toolchain rebuild); `nohup` is the next applet that needs it
+    and carries its own minix arm when it lands.
+
+    The fixture gained `nproc`, `nproc --all`, `nproc --ignore=5`, the `OMP_NUM_THREADS`
+    override through `env`, and the two `test -t` lines. 141 steps now, green on all three
+    arches with `just test-coreutils-minix-<arch>`.
+
+    The multicall growing moved `KNOWN_ISSUES.md` item 63's window back onto x86_64, which is
+    why the fixture runs `du` before its `env` section: that item has the two-step reproducer
+    and the pool probe result.
+
+    Gates: `just test-coreutils-minix` on x86_64, riscv64 and aarch64 (141 steps each),
+    `cargo test --workspace`, `cargo clippy --all-targets -- -D warnings`, `just check`,
+    `just test-linux`.
+    (`libc/src/minix/process.rs`, `crates/minix-libc/src/c_sys.rs`,
+    `coreutils/Cargo.toml`, `coreutils/src/uu/test/src/test.rs`,
+    `coreutils/src/uu/test/Cargo.toml`, `tools/smoke/coreutils-minix.tsv`, `Justfile`)
 
 ---
 
