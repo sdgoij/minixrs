@@ -22,9 +22,6 @@ exclude = [
     # it would shadow nothing (`[patch]` is the only way it is consumed) and
     # would build the wrong thing into this workspace's lockfile.
     "crates/errno",
-    # And for `terminal_size`: it asks rustix's termios for the window size, which
-    # the port's rustix fork does not serve. `clap`'s `wrap_help` pulls it in.
-    "crates/terminal_size",
 ]
 
 members = [

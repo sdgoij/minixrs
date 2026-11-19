@@ -2274,20 +2274,74 @@ the defect itself was cross-arch.
 
     `stty` needed a termios surface: `nix`'s, which has no minix arm. Rather than rewrite
     `stty`, `coreutils/src/uu/stty/src/minixterm.rs` re-exposes the port's tty attributes in the
-    shape `stty` already uses — the four flag groups with `contains`/`intersects`/`set`, a
+    shape `stty` already uses: the four flag groups with `contains`/`intersects`/`set`, a
     `control_chars` array indexed by `SpecialCharacterIndices`, and `tcgetattr`/`tcsetattr` over a
-    borrowed fd over `libc`'s `tc*` calls — and both files reach it through
-    `use crate::minixterm as nix;`. The build treats minix as `bsd` for `stty` because the port's
-    termios is NetBSD's: speeds are rates in `c_ispeed`/`c_ospeed`, not flag bits, which is the
-    `u32`-speed path `stty` takes for a BSD. The steps print `-g`, ask `size` (a serial console has
-    no window size, so `0 0`), read the whole `-a` listing, then change two flags with
-    `cs8 -parity` and `sane` and print `-g` again: the save line differs, which is the write path
-    and not just a read of the console's defaults.
+    borrowed fd, and both files reach it through `use crate::minixterm as nix;`. That adapter sat
+    on `libc`'s `tc*` calls at first; item 62 moved it onto `rustix::termios`. The build treats
+    minix as `bsd` for `stty` because the port's termios is NetBSD's: speeds are rates in
+    `c_ispeed`/`c_ospeed`, not flag bits, which is the `u32`-speed path `stty` takes for a BSD.
+    The steps print `-g`, ask `size` (a serial console has no window size, so `0 0`), read the
+    whole `-a` listing, then change two flags with `cs8 -parity` and `sane` and print `-g` again:
+    the save line differs, which is the write path and not just a read of the console's defaults.
     (`coreutils/Cargo.toml`, `coreutils/src/uu/mknod/Cargo.toml`,
     `coreutils/src/uu/mknod/src/mknod.rs`, `coreutils/src/uucore/src/lib/features/fsext/mod.rs`,
     `coreutils/src/uu/stty/Cargo.toml`, `coreutils/src/uu/stty/build.rs`,
     `coreutils/src/uu/stty/src/minixterm.rs`, `coreutils/src/uu/stty/src/stty.rs`,
     `coreutils/src/uu/stty/src/flags.rs`, `tools/smoke/coreutils-minix.tsv`, `Justfile`)
+
+62. **`rustix::termios` has a real minix backend, so `stty` no longer talks to the C library and
+    `terminal_size` is upstream again (2026-11-19).** Until now rustix's minix arm had no termios
+    module: `crates/terminal_size` existed only as a `[patch.crates-io]` stand-in because clap's
+    `wrap_help` asks `rustix::termios::{isatty, tcgetwinsize}`, and stty's `minixterm` re-exposed
+    the tty server's attributes by calling `libc`'s `tc*` functions directly.
+
+    `rustix/src/backend/minix/termios/` is the backend. `syscalls.rs` converts between
+    `rustix::termios::Termios` and `minix_std::termios::Termios` field by field (never by layout)
+    and issues `TIOCGETA`, `TIOCSETA`/`TIOCSETAW`/`TIOCSETAF` for the three `tcsetattr` actions,
+    `TIOCGPGRP`/`TIOCSPGRP`, `TIOCDRAIN`, `TIOCFLUSH` (the queue selector is the `FREAD`/`FWRITE`
+    mask), `TIOCSTOP`/`TIOCSTART` for `TCOOFF`/`TCOON`, and `TIOCGWINSZ`/`TIOCSWINSZ`. The three
+    speed setters are assignments to `c_ispeed`/`c_ospeed`, since the tty server keeps a rate
+    there rather than a bit field in `c_cflag`; a value that does not fit the server's `i32` is
+    refused with `EINVAL` instead of wrapping. `cfmakeraw` clears and sets the same bits as the C
+    library's. `isatty` asks `fstat` for a character device, not `tcgetattr`: VFS answers an ioctl
+    it does not route with success, so a successful `tcgetattr` says nothing (`crates/minix-libc`
+    made the same choice). `ttyname` answers `/dev/tty`. `tcgetsid` and `tcsendbreak` report
+    `ENOSYS`, because the tty server has no session leader and no break request.
+
+    `backend/minix/c.rs` gained the names `tools/c-include/termios.h` publishes: `NCCS` 20,
+    `tcflag_t`/`speed_t`/`cc_t`, the `I*`/`O*`/`C*`/`L*` flags the front end's BSD shape exposes,
+    the `V*` subscripts, the `TCSA*`/`TC*` values and the `B*` rates.
+
+    `src/termios/types.rs` needed minix on the same arms as a BSD: `input_speed`/`output_speed`
+    read the fields directly (no `speed::decode` table), `decode`/`encode` are compiled out, and
+    `VSWTC` is absent while `VDSUSP`/`VSTATUS` are present. It also needed the port's header as the
+    authority in the other direction: `IUTF8`, `OLCUC`, `TABDLY`/`TAB0`, `OFILL`/`OFDEL`, the
+    `NL`/`CR`/`BS`/`FF`/`VT` delay groups and `CMSPAR` are excluded, because the header does not
+    define them. `SpecialCodes` gained `as_bytes` and `from_bytes` so a libc-shaped adapter can
+    carry the whole `c_cc` array, including the two indices the port does not name (7 and 19),
+    which the `-g` line prints. `ioctl_tiocexcl`/`ioctl_tiocnxcl` are not offered for minix: the
+    tty server has no exclusive-mode request, and an unrouted ioctl succeeds, so either one would
+    lie.
+
+    `coreutils/src/uu/stty/src/minixterm.rs` is now an adapter over rustix instead of a second
+    implementation: flag bits come from rustix's `InputModes`/`OutputModes`/`ControlModes`/
+    `LocalModes`, the control characters go through `SpecialCodes`, the speeds through
+    `set_input_speed`/`set_output_speed`, and `tcgetattr`/`tcsetattr` plus `TIOCGWINSZ`/
+    `TIOCSWINSZ` through rustix. It keeps the rustix `Termios` a `tcgetattr` returned as the mould
+    for `tcsetattr`, because that type has no public constructor.
+
+    `crates/terminal_size` and both `[patch.crates-io]` entries are gone. The published
+    `terminal_size` 0.4.4 builds again, so clap's `wrap_help` gets its width from
+    `tcgetwinsize`, and `isatty` keeps a pipe from being read as a terminal.
+
+    Gates. `cargo test --workspace`, `cargo clippy --all-targets -- -D warnings`, `just check`,
+    `just test-arches` (the 92-step coreutils fixture asserts the exact `-g` line before and after
+    `cs8 -parity`/`sane` on x86_64, riscv64 and aarch64), `just image x86`,
+    `sh tools/wasm-verify.sh` (46/46) and `just test-linux`.
+    (`rustix/src/backend/minix/c.rs`, `rustix/src/backend/minix/termios/`,
+    `rustix/src/termios/types.rs`, `rustix/src/termios/ioctl.rs`,
+    `coreutils/src/uu/stty/src/minixterm.rs`, `coreutils/src/uu/stty/Cargo.toml`,
+    `coreutils/Cargo.toml`, `Cargo.toml`)
 
 ---
 
