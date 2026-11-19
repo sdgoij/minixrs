@@ -168,23 +168,57 @@ pub fn send(
     }
 }
 
-/// Is VFS still filling this page of this process?
-///
-/// `start_file_page` maps a zero-filled placeholder at the VA before VFS has the file's bytes, so a
-/// second thread of the same process that touches the page finds a *present* mapping. The page fault
-/// path would otherwise take that for a finished page (`PageOutcome::Done`) and let the thread run on
-/// the placeholder, whose content is not the file's yet. The answer is keyed on the page and the
-/// process, because that is what the thread that blocked on it has in common with the fill.
-pub fn page_pending(ep: i32, page_addr: u64) -> bool {
+/// An in-flight file-page fill, as a fault for the same page sees it.
+struct PendingFill {
+    reqid: u32,
+    /// The address space the fill was started for.
+    cr3: u64,
+}
+
+/// The in-flight fill for `(ep, page_addr)`, whatever address space it belongs to.
+fn find_pending(ep: i32, page_addr: u64) -> Option<PendingFill> {
     unsafe {
         let pool = &*POOL.get();
-        pool.iter().any(|n| {
-            n.busy
-                && match &n.job {
-                    Some(Job::Page(state)) => state.fault.ep == ep && state.page_addr == page_addr,
-                    _ => false,
+        pool.iter().find_map(|n| {
+            if !n.busy {
+                return None;
+            }
+            match &n.job {
+                Some(Job::Page(state))
+                    if state.fault.ep == ep && state.page_addr == page_addr =>
+                {
+                    Some(PendingFill {
+                        reqid: n.reqid,
+                        cr3: state.fault.cr3,
+                    })
                 }
+                _ => None,
+            }
         })
+    }
+}
+
+/// Is VFS filling this page for this process, in this address space?
+///
+/// `start_file_page` maps nothing at the faulting VA while the fill is in flight (the frame lives
+/// in VM's `host_va`), so a second thread that faults the page finds it absent. Without this check
+/// it would start a fill of its own, and the last one to land would win.
+///
+/// The address space is part of the match. A fill started before an `exec` replaced the process's
+/// page tables can never resolve a fault in the new ones, so waiting for it is a wait with no end.
+/// That case is reported (once) instead of being taken for ordinary pending work; the wait itself
+/// is left alone, because dropping the fill here would let its reply map a frame into an address
+/// space that may already be gone. The answer is keyed on the endpoint, the page and the cr3,
+/// which is what a thread that blocked on the fill has in common with it.
+pub fn page_pending(ep: i32, page_addr: u64, cr3: u64) -> bool {
+    match find_pending(ep, page_addr) {
+        Some(fill) => {
+            if fill.cr3 != cr3 {
+                report_stale_fill(ep, page_addr, fill.cr3, cr3, fill.reqid);
+            }
+            true
+        }
+        None => false,
     }
 }
 
@@ -499,6 +533,22 @@ impl Line {
         self.push(&digits[i..]);
     }
 
+    fn push_hex64(&mut self, mut v: u64) {
+        self.push(b"0x");
+        let mut digits = [0u8; 16];
+        let mut i = digits.len();
+        loop {
+            i -= 1;
+            let d = (v & 0xf) as u8;
+            digits[i] = if d < 10 { b'0' + d } else { b'a' + d - 10 };
+            v >>= 4;
+            if v == 0 {
+                break;
+            }
+        }
+        self.push(&digits[i..]);
+    }
+
     fn as_bytes(&self) -> &[u8] {
         &self.buf[..self.len]
     }
@@ -540,6 +590,24 @@ fn unmatched_line(reqid: u32) -> Line {
     line
 }
 
+/// The report for a fill that belongs to a different address space: the fault in front of us can
+/// never be resolved by it, so the wait would never end.
+fn stale_fill_line(ep: i32, page_addr: u64, job_cr3: u64, fault_cr3: u64, reqid: u32) -> Line {
+    let mut line = Line::new();
+    line.push(b"VM: vfs_request: ep ");
+    line.push_hex32(ep as u32);
+    line.push(b" page ");
+    line.push_hex64(page_addr);
+    line.push(b": fill cr3 ");
+    line.push_hex64(job_cr3);
+    line.push(b" is not fault cr3 ");
+    line.push_hex64(fault_cr3);
+    line.push(b" (reqid ");
+    line.push_i32(reqid as i32);
+    line.push(b")\n");
+    line
+}
+
 /// Report a reply of the wrong type, once.
 fn report_mismatch(msg: &[u8; 64]) {
     static REPORTED: AtomicBool = AtomicBool::new(false);
@@ -556,6 +624,15 @@ fn report_unmatched(reqid: u32) {
         return;
     }
     minix_rt::diag_write(unmatched_line(reqid).as_bytes());
+}
+
+/// Report a fill that belongs to another address space, once.
+fn report_stale_fill(ep: i32, page_addr: u64, job_cr3: u64, fault_cr3: u64, reqid: u32) {
+    static REPORTED: AtomicBool = AtomicBool::new(false);
+    if REPORTED.swap(true, Ordering::Relaxed) {
+        return;
+    }
+    minix_rt::diag_write(stale_fill_line(ep, page_addr, job_cr3, fault_cr3, reqid).as_bytes());
 }
 
 /// Report every request slot being in use, once.
@@ -674,6 +751,44 @@ mod tests {
         reply[VMCALL_REQID_OFF..VMCALL_REQID_OFF + 4]
             .copy_from_slice(&0x1234_5678u32.to_le_bytes());
         assert_eq!(reply_reqid(&reply), 0x1234_5678);
+    }
+
+    #[test]
+    fn test_pending_fill_matches_the_endpoint_and_page() {
+        unsafe {
+            let pool = &mut *POOL.get();
+            let slot = &mut pool[0];
+            slot.busy = true;
+            slot.reqid = 77;
+            slot.job = Some(Job::Page(page_state(9, 0x61, 11, 0x5000, true)));
+        }
+
+        let fill = find_pending(9, 0x5000).expect("ep 9's page 0x5000 is being filled");
+        assert_eq!(fill.reqid, 77);
+        assert_eq!(fill.cr3, 0);
+        // A different endpoint or page is a different fill.
+        assert!(find_pending(8, 0x5000).is_none());
+        assert!(find_pending(9, 0x6000).is_none());
+
+        unsafe {
+            let pool = &mut *POOL.get();
+            for slot in pool.iter_mut() {
+                slot.busy = false;
+                slot.reqid = 0;
+                slot.job = None;
+            }
+        }
+    }
+
+    #[test]
+    fn test_stale_fill_line_names_both_cr3s() {
+        let line = stale_fill_line(0x8009, 0x113d000, 0x1a2b, 0x3c4d, 1253);
+        assert_eq!(
+            core::str::from_utf8(line.as_bytes()),
+            Ok(
+                "VM: vfs_request: ep 0x8009 page 0x113d000: fill cr3 0x1a2b is not fault cr3 0x3c4d (reqid 1253)\n"
+            )
+        );
     }
 
     /// A `PageState` for a file page, as either side of a join would describe it.

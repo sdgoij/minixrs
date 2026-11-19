@@ -203,9 +203,10 @@ the burst-overflow reading in item 37, are under `# Resolved issues`.
     orphan-placeholder recovery in `start_file_page` (a present page without the user bit)
     does not run. That leaves one shape: `page_pending(ep, page_addr)` matches a pool job
     that is still `busy` and will never complete, either an FDIO reply that never arrives or
-    a job left in flight. Note that `vfs_request::page_pending`'s comment still describes a
+    a job left in flight. Note that `vfs_request::page_pending`'s comment described a
     zero-filled placeholder mapped at the VA; `start_file_page` maps nothing there any more
-    (the frame lives in VM's `host_va`), so that comment is stale.
+    (the frame lives in VM's `host_va`), so that comment was corrected with the diagnostic
+    below.
 
     Status at HEAD (2026-11-19, after item 64 added `uname` and `arch`). The reproducer no
     longer hangs: the heavy scenario (the `ls` block, `cp`, `cp -R`, then `du`) and the
@@ -225,9 +226,19 @@ the burst-overflow reading in item 37, are under `# Resolved issues`.
     decisive search is for the fault's own values, `ep=0x28018` and `page_addr=0x113d000`, in
     the same node. If both are present, a `Job::Page` is still in flight and the question is
     why VFS never answered that FDIO; if neither is, the fault is not parked on a fill and
-    `start_file_page` returned `Done` without mapping. A permanent diagnostic that reports a
-    fault parked on a job no longer in flight would make that visible without a debugger.
-    Until then, `tools/smoke/coreutils-extra.tsv` runs `du` before the first listing.
+    `start_file_page` returned `Done` without mapping.
+
+    A permanent diagnostic now covers one half of this. `page_pending` takes the faulting cr3
+    and, when the in-flight fill it matches was started for a different address space (the
+    process exec'd after the fill began), reports once as `VM: vfs_request: ep ... page ...:
+    fill cr3 ... is not fault cr3 ... (reqid ...)`. That fill can never resolve the new fault,
+    so the wait has no end; the reply is left alone rather than racing a second fill into an
+    address space that may be gone. The line never appeared across `just test-arches`, so it
+    does not false-positive on ordinary faults and file fills. The other half, a reply lost
+    while the cr3 still matches, has no timestamp to compare and stays silent; catching it
+    needs a watchdog, which the port has no periodic VM wakeup for today.
+    `tools/smoke/coreutils-extra.tsv` still runs `du` before the first listing, and the pool
+    dump above remains the way to see a same-cr3 stall.
 
 ---
 

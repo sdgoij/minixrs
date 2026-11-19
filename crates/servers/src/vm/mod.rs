@@ -1370,7 +1370,7 @@ fn start_file_page(va: u64, fault: &Fault) -> PageOutcome {
     // been read into it), so this is the only way to tell a pending page from an absent one. It has
     // to come before anything else: without it each thread that faults here would start a fill of
     // its own, and the last one to land would win.
-    if crate::vm::vfs_request::page_pending(ep, page_addr) {
+    if crate::vm::vfs_request::page_pending(ep, page_addr, cr3) {
         return PageOutcome::Pending;
     }
 
