@@ -92,3 +92,22 @@ file as their sources land; nothing here prevents that.
 The `State` letter is PM's view alone: `Z` for a zombie, `T` for a stopped process, `R` for
 anything else PM has in use. C derives a richer set from PM's flags *and* the kernel's run-state
 flags, which procfs does not have yet.
+
+## The callback-data encoding
+
+A vtreefs inode has one `usize` of callback data, so a procfs file's handler and the kind of
+handler share it: 0 is the sentinel, a `Static(fn())` stores the pointer whole, and a
+`Dynamic(fn(i32))` stores `pointer | CB_DYNAMIC`.
+
+`CB_DYNAMIC` is the **top** bit (1 << 31 on wasm32, 1 << 63 elsewhere), not bit 0. Bit 0 was the
+original choice, on the argument that a function pointer is aligned. That holds on x86_64,
+riscv64 and aarch64 and fails on wasm32, where a function pointer is an index into the
+indirect-function table and `root_hz` can sit at an odd index. The tag then cleared the index to
+null or aliased it onto a neighbouring function, and `cat /proc/hz` in the browser system died
+with `null function or function signature mismatch`. `KNOWN_ISSUES.md` item 67 has the trace.
+The top bit is free everywhere this port runs: userland code is well inside the low canonical
+range on the hardware arches, and a wasm table index is small.
+
+A host test cannot catch a regression here, because the host's pointers are aligned; the gate is
+`/bin/cat /proc/hz > /dev/null && /bin/echo procfs-ok` in `tools/smoke/scenario.tsv`, which the
+three image boots and `tools/wasm-browser/run.js` all type at a live shell.

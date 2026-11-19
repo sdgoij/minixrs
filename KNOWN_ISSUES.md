@@ -2541,6 +2541,39 @@ the burst-overflow reading in item 37, are under `# Resolved issues`.
     `crates/fs/src/procfs/tree.rs`, `crates/userland/src/procfsprobe.rs`,
     `tools/smoke/procfs.tsv`, `Justfile`)
 
+67. **~~The wasm system trapped on `cat /proc/hz`~~: a file handler's kind is the top bit
+    of its callback data (2026-11-19).** `cat /proc/hz` in the browser system stopped the
+    machine: `RuntimeError: null function or function signature mismatch`, reported for
+    procfs (slot 21).
+
+    A procfs inode stores its handler in the vtreefs callback data, one `usize`, so the
+    kind of handler shared it with the pointer: `FileData::Static` stored the pointer
+    whole and `FileData::Dynamic` OR-ed in bit 0. That assumed a function pointer has an
+    aligned low bit. On the three hardware arches it does. On wasm32 a function pointer
+    is an index into the indirect-function table, with no alignment to spare, so
+    `root_hz` landing on an odd index made a static file take the dynamic branch: the
+    mask cleared the index to null (or aliased it onto the neighbouring entry) and
+    `call_indirect` failed on the signature. It stayed latent because no wasm gate had
+    read a static `/proc` file; the slot that changed in this batch moved the index.
+
+    The tag is now `CB_DYNAMIC = 1 << (usize::BITS - 1)`, which is free on all four
+    targets: userland code stays inside the low canonical range on x86_64, riscv64 and
+    aarch64, and a wasm table index is small. `read_hook` masks it off before the
+    transmute. A host test pins the encoding, but the host cannot see the collision, so
+    the real gate is the guest.
+
+    `tools/smoke/scenario.tsv` gained `/bin/cat /proc/hz > /dev/null && /bin/echo
+    procfs-ok`. That scenario is read by `just image <arch>` on the three arches and by
+    `tools/wasm-browser/run.js`, so all four targets now read a static `/proc` file from
+    a userland command. With the old tag and that step added, the wasm harness trapped at
+    16/22; with the fix it is 22/22 and the console shows `60`.
+
+    Gates: `cargo test --workspace`, `cargo clippy --all-targets -- -D warnings`,
+    `just check`, `just test-arches`, `just image x86`, `sh tools/wasm-verify.sh`
+    (46/46, and 22/22 in `run.js`), `just test-linux`.
+    (`crates/fs/src/procfs/main.rs`, `crates/fs/src/procfs/tree.rs`,
+    `tools/smoke/scenario.tsv`)
+
 ---
 
 ## x86_64 (`[x86]`)

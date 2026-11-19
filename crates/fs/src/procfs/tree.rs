@@ -13,6 +13,7 @@ use arch_common::types::{PM_PROC_IN_USE, ProcTabEntry};
 
 use crate::procfs::buf;
 use crate::procfs::consts::*;
+use crate::procfs::main::CB_DYNAMIC;
 use crate::procfs::pid::PID_FILES;
 
 /// `PM_GETSYSINFO` (`PM_BASE + 47`), and the `mess_lsys_getsysinfo` fields: C's union puts
@@ -225,15 +226,14 @@ pub fn read_hook(node: u32, offset: u64, buf: &mut [u8]) -> usize {
 
     let cbdata = libs::vtreefs::get_inode_cbdata(node);
     if cbdata != 0 {
-        if cbdata & 1 == 1 {
-            // Dynamic handler (bit 0 set): fn(i32), with the process slot in the parent's index.
+        if cbdata & CB_DYNAMIC != 0 {
+            // Dynamic handler: fn(i32), with the process slot in the parent's index.
             let parent = libs::vtreefs::get_inode(node).parent_id;
             let slot = libs::vtreefs::get_inode(parent).index;
-            let f: fn(i32) =
-                unsafe { core::mem::transmute::<*const (), fn(i32)>((cbdata & !1) as *const ()) };
+            let f: fn(i32) = unsafe { core::mem::transmute((cbdata & !CB_DYNAMIC) as *const ()) };
             f(slot);
         } else {
-            let f: fn() = unsafe { core::mem::transmute::<*const (), fn()>(cbdata as *const ()) };
+            let f: fn() = unsafe { core::mem::transmute(cbdata as *const ()) };
             f();
         }
     }

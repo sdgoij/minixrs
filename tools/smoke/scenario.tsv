@@ -13,13 +13,19 @@
 #     echoed the line and never ran the command. Anchored, only the output can satisfy it.
 #   * The expectation is therefore never a prefix or substring of its own command.
 #
-# Why these three steps: they are the ones that need the file-backed exec path (an image binary
-# exec'd by the shell), the filesystem (a file created, and read back through a second open), and a
-# second process — which is what was broken, invisibly, when init stopped at `RTS_PAGEFAULT`
-# (finding 57). `boot.cjs` and `page.test.js` assert much more on wasm; this is the part every
-# target can be asked, and wasm cannot answer for the other three: it has no page faults, so it
-# never runs FDIO or the demand-paged path at all.
-
+# Why these steps: they are the ones that need the file-backed exec path (an image binary
+# exec'd by the shell), the filesystem (a file created, and read back through a second open), a
+# second process, which is what was broken, invisibly, when init stopped at `RTS_PAGEFAULT`
+# (finding 57), and a server that answers a path from its own in-memory tree (`/proc`). `boot.cjs`
+# and `page.test.js` assert much more on wasm; this is the part every target can be asked, and wasm
+# cannot answer for the other three: it has no page faults, so it never runs FDIO or the
+# demand-paged path at all.
+#
+# The `/proc` step's answer must not depend on the clock, so the value is thrown away and only the
+# second command's line is asserted. A procfs read that faults stops the system, and the step then
+# has no answer at all; that is the failure it is here to catch (the wasm system trapped on
+# `cat /proc/hz` because its file-handler tag was a low bit that collided with a function index).
 /bin/echo smoke-ok	smoke-ok
 /bin/echo hello-from-the-image > smoke.txt	
 /bin/cat smoke.txt	hello-from-the-image
+/bin/cat /proc/hz > /dev/null && /bin/echo procfs-ok	procfs-ok
