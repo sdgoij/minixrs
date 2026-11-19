@@ -828,9 +828,11 @@ mod tests {
             libs::libminixfs::cache::lmfs_set_blocksize(4096, 0);
         }
 
-        // Create a RAM disk containing one directory block (block 0).
+        // Create a RAM disk containing one directory block (block 1: zone 0 is
+        // the boot block, so no file may live there).
         // Directory has two entries: "." (inode 1) and "file" (inode 42).
-        let mut disk = vec![0u8; 4096];
+        let mut disk = vec![0u8; 8192];
+        let dir = unsafe { disk.as_mut_ptr().add(4096) };
         let entry_size = core::mem::size_of::<Direct>();
 
         // Entry 0: "." -> inode 1
@@ -843,11 +845,7 @@ mod tests {
             },
         };
         unsafe {
-            core::ptr::copy_nonoverlapping(
-                &dot as *const Direct as *const u8,
-                disk.as_mut_ptr(),
-                entry_size,
-            );
+            core::ptr::copy_nonoverlapping(&dot as *const Direct as *const u8, dir, entry_size);
         }
 
         // Entry 1: "file" -> inode 42
@@ -862,7 +860,7 @@ mod tests {
         unsafe {
             core::ptr::copy_nonoverlapping(
                 &file_entry as *const Direct as *const u8,
-                disk.as_mut_ptr().add(entry_size),
+                dir.add(entry_size),
                 entry_size,
             );
         }
@@ -887,7 +885,7 @@ mod tests {
             (*rip).i_dev = 0;
             (*rip).i_mode = I_DIRECTORY;
             (*rip).i_size = (2 * entry_size) as i32;
-            (*rip).i_zone[0] = 0; // data zone 0 = block 0 on device 0
+            (*rip).i_zone[0] = 1; // data zone 1 = block 1 on device 0
             (*rip).i_sp = Some(&*sp);
         }
 
@@ -922,9 +920,9 @@ mod tests {
             libs::libminixfs::cache::lmfs_invalidate(0);
         }
 
-        // RAM disk block 0: 9 entries, but the inode's i_size covers only
+        // RAM disk block 1: 9 entries, but the inode's i_size covers only
         // the first 8 slots — the stale "stray" entry is beyond i_size.
-        let mut disk = vec![0u8; 4096];
+        let mut disk = vec![0u8; 8192];
         let names: [&str; 9] = [
             ".", "..", "bin", "sbin", "etc", "tmp", "dev", "devices", "stray",
         ];
@@ -937,7 +935,7 @@ mod tests {
             unsafe {
                 core::ptr::copy_nonoverlapping(
                     &e as *const Direct as *const u8,
-                    disk.as_mut_ptr().add(i * DIR_ENTRY_SIZE),
+                    disk.as_mut_ptr().add(4096 + i * DIR_ENTRY_SIZE),
                     DIR_ENTRY_SIZE,
                 );
             }
@@ -960,7 +958,7 @@ mod tests {
             (*rip).i_dev = 0;
             (*rip).i_mode = I_DIRECTORY;
             (*rip).i_size = (8 * DIR_ENTRY_SIZE) as i32;
-            (*rip).i_zone[0] = 0; // data zone 0 = block 0 on device 0
+            (*rip).i_zone[0] = 1; // data zone 1 = block 1 on device 0
             (*rip).i_sp = Some(&*sp);
         }
 

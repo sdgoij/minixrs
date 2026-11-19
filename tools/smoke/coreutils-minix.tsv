@@ -125,8 +125,14 @@ coreutils mkfifo -m 600 mf2
 coreutils test -p mf2 && coreutils echo MKFIFO-M-OK	MKFIFO-M-OK
 # `chroot`: VFS's do_chroot was implemented but unreachable, because rustix's
 # minix chroot was a NOSYS stub. The step proves the syscall, the
-# `set_current_dir("/")` and the exec after it on every arch. The jail form
-# (copy a binary in, `chroot jail /echo`) cannot be gated yet: exec'ing a file
-# written during the boot traps at its entry on aarch64, a read-path defect
-# recorded as the open aarch64 issue; x86_64 and riscv64 pass that form.
+# `set_current_dir("/")` and the exec after it on every arch.
 coreutils chroot / /bin/coreutils echo ROOT-OK	ROOT-OK
+# The jail form is the one that execs a binary written during this boot: `install`
+# copies /bin/echo into the jail, and the exec reads the copy back through MFS.
+# It trapped on aarch64 only, because that arch's /bin/echo is 77576 bytes (19
+# blocks) while x86's is 15952 and riscv's 18600 (4 and 5): the copy's blocks past
+# the seventh went behind the single-indirect block, and `KNOWN_ISSUES.md` item
+# 60 is what made those read back as block 0.
+coreutils mkdir jail	
+coreutils install /bin/echo jail/echo	
+coreutils chroot jail /echo JAIL-OK	JAIL-OK

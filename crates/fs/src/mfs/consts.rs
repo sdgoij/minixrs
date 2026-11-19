@@ -102,8 +102,26 @@ pub const ESYMLINK: i32 = -303;
 pub const EENTERMOUNT: i32 = 101;
 pub const ELEAVEMOUNT: i32 = 102;
 
-pub const NO_ZONE: u32 = 0xFFFFFFFF;
-pub const NO_BLOCK: u32 = 0xFFFFFFFF;
+/// Absence of a zone number.
+///
+/// Zero, not `u32::MAX`: this is the on-disk encoding, the one C uses
+/// (`minix/include/minix/const.h: #define NO_ZONE ((zone_t) 0)`) and the one
+/// `boot-image` writes, and an indirect block is created zero-filled, so every
+/// entry a `write_map` has not filled yet is a hole. With `0xFFFFFFFF` here,
+/// `read_map` read those entries as a *valid* block 0, so the eighth and later
+/// blocks of a file written at runtime all resolved to block 0: the write
+/// landed on the boot block and a read returned whatever had last been written
+/// there (`KNOWN_ISSUES.md` item 60). No data zone can be numbered 0: zones
+/// start at `s_firstdatazone`, past the superblock, the bitmaps and the inode
+/// table.
+pub const NO_ZONE: u32 = 0;
+
+/// Absence of a block number: what `read_map` reports for a hole.
+///
+/// Also zero, matching C's `NO_BLOCK`, and for the same reason `NO_ZONE` is:
+/// the two are compared against each other and against zero-filled metadata.
+/// `s_firstdatazone` keeps a real block from ever being numbered 0.
+pub const NO_BLOCK: u32 = 0;
 pub const NO_ENTRY: u32 = 0;
 pub const NO_LINK: u16 = 0;
 pub const LINK_MAX: u16 = 32767;

@@ -620,17 +620,51 @@ test-coreutils-minix-x86 boot-timeout="40": build-x86
     @if grep -qE "^(touch|env|ln|chgrp|chown|groups|id|logname|whoami|install|mkfifo|chroot|coreutils):|^(RM-STILL-THERE|RMR-STILL-THERE|CHMOD-X-BAD|CHMOD-ENOENT-BAD|INSTALL-M-BAD)$" target/test-coreutils-minix-x86.log; then echo "!! a tool reported an error:"; grep -nE "^(touch|env|ln|chgrp|chown|groups|id|logname|whoami|install|mkfifo|chroot|coreutils):|^(RM-STILL-THERE|RMR-STILL-THERE|CHMOD-X-BAD|CHMOD-ENOENT-BAD|INSTALL-M-BAD)$" target/test-coreutils-minix-x86.log; exit 1; fi
     @echo "coreutils-minix: touch, env, rm, chmod, chgrp, chown, groups, id, logname, whoami, install, mkfifo and chroot ran (x86_64)"
 
-test-coreutils-minix-riscv64 boot-timeout="120": build-riscv64
+# The gate is 69 steps, and riscv64 and aarch64 pace every byte of every command
+# (`FEED_PACE`), so the driver's budget covers the whole scenario rather than one
+# step: 120s ran out two steps from the end once the `chroot` jail steps landed.
+# A guest that stops is still reported by the step that did not answer, which is
+# what the budget buys; x86, which needs no pacing, is at 40.
+test-coreutils-minix-riscv64 boot-timeout="160": build-riscv64
     @just _assert-qemu-version qemu-system-riscv64
     FEED_PACE=0.003 FEED_SCENARIO=tools/smoke/coreutils-minix.tsv sh tools/smoke/feed.sh target/test-coreutils-minix-riscv64.log {{boot-timeout}} qemu-system-riscv64 -machine virt -m 256M -nographic -global virtio-mmio.force-legacy=off -netdev user,id=net0 -device virtio-net-device,netdev=net0 -device virtio-gpu-device -device virtio-keyboard-device -kernel target/riscv64gc-unknown-minix/release/kernel-boot-riscv64
     @if grep -qE "^(touch|env|ln|chgrp|chown|groups|id|logname|whoami|install|mkfifo|chroot|coreutils):|^(RM-STILL-THERE|RMR-STILL-THERE|CHMOD-X-BAD|CHMOD-ENOENT-BAD|INSTALL-M-BAD)$" target/test-coreutils-minix-riscv64.log; then echo "!! a tool reported an error:"; grep -nE "^(touch|env|ln|chgrp|chown|groups|id|logname|whoami|install|mkfifo|chroot|coreutils):|^(RM-STILL-THERE|RMR-STILL-THERE|CHMOD-X-BAD|CHMOD-ENOENT-BAD|INSTALL-M-BAD)$" target/test-coreutils-minix-riscv64.log; exit 1; fi
     @echo "coreutils-minix: touch, env, rm, chmod, chgrp, chown, groups, id, logname, whoami, install, mkfifo and chroot ran (riscv64)"
 
-test-coreutils-minix-aarch64 boot-timeout="120": build-aarch64
+test-coreutils-minix-aarch64 boot-timeout="160": build-aarch64
     @just _assert-qemu-version qemu-system-aarch64
     FEED_PACE=0.003 FEED_SCENARIO=tools/smoke/coreutils-minix.tsv sh tools/smoke/feed.sh target/test-coreutils-minix-aarch64.log {{boot-timeout}} qemu-system-aarch64 -machine virt -cpu cortex-a57 -m 256M -nographic -no-reboot -global virtio-mmio.force-legacy=off -netdev user,id=net0 -device virtio-net-device,netdev=net0 -device virtio-gpu-device -device virtio-keyboard-device -kernel target/aarch64-unknown-minix/release/kernel-boot-aarch64
     @if grep -qE "^(touch|env|ln|chgrp|chown|groups|id|logname|whoami|install|mkfifo|chroot|coreutils):|^(RM-STILL-THERE|RMR-STILL-THERE|CHMOD-X-BAD|CHMOD-ENOENT-BAD|INSTALL-M-BAD)$" target/test-coreutils-minix-aarch64.log; then echo "!! a tool reported an error:"; grep -nE "^(touch|env|ln|chgrp|chown|groups|id|logname|whoami|install|mkfifo|chroot|coreutils):|^(RM-STILL-THERE|RMR-STILL-THERE|CHMOD-X-BAD|CHMOD-ENOENT-BAD|INSTALL-M-BAD)$" target/test-coreutils-minix-aarch64.log; exit 1; fi
     @echo "coreutils-minix: touch, env, rm, chmod, chgrp, chown, groups, id, logname, whoami, install, mkfifo and chroot ran (aarch64)"
+
+# The read path over a file written this boot, per arch: `tools/smoke/fileread.tsv` writes
+# `seq 1 10000` (twelve blocks, so blocks 8-11 sit behind the single-indirect block) and hashes
+# what reads of a chosen size return through `/bin/filereadprobe`.
+#
+# The defect this pins is `KNOWN_ISSUES.md` item 60: an indirect entry `write_map` has not filled
+# yet is a zero, and reading that zero as `0xFFFFFFFF` made it a valid block number, so those
+# blocks all resolved to block 0. It is per arch because the read crosses VFS's grant, MFS's block
+# loop and the kernel's copy, and each arch builds its own tables; but the defect itself was
+# cross-arch, and x86 is the arch it was measured on.
+test-fileread arch="x86":
+    @just test-fileread-{{arch}}
+
+test-fileread-x86 boot-timeout="40": build-x86
+    mkdir -p target/images/x86_64-pc-minix
+    cp target/trampoline.elf target/images/x86_64-pc-minix/minix-x86.elf
+    @just _assert-qemu-version qemu-system-x86_64
+    FEED_SCENARIO=tools/smoke/fileread.tsv sh tools/smoke/feed.sh target/test-fileread-x86.log {{boot-timeout}} qemu-system-x86_64 -nographic -m 256M -no-reboot -vga none -device bochs-display,id=fb0 -kernel target/images/x86_64-pc-minix/minix-x86.elf -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0 -device virtio-tablet-pci,display=fb0
+    @echo "fileread: a runtime-written file's indirect blocks read back (x86_64)"
+
+test-fileread-riscv64 boot-timeout="120": build-riscv64
+    @just _assert-qemu-version qemu-system-riscv64
+    FEED_PACE=0.003 FEED_SCENARIO=tools/smoke/fileread.tsv sh tools/smoke/feed.sh target/test-fileread-riscv64.log {{boot-timeout}} qemu-system-riscv64 -machine virt -m 256M -nographic -global virtio-mmio.force-legacy=off -netdev user,id=net0 -device virtio-net-device,netdev=net0 -device virtio-gpu-device -device virtio-keyboard-device -kernel target/riscv64gc-unknown-minix/release/kernel-boot-riscv64
+    @echo "fileread: a runtime-written file's indirect blocks read back (riscv64)"
+
+test-fileread-aarch64 boot-timeout="120": build-aarch64
+    @just _assert-qemu-version qemu-system-aarch64
+    FEED_PACE=0.003 FEED_SCENARIO=tools/smoke/fileread.tsv sh tools/smoke/feed.sh target/test-fileread-aarch64.log {{boot-timeout}} qemu-system-aarch64 -machine virt -cpu cortex-a57 -m 256M -nographic -no-reboot -global virtio-mmio.force-legacy=off -netdev user,id=net0 -device virtio-net-device,netdev=net0 -device virtio-gpu-device -device virtio-keyboard-device -kernel target/aarch64-unknown-minix/release/kernel-boot-aarch64
+    @echo "fileread: a runtime-written file's indirect blocks read back (aarch64)"
 
 # The shared anonymous mapping gate: VM allocates the frames at map time, so a
 # store the child makes after the fork is visible in the parent's view.
@@ -1648,6 +1682,7 @@ test-arches:
     @just test-epoll-x86
     @just test-read-cost x86
     @just test-coreutils-minix x86
+    @just test-fileread x86
     @just test-qemu riscv64
     @just test-boot riscv64
     @just test-fork riscv64
@@ -1660,6 +1695,7 @@ test-arches:
     @just test-pipeblock riscv64
     @just test-threads riscv64
     @just test-coreutils-minix riscv64
+    @just test-fileread riscv64
     @just test-qemu aarch64
     @just test-boot aarch64
     @just test-fork aarch64
@@ -1673,6 +1709,7 @@ test-arches:
     @just test-threads aarch64
     @just test-coreutils-wedge-aarch64
     @just test-coreutils-minix aarch64
+    @just test-fileread aarch64
 
 # Fork isolation, per arch: `tools/smoke/fork.tsv` runs `/bin/forktest`, which forks and checks
 # all three directions of the copy - the child's write must not reach the parent, the parent's

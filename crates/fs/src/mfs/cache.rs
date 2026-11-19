@@ -10,10 +10,16 @@ pub fn alloc_zone(dev: u32, z: u32) -> u32 {
         Some(s) => s,
         None => return NO_ZONE,
     };
-    let bit = if z == sp.s_firstdatazone {
+    // `z` is a search origin: either the superblock's hint (asked for by passing
+    // `s_firstdatazone`) or a zone number to start at. `NO_ZONE` reaches here from
+    // `write_map`, which passes the inode's first zone, and a file whose first block is
+    // a hole has none; searching from the start of the bitmap is what C's wrapped
+    // subtraction turns into once `alloc_bit` clamps an out-of-range origin.
+    let from_hint = z == sp.s_firstdatazone || z == NO_ZONE;
+    let bit = if from_hint {
         sp.s_zsearch
     } else {
-        z - (sp.s_firstdatazone - 1)
+        z.saturating_sub(sp.s_firstdatazone - 1)
     };
     let b = alloc_bit(sp, ZMAP, bit);
     if b == NO_BIT {
@@ -22,7 +28,7 @@ pub fn alloc_zone(dev: u32, z: u32) -> u32 {
         }
         return NO_ZONE;
     }
-    if z == sp.s_firstdatazone {
+    if from_hint {
         sp.s_zsearch = b;
     }
     (sp.s_firstdatazone - 1) + b

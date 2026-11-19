@@ -71,6 +71,10 @@ pub mod linktest;
 /// only client that crosses into a user-mounted VTreeFS.
 pub mod procfsprobe;
 
+/// `/bin/filereadprobe` — hashes the bytes reads of a chosen size return, so a read defect can be
+/// measured without a tool's own buffering in the way (`KNOWN_ISSUES.md` item 60).
+pub mod filereadprobe;
+
 /// When >= 0, all `write_out` calls are routed through this fd (via VFS)
 /// instead of the kernel's serial shortcut on fd 1. Set by the shell's
 /// redirect child after `fork`, so it is process-private.

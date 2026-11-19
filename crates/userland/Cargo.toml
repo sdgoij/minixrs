@@ -480,5 +480,12 @@ name = "procfsprobe"
 path = "src/bin/procfsprobe.rs"
 test = false
 
+# filereadprobe hashes the bytes a read of a chosen size returns. Driven by
+# `tools/smoke/fileread.tsv` and `just test-fileread-<arch>` (KNOWN_ISSUES.md item 60).
+[[bin]]
+name = "filereadprobe"
+path = "src/bin/filereadprobe.rs"
+test = false
+
 [lints]
 workspace = true

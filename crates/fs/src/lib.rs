@@ -61,10 +61,16 @@ mod tests {
         assert_eq!(ROOT_INODE, 1);
     }
 
+    /// C's `NO_ZONE` and `NO_BLOCK` are both 0 (`minix/include/minix/const.h`), and
+    /// these are compared against zero-filled metadata: `write_map` creates an indirect
+    /// block by zeroing it, and `boot-image` writes 0 into every zone slot a file does
+    /// not use. Reading those as `0xFFFFFFFF` made each of them block 0, which is how
+    /// item 60's eighth-block-onward corruption happened. Pinned here because the value
+    /// is an on-disk encoding, not an internal choice.
     #[test]
-    fn zone_constants_are_sentinels() {
-        assert_eq!(NO_ZONE, 0xFFFFFFFF);
-        assert_eq!(NO_BLOCK, 0xFFFFFFFF);
+    fn zone_constants_match_the_on_disk_sentinels() {
+        assert_eq!(NO_ZONE, 0);
+        assert_eq!(NO_BLOCK, 0);
         assert_eq!(NO_BIT, 0);
     }
 

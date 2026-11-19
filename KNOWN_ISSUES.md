@@ -158,51 +158,10 @@ the burst-overflow reading in item 37, are under `# Resolved issues`.
 
 ## AArch64 (`[aarch64]`)
 
-60. **A large read of a file written this boot can return stale bytes, so exec of it traps
-    (2026-11-17, measured; aarch64 only).** Exec of a copied `/bin/echo` traps before any
-    syscall, `EL0 unhandled exception, EC=0x00 E=0000000001000000 ...` (an undefined instruction at
-    the entry `0x01000000`), with x86_64 and riscv64 running the same copy fine. The cause is in
-    the **read** path, not the write or the copy: the stored bytes are correct.
-
-    What the probes established:
-    - `coreutils seq 1 10000 > f1` then `coreutils od -An -tx1 -v f1 > d1` and
-      `coreutils seq 1 10000 | coreutils od -An -tx1 -v > d2` write **identical** dumps
-      (`md5sum d1 d2` equal), so `f1` on disk is the true `seq` output (`72d4ff27...`).
-    - But `coreutils md5sum f1` reads back `78941700...` in one boot and `1af9c72a...` in another,
-      and `coreutils cat f1 | coreutils md5sum` and `coreutils head -c 48894 f1 | coreutils md5sum`
-      agree with it. So it is not one tool: every reader that issues one large `read(2)` sees the
-      same wrong bytes, and the wrong value varies per boot, which is what stale pages look like.
-      `od`, whose reads are small, sees the correct file.
-    - The pipe is always right: `coreutils seq 1 10000 | coreutils md5sum` gives the true hash, and
-      routing the same bytes through `cat` to a file reproduces the bad read, so it is not `seq`.
-    - Small files never showed it (`seq 1 10`, `seq 1 1000`, `seq 1 5000` read back true), and
-      16-64 KiB written through `yes | head -c` read back true. But `seq 1 8000` (~39 KiB) and
-      `seq 1 10000` (~49 KiB) written directly to a file read back wrong. So it is not size alone
-      but **write timing**: a paced pipe writer (`head` draining `yes`) is fine, a fast direct
-      writer (`seq > file`) is not, which is what a writeback/eviction race looks like.
-    - It is **independent of `chroot`** and of content class: all-zero (`truncate -s 100000`,
-      hash `0019d23b...`) and all-`0xff` files read back correctly.
-
-    So a large read of a file written during this boot returns block contents that were not yet
-    the file's, while the file itself is right; exec maps the same wrong view and runs `0x00000000`.
-    A small read is correct and a large one is not, every large-read tool agrees, and the wrong
-    value varies per boot, so the suspect is MFS's block cache under a fast multi-block write:
-    a read that lands after eviction but before writeback completes sees the pre-write block, and
-    a paced writer, whose writeback finishes first, does not. x86_64 and riscv64 serve the same
-    reads correctly.
-
-    Until it is fixed, the `chroot` gate uses the no-op-root form (`chroot / ...`) and the
-    jail-with-a-copied-binary form is absent (item 59); that form passes on x86_64 and riscv64.
-    Next step: an LLDB run that breaks in MFS's write-then-read on a fast `seq 1 10000` and follows
-    a block from `lmfs_markdirty`/`lmfs_put_block` through eviction to the read that serves it, to
-    see whether the read gets the dirty cache block or an evicted one whose writeback is pending.
-    The code already shows where to look: `lmfs_put_block` flushes `FULL_DATA_BLOCK` and
-    `INODE_BLOCK` before release, but the eviction path in `lmfs_get_block_ino` calls `freeblock`
-    on the LRU head without flushing a dirty buffer, and `cache_heuristic_check`'s own comment says
-    the pool can stay at `MINBUFS` (6) and "evict dirty blocks before they are written back". The
-    wrong hash moving per boot means it must be caught live, not by offset.
-    (`crates/libs/src/libminixfs/cache.rs`, `crates/fs/src/mfs/read.rs`,
-    `crates/fs/src/mfs/inode.rs`, `crates/servers/src/vfs`, `crates/kernel/src/`)
+No open issues. Item 49 (the `threadtest` EL0 exception) and item 60 (a copied binary
+trapping on exec) are under `# Resolved issues`. Item 60 was filed here because
+aarch64's `/bin/echo` was the one large enough to reach the defective block range;
+the defect itself was cross-arch.
 
 ---
 
@@ -2273,7 +2232,7 @@ the burst-overflow reading in item 37, are under `# Resolved issues`.
     (`coreutils/Cargo.toml`, `tools/smoke/coreutils-minix.tsv`, `Justfile`)
 
 59. **`chroot` is in the multicall on all three arches (2026-11-17).** The gate is
-    `just test-coreutils-minix-<arch>` (`tools/smoke/coreutils-minix.tsv`, 66 steps), green on
+    `just test-coreutils-minix-<arch>` (`tools/smoke/coreutils-minix.tsv`, 69 steps), green on
     x86_64, riscv64 and aarch64.
 
     VFS's `do_chroot` was implemented from the start but unreachable: `rustix`'s minix `chroot`
@@ -2283,10 +2242,10 @@ the burst-overflow reading in item 37, are under `# Resolved issues`.
     needed minix in the `setgroups` `size_t` arm.
 
     The gate uses the no-op-root form, `chroot / /bin/coreutils echo ROOT-OK`, which exercises
-    the syscall, the `set_current_dir("/")` and the exec after it. The jail form (copy a binary
-    in, then `chroot jail /echo`) passes on x86_64 and riscv64 but traps on aarch64 before any
-    syscall, because exec'ing a file written during the boot is broken there for a separate
-    reason (open aarch64 item 60). So it is not in the shared scenario until that is fixed.
+    the syscall, the `set_current_dir("/")` and the exec after it, and the jail form,
+    `install /bin/echo jail/echo` then `chroot jail /echo JAIL-OK`, which execs a binary written
+    during this boot. The jail form used to trap on aarch64 only; that was item 60, and the two
+    landed together.
     (`coreutils/Cargo.toml`, `coreutils/src/uu/chroot/src/chroot.rs`,
     `crates/minix-std/src/fs.rs`, `crates/minix-libc/src/c_sys.rs`,
     `rustix/src/backend/minix/process/syscalls.rs`, `tools/c-include/unistd.h`,
@@ -2535,6 +2494,57 @@ the burst-overflow reading in item 37, are under `# Resolved issues`.
 ---
 
 ## AArch64 (`[aarch64]`)
+
+60. **~~A large read of a file written this boot returned stale bytes, so exec of it trapped~~:
+    FIXED (2026-11-19), and it was never aarch64-only.** The symptom was an exec of a binary
+    copied during the boot trapping at `0x01000000` (`EL0 unhandled exception, EC=0x00`), because
+    that arch's `/bin/echo` is 77576 bytes (19 blocks) while x86's is 15952 and riscv's 18600 (4
+    and 5 blocks): only aarch64's copy reached the file's single-indirect block.
+
+    The defect is one constant. MFS's `NO_ZONE` was `0xFFFFFFFF`, but the on-disk encoding is 0
+    (C: `include/minix/const.h`, `#define NO_ZONE ((zone_t) 0)`), and `write_map` creates an
+    indirect block by zeroing it, so every entry it has not filled yet is 0. `read_map` compared
+    those entries to `0xFFFFFFFF`, so an unfilled one passed the hole check and was returned as
+    **block 0** (`(0 << scale) + boff`): the eighth and later blocks of any file written at runtime
+    all resolved to the boot block. Writing such a file wrote file data over block 0 (the boot
+    block and the superblock, whose in-memory copy is authoritative, which is why nothing
+    noticed), and reading any of those blocks returned whatever had been written there last. That
+    is why the wrong hash was stable within a boot and moved between boots, and why the file's own
+    bytes were fine whenever a reader asked for the block that had been written last - its last
+    block.
+
+    What the measurements established: `seq 1 10000` is 48894 bytes (twelve blocks), and its
+    whole-file FNV-1a is `3d86a12d29c1503a` while a runtime-written copy read back
+    `8afc28932d8457a8`; `seq 1 8000` (ten blocks) was wrong and `seq 1 7000` (nine blocks) right,
+    because the ninth block was the file's last and a read stops at `i_size`; `od`, whose reads are
+    16 bytes, saw the true bytes; a `filereadprobe` read at offset 32768 returned the file's last
+    block. Recomputing what "blocks 8-10 serve the last block's write plus the tail of block 10's"
+    predicts matched the measured whole-file and offset sums **exactly**, on x86_64 as well as
+    aarch64. The earlier "paced writer is fine, direct writer is not" reading was a coincidence of
+    the paced files' lengths: `yes A | head -c N` writes uniform content, and blocks 8-10 serving
+    the last block of a uniform file hash the same.
+
+    `NO_ZONE` and `NO_BLOCK` are both 0 now (`crates/fs/src/mfs/consts.rs`), so an image's unused
+    zone slots and a directory hole also read as holes instead of block 0, and `alloc_zone` treats
+    `NO_ZONE` as "search from the start of the bitmap" instead of letting the subtraction
+    underflow. Two `search_dir` fixtures that placed a directory in zone 0 (never a legal data
+    zone) moved to zone 1.
+
+    Gates. `just test-fileread-<arch>` (`tools/smoke/fileread.tsv`) writes `seq 1 10000` and hashes
+    what `/bin/filereadprobe` reads: the whole file in one read, in 4096-byte chunks and in 16-byte
+    chunks, then each block from its own offset. Green on x86_64, riscv64 and aarch64; the same
+    steps read `8afc...` for the whole file before the fix. `tools/smoke/fileread.tsv` and
+    `filereadprobe` exist because no other tool could say what one read of a chosen size got: `od`
+    reads 16 bytes at a time and `md5sum` reads the whole file, and both hid which layer was wrong.
+    Host tests `test_read_map_treats_an_unfilled_indirect_entry_as_a_hole` (fails with `NO_ZONE` at
+    `0xFFFFFFFF`) and `zone_constants_match_the_on_disk_sentinels` pin the rule. The coreutils
+    scenario's `chroot` jail step, `install /bin/echo jail/echo` then `chroot jail /echo JAIL-OK`,
+    is back in the shared fixture and runs on all three arches (it was aarch64-only before); that
+    is the exec of a runtime-written binary that started this item.
+    (`crates/fs/src/mfs/consts.rs`, `crates/fs/src/mfs/cache.rs`, `crates/fs/src/mfs/read.rs`,
+    `crates/fs/src/mfs/path.rs`, `crates/userland/src/filereadprobe.rs`,
+    `crates/userland/src/bin/filereadprobe.rs`, `crates/boot-image/src/manifest.rs`,
+    `tools/smoke/fileread.tsv`, `tools/smoke/coreutils-minix.tsv`, `Justfile`)
 
 49. **~~`/bin/threadtest` took an unhandled EL0 exception on aarch64~~: FIXED (2026-11-17).** The
     process died on `udf #0` at the first instruction of `memcpy`. Five measurements ran it down:

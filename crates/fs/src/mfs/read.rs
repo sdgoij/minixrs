@@ -580,6 +580,54 @@ mod tests {
         assert_eq!(rd_indir(bp, 0), 99);
     }
 
+    /// An indirect block is created zero-filled, so every entry `write_map` has not filled
+    /// yet is a hole, not block 0.
+    ///
+    /// This is `KNOWN_ISSUES.md` item 60: with `NO_ZONE` at `0xFFFFFFFF`, `read_map` took an
+    /// unfilled entry (0) for a valid block number, so the eighth and later blocks of a file
+    /// written at runtime all resolved to block 0. A write then landed on the boot block, and a
+    /// read returned whichever of those blocks was written last.
+    #[test]
+    fn test_read_map_treats_an_unfilled_indirect_entry_as_a_hole() {
+        use alloc::vec;
+
+        init();
+        unsafe {
+            // Block 20 is the indirect block: entry 0 is the data zone of the file's eighth
+            // block, and the rest are the zeroes `write_map` leaves behind.
+            let mut image = vec![0u8; 32 * 4096];
+            image[20 * 4096..20 * 4096 + 4].copy_from_slice(&40u32.to_le_bytes());
+            crate::block_io::ram_disk_init(image.as_ptr(), image.len());
+            libs::libminixfs::cache::lmfs_buf_pool(10);
+            libs::libminixfs::cache::lmfs_set_blocksize(4096, 0);
+            libs::libminixfs::cache::lmfs_set_block_io(crate::block_io::ram_disk_io);
+
+            let sp = glo::get_super_ptr(0);
+            (*sp).s_dev = 7;
+            (*sp).s_block_size = 4096;
+            (*sp).s_log_zone_size = 0;
+            (*sp).s_ndzones = 7;
+            (*sp).s_nindirs = 1024; // 4096 / 4
+
+            let rip = glo::get_inode_ptr(0);
+            (*rip).i_dev = 7;
+            (*rip).i_sp = Some(sp);
+            (*rip).i_ndzones = 7;
+            (*rip).i_nindirs = 1024; // 4096 / 4
+            for z in (*rip).i_zone.iter_mut() {
+                *z = NO_ZONE;
+            }
+            (*rip).i_zone[7] = 20; // the single-indirect zone
+
+            // Block 7 is the entry the write filled.
+            assert_eq!(read_map(0, 7 * 4096, 0), 40);
+            // Block 8 is the entry it did not fill: a hole, not block 0.
+            assert_eq!(read_map(0, 8 * 4096, 0), NO_BLOCK);
+            // A direct zone an empty file never allocated is a hole too.
+            assert_eq!(read_map(0, 0, 0), NO_BLOCK);
+        }
+    }
+
     #[test]
     fn test_fs_readwrite_no_super_returns_einval() {
         // Without a registered inode, fs_readwrite returns -EINVAL.

@@ -270,6 +270,11 @@ pub const BOOT_BINS: &[(&str, &str)] = &[
     // procfs server, and asks for a path under `/proc` that is not there. `just test-procfs
     // <arch>` drives it; it is the only client that crosses into a user-mounted VTreeFS.
     ("/bin/procfsprobe", "procfsprobe"),
+    // `/bin/filereadprobe` hashes the bytes one read of a chosen size returns: offset, length and
+    // chunk size all come from argv, so a defect in the read path can be measured without a
+    // tool's own buffering in the way (`KNOWN_ISSUES.md` item 60). Driven by
+    // `just test-fileread <arch>`.
+    ("/bin/filereadprobe", "filereadprobe"),
     // `/bin/forktest` fills two separately aligned 4 KiB writable pages, forks, and checks both
     // directions of the copy: the child's write must not reach the parent, and the parent's
     // post-fork write must not reach a child that only reads that page. The second direction is

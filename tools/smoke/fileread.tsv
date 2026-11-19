@@ -1,0 +1,36 @@
+# The read path over a file this boot wrote (`KNOWN_ISSUES.md` item 60).
+#
+# A file's eighth and later blocks live behind its single-indirect block, and an
+# indirect entry `write_map` has not filled yet is a zero, not `0xFFFFFFFF`. When
+# that zero was read as a *valid* block number, a runtime-written file's blocks 8
+# onward all resolved to block 0: the writes landed on the boot block and every
+# read returned whichever of them was written last. A file of seven blocks or
+# fewer never showed it, which is why the earlier coreutils steps did not.
+#
+# `filereadprobe` is the reader because no other tool can say what one read of a
+# chosen size got: `od` reads 16 bytes at a time, `md5sum` reads the whole file,
+# and both hide which layer was wrong. The sums are FNV-1a 64 of the bytes read,
+# computed from `seq 1 10000`'s known output (48894 bytes), so a wrong block shows
+# as a wrong number rather than as another hash to compare.
+#
+# `seq 1 10000` is 48894 bytes: twelve blocks, so blocks 0-6 are direct, block 7
+# is indirect entry 0, and blocks 8-11 are the entries a fresh indirect block
+# leaves zeroed.
+coreutils seq 1 10000 > /fr1	
+coreutils wc -c /fr1	48894 /fr1
+filereadprobe /fr1 0 48894 0	filereadprobe: pos=0 off=0 len=48894 chunk=0 got=48894 sum=3d86a12d29c1503a first=310a320a330a340a
+# The same bytes one block at a time: the size of a read must not matter.
+filereadprobe /fr1 0 48894 4096	filereadprobe: pos=0 off=0 len=48894 chunk=4096 got=48894 sum=3d86a12d29c1503a first=310a320a330a340a
+filereadprobe /fr1 0 48894 16	filereadprobe: pos=0 off=0 len=48894 chunk=16 got=48894 sum=3d86a12d29c1503a first=310a320a330a340a
+# Each block, read from its own offset. Blocks 7-11 are the indirect ones: entry 0
+# is the seventh block's and the rest were the entries that read as block 0.
+filereadprobe /fr1 0 4096 0	filereadprobe: pos=0 off=0 len=4096 chunk=0 got=4096 sum=f74373f8af0772b1 first=310a320a330a340a
+filereadprobe /fr1 28672 4096 0	filereadprobe: pos=28672 off=28672 len=4096 chunk=0 got=4096 sum=d18fc174b81cd526 first=0a353935370a3539
+filereadprobe /fr1 32768 4096 0	filereadprobe: pos=32768 off=32768 len=4096 chunk=0 got=4096 sum=ff9df764095e2fbe first=363737360a363737
+filereadprobe /fr1 36864 16 0	filereadprobe: pos=36864 off=36864 len=16 chunk=0 got=16 sum=c6a93cef7dd29b37 first=3539350a37353936
+filereadprobe /fr1 40960 4096 0	filereadprobe: pos=40960 off=40960 len=4096 chunk=0 got=4096 sum=43e49387303d2820 first=31340a383431350a
+filereadprobe /fr1 45056 3838 0	filereadprobe: pos=45056 off=45056 len=3838 chunk=0 got=3838 sum=6ef1b498d18a3df6 first=330a393233340a39
+# The file the writer produced and the bytes the pipe produced are the same
+# stream: one hash, computed two ways.
+coreutils seq 1 10000 | coreutils md5sum	72d4ff27a28afbc066d5804999d5a504  -
+coreutils md5sum /fr1	72d4ff27a28afbc066d5804999d5a504  /fr1
