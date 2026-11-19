@@ -2707,6 +2707,39 @@ the burst-overflow reading in item 37, are under `# Resolved issues`.
     `coreutils/Cargo.toml`, `coreutils/src/uu/nohup/`,
     `tools/smoke/coreutils-minix.tsv`, `Justfile`)
 
+73. **`hostname` is in `feat_minix`, and the machine name has one home (2026-11-20).**
+    The applet's `hostname::get`/`set` reach the C library's
+    `gethostname`/`sethostname`, and only `gethostname` existed, returning a hardcoded
+    "minix" that nothing could change. C keeps the name in `/etc/hostname.file`:
+    `sethostname` writes it through a temporary file and a rename, `gethostname` reads it,
+    and `uname(3)` reads it last so the file overrides PM's nodename
+    (`minix/lib/libc/gen/{gethostname,sethostname,uname}.c`).
+
+    The port now does the same. `gethostname` reads the file, `sethostname` writes 0644
+    through `/etc/hostname.tmp` and renames it over the name file, and `uname` lets the
+    file replace `UTS_NODENAME` when it is present (a missing file keeps PM's name, as C
+    does). `sysconf(_SC_HOST_NAME_MAX)` answers 255, and the image ships
+    `/etc/hostname.file` with `minix`, the name PM reports, so `hostname` and `uname -n`
+    agree from the first boot. The libc fork declares `sethostname` and
+    `tools/c-include/unistd.h` declares it too, so the C header contract and the export
+    move together (the image file shifts the device inodes by one, which the two layout
+    tests now pin).
+
+    The fixture gained the read, the `-s` short form and two writes (the second renames
+    over an existing file), each followed by `uname -n`, then a write that restores
+    `minix`. `uptime` was the other candidate and is not in this batch: `get_loadavg`
+    needs `/proc/loadavg`, which needs `GET_LOADINFO` (item 7 and `.notes/procfs.md`), and
+    `get_nusers` needs utmp; a constant load average would be a placeholder.
+
+    Verified in the guest on all three arches. Gates: `cargo test --workspace`,
+    `cargo clippy --all-targets -- -D warnings`, `just check`, `just test-arches`,
+    `just test-coreutils-minix` (x86_64, riscv64, aarch64), `just image` on the three
+    arches, `sh tools/wasm-verify.sh` (83/83, 22/22, 46/46), `just test-linux`.
+    (`crates/minix-libc/src/lib.rs`, `crates/minix-libc/src/c_sys.rs`,
+    `libc/src/minix/process.rs`, `tools/c-include/unistd.h`,
+    `crates/boot-image/src/manifest.rs`, `crates/boot-image/src/minixfs.rs`,
+    `coreutils/Cargo.toml`, `tools/smoke/coreutils-minix.tsv`, `Justfile`)
+
 ---
 
 ## x86_64 (`[x86]`)

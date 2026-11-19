@@ -401,6 +401,10 @@ pub const SESSION: &[u8] = b"# /etc/session: what the session manager starts.
 pub const BOOT_FILES: &[(&str, &[u8], u16, u16, u16)] = &[
     ("/etc/rc", RC, 0o644, 0, 0),
     ("/etc/session", SESSION, 0o644, 0, 0),
+    // The machine name. `gethostname`, `sethostname` and `uname` all read this
+    // file (C's `_PATH_HOSTNAME_FILE`), so `hostname` and `uname -n` agree. It
+    // ships with the same name PM reports as its nodename.
+    ("/etc/hostname.file", b"minix", 0o644, 0, 0),
     (
         "/etc/passwd",
         b"root::0:0:root:/:/bin/sh\n\

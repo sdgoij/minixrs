@@ -22,6 +22,7 @@ int getpid(void);
 int getppid(void);
 int isatty(int fd);
 int gethostname(char *name, size_t len);
+int sethostname(const char *name, size_t len);
 int getsid(int pid);
 pid_t getpgrp(void);
 pid_t getpgid(pid_t pid);

@@ -246,6 +246,20 @@ coreutils uname -s	Minix
 coreutils uname -n	minix
 coreutils uname -m	(x86_64|riscv64|aarch64)
 coreutils arch	(x86_64|riscv64|aarch64)
+# `hostname` reads and writes `/etc/hostname.file` through the C library's
+# `gethostname`/`sethostname`; `uname -n` reads the same file (C's `uname(3)`
+# lets it replace the PM nodename), so a write moves both and the image ships the
+# file with the name PM reports. `-s` is the part before the first dot.
+coreutils hostname	minix
+coreutils hostname -s	minix
+coreutils hostname gate.test	
+coreutils hostname	gate.test
+coreutils uname -n	gate.test
+coreutils hostname gate	
+coreutils uname -n	gate
+# Put the image's name back, so a later step that reads it sees what it shipped.
+coreutils hostname minix	
+coreutils uname -n	minix
 # `nproc` reports the CPUs the kernel runs, which is one (`CONFIGURED_CPUS` in the
 # C library's `sysconf`, the same answer `std`'s `available_parallelism` gives).
 # `--all` is the `sysconf(_SC_NPROCESSORS_CONF)` path; the plain form is std's,

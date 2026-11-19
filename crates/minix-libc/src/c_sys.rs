@@ -544,6 +544,9 @@ const SC_PAGE_SIZE: c_int = 30;
 const SC_OPEN_MAX: c_int = 4;
 const SC_CLK_TCK: c_int = 2;
 const SC_GETPW_R_SIZE_MAX: c_int = 69;
+/// `_SC_HOST_NAME_MAX`: POSIX's minimum is 255, and the image's name is shorter.
+const SC_HOST_NAME_MAX: c_int = 180;
+const HOST_NAME_MAX: c_long = 255;
 const SC_PHYS_PAGES: c_int = 85;
 const SC_AVPHYS_PAGES: c_int = 86;
 /// `_SC_NPROCESSORS_CONF` and `_SC_NPROCESSORS_ONLN`, both answered with
@@ -575,6 +578,7 @@ pub unsafe extern "C" fn sysconf(name: c_int) -> c_long {
         SC_OPEN_MAX => OPEN_MAX as c_long,
         SC_CLK_TCK => CLK_TCK as c_long,
         SC_GETPW_R_SIZE_MAX => 16_384,
+        SC_HOST_NAME_MAX => HOST_NAME_MAX,
         SC_PHYS_PAGES | SC_AVPHYS_PAGES => PHYS_PAGES,
         SC_NPROCESSORS_CONF | SC_NPROCESSORS_ONLN => CONFIGURED_CPUS,
         _ => {
@@ -1755,6 +1759,27 @@ pub unsafe extern "C" fn uname(buf: *mut Utsname) -> c_int {
     fetch(minix_std::process::UTS_RELEASE, &mut u.release);
     fetch(minix_std::process::UTS_VERSION, &mut u.version);
     fetch(minix_std::process::UTS_MACHINE, &mut u.machine);
+
+    // C's `uname(3)` reads `/etc/hostname.file` last and lets it replace the PM
+    // nodename, so `sethostname` (and `hostname`) moves `uname -n` too. A missing
+    // file is not an error; the PM value stands.
+    if let Ok(fd) = unsafe { minix_std::fs::open(crate::HOSTNAME_FILE, minix_std::fs::O_RDONLY, 0) }
+    {
+        let mut name = [0u8; 64];
+        if let Ok(n) = unsafe { minix_std::fs::read(fd, &mut name) } {
+            let read = (n as usize).min(name.len());
+            if read > 0 {
+                let mut n = read;
+                if let Some(pos) = name[..n].iter().position(|&b| b == b'\n') {
+                    n = pos;
+                }
+                set_str(&mut u.nodename, &name[..n]);
+            }
+        }
+        // A read error leaves the PM name in place, as a missing file does; a
+        // close error is not worth failing `uname` over.
+        let _ = minix_std::fs::close(fd);
+    }
     0
 }
 

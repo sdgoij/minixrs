@@ -1140,20 +1140,83 @@ pub extern "C" fn getpid() -> c_int {
     }
 }
 
+/// The file C's `gethostname`, `sethostname` and `uname` share (`minix/paths.h`'s
+/// `_PATH_HOSTNAME_FILE`), so the machine name has one home and the three agree.
+#[cfg(target_os = "minix")]
+pub(crate) const HOSTNAME_FILE: &[u8] = b"/etc/hostname.file";
+
 /// `gethostname(2)`: copy the machine name into `name`, NUL-terminated.
-/// A single name is enough — lock-file host IDs only need to distinguish
-/// machines, and there is one (the QEMU guest).
+///
+/// The name lives in `/etc/hostname.file`, as it does in C (`gen/gethostname.c`),
+/// and `uname` reads the same file, so `sethostname` moves both.
 #[cfg(target_os = "minix")]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gethostname(name: *mut c_char, len: usize) -> c_int {
     if name.is_null() || len == 0 {
         return fail(22); // EINVAL
     }
-    let host = b"minix";
-    let n = host.len().min(len - 1);
+    let fd = match unsafe { minix_std::fs::open(HOSTNAME_FILE, minix_std::fs::O_RDONLY, 0) } {
+        Ok(fd) => fd,
+        Err(e) => return fail(e.0),
+    };
+    // Read no more than the caller's buffer holds, keeping room for the NUL.
+    let mut buf = [0u8; 256];
+    let cap = core::cmp::min(len - 1, buf.len());
+    let read = unsafe { minix_std::fs::read(fd, &mut buf[..cap]) };
+    let closed = minix_std::fs::close(fd);
+    let n = match read {
+        Ok(n) => n as usize,
+        Err(e) => return fail(e.0),
+    };
+    if let Err(e) = closed {
+        return fail(e.0);
+    }
+    let mut n = n.min(cap);
+    if let Some(pos) = buf[..n].iter().position(|&b| b == b'\n') {
+        n = pos;
+    }
     unsafe {
-        core::ptr::copy_nonoverlapping(host.as_ptr() as *const c_char, name, n);
+        core::ptr::copy_nonoverlapping(buf.as_ptr() as *const c_char, name, n);
         *name.add(n) = 0;
+    }
+    0
+}
+
+/// `sethostname(2)`: write the machine name to `/etc/hostname.file`.
+///
+/// C (`gen/sethostname.c`) writes a temporary file, makes it 0644 and renames it
+/// over the name file, so a reader never sees half a name. This does the same
+/// with a fixed temporary name: there is one writer (root) and no `mkstemp` on
+/// this port.
+#[cfg(target_os = "minix")]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sethostname(name: *const c_char, len: usize) -> c_int {
+    if name.is_null() || len == 0 {
+        return fail(22); // EINVAL
+    }
+    let bytes = unsafe { core::slice::from_raw_parts(name as *const u8, len) };
+    const TMP: &[u8] = b"/etc/hostname.tmp";
+    let flags = minix_std::fs::O_WRONLY | minix_std::fs::O_CREAT | minix_std::fs::O_TRUNC;
+    let fd = match unsafe { minix_std::fs::open(TMP, flags, 0o644) } {
+        Ok(fd) => fd,
+        Err(e) => return fail(e.0),
+    };
+    let written = unsafe { minix_std::fs::write(fd, bytes) };
+    let closed = minix_std::fs::close(fd);
+    let failure = match (written, closed) {
+        (Err(e), _) | (_, Err(e)) => Some(e.0),
+        (Ok(n), Ok(())) if n as usize != len => Some(28), // ENOSPC
+        (Ok(_), Ok(())) => None,
+    };
+    if let Some(e) = failure {
+        // The temporary is overwritten by the next call; report what stopped this
+        // one rather than a cleanup error.
+        let _ = minix_std::fs::unlink(TMP);
+        return fail(e);
+    }
+    if let Err(e) = minix_std::fs::rename(TMP, HOSTNAME_FILE) {
+        let _ = minix_std::fs::unlink(TMP);
+        return fail(e.0);
     }
     0
 }
