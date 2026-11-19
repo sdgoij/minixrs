@@ -192,12 +192,28 @@ the burst-overflow reading in item 37, are under `# Resolved issues`.
     main slot, so threads share the address space. It is not `cp -R` itself: a plain
     `ls -1 <dir>` triggers it, so the common factor is the directory read, not the copy.
 
-    Next step. Follow the fault into VM's demand-paging path for an executable page
-    (`VMCTL_CLEAR_PAGEFAULT` and the `memory` server). The page is inside a `PT_LOAD r-x`
-    segment, so either the file-cache lookup after a directory read loses the frame, or the
-    mapping is made and not seen by the faulting thread. QEMU `-d int` will show whether the
-    abort storm is one fault retried forever. Until it is fixed,
-    `tools/smoke/coreutils-extra.tsv` runs `du` before the first listing.
+    Followed into VM. The page is a `VR_FILE` region, so `handle_pagefault_for` takes the
+    file-backed branch and calls `advance_fault`, then `start_file_page`, then an FDIO request
+    to VFS (`VMVFSREQ_FDIO`, the page filled into VM's own `host_va`). That returns
+    `PageOutcome::Pending`, which leaves the fault parked until `finish_file_page` runs on
+    VFS's reply; only then does `advance_fault` map the page and clear the fault, and nothing
+    else clears it. VM's own mismatch, unmatched-reply and pool-exhausted diagnostics in
+    `vm/vfs_request.rs` did not print on the wedged boot, so no reply was misrouted and the
+    request pool was not exhausted. The page is *absent* (a translation fault), so the
+    orphan-placeholder recovery in `start_file_page` (a present page without the user bit)
+    does not run. That leaves one shape: `page_pending(ep, page_addr)` matches a pool job
+    that is still `busy` and will never complete, either an FDIO reply that never arrives or
+    a job left in flight. Note that `vfs_request::page_pending`'s comment still describes a
+    zero-filled placeholder mapped at the VA; `start_file_page` maps nothing there any more
+    (the frame lives in VM's `host_va`), so that comment is stale.
+
+    Next step. Read VM's `POOL` (a BSS static) at the wedge to see whether a `Job::Page`
+    for `(ep, page_addr)` is still `busy` and whether its `PageState` matches the wedged
+    page. If it is, the question is why VFS never answered that FDIO (the reply goes through
+    `vm_call_reply` in VFS); if it is not, the fault is not parking on a fill and
+    `start_file_page` returned `Done` without mapping. A permanent diagnostic that reports a
+    fault parked on a job no longer in flight would make that visible without a debugger.
+    Until it is fixed, `tools/smoke/coreutils-extra.tsv` runs `du` before the first listing.
 
 ---
 
