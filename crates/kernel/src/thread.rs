@@ -184,6 +184,8 @@ pub unsafe fn exit(rp: *mut Proc) -> i32 {
         crate::system::clear_ipc(rp);
 
         hal::release_fpu(rp as *mut core::ffi::c_void);
+        // The slot's FPU save area is one page no reuse can find; see `fpu::release`.
+        crate::fpu::release(rp);
 
         // Free the slot and remove it from the run queue. The running
         // thread stays linked in its run queue under this port's invariant,
@@ -410,6 +412,7 @@ pub unsafe fn sweep_group(main: *mut Proc) {
             let next = (*t).p_t_next;
             crate::system::clear_ipc(t);
             hal::release_fpu(t as *mut core::ffi::c_void);
+            crate::fpu::release(t);
             (*t).p_rts_flags
                 .store(RtsFlags::SLOT_FREE.bits(), Ordering::Relaxed);
             crate::sched::dequeue(t);

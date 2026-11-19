@@ -1801,6 +1801,11 @@ pub unsafe fn clear_endpoint(rp: *mut Proc) {
         // become SLOT_FREE, so the clear_ipc_refs walk below skips them.
         crate::thread::sweep_group(rp);
 
+        // The main slot's FPU save area is one page that reuse would lose; the workers' were
+        // released by `sweep_group`.
+        crate::hal::release_fpu(rp as *mut core::ffi::c_void);
+        crate::fpu::release(rp);
+
         // Mark as having no endpoint AND free the slot for reuse.
         // Matching C: clear_endpoint in do_clear.c sets SLOT_FREE
         // after release_address_space, so the slot can be reused.

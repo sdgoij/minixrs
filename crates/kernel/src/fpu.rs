@@ -477,3 +477,71 @@ pub fn state_offset() -> usize {
         0
     }
 }
+
+/// Free the FPU/SIMD save area of a slot that is being retired.
+///
+/// `save` (and `aarch64_area`/`riscv_area`, for a frame swap) allocates one physical page the
+/// first time a slot needs it and keeps its physmap address in `p_seg.fpu_state`. The slot is
+/// zeroed when it is handed out again, so nothing else can find that page: without this it is
+/// lost, measured at about one page per exec (`.notes/memory_budget.md`). Idempotent, so every
+/// retirement path may call it, including PM's later clear of a slot that already exited.
+///
+/// The page is always `phys_to_virt` of a page `alloc_phys_contig(1)` returned. The base check
+/// keeps a pointer that is not in the window (which no producer here makes) from becoming a
+/// wild free.
+///
+/// # Safety
+///
+/// `rp` must be a valid `Proc` and must not be the slot running on another CPU. This is a
+/// single-CPU kernel, so the callers are the slot's own exit path and the clear that follows it,
+/// both with the slot off the run queue.
+pub unsafe fn release(rp: *mut Proc) {
+    if rp.is_null() {
+        return;
+    }
+    unsafe {
+        let area = (*rp).p_seg.fpu_state;
+        if area.is_null() {
+            return;
+        }
+        let va = area as u64;
+        // The wasm kernel runs in a host runtime and never allocates an FPU area (`fpu::save`
+        // is a no-op there), so its HAL has no physmap helpers to call.
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            if va >= crate::hal::physmap_base() {
+                crate::hal::free_phys_contig(crate::hal::virt_to_phys(va), 1);
+            }
+        }
+        #[cfg(target_arch = "wasm32")]
+        let _ = va;
+        (*rp).p_seg.fpu_state = core::ptr::null_mut();
+    }
+}
+
+// The allocator here is the host-mode one (`--features sim`); the default kernel test build uses
+// the real x86 HAL and has no allocator to return a page to.
+#[cfg(all(test, feature = "sim"))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn release_returns_the_area_page_and_clears_the_pointer() {
+        let mut p = Proc::default();
+        let page = unsafe { crate::hal::alloc_phys_contig(1) }.expect("a page");
+        p.p_seg.fpu_state = crate::hal::phys_to_virt(page) as *mut u8;
+
+        let before = crate::hal::phys_free_pages();
+        unsafe { release(&mut p) };
+        assert!(p.p_seg.fpu_state.is_null(), "the pointer is cleared");
+        assert_eq!(
+            crate::hal::phys_free_pages(),
+            before + 1,
+            "the page returns to the allocator"
+        );
+
+        // PM's clear can retire the same slot after the exit; the second call is a no-op.
+        unsafe { release(&mut p) };
+        assert_eq!(crate::hal::phys_free_pages(), before + 1);
+    }
+}

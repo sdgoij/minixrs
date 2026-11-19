@@ -51,12 +51,20 @@ the gate now runs one boot at 512M.
   freed. That is deliberate (the render node's objects need physically contiguous
   guest memory), but it fixes the x86 guest's free pool at about 25 MB at 256M before
   any userland runs.
-- About one page per exec is not returned to the allocator (measured: 10 pages per 10
-  `coreutils true`). The `bare-metal-debug` skill documents roughly 1.2 pages per exec
-  from VM's temporary self-map VAs, which is the likely source. The per-process FPU
-  save area (`p_seg.fpu_state`) is also never freed when a Proc slot is recycled
-  (`fpu::save` allocates it; no path frees it). Both are small: about 360 KB over the
-  whole fixture.
+
+## The per-exec page (fixed)
+
+Before this was fixed, 50 `coreutils true` in a row cost one page per exec (10 pages
+per 10, measured with `hangdump`). The source was the FPU save area:
+`fpu::save` (and the aarch64/riscv area helpers) allocates one physical page the first
+use of a slot, and nothing freed it. `Proc::default` zeroes `p_seg.fpu_state` when the
+slot is handed out again, so the page was unreachable, and `fork_inherit` gives every
+fork a fresh copy, which is why it was one page per command.
+
+`fpu::release` now frees that page and clears the pointer. It is called on every slot
+retirement: `sys_exit_handler` and `clear_endpoint` for the main slot, and
+`thread::exit`/`thread::sweep_group` for workers. Re-measured: 50 execs leave
+`free` at 5094 pages, unchanged across all five dumps (0 pages per 10 execs).
 
 ## Reproduce
 

@@ -2458,10 +2458,13 @@ the burst-overflow reading in item 37, are under `# Resolved issues`.
     memory: x86's fb server carries a 128 MiB `GEM_ARENA` static
     (`crates/servers/src/fb.rs`) that the boot loader allocates with the image, so only
     about 25 MB is free at boot and the fixture's first pipeline fails with EPIPE. It is
-    not an exec-count limit (`coreutils true` costs about a page each) and not a full
-    filp or process table. At 512 MiB the whole 134-step fixture passes on all three
-    arches in one boot, and the gate drives that. `.notes/memory_budget.md` has the
-    numbers and the free-path analysis. `feed.sh` now writes four bytes per `sleep`
+    not an exec-count limit and not a full filp or process table. An exec did cost
+    about a page each, but that was a leak, not a limit: `fpu::save` allocated the
+    slot's FPU save area and nothing freed it, so every command kept one page after
+    exit. `fpu::release` now frees it on each retirement path and 50 execs leave the
+    free count unchanged; `.notes/memory_budget.md` has the before/after counts. At
+    512 MiB the whole 134-step fixture passes on all three arches in one boot, and
+    the gate drives that. `feed.sh` now writes four bytes per `sleep`
     instead of one (per-byte pacing is a process spawn each and made a long scenario
     take minutes under MSYS). The per-command read-cost ceiling moved 1120 to 1200
     because the multicall grew (1146 measured, one zone-sized request per added page),

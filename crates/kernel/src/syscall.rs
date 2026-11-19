@@ -326,6 +326,11 @@ unsafe fn sys_exit_handler(caller: *mut crate::proc::Proc, args: &[u64; 6]) -> i
         crate::thread::sweep_group(main);
         let rp = main;
 
+        // The main slot's FPU save area is one page, and zeroing the slot on reuse would lose it.
+        // The workers' areas were released by `sweep_group`.
+        crate::hal::release_fpu(main as *mut core::ffi::c_void);
+        crate::fpu::release(main);
+
         // Store exit status in p_signal_received for PM to read via SYS_GETKSIG.
         (*rp).p_signal_received = exit_status as u64;
 
