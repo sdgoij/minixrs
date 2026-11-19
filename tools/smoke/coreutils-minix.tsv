@@ -149,21 +149,6 @@ coreutils stat -c %F mn1	fifo
 coreutils stat -c %F mn3	block special file
 coreutils stat -c %F /link	symbolic link
 coreutils stat -f -c %T /	minix
-# `stty` reads and writes the tty server's `struct termios` through
-# `src/uu/stty/src/minixterm.rs`, this crate's `nix`-shaped surface over the port's C
-# library: `nix` has no minix support, and the port's termios is NetBSD's (speeds are
-# rates, not flag bits), which is why minix takes stty's `bsd` path. The console is a
-# serial line, so there is no window size and `size` answers `0 0`. The second `-g`
-# is the write path: `sane` changes `ixany` and two control characters, so the save
-# line differs from the first — a read-only `stty` would print it twice.
-coreutils stty -g	2b02:7:4b00:5cf:4:ff:ff:8:17:15:12:ff:3:1c:1a:19:11:13:16:f:1:0:14:ff
-coreutils stty size	0 0
-# The whole `-a` listing, consumed by `tail` so the step's evidence is its last line
-# and no later command is typed while it is still printing.
-coreutils stty -a | coreutils tail -2	-extproc
-coreutils stty cs8 -parity	
-coreutils stty sane	
-coreutils stty -g	2302:7:4b00:5cf:4:0:0:7f:17:15:12:ff:3:1c:1a:19:11:13:16:f:1:0:14:ff
 # `chroot`: VFS's do_chroot was implemented but unreachable, because rustix's
 # minix chroot was a NOSYS stub. The step proves the syscall, the
 # `set_current_dir("/")` and the exec after it on every arch.

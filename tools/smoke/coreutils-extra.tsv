@@ -1,0 +1,92 @@
+# The applets added to `feat_minix` after the core scenario: `ls`, `dir` and
+# `vdir`, `cp`, `mv`, the small unix set (`expr`, `link`, `hostid`, `nice`,
+# `date`, `dd`, `tty`, `dircolors`, `csplit`, `du`) and `kill`. It is a second
+# boot because the guest cannot drive ~130 execs of the 6 MB multicall in one
+# run: near the end a fork fails or a command produces no output, so the two
+# halves each stay well inside that limit.
+# `ls`, `dir` and `vdir`: the directory listing. `-1` pins one entry per line
+# so a step can match it whole, `-d` proves the directory itself is reported
+# rather than its contents, and `-a` has to name `.` and `..` as well. The
+# long form reads the mode, owner, group and size back out of `stat`, and the
+# arrow is `readlink`, which is the symlink target.
+#
+# `du` spawns a printer thread, and on aarch64 a thread spawn after *any*
+# directory listing never finishes (KNOWN_ISSUES 63): the process faults on a
+# text page VM never maps and stays in RTS_PAGEFAULT. So `du` runs first, before
+# the first listing and before the recursive copies. Nothing else here threads.
+# `cp`: the ordinary copy is std's `fs::copy`; `-R` walks a directory through
+# uucore's safe-copy.
+coreutils cp /etc/group cpg	
+coreutils head -1 cpg	root:x:0:
+# `du` reads `stat` through uucore's fsext and the safe-traversal walk.
+coreutils du -b cpg	[0-9]+[[:space:]]+cpg
+coreutils mkdir lsd1	
+coreutils touch lsd1/only	
+coreutils ln -s nowhere lsd1/dangling	
+coreutils ls -1 lsd1/dangling	lsd1/dangling
+coreutils ls -d lsd1	lsd1
+coreutils ls /bin/coreutils	/bin/coreutils
+# The console reports a 0x0 window size, so `ls` takes its non-terminal path
+# (one entry per line) even though stdout is the tty. Counting the lines is
+# the whole-line assertion a multi-line listing cannot be.
+coreutils ls lsd1 | coreutils wc -l	2
+coreutils ls -a lsd1 | coreutils wc -l	4
+coreutils ls -l lsd1/dangling	lrwxrwxrwx[[:space:]]+1[[:space:]]+root[[:space:]]+root[[:space:]]+7[[:space:]].*lsd1/dangling -> nowhere
+# `cp` and `mv`: copying a FIFO is the crate's own `mknodat` arm (`nix` has no
+# minix support).
+# A path with a trailing separator must name the directory to create.
+coreutils mkdir trail/	
+coreutils test -d trail && coreutils echo MKDIR-TRAIL-OK	MKDIR-TRAIL-OK
+coreutils mkdir dsrc	
+coreutils touch dsrc/f1	
+coreutils cp -R dsrc cdst	
+coreutils ls -1 cdst | coreutils head -1	f1
+coreutils mkfifo cpf	
+coreutils cp -R cpf cpf2 && coreutils test -p cpf2 && coreutils echo CP-FIFO-OK	CP-FIFO-OK
+coreutils cp /etc/group mvs	
+coreutils mv mvs mv2.txt	
+coreutils test -e mv2.txt && coreutils echo MV-OK	MV-OK
+# `expr` is the arithmetic and regular-expression evaluator.
+coreutils expr 2 + 3	5
+coreutils expr length abcdef	6
+# `link` is the direct VFS_LINK call.
+coreutils link cpg lk1 && coreutils test -e lk1 && coreutils echo LINK-OK	LINK-OK
+# `hostid` reads /etc/hostid or turns the nodename into an address; only the
+# shape of the printed id is stable here.
+coreutils hostid	[0-9a-f]+
+# `nice` reads and writes the priority through PM, then execs the command.
+coreutils nice coreutils echo NICE-OK	NICE-OK
+# `date -d @0` reads a fixed instant, so the system clock is not the assertion.
+coreutils date -u -d @0 +%Y-%m-%d	1970-01-01
+# `dd` copies a block, and its statistics go to stderr, which the step discards.
+coreutils dd if=/etc/group of=ddg bs=512 count=1 status=none	
+coreutils head -1 ddg	root:x:0:
+# `tty` asks the termios backend for the name of stdin.
+coreutils tty	/dev/tty
+
+# `stty` reads and writes the tty server's `struct termios` through
+# `src/uu/stty/src/minixterm.rs`, the `nix`-shaped surface over `rustix::termios`
+# (`nix` has no minix support, and the port's termios is NetBSD's: speeds are
+# rates, not flag bits, which is why minix takes stty's `bsd` path). The console
+# is a serial line, so there is no window size and `size` answers `0 0`. The
+# second `-g` is the write path: `sane` changes `ixany` and two control
+# characters, so the save line differs from the first, a read-only `stty` would
+# print it twice.
+coreutils stty -g	2b02:7:4b00:5cf:4:ff:ff:8:17:15:12:ff:3:1c:1a:19:11:13:16:f:1:0:14:ff
+coreutils stty size	0 0
+coreutils stty cs8 -parity	
+coreutils stty sane	
+coreutils stty -g	2302:7:4b00:5cf:4:0:0:7f:17:15:12:ff:3:1c:1a:19:11:13:16:f:1:0:14:ff
+# The whole `-a` listing goes to a file so the step's evidence is its last line:
+# `-a` prints a raw-mode line, and a later command typed while it prints would
+# be read as stty's input instead of reaching the shell.
+coreutils stty -a > stty.out	
+coreutils tail -2 stty.out	-extproc
+# `dircolors -b` emits the LS_COLORS assignment; its value is not asserted.
+coreutils dircolors -b > dircolors.out && coreutils test -s dircolors.out && coreutils echo DIRCOLORS-OK	DIRCOLORS-OK
+# `csplit` splits on a line number, naming the pieces xx00 and xx01.
+coreutils seq 1 3 > cs.txt	
+coreutils csplit cs.txt 2	
+coreutils head -1 xx00	1
+# `kill -0` only checks that pid 1 exists, through PM's signal call.
+coreutils kill -0 1 && coreutils echo KILL-OK	KILL-OK

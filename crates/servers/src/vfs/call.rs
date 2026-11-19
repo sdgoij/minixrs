@@ -343,6 +343,7 @@ pub fn do_creat() -> i32 {
         .iter()
         .position(|&b| b == 0)
         .unwrap_or(copy_len);
+    let actual_len = path::strip_trailing_slashes(&mut path_buf, actual_len);
     // Null-terminate for easy string handling.
     path_buf[actual_len] = 0;
     let mut resolve = Lookup::default();
@@ -2172,6 +2173,7 @@ pub fn do_link() -> i32 {
         .iter()
         .position(|&b| b == 0)
         .unwrap_or(copy2);
+    let actual2 = path::strip_trailing_slashes(&mut name2_buf, actual2);
     let mut resolve2 = Lookup::default();
     resolve2.l_path[..actual2].copy_from_slice(&name2_buf[..actual2]);
     resolve2.l_path_len = actual2;
@@ -2236,6 +2238,7 @@ pub fn do_unlink() -> i32 {
         .iter()
         .position(|&b| b == 0)
         .unwrap_or(copy_len);
+    let actual_len = path::strip_trailing_slashes(&mut path_buf, actual_len);
     let mut resolve = Lookup::default();
     resolve.l_path[..actual_len].copy_from_slice(&path_buf[..actual_len]);
     resolve.l_path_len = actual_len;
@@ -2293,6 +2296,7 @@ pub fn do_rename() -> i32 {
         }
     }
     let actual = buf[..copy].iter().position(|&b| b == 0).unwrap_or(copy);
+    let actual = path::strip_trailing_slashes(&mut buf, actual);
     let mut resolve = Lookup::default();
     resolve.l_path[..actual].copy_from_slice(&buf[..actual]);
     resolve.l_path_len = actual;
@@ -2320,6 +2324,7 @@ pub fn do_rename() -> i32 {
         }
     }
     let actual2 = buf2[..copy2].iter().position(|&b| b == 0).unwrap_or(copy2);
+    let actual2 = path::strip_trailing_slashes(&mut buf2, actual2);
     let mut resolve2 = Lookup::default();
     resolve2.l_path[..actual2].copy_from_slice(&buf2[..actual2]);
     resolve2.l_path_len = actual2;
@@ -2343,7 +2348,8 @@ pub fn do_rename() -> i32 {
         .map(|i| i + 1)
         .unwrap_or(0);
     if old_start == actual || new_start == actual2 {
-        // A trailing slash leaves no name to move.
+        // `last_dir` trimmed the trailing separators above, so this is now
+        // only the root path "/", which has no entry to move.
         unsafe { mount::put_vnode(dirp2) };
         unsafe { mount::put_vnode(dirp) };
         return ENOENT;
@@ -2392,6 +2398,7 @@ pub fn do_mkdir() -> i32 {
         .iter()
         .position(|&b| b == 0)
         .unwrap_or(copy_len);
+    let actual_len = path::strip_trailing_slashes(&mut path_buf, actual_len);
     let mut resolve = Lookup::default();
     resolve.l_path[..actual_len].copy_from_slice(&path_buf[..actual_len]);
     resolve.l_path_len = actual_len;
@@ -2453,6 +2460,7 @@ pub fn do_mknod() -> i32 {
         .iter()
         .position(|&b| b == 0)
         .unwrap_or(copy_len);
+    let actual_len = path::strip_trailing_slashes(&mut path_buf, actual_len);
     if actual_len == 0 {
         return ENOENT;
     }
@@ -2548,6 +2556,7 @@ pub fn do_slink() -> i32 {
         .iter()
         .position(|&b| b == 0)
         .unwrap_or(copy_len);
+    let actual_len = path::strip_trailing_slashes(&mut link_buf, actual_len);
     if actual_len == 0 {
         return ENOENT;
     }
@@ -2639,6 +2648,7 @@ pub fn do_rmdir() -> i32 {
         .iter()
         .position(|&b| b == 0)
         .unwrap_or(copy_len);
+    let actual_len = path::strip_trailing_slashes(&mut path_buf, actual_len);
     let mut resolve = Lookup::default();
     resolve.l_path[..actual_len].copy_from_slice(&path_buf[..actual_len]);
     resolve.l_path_len = actual_len;

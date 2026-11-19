@@ -398,6 +398,22 @@ pub unsafe fn last_dir(resolve: &Lookup, rfp: &Fproc) -> *mut Vnode {
     advance(start_dir, &temp_resolve, rfp)
 }
 
+/// Ignore a path's trailing separators, as C's `last_dir` does with
+/// `DO_POSIX_PATHNAME_RES` off (`path.c`): `mkdir("x/")` and `mkdir("x")`
+/// name the same entry, so the last component is never empty. Returns the
+/// trimmed length and writes a NUL there, which is the string the handlers
+/// hand to the filesystem.
+pub fn strip_trailing_slashes(path: &mut [u8], len: usize) -> usize {
+    let mut len = len;
+    while len > 1 && path[len - 1] == b'/' {
+        len -= 1;
+    }
+    if len < path.len() {
+        path[len] = 0;
+    }
+    len
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -532,6 +548,26 @@ mod tests {
             let result = last_dir(&resolve, &rfp);
             assert!(result.is_null(), "nested path lookup fails without FS IPC");
         }
+    }
+
+    #[test]
+    fn strip_trailing_slashes_names_the_same_entry() {
+        let mut p = [0u8; 16];
+        p[..8].copy_from_slice(b"trail///");
+        assert_eq!(strip_trailing_slashes(&mut p, 8), 5);
+        assert_eq!(&p[..5], b"trail");
+        assert_eq!(p[5], 0, "the trimmed path is NUL-terminated for the FS");
+
+        let mut p = [0u8; 16];
+        p[..3].copy_from_slice(b"/x/");
+        assert_eq!(strip_trailing_slashes(&mut p, 3), 2);
+        assert_eq!(&p[..2], b"/x");
+
+        // The root keeps its one separator.
+        let mut p = [0u8; 16];
+        p[0] = b'/';
+        assert_eq!(strip_trailing_slashes(&mut p, 1), 1);
+        assert_eq!(p[0], b'/');
     }
 
     #[test]

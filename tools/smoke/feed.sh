@@ -138,11 +138,18 @@ type_step() {
         attempt=$((attempt + 1))
         send_at=$(wc -c < "$log" 2>/dev/null || echo 0)
         rest=$1
+        sent=0
         while [ -n "$rest" ]; do
             byte=${rest%"${rest#?}"}
             rest=${rest#?}
             printf '%s' "$byte"
-            sleep "$pace"
+            sent=$((sent + 1))
+            # A pause per byte is a process spawn each; four bytes is still far
+            # below the console's input FIFO, and one pause per group keeps a
+            # long scenario to seconds rather than minutes under MSYS.
+            if [ $((sent % 4)) -eq 0 ] || [ -z "$rest" ]; then
+                sleep "$pace"
+            fi
         done
         printf '\n'
         if wait_for_after_fixed "$1" "$anchor"; then

@@ -78,6 +78,11 @@ are arch-specific, `[env]` is tooling/platform, not kernel.
    pre-fault still costs one zone-sized request per page and the pre-copy touch is still the only
    change that would lower it. The touch remains unattempted, and its gate is this same one.
 
+   *Checked 2026-11-19: the cost grew with the multicall, not with the per-page rule.* Item 62
+   added `ls`, `cp`, `mv` and the small unix set, and the same gate now measures 1146 requests
+   (one zone-sized request per added page) against a ceiling of 1200. The per-page pre-fault cost
+   is unchanged, so the pre-copy touch is still the only change that would lower it.
+
 6. **Kernel-mode fault resume beyond exec** — all three arches' kernel-mode
    resume paths are in-commit and boot-verified, but the lazy coverage is
    exec-only (text fetch + pre-faulted regions). General kernel-mode copies
@@ -158,10 +163,41 @@ the burst-overflow reading in item 37, are under `# Resolved issues`.
 
 ## AArch64 (`[aarch64]`)
 
-No open issues. Item 49 (the `threadtest` EL0 exception) and item 60 (a copied binary
-trapping on exec) are under `# Resolved issues`. Item 60 was filed here because
-aarch64's `/bin/echo` was the one large enough to reach the defective block range;
-the defect itself was cross-arch.
+63. **A thread spawn after a directory listing faults on its own text page and stays in
+    `RTS_PAGEFAULT`, so the command never returns (found 2026-11-19).** `coreutils du` is the
+    reproducer because it is the only applet in the smoke fixture that spawns a thread (its
+    printer, `thread::spawn`). On aarch64, once any process has read a directory
+    (`ls <dir>`, `cp -R`, or `du`'s own walk), a later `du` never answers; x86_64 and riscv64
+    run the same sequence and finish. Measured on a fresh aarch64 boot:
+    `mkdir d1; touch d1/f; coreutils ls -1 d1; coreutils du -b cpg` hangs, while the same
+    `du` with no listing first prints `39\tcpg`. `coreutils cp -R dsrc cdst` is an
+    equivalent trigger, which is why the fixture's `du` step was moved ahead of both.
+
+    What the guest is doing. Sampling `info registers` through the QEMU monitor while it
+    hangs alternates between EL0 at a coreutils address and EL1 in `el0_sync_return` /
+    `aarch64_post_syscall`: the process is executing and taking syscalls, not deadlocked.
+    The kernel proc table (`PROC_TABLE_ALIGNED`, `Proc` stride 0x3a0, `p_rts_flags` at
+    +0x150) shows the `du` slot with `rts=0x400` (`RTS_PAGEFAULT`), and `PAGE_FAULT_INFO`
+    for it records `fault=0x113d7b4, err=0x14`, a translation fault on an *instruction
+    fetch* at an address inside coreutils' executable segment (`0x1000000..0x12d4204`). The
+    slot's `p_reg` holds `elr_el1` (+0x100) equal to that same address, so the faulting
+    thread is parked with its PC on the unmapped page. The other thread (the printer) is the
+    one whose text page is first touched; the main thread spins in `std::sync::mpmc`'s
+    `Backoff::spin_heavy` (a `thread_yield` loop) waiting for a channel the parked thread
+    never drains.
+
+    Ruled out. It is not the FPU/SIMD save/restore: `fpu::frame_save`/`frame_load` swap the
+    exception frame's 512-byte SIMD block, and that path is present on all three arches. It
+    is not a worker with its own page table: `thread::create` copies `p_seg.p_cr3` from the
+    main slot, so threads share the address space. It is not `cp -R` itself: a plain
+    `ls -1 <dir>` triggers it, so the common factor is the directory read, not the copy.
+
+    Next step. Follow the fault into VM's demand-paging path for an executable page
+    (`VMCTL_CLEAR_PAGEFAULT` and the `memory` server). The page is inside a `PT_LOAD r-x`
+    segment, so either the file-cache lookup after a directory read loses the frame, or the
+    mapping is made and not seen by the faulting thread. QEMU `-d int` will show whether the
+    abort storm is one fault retried forever. Until it is fixed,
+    `tools/smoke/coreutils-extra.tsv` runs `du` before the first listing.
 
 ---
 
@@ -2342,6 +2378,54 @@ the defect itself was cross-arch.
     `rustix/src/termios/types.rs`, `rustix/src/termios/ioctl.rs`,
     `coreutils/src/uu/stty/src/minixterm.rs`, `coreutils/src/uu/stty/Cargo.toml`,
     `coreutils/Cargo.toml`, `Cargo.toml`)
+
+64. **Sixteen more applets are in `feat_minix`, so `ls`, `cp`, `mv`, `du` and the small unix
+    set run on all three arches (2026-11-19).** The gate is
+    `just test-coreutils-minix-<arch>`: `tools/smoke/coreutils-minix.tsv` (the original 86
+    steps) plus `tools/smoke/coreutils-extra.tsv` (44 steps), green on x86_64, riscv64 and
+    aarch64.
+
+    `feat_minix` gained `ls`, `dir`, `vdir`, `cp`, `mv`, `expr`, `link`, `hostid`, `nice`,
+    `date`, `dd`, `tty`, `dircolors`, `csplit`, `du` and `kill`, and the workspace `rustix`
+    pin gained `minix`/`alloc` (`hostid` needs `rustix::system::uname`). Four applets needed a
+    port fix rather than a feature flip:
+
+    - `cp`/`mv` created FIFOs and special nodes through `nix`, which has no minix support.
+      They now use `rustix::fs::mknodat` over `VFS_MKNOD` (the `mkfifo`/`mknod` pattern, items
+      58/61), and `nix` is cfg-gated off for minix.
+    - `dd`'s lcase/ucase conversion tables called `libc::tolower`/`toupper`, which the port
+      does not have; it now uses ASCII helpers for minix and `libc` elsewhere.
+    - `uucore::fs::canonicalize` pre-canonicalized the cwd with `dunce`, whose underlying
+      `std::fs::canonicalize` is a PAL stub returning `Unsupported`; on minix that step is
+      skipped, because `current_dir` is already absolute and the walk resolves symlinks.
+    - `ls` computed `SystemTime::now() - Duration::new(31_556_952/2, 0)`, which panicked on
+      riscv64 (the guest clock at the epoch). `recent_time_range(now)` returns
+      `UNIX_EPOCH..=now` before the half-year mark, with two host tests.
+
+    VFS stripped a trailing separator only in C's `last_dir` (the port has
+    `DO_POSIX_PATHNAME_RES` off), so `mkdir("x/")` left an empty last component and failed
+    `ENOENT`. `vfs::path::strip_trailing_slashes` now trims and NUL-terminates after each
+    path copy in `do_creat`, `do_link` (both names), `do_unlink`, `do_rename` (both),
+    `do_mkdir`, `do_mknod`, `do_slink` and `do_rmdir`; a host test pins the rule.
+
+    Two boots per arch. The guest cannot drive ~130 execs of the 6 MB multicall in one run
+    (near the end a fork fails or a command prints nothing, while 200 `coreutils true` in one
+    boot still pass), so the fixture is split and each half stays well under that limit.
+    `feed.sh` now writes four bytes per `sleep` instead of one (per-byte pacing is a process
+    spawn each and made a long scenario take minutes under MSYS). The per-command read-cost
+    ceiling moved 1120 to 1200 because the multicall grew (1146 measured, one zone-sized
+    request per added page), recorded on item 5.
+
+    `du` hangs on aarch64 after any directory listing. That is a port defect, not a missing
+    applet, and is item 63; the fixture runs `du` first because of it.
+
+    Gates. `cargo test --workspace`, `cargo clippy --all-targets -- -D warnings`, `just
+    check`, `just test-arches`, `just image x86`, `sh tools/wasm-verify.sh` and `just
+    test-linux`.
+    (`coreutils/Cargo.toml`, `coreutils/src/uu/{cp,mv,dd,ls}/`,
+    `coreutils/src/uucore/src/lib/features/fs.rs`, `crates/servers/src/vfs/call.rs`,
+    `crates/servers/src/vfs/path.rs`, `tools/smoke/coreutils-extra.tsv`,
+    `tools/smoke/feed.sh`, `Justfile`)
 
 ---
 

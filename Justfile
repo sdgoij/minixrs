@@ -604,38 +604,41 @@ test-coreutils-wedge-aarch64 boot-timeout="30": build-aarch64
 # `mkfifo` the VFS_MKNOD path, and `chroot` the VFS_CHROOT path.
 # `tools/smoke/coreutils-minix.tsv` says which step covers which.
 #
-# riscv64 and aarch64 pace their input (`FEED_PACE`): their consoles drop
-# bytes mid-line under a burst, which runs a truncated command, and the fixture
-# is long enough that it happens. Pacing is slow under MSYS (each byte spawns a
-# `sleep`), so those two get a 120 s guest budget; x86 keeps the default and
-# does not flake.
+# Two boots per arch. The first drives the original 86-step scenario; the second
+# drives `tools/smoke/coreutils-extra.tsv`, the applets added after it. They are
+# separate because the guest cannot run ~130 execs of the 6 MB multicall in one
+# boot: near the end a fork fails or a command produces no output, while 200
+# `coreutils true` in one boot still pass, so it is what the copies and listings
+# leave behind, not a per-exec leak.
+#
+# Every arch paces its input (`FEED_PACE`): the console drops bytes mid-line
+# under a burst, which runs a truncated command. Pacing costs a `sleep` per
+# group under MSYS, so the budgets cover a paced scenario.
 test-coreutils-minix arch="x86":
     @just test-coreutils-minix-{{arch}}
 
-test-coreutils-minix-x86 boot-timeout="40": build-x86
+test-coreutils-minix-x86: build-x86
     mkdir -p target/images/x86_64-pc-minix
     cp target/trampoline.elf target/images/x86_64-pc-minix/minix-x86.elf
     @just _assert-qemu-version qemu-system-x86_64
-    FEED_SCENARIO=tools/smoke/coreutils-minix.tsv sh tools/smoke/feed.sh target/test-coreutils-minix-x86.log {{boot-timeout}} qemu-system-x86_64 -nographic -m 256M -no-reboot -vga none -device bochs-display,id=fb0 -kernel target/images/x86_64-pc-minix/minix-x86.elf -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0 -device virtio-tablet-pci,display=fb0
-    @if grep -qE "^(touch|env|ln|chgrp|chown|groups|id|logname|whoami|install|mkfifo|chroot|coreutils):|^(RM-STILL-THERE|RMR-STILL-THERE|CHMOD-X-BAD|CHMOD-ENOENT-BAD|INSTALL-M-BAD)$" target/test-coreutils-minix-x86.log; then echo "!! a tool reported an error:"; grep -nE "^(touch|env|ln|chgrp|chown|groups|id|logname|whoami|install|mkfifo|chroot|coreutils):|^(RM-STILL-THERE|RMR-STILL-THERE|CHMOD-X-BAD|CHMOD-ENOENT-BAD|INSTALL-M-BAD)$" target/test-coreutils-minix-x86.log; exit 1; fi
-    @echo "coreutils-minix: touch, env, rm, chmod, chgrp, chown, groups, id, logname, whoami, install, mkfifo, mknod, stat, stty and chroot ran (x86_64)"
+    FEED_PACE=0.003 FEED_SCENARIO=tools/smoke/coreutils-minix.tsv sh tools/smoke/feed.sh target/test-coreutils-minix-x86.log 120 qemu-system-x86_64 -nographic -m 256M -no-reboot -vga none -device bochs-display,id=fb0 -kernel target/images/x86_64-pc-minix/minix-x86.elf -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0 -device virtio-tablet-pci,display=fb0
+    FEED_PACE=0.003 FEED_SCENARIO=tools/smoke/coreutils-extra.tsv sh tools/smoke/feed.sh target/test-coreutils-extra-x86.log 90 qemu-system-x86_64 -nographic -m 256M -no-reboot -vga none -device bochs-display,id=fb0 -kernel target/images/x86_64-pc-minix/minix-x86.elf -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0 -device virtio-tablet-pci,display=fb0
+    @if grep -qE "^(touch|env|ln|chgrp|chown|groups|id|logname|whoami|install|mkfifo|chroot|coreutils|ls|dir|vdir|cp|mv|expr|link|hostid|nice|date|dd|tty|dircolors|csplit|du|kill):|^(RM-STILL-THERE|RMR-STILL-THERE|CHMOD-X-BAD|CHMOD-ENOENT-BAD|INSTALL-M-BAD)$" target/test-coreutils-minix-x86.log target/test-coreutils-extra-x86.log; then echo "!! a tool reported an error:"; grep -nE "^(touch|env|ln|chgrp|chown|groups|id|logname|whoami|install|mkfifo|chroot|coreutils|ls|dir|vdir|cp|mv|expr|link|hostid|nice|date|dd|tty|dircolors|csplit|du|kill):|^(RM-STILL-THERE|RMR-STILL-THERE|CHMOD-X-BAD|CHMOD-ENOENT-BAD|INSTALL-M-BAD)$" target/test-coreutils-minix-x86.log target/test-coreutils-extra-x86.log; exit 1; fi
+    @echo "coreutils-minix: the core scenario and ls, cp, mv, expr, link, hostid, nice, date, dd, tty, dircolors, csplit, du and kill ran (x86_64)"
 
-# The gate is 92 steps, and riscv64 and aarch64 pace every byte of every command
-# (`FEED_PACE`), so the driver's budget covers the whole scenario rather than one
-# step: 120s ran out two steps from the end at 69 steps, once the `chroot` jail
-# steps landed. A guest that stops is still reported by the step that did not
-# answer, which is what the budget buys; x86, which needs no pacing, is at 40.
-test-coreutils-minix-riscv64 boot-timeout="200": build-riscv64
+test-coreutils-minix-riscv64: build-riscv64
     @just _assert-qemu-version qemu-system-riscv64
-    FEED_PACE=0.003 FEED_SCENARIO=tools/smoke/coreutils-minix.tsv sh tools/smoke/feed.sh target/test-coreutils-minix-riscv64.log {{boot-timeout}} qemu-system-riscv64 -machine virt -m 256M -nographic -global virtio-mmio.force-legacy=off -netdev user,id=net0 -device virtio-net-device,netdev=net0 -device virtio-gpu-device -device virtio-keyboard-device -kernel target/riscv64gc-unknown-minix/release/kernel-boot-riscv64
-    @if grep -qE "^(touch|env|ln|chgrp|chown|groups|id|logname|whoami|install|mkfifo|chroot|coreutils):|^(RM-STILL-THERE|RMR-STILL-THERE|CHMOD-X-BAD|CHMOD-ENOENT-BAD|INSTALL-M-BAD)$" target/test-coreutils-minix-riscv64.log; then echo "!! a tool reported an error:"; grep -nE "^(touch|env|ln|chgrp|chown|groups|id|logname|whoami|install|mkfifo|chroot|coreutils):|^(RM-STILL-THERE|RMR-STILL-THERE|CHMOD-X-BAD|CHMOD-ENOENT-BAD|INSTALL-M-BAD)$" target/test-coreutils-minix-riscv64.log; exit 1; fi
-    @echo "coreutils-minix: touch, env, rm, chmod, chgrp, chown, groups, id, logname, whoami, install, mkfifo, mknod, stat, stty and chroot ran (riscv64)"
+    FEED_PACE=0.003 FEED_SCENARIO=tools/smoke/coreutils-minix.tsv sh tools/smoke/feed.sh target/test-coreutils-minix-riscv64.log 240 qemu-system-riscv64 -machine virt -m 256M -nographic -global virtio-mmio.force-legacy=off -netdev user,id=net0 -device virtio-net-device,netdev=net0 -device virtio-gpu-device -device virtio-keyboard-device -kernel target/riscv64gc-unknown-minix/release/kernel-boot-riscv64
+    FEED_PACE=0.003 FEED_SCENARIO=tools/smoke/coreutils-extra.tsv sh tools/smoke/feed.sh target/test-coreutils-extra-riscv64.log 180 qemu-system-riscv64 -machine virt -m 256M -nographic -global virtio-mmio.force-legacy=off -netdev user,id=net0 -device virtio-net-device,netdev=net0 -device virtio-gpu-device -device virtio-keyboard-device -kernel target/riscv64gc-unknown-minix/release/kernel-boot-riscv64
+    @if grep -qE "^(touch|env|ln|chgrp|chown|groups|id|logname|whoami|install|mkfifo|chroot|coreutils|ls|dir|vdir|cp|mv|expr|link|hostid|nice|date|dd|tty|dircolors|csplit|du|kill):|^(RM-STILL-THERE|RMR-STILL-THERE|CHMOD-X-BAD|CHMOD-ENOENT-BAD|INSTALL-M-BAD)$" target/test-coreutils-minix-riscv64.log target/test-coreutils-extra-riscv64.log; then echo "!! a tool reported an error:"; grep -nE "^(touch|env|ln|chgrp|chown|groups|id|logname|whoami|install|mkfifo|chroot|coreutils|ls|dir|vdir|cp|mv|expr|link|hostid|nice|date|dd|tty|dircolors|csplit|du|kill):|^(RM-STILL-THERE|RMR-STILL-THERE|CHMOD-X-BAD|CHMOD-ENOENT-BAD|INSTALL-M-BAD)$" target/test-coreutils-minix-riscv64.log target/test-coreutils-extra-riscv64.log; exit 1; fi
+    @echo "coreutils-minix: the core scenario and ls, cp, mv, expr, link, hostid, nice, date, dd, tty, dircolors, csplit, du and kill ran (riscv64)"
 
-test-coreutils-minix-aarch64 boot-timeout="200": build-aarch64
+test-coreutils-minix-aarch64: build-aarch64
     @just _assert-qemu-version qemu-system-aarch64
-    FEED_PACE=0.003 FEED_SCENARIO=tools/smoke/coreutils-minix.tsv sh tools/smoke/feed.sh target/test-coreutils-minix-aarch64.log {{boot-timeout}} qemu-system-aarch64 -machine virt -cpu cortex-a57 -m 256M -nographic -no-reboot -global virtio-mmio.force-legacy=off -netdev user,id=net0 -device virtio-net-device,netdev=net0 -device virtio-gpu-device -device virtio-keyboard-device -kernel target/aarch64-unknown-minix/release/kernel-boot-aarch64
-    @if grep -qE "^(touch|env|ln|chgrp|chown|groups|id|logname|whoami|install|mkfifo|chroot|coreutils):|^(RM-STILL-THERE|RMR-STILL-THERE|CHMOD-X-BAD|CHMOD-ENOENT-BAD|INSTALL-M-BAD)$" target/test-coreutils-minix-aarch64.log; then echo "!! a tool reported an error:"; grep -nE "^(touch|env|ln|chgrp|chown|groups|id|logname|whoami|install|mkfifo|chroot|coreutils):|^(RM-STILL-THERE|RMR-STILL-THERE|CHMOD-X-BAD|CHMOD-ENOENT-BAD|INSTALL-M-BAD)$" target/test-coreutils-minix-aarch64.log; exit 1; fi
-    @echo "coreutils-minix: touch, env, rm, chmod, chgrp, chown, groups, id, logname, whoami, install, mkfifo, mknod, stat, stty and chroot ran (aarch64)"
+    FEED_PACE=0.003 FEED_SCENARIO=tools/smoke/coreutils-minix.tsv sh tools/smoke/feed.sh target/test-coreutils-minix-aarch64.log 240 qemu-system-aarch64 -machine virt -cpu cortex-a57 -m 256M -nographic -no-reboot -global virtio-mmio.force-legacy=off -netdev user,id=net0 -device virtio-net-device,netdev=net0 -device virtio-gpu-device -device virtio-keyboard-device -kernel target/aarch64-unknown-minix/release/kernel-boot-aarch64
+    FEED_PACE=0.003 FEED_SCENARIO=tools/smoke/coreutils-extra.tsv sh tools/smoke/feed.sh target/test-coreutils-extra-aarch64.log 180 qemu-system-aarch64 -machine virt -cpu cortex-a57 -m 256M -nographic -no-reboot -global virtio-mmio.force-legacy=off -netdev user,id=net0 -device virtio-net-device,netdev=net0 -device virtio-gpu-device -device virtio-keyboard-device -kernel target/aarch64-unknown-minix/release/kernel-boot-aarch64
+    @if grep -qE "^(touch|env|ln|chgrp|chown|groups|id|logname|whoami|install|mkfifo|chroot|coreutils|ls|dir|vdir|cp|mv|expr|link|hostid|nice|date|dd|tty|dircolors|csplit|du|kill):|^(RM-STILL-THERE|RMR-STILL-THERE|CHMOD-X-BAD|CHMOD-ENOENT-BAD|INSTALL-M-BAD)$" target/test-coreutils-minix-aarch64.log target/test-coreutils-extra-aarch64.log; then echo "!! a tool reported an error:"; grep -nE "^(touch|env|ln|chgrp|chown|groups|id|logname|whoami|install|mkfifo|chroot|coreutils|ls|dir|vdir|cp|mv|expr|link|hostid|nice|date|dd|tty|dircolors|csplit|du|kill):|^(RM-STILL-THERE|RMR-STILL-THERE|CHMOD-X-BAD|CHMOD-ENOENT-BAD|INSTALL-M-BAD)$" target/test-coreutils-minix-aarch64.log target/test-coreutils-extra-aarch64.log; exit 1; fi
+    @echo "coreutils-minix: the core scenario and ls, cp, mv, expr, link, hostid, nice, date, dd, tty, dircolors, csplit, du and kill ran (aarch64)"
 
 # The read path over a file written this boot, per arch: `tools/smoke/fileread.tsv` writes
 # `seq 1 10000` (twelve blocks, so blocks 8-11 sit behind the single-indirect block) and hashes
@@ -832,14 +835,15 @@ test-threads-aarch64 boot-timeout="40": build-aarch64
     FEED_SCENARIO=tools/smoke/threads.tsv sh tools/smoke/feed.sh target/test-threads-aarch64.log {{boot-timeout}} qemu-system-aarch64 -machine virt -cpu cortex-a57 -m 256M -nographic -no-reboot -global virtio-mmio.force-legacy=off -netdev user,id=net0 -device virtio-net-device,netdev=net0 -device virtio-gpu-device -device virtio-keyboard-device -kernel target/aarch64-unknown-minix/release/kernel-boot-aarch64
     @echo "threads: four kernel threads shared the process and were joined (aarch64)"
 
-# The per-command read cost of a large binary. The scenario runs two invocations of the 6 MB
-# multicall, each reading no file data: the first costs 1079 virtio reads of 4 KiB because the
-# first text fault pre-faults every non-executable region of the image (KNOWN_ISSUES #5), and the
-# second costs 9 because VM's file cache serves those pages from the same boot. The total is 1088
-# in every run so far; the ceiling of 1120 covers both halves, so it fails if either the cold
-# start grows or the cache stops serving the warm one, and the warm half is the property that
-# matters for a shell running many applets. Paced input (`FEED_PACE`) because the traced stdio
-# console drops bytes, and a step that never arrived would fail before the count mattered.
+# The per-command read cost of a large binary. The scenario runs two invocations of the multicall,
+# each reading no file data: the first costs ~1080 virtio reads of 4 KiB because the first text
+# fault pre-faults every non-executable region of the image (KNOWN_ISSUES #5), and the second
+# costs ~9 because VM's file cache serves those pages from the same boot. The total was 1146 when
+# the multicall gained `ls`, `cp`, `mv` and the small unix set (KNOWN_ISSUES 62), one zone-sized
+# request per added page, so the ceiling is 1200; it still fails if either the cold start grows or
+# the cache stops serving the warm one, and the warm half is the property that matters for a shell
+# running many applets. Paced input (`FEED_PACE`) because the traced stdio console drops bytes, and
+# a step that never arrived would fail before the count mattered.
 test-read-cost arch="x86" boot-timeout="40":
     @just test-read-cost-{{arch}} {{boot-timeout}}
 
@@ -849,7 +853,7 @@ test-read-cost-x86 boot-timeout="40": build-x86
     @just _assert-qemu-version qemu-system-x86_64
     rm -f target/test-read-cost.trace
     FEED_PACE=0.003 FEED_SCENARIO=tools/smoke/read-cost.tsv sh tools/smoke/feed.sh target/test-read-cost.log {{boot-timeout}} qemu-system-x86_64 -nographic -monitor none -m 256M -no-reboot -vga none -device bochs-display,id=fb0 -kernel target/images/x86_64-pc-minix/minix-x86.elf -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0 -device virtio-tablet-pci,display=fb0 -drive if=none,id=disk0,file=target/images/x86_64-pc-minix/disk.img,format=raw,cache=writethrough -device virtio-blk-pci,disable-legacy=on,drive=disk0 -trace enable=virtio_blk_handle_read -D target/test-read-cost.trace
-    python tools/virtio_read_hist.py target/test-read-cost.trace --max=1120
+    python tools/virtio_read_hist.py target/test-read-cost.trace --max=1200
     @echo "read-cost: per-command read cost within the ceiling"
 
 # Boot the bash that `build-bash` produced and drive `tools/smoke/bash.tsv` at
