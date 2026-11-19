@@ -123,6 +123,47 @@ coreutils mkfifo mf1
 coreutils test -p mf1 && coreutils echo MKFIFO-P-OK	MKFIFO-P-OK
 coreutils mkfifo -m 600 mf2	
 coreutils test -p mf2 && coreutils echo MKFIFO-M-OK	MKFIFO-M-OK
+# `mknod` makes the three special inodes through rustix's `mknodat`, whose minix
+# arm is VFS_MKNOD. `nix`, which mknod used, has no minix support, so the node
+# creation, the mode bits and the umask come from rustix instead (the pattern
+# `mkfifo` set). `u` is the character-device alias GNU accepts, and `-m` is the
+# explicit-mode path that clears the umask around the call.
+coreutils mknod mn1 p	
+coreutils test -p mn1 && coreutils echo MKNOD-P-OK	MKNOD-P-OK
+coreutils mknod mn2 c 4 64	
+coreutils test -c mn2 && coreutils echo MKNOD-C-OK	MKNOD-C-OK
+coreutils mknod -m 600 mn3 b 3 0	
+coreutils test -b mn3 && coreutils echo MKNOD-B-OK	MKNOD-B-OK
+coreutils mknod mn4 u 1 3	
+coreutils test -c mn4 && coreutils echo MKNOD-U-OK	MKNOD-U-OK
+# `stat`: the file fields are `MetadataExt`, the owner names are `uucore::entries` over
+# the port's libc, and `-f` is `uucore::fsext`, whose minix arm reads `statvfs` through
+# `rustix` (MINIX has no `statfs`) and answers one filesystem type. Sizes and inodes
+# differ per arch; types, modes and names do not.
+coreutils stat -c %F /bin/echo	regular file
+coreutils stat -c %A:%a:%U:%G /bin/echo	-rwxr-xr-x:755:root:root
+coreutils stat -c %F /bin	directory
+coreutils stat -c %F /dev/null	character special file
+coreutils stat -c %t:%T /dev/null	1:3
+coreutils stat -c %F mn1	fifo
+coreutils stat -c %F mn3	block special file
+coreutils stat -c %F /link	symbolic link
+coreutils stat -f -c %T /	minix
+# `stty` reads and writes the tty server's `struct termios` through
+# `src/uu/stty/src/minixterm.rs`, this crate's `nix`-shaped surface over the port's C
+# library: `nix` has no minix support, and the port's termios is NetBSD's (speeds are
+# rates, not flag bits), which is why minix takes stty's `bsd` path. The console is a
+# serial line, so there is no window size and `size` answers `0 0`. The second `-g`
+# is the write path: `sane` changes `ixany` and two control characters, so the save
+# line differs from the first — a read-only `stty` would print it twice.
+coreutils stty -g	2b02:7:4b00:5cf:4:ff:ff:8:17:15:12:ff:3:1c:1a:19:11:13:16:f:1:0:14:ff
+coreutils stty size	0 0
+# The whole `-a` listing, consumed by `tail` so the step's evidence is its last line
+# and no later command is typed while it is still printing.
+coreutils stty -a | coreutils tail -2	-extproc
+coreutils stty cs8 -parity	
+coreutils stty sane	
+coreutils stty -g	2302:7:4b00:5cf:4:0:0:7f:17:15:12:ff:3:1c:1a:19:11:13:16:f:1:0:14:ff
 # `chroot`: VFS's do_chroot was implemented but unreachable, because rustix's
 # minix chroot was a NOSYS stub. The step proves the syscall, the
 # `set_current_dir("/")` and the exec after it on every arch.

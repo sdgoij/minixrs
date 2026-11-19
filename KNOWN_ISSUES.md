@@ -2251,6 +2251,44 @@ the defect itself was cross-arch.
     `rustix/src/backend/minix/process/syscalls.rs`, `tools/c-include/unistd.h`,
     `tools/smoke/coreutils-minix.tsv`, `Justfile`)
 
+61. **`mknod`, `stat` and `stty` are in the multicall on all three arches (2026-11-19), so
+    `feat_require_unix_core` is in `feat_minix` whole.** The gate is
+    `just test-coreutils-minix-<arch>` (`tools/smoke/coreutils-minix.tsv`, 92 steps), green on
+    x86_64, riscv64 and aarch64.
+
+    `mknod` only needed its backend moved: it used `nix`, which has no minix support and no fork,
+    and `mkfifo` had already shown the replacement — `rustix::fs::mknodat` over `VFS_MKNOD`
+    (item 58). The node creation, the mode bits and the umask are `rustix`'s now, so `mknod`'s
+    dependency block matches `mkfifo`'s and its `nix` dependency is gone. The scenario creates a
+    fifo, a character device, a block device and a character device through `u` (the alias GNU
+    accepts), and checks each with `test -p`/`-c`/`-b`.
+
+    `stat` needed the half of `uucore::fsext` the port did not serve. MINIX has `statvfs(2)` and
+    no `statfs`, so `fsext` gained a minix `StatFs` and `statfs()` over `rustix::fs::statvfs`
+    (whose minix arm is `REQ_STATVFS`), a `FsMeta` impl whose ten answers are single fields, an
+    empty `read_fs_list` (the same shape `aix`/`solaris` take: there is no mount list to read), and
+    one filesystem-type id so `-f %t`/`%T` report `minix` rather than an `unimplemented!()`. The
+    steps check `%F` for a regular file, a directory, a character device, a block device, a fifo
+    and a symlink, `%A:%a:%U:%G` for the mode and the owner names, `%t:%T` for the device decode,
+    and `-f %T` for the filesystem type.
+
+    `stty` needed a termios surface: `nix`'s, which has no minix arm. Rather than rewrite
+    `stty`, `coreutils/src/uu/stty/src/minixterm.rs` re-exposes the port's tty attributes in the
+    shape `stty` already uses — the four flag groups with `contains`/`intersects`/`set`, a
+    `control_chars` array indexed by `SpecialCharacterIndices`, and `tcgetattr`/`tcsetattr` over a
+    borrowed fd over `libc`'s `tc*` calls — and both files reach it through
+    `use crate::minixterm as nix;`. The build treats minix as `bsd` for `stty` because the port's
+    termios is NetBSD's: speeds are rates in `c_ispeed`/`c_ospeed`, not flag bits, which is the
+    `u32`-speed path `stty` takes for a BSD. The steps print `-g`, ask `size` (a serial console has
+    no window size, so `0 0`), read the whole `-a` listing, then change two flags with
+    `cs8 -parity` and `sane` and print `-g` again: the save line differs, which is the write path
+    and not just a read of the console's defaults.
+    (`coreutils/Cargo.toml`, `coreutils/src/uu/mknod/Cargo.toml`,
+    `coreutils/src/uu/mknod/src/mknod.rs`, `coreutils/src/uucore/src/lib/features/fsext/mod.rs`,
+    `coreutils/src/uu/stty/Cargo.toml`, `coreutils/src/uu/stty/build.rs`,
+    `coreutils/src/uu/stty/src/minixterm.rs`, `coreutils/src/uu/stty/src/stty.rs`,
+    `coreutils/src/uu/stty/src/flags.rs`, `tools/smoke/coreutils-minix.tsv`, `Justfile`)
+
 ---
 
 ## x86_64 (`[x86]`)
