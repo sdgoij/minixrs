@@ -163,12 +163,16 @@ pub fn construct_pid_dirs() {
 }
 
 /// Construct the files of one PID directory.
+///
+/// The files are indexed children, as in C's `make_all_pid_entries`: `getdents` walks a
+/// directory's indexed range by index, so a PID's files are listed from it rather than as
+/// ordinary children.
 pub fn construct_pid_entries(parent: u32) {
     let slot = libs::vtreefs::get_inode(parent).index;
     if slot < 0 {
         return;
     }
-    crate::procfs::main::construct_tree(parent as u16, PID_FILES);
+    crate::procfs::main::construct_indexed_tree(parent as u16, PID_FILES);
 }
 
 /// Path name resolution hook.
@@ -298,6 +302,53 @@ mod tests {
 
         // The slot travels in the inode's index, which is what the read hook reads back.
         assert_eq!(libs::vtreefs::get_inode(dir).index, 0);
+    }
+
+    #[test]
+    fn pid_dirs_are_indexed_children_of_the_root() {
+        // `getdents` walks a directory's indexed range by index. A PID directory that was not
+        // indexed would be skipped by that walk and never listed.
+        init();
+        set_table(&[live(42, "init"), live(43, "shell")]);
+        construct_pid_dirs();
+        let root = libs::vtreefs::get_root_inode();
+        let first = libs::vtreefs::get_inode_by_index(root, 0).expect("slot 0 is indexed");
+        assert_eq!(libs::vtreefs::get_inode_name(first), "42");
+        let second = libs::vtreefs::get_inode_by_index(root, 1).expect("slot 1 is indexed");
+        assert_eq!(libs::vtreefs::get_inode_name(second), "43");
+        assert_eq!(libs::vtreefs::get_inode(root).indexed, 2);
+        assert!(libs::vtreefs::get_inode_by_index(root, 2).is_none());
+    }
+
+    fn child_count(parent: u32, name: &str) -> usize {
+        let mut n = 0;
+        let mut cur = libs::vtreefs::first_inode(parent);
+        while let Some(c) = cur {
+            if libs::vtreefs::get_inode_name(c) == name {
+                n += 1;
+            }
+            cur = libs::vtreefs::next_sibling(c);
+        }
+        n
+    }
+
+    #[test]
+    fn a_pid_dir_adds_its_files_once() {
+        // The hook runs on every read of the directory, so a second call must not add a
+        // second `status`.
+        init();
+        set_table(&[live(42, "init")]);
+        construct_pid_dirs();
+        let root = libs::vtreefs::get_root_inode();
+        let dir = find_pid_dir(root, 42).unwrap();
+
+        construct_pid_entries(dir);
+        construct_pid_entries(dir);
+
+        assert_eq!(child_count(dir, "status"), 1);
+        let status = libs::vtreefs::get_inode_by_index(dir, 0).expect("status is indexed");
+        assert_eq!(libs::vtreefs::get_inode_name(status), "status");
+        assert_eq!(libs::vtreefs::get_inode(dir).indexed, 1);
     }
 
     #[test]

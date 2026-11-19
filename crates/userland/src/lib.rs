@@ -67,8 +67,8 @@ pub mod symlinktest;
 /// is waiting on.
 pub mod linktest;
 
-/// `/bin/procfsprobe` — reads `/proc/hz` and `/proc/uptime` through the mount VFS makes, the
-/// only client that crosses into a user-mounted VTreeFS.
+/// `/bin/procfsprobe` — reads `/proc/hz` and `/proc/uptime` through the mount VFS makes, and
+/// lists `/proc`, the only client that crosses into a user-mounted VTreeFS.
 pub mod procfsprobe;
 
 /// `/bin/filereadprobe` — hashes the bytes reads of a chosen size return, so a read defect can be

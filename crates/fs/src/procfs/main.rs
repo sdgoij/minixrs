@@ -63,6 +63,23 @@ pub fn construct_tree(dir: u16, files: &[File]) {
     }
 }
 
+/// Construct a directory's files as indexed children, once each.
+///
+/// This is C's `make_all_pid_entries`: the index is the file's position in `files`, which is
+/// what `getdents` enumerates, and a file that is already present is left alone because the
+/// hook runs on every read of the directory. Adding it again would list the same name twice.
+pub fn construct_indexed_tree(dir: u16, files: &[File]) {
+    for (i, file) in files.iter().enumerate() {
+        if file.name.is_empty() {
+            break;
+        }
+        if vtreefs::get_inode_by_index(dir as u32, i as i32).is_some() {
+            continue;
+        }
+        let _node = add_inode(dir, file.name, i as i32, file.mode, &file.data);
+    }
+}
+
 /// Build the VTreeFS hook table and root inode stat.
 fn hooks_and_root_stat() -> (vtreefs::FsHooks, vtreefs::InodeStat) {
     let hooks = vtreefs::FsHooks {

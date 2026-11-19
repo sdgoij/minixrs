@@ -440,6 +440,30 @@ pub fn next_sibling(id: u32) -> Option<u32> {
     unsafe { (*get_table())[id as usize].next_sibling }
 }
 
+/// Return the child of `parent_id` carrying `index`, or `None` (the C `get_inode_by_index`).
+///
+/// An indexed child is a slot the directory's owner fills in on demand: a PID directory in
+/// `/proc`, for instance, is identified by the process slot, not by its position among the
+/// directory's children. Enumeration therefore walks these by index and skips an index with
+/// no inode rather than letting the gap shift the entries after it.
+pub fn get_inode_by_index(parent_id: u32, index: i32) -> Option<u32> {
+    if index < 0 {
+        return None;
+    }
+    unsafe {
+        let table = &*get_table();
+        let mut cur = table[parent_id as usize].first_child;
+        while let Some(id) = cur {
+            let inode = &table[id as usize];
+            if inode.flags & I_DELETED == 0 && inode.index == index {
+                return Some(id);
+            }
+            cur = inode.next_sibling;
+        }
+    }
+    None
+}
+
 /// Get the name of an inode as a `&str`.
 pub fn get_inode_name(id: u32) -> &'static str {
     unsafe {
@@ -857,33 +881,18 @@ fn nth_child(node: u32, mut skip: i64) -> Option<u32> {
     None
 }
 
-/// `m_vfs_fs_getdents`: inode (u32) at payload[0], seek_pos (i64) at
-/// payload[8], grant (i32) at payload[16], mem_size (u64) at payload[24].
+/// Build the `dirent` records for `ino` starting at position `pos`.
 ///
-/// Reply: seek_pos (i64) at payload[0], nbytes (i32) at payload[8].
-fn fs_getdents(msg: &mut Message) -> i32 {
-    let raw = raw_of(msg);
-    let ino = u32::from_ne_bytes(raw[0..4].try_into().unwrap_or([0u8; 4]));
-    let pos = i64::from_ne_bytes(raw[8..16].try_into().unwrap_or([0u8; 8]));
-    let grant = i32::from_ne_bytes(raw[16..20].try_into().unwrap_or([0u8; 4]));
-    let mem_size = u64::from_ne_bytes(raw[24..32].try_into().unwrap_or([0u8; 8])) as usize;
-
-    if ino as usize >= MAX_INODES {
-        return EINVAL;
-    }
-    if (get_inode_stat(ino).mode & I_TYPE as u32) as u16 != I_DIRECTORY {
-        return EINVAL;
-    }
-
-    // Refresh the directory before enumerating.
-    if let Some(hook) = hooks().getdents_hook
-        && hook(ino) != OK
-    {
-        return EINVAL;
-    }
-
+/// Returns `(next_pos, out_len, status)`. A full `out` is not an error: `next_pos` names the
+/// entry the next call resumes at. `EINVAL` is returned only when not even one record fits.
+///
+/// Positions 0 and 1 are `.` and `..`; the next `indexed` positions are the indexed children,
+/// taken in index order and skipping an index with no inode; every position after that is one
+/// non-indexed child. Splitting the two kinds is the C `fs_getdents` rule. Treating the indexed
+/// range as non-indexed (a negative skip into `nth_child`) makes the first non-indexed child
+/// repeat once per indexed slot and hides the indexed ones entirely.
+fn build_dirents(ino: u32, pos: i64, out: &mut [u8], mem_size: usize) -> (i64, usize, i32) {
     let indexed = get_inode(ino).indexed as i64;
-    let mut out = [0u8; 4096];
     let mut out_len = 0usize;
     let mut entry_pos = pos.max(0);
     let mut r = OK;
@@ -893,6 +902,13 @@ fn fs_getdents(msg: &mut Message) -> i32 {
             (ino, b".")
         } else if entry_pos == 1 {
             (get_inode_parent(ino), b"..")
+        } else if entry_pos - 2 < indexed {
+            let Some(c) = get_inode_by_index(ino, (entry_pos - 2) as i32) else {
+                // No inode for this index: skip the number, not the rest of the directory.
+                entry_pos += 1;
+                continue;
+            };
+            (c, get_inode_name(c).as_bytes())
         } else {
             match nth_child(ino, entry_pos - 2 - indexed) {
                 Some(c) => (c, get_inode_name(c).as_bytes()),
@@ -921,6 +937,37 @@ fn fs_getdents(msg: &mut Message) -> i32 {
         out_len += reclen;
         entry_pos += 1;
     }
+
+    (entry_pos, out_len, r)
+}
+
+/// `m_vfs_fs_getdents`: inode (u32) at payload[0], seek_pos (i64) at
+/// payload[8], grant (i32) at payload[16], mem_size (u64) at payload[24].
+///
+/// Reply: seek_pos (i64) at payload[0], nbytes (i32) at payload[8].
+fn fs_getdents(msg: &mut Message) -> i32 {
+    let raw = raw_of(msg);
+    let ino = u32::from_ne_bytes(raw[0..4].try_into().unwrap_or([0u8; 4]));
+    let pos = i64::from_ne_bytes(raw[8..16].try_into().unwrap_or([0u8; 8]));
+    let grant = i32::from_ne_bytes(raw[16..20].try_into().unwrap_or([0u8; 4]));
+    let mem_size = u64::from_ne_bytes(raw[24..32].try_into().unwrap_or([0u8; 8])) as usize;
+
+    if ino as usize >= MAX_INODES {
+        return EINVAL;
+    }
+    if (get_inode_stat(ino).mode & I_TYPE as u32) as u16 != I_DIRECTORY {
+        return EINVAL;
+    }
+
+    // Refresh the directory before enumerating; the hook is what gives it its indexed entries.
+    if let Some(hook) = hooks().getdents_hook
+        && hook(ino) != OK
+    {
+        return EINVAL;
+    }
+
+    let mut out = [0u8; 4096];
+    let (entry_pos, out_len, r) = build_dirents(ino, pos, &mut out, mem_size);
 
     if out_len > 0 {
         let cr = safecopy_to(msg.m_source, grant, &out[..out_len]);
@@ -1208,6 +1255,77 @@ mod tests {
 
     fn r_i64(raw: &[u8], off: usize) -> i64 {
         i64::from_le_bytes(raw[off..off + 8].try_into().unwrap())
+    }
+
+    /// The names in a packed `dirent` buffer, in the order `build_dirents` wrote them.
+    fn dirent_names<'a>(buf: &'a [u8], names: &mut [&'a str]) -> usize {
+        let mut n = 0usize;
+        let mut off = 0usize;
+        while off + 13 <= buf.len() && n < names.len() {
+            let reclen = u16::from_le_bytes(buf[off + 8..off + 10].try_into().unwrap()) as usize;
+            let namlen = u16::from_le_bytes(buf[off + 10..off + 12].try_into().unwrap()) as usize;
+            if reclen == 0 || off + reclen > buf.len() {
+                break;
+            }
+            names[n] = core::str::from_utf8(&buf[off + 13..off + 13 + namlen]).unwrap();
+            n += 1;
+            off += reclen;
+        }
+        n
+    }
+
+    /// A directory's indexed children are enumerated by index, once each, with an empty index
+    /// skipped. The previous code had no branch for them: the negative skip it passed to
+    /// `nth_child` made the first ordinary child repeat once per indexed slot, which is what
+    /// `ls /proc` printed as a row of `uptime` entries.
+    #[test]
+    fn getdents_names_indexed_children_once_each() {
+        vtreefs_init(null_hooks(), 64, test_root_stat());
+        let file = InodeStat {
+            mode: I_REGULAR as u32 | 0o444,
+            ..test_root_stat()
+        };
+        add_inode(0, "static-a", NO_INDEX, &file, 0);
+        add_inode(0, "static-b", NO_INDEX, &file, 0);
+        add_inode(0, "pid-0", 0, &file, 0);
+        add_inode(0, "pid-2", 2, &file, 0); // index 1 is deliberately empty
+        assert_eq!(get_inode(0).indexed, 3, "the high-water mark is index + 1");
+
+        let mut out = [0u8; 4096];
+        let (next, len, status) = build_dirents(0, 0, &mut out, 4096);
+        assert_eq!(status, OK);
+        {
+            let mut names = [""; 16];
+            let n = dirent_names(&out[..len], &mut names);
+            assert_eq!(&names[..2], &[".", ".."], "the first two positions are fixed");
+            assert_eq!(n, 6, "two indexed and two ordinary children: {names:?}");
+            for want in ["pid-0", "pid-2", "static-a", "static-b"] {
+                assert_eq!(
+                    names[2..n].iter().filter(|got| **got == want).count(),
+                    1,
+                    "{want} is listed exactly once: {names:?}"
+                );
+            }
+        }
+        // Position 3 named a hole and was skipped, so 7 positions cover 6 records.
+        assert_eq!(next, 7, "the reply's seek_pos skips the empty index");
+
+        // Resuming at an ordinary child lists the remainder and then stops.
+        let (next, len, status) = build_dirents(0, 5, &mut out, 4096);
+        assert_eq!(status, OK);
+        {
+            let mut names = [""; 16];
+            let n = dirent_names(&out[..len], &mut names);
+            assert_eq!(n, 2);
+            for want in ["static-a", "static-b"] {
+                assert_eq!(names[..n].iter().filter(|got| **got == want).count(), 1);
+            }
+        }
+        assert_eq!(next, 7);
+
+        let (_, len, status) = build_dirents(0, 7, &mut out, 4096);
+        assert_eq!(status, OK);
+        assert_eq!(len, 0, "past the end is an empty read, not an error");
     }
 
     /// All tests run in a single function because VTreeFS uses global static

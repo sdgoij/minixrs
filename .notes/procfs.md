@@ -40,12 +40,21 @@ boot process.
 ## The gate
 
 `just test-procfs <arch>` types `/bin/procfsprobe` into the shell on all three arches. The probe
-reads the two root files and parses them, stats `/proc`, and asks for `/proc/no-such-file`. It
-exists because nothing else in the tree opens a path under a user-mounted VTreeFS: the unit
-tests in `crates/libs/src/vtreefs` and `crates/fs/src/procfs` call `handle_fs_message` directly,
-so they pass whether or not VFS ever crosses the mount point. The probe's own parse helpers
-(`parse_decimal`, `is_uptime`) have host tests; the end-to-end case is what proves the two sides
-meet.
+reads the two root files and parses them, stats `/proc`, enumerates `/proc` with `getdents` the
+way `ls` does, and asks for `/proc/no-such-file`. It exists because nothing else in the tree
+opens a path under a user-mounted VTreeFS: the unit tests in `crates/libs/src/vtreefs` and
+`crates/fs/src/procfs` call `handle_fs_message` directly, so they pass whether or not VFS ever
+crosses the mount point. The probe's own parse helpers (`parse_decimal`, `is_uptime`, and the
+listing check) have host tests; the end-to-end case is what proves the two sides meet.
+
+The `list` field is the root listing. It found a real defect: the port's `fs_getdents` never
+enumerated a directory's *indexed* children, and the PID directories are exactly that (their
+inode index is the process slot). Worse, the positions it then handed to the ordinary-child walk
+were negative for the first `indexed` slots, so `ls /proc` printed `hz` and then `uptime` once
+per process slot, and no PID directory at all. The enumeration is now C's (`read.c:115`): an
+indexed range walked by index, skipping an index with no inode, then the ordinary children.
+`construct_pid_entries` had the matching defect and now adds a PID's files as indexed children
+once, so a second listing does not repeat `status`.
 
 The root's other C files are **not in the tree**. They used to print constants (`"0"`,
 `"0 0 0 0 0"`), and a constant a reader cannot tell from data is worse than an absent file:

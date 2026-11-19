@@ -2481,6 +2481,41 @@ the burst-overflow reading in item 37, are under `# Resolved issues`.
     `crates/servers/src/vfs/call.rs`, `crates/servers/src/vfs/path.rs`,
     `tools/smoke/coreutils-minix.tsv`, `tools/smoke/feed.sh`, `Justfile`)
 
+65. **~~`/proc` listed nothing but repeated entries~~: the indexed range is enumerated
+    (2026-11-19).** `ls /proc` printed `hz` and then `uptime` once per process slot, and
+    no PID directory at all. The root's PID directories are *indexed* children (their
+    inode index is the process slot), and the port's `fs_getdents` had no branch for
+    them. It skipped indexed children while counting ordinary ones and then passed
+    `entry_pos - 2 - indexed` to `nth_child`, which for the first `indexed` positions is
+    negative and returns the first ordinary child every time. The count matched the
+    report: 25 `uptime` entries is 24 live slots plus one.
+
+    `fs_getdents` now has C's two kinds of position (`libvtreefs/read.c:115`): positions
+    `2..2+indexed` are looked up by index with the new
+    `vtreefs::get_inode_by_index`, an index with no inode is skipped without stopping
+    the walk, and only the positions after that are ordinary children. The record
+    builder moved out to `build_dirents` so it can be asserted on the host.
+
+    The same mistake had a second face: `construct_pid_entries` added a PID directory's
+    files as ordinary children on every `getdents`, so a second `ls /proc/1` would list
+    `status` twice. The files are now indexed children added once, which is C's
+    `make_all_pid_entries` (`construct_indexed_tree`).
+
+    `/bin/procfsprobe` grew a `list` field: it enumerates `/proc` with `getdents` the way
+    `ls` does and requires `hz`, `uptime` and one directory per live process, each
+    exactly once (a duplicate PID counts as an unexpected entry). `just test-procfs`
+    therefore pins the listing, not only that the two files read. Host tests cover the
+    enumeration order, the skipped index, resumption mid-directory, and the
+    add-once rule for a PID directory.
+
+    Verified in the guest: `coreutils ls -1 /proc` names 1 to 25, `hz` and `uptime`
+    once each, and two listings of `/proc/1` both give one `status`. Gates:
+    `cargo test --workspace`, `cargo clippy --all-targets -- -D warnings`, `just check`,
+    `just test-arches`, `just image x86`.
+    (`crates/libs/src/vtreefs/mod.rs`, `crates/fs/src/procfs/main.rs`,
+    `crates/fs/src/procfs/tree.rs`, `crates/userland/src/procfsprobe.rs`,
+    `tools/smoke/procfs.tsv`, `Justfile`)
+
 ---
 
 ## x86_64 (`[x86]`)

@@ -10,11 +10,15 @@
 # The client's fields are separate claims, so a mount that half-works cannot read as
 # a pass. `hz` is `/proc/hz`, a positive decimal from the kernel clock (`SYS_TIMES`).
 # `uptime` is `/proc/uptime`, `<seconds>.<hundredths>`, which is C's `%ld.%02ld`
-# split. `dir` is `/proc` itself resolving to a directory through the mount. `gone`
-# is a path under `/proc` that is not there: it has to be the mounted tree's own
-# `ENOENT` (2), which is only reachable if VFS split the path at `/proc` rather than
-# falling through to the root filesystem.
+# split. `dir` is `/proc` itself resolving to a directory through the mount. `list` is
+# the root listing, read with `getdents` the way `ls` reads it: `hz`, `uptime` and one
+# directory per live process, each exactly once. That is the claim a listing bug broke
+# (every PID directory was invisible and the first static file repeated once per
+# process slot). `gone` is a path under `/proc` that is not there: it has to be the
+# mounted tree's own `ENOENT` (2), which is only reachable if VFS split the path at
+# `/proc` rather than falling through to the root filesystem.
 #
 # The same line holds on all three arches because none of the claims is a number the
-# arch chooses: the two files are parsed, not compared, and the refusals are errnos.
-/bin/procfsprobe	procfs: hz=ok uptime=ok dir=ok gone=err 2
+# arch chooses: the two files are parsed, not compared, the listing is checked for
+# shape rather than contents, and the refusals are errnos.
+/bin/procfsprobe	procfs: hz=ok uptime=ok dir=ok list=ok gone=err 2
