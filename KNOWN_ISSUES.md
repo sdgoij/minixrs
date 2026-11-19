@@ -177,6 +177,41 @@ are arch-specific, `[env]` is tooling/platform, not kernel.
     `vtreefs::delete_inode`/`put_inode`, then add C's first pass to `construct_pid_dirs`.
     (`crates/libs/src/vtreefs/mod.rs`, `crates/fs/src/procfs/tree.rs`)
 
+69. **Opening a character device with `O_CREAT` skips `cdev_open`, so its I/O goes to
+    major 0 and is silently discarded (found 2026-11-19).** `do_creat` (`crates/servers/src/vfs/call.rs`)
+    resolves the existing vnode and wires a filp, but C's `common_open` also does the
+    character-device open, and this one does not: it never calls `cdev_open` and never sets
+    `filp_dev`, which stays at `Filp::default`'s 0. Every later read, write, ioctl and close
+    on that descriptor therefore goes to `cdev_io(dev = 0)`, and major 0 is the root
+    filesystem, so the operation is answered by the wrong server. Measured on x86_64:
+    `coreutils echo x > /dev/tty00` exits 0 (major 3 has no driver at all, so it should be
+    `ENXIO`), while `coreutils cat /dev/null` (no `O_CREAT`, so `do_open`) correctly fails
+    `ENXIO`. The silent-success half is the dangerous one: a program that writes to a device
+    opened this way cannot tell that nothing was written.
+
+    The fix is to give `do_creat` the same `S_IFCHR` block `do_open` has, including the
+    filp's `filp_dev`, and to do it in the same place. Its `forbidden` check already runs
+    for the existing-file case, so the block sits after that. That will make
+    `> /dev/null` fail until item 70's driver exists, which is the honest order.
+    (`crates/servers/src/vfs/call.rs`)
+
+70. **There is no memory driver, so `/dev/null` cannot be read and `/dev/zero` does not
+    exist (found 2026-11-19).** `crates/drivers/src/storage/memory.rs` is a port of C's
+    `memory` driver and nothing loads it: there is no `crates/servers/src/bin/memory.rs`, no
+    `/sbin/memory` in `BOOT_PROCS_ALL`, and VFS maps no major for `MEMORY_MAJOR` (1).
+    `com.rs` reserves `MEM_PROC_NR = 3` and `kernel/src/table.rs` names that slot `memory`,
+    so the slot is waiting for the server. Consequences measured in the guest: `cat
+    /dev/null` fails `ENXIO`, `/dev/zero` is `ENOENT`, and `nohup` cannot redirect stdin
+    (`Cannot replace STDIN: No such device or address`). `nohup` is the first applet blocked
+    on it and is deliberately not in `feat_minix` yet.
+
+    The work is: a server binary over `storage::memory`'s device loop, the boot-image
+    entries (manifest, the boot suite's process lists, the wasm front ends, since `BOOT_IMAGE`
+    is shared), and `dmap::map_driver(b"mem", MEMORY_MAJOR, MEM_PROC_NR)` in VFS's init.
+    It changes a boot configuration, so it waits for a decision rather than riding on an
+    applet. (`crates/drivers/src/storage/memory.rs`, `crates/boot-image/src/manifest.rs`,
+    `crates/servers/src/vfs/main.rs`)
+
 ---
 
 ## RISC-V (`[riscv]`)
