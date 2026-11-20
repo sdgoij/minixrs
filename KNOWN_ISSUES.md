@@ -169,19 +169,6 @@ are arch-specific, `[env]` is tooling/platform, not kernel.
     minix arm that calls `rustix::fs::open` with the flags directly; remove that arm when
     the PAL is fixed and the fixture still passes. (`rust/library/std/src/sys/pal/minix/fs.rs`)
 
-76. **The std PAL's `IsTerminal` answers false for every stream, so no program can tell it is on
-    the console (found 2026-11-20, while adding `more`).**
-    `rust/library/std/src/sys/pal/minix/is_terminal.rs` is a stub that returns `false`, with a
-    comment saying the kernel exposes no `isatty`. That is out of date: `fstat` answers the file
-    type, and item 68's `test -t` already reads it through `rustix::termios::isatty`. `more` is
-    the first applet whose behaviour depends on the answer, and it takes its `Pipe` output path
-    with a console stdout: it pages and reads keys, but without raw mode, so the console's line
-    discipline makes every key need Enter, and the alternate screen is never taken (item 75).
-    The fix is the C library's check (`st_mode & S_IFMT == S_IFCHR`) behind the PAL's generic
-    parameter, which has to name the descriptor the way the unix PAL does. The PAL is compiled
-    into the toolchain, so it is a `just bootstrap` + `just verify-stage1` batch (item 71's
-    neighbourhood), not an applet. (`rust/library/std/src/sys/pal/minix/is_terminal.rs`)
-
 77. **The tty reports a zero window size, so a full-screen program cannot learn the console's
     geometry (found 2026-11-20, while adding `more`).** The reference's `tty.c` starts
     `winsize_defaults` as all zeroes and this port keeps that, so `TIOCGWINSZ` on the console
@@ -2795,12 +2782,12 @@ from resolving, is under `# Resolved issues`.
     private and drops it whole, with a host test that fails without the change (measured: the
     row became `a25l1049hb`).
 
-    Two defects surfaced and are recorded rather than fixed, because neither is in the
-    applet: items 76 (the std PAL's `IsTerminal` is false for every stream, so `more` takes its
-    pipe output path with a console stdout: it pages and reads keys, but the console stays in
-    its line discipline, so a key needs Enter and the alternate screen is never taken) and 77
-    (the tty reports a zero window size, so a page without `-n` is one line). Item 78, the
-    riscv64 three-stage pipeline fault, is why the fixture's page goes to a file.
+    Two defects surfaced and were recorded rather than fixed in that commit, because neither is
+    in the applet: item 76 (the std PAL's `IsTerminal` answered false for every stream, so
+    `more` took its pipe output path with a console stdout) and item 77 (the tty reports a zero
+    window size, so a page without `-n` is one line). Item 76 is fixed, which is what turns the
+    fixture's console step into the alternate-screen path. Item 78, the riscv64 three-stage
+    pipeline fault, is why the fixture's page goes to a file.
 
     The scenario gained ten steps: a 100-line file, two key files (one byte, and a space
     followed by `q`), and three pager runs with the keys piped in (a pager holds the console,
@@ -2816,6 +2803,41 @@ from resolving, is under `# Resolved issues`.
     (`coreutils/src/uu/more/src/minixterm.rs`, `coreutils/src/uu/more/src/more.rs`,
     `coreutils/src/uu/more/Cargo.toml`, `coreutils/Cargo.toml`,
     `crates/servers/src/console.rs`, `tools/smoke/coreutils-minix.tsv`, `Justfile`)
+
+76. **`IsTerminal` answers for the console: the std PAL reads the descriptor's file type
+    (2026-11-20).** The stub in `rust/library/std/src/sys/pal/minix/is_terminal.rs` returned
+    `false` for every stream, on the belief that the kernel exposed no `isatty`. It does not
+    need one: `fstat` answers the file type, which is exactly what the C library's `isatty`
+    reads, and VFS's habit of answering an ioctl it does not route with success is why the file
+    type is the right question (a request aimed at the terminal would call a pipe a terminal).
+    The function now takes the descriptor the way the unix PAL does (`&impl AsFd`) and answers
+    `st_mode & S_IFMT == S_IFCHR`, so both console streams are terminals and a redirect to a
+    file or a pipe is not.
+
+    `more` is the applet that depended on the answer, and it now takes its tty path with a
+    console stdout. The fixture's console step shows the whole of it in the log:
+    `ESC[?1049h ESC[?25l ESC[2K`, the three `\r`-prefixed page lines, `ESC[7m` around the
+    status bar with `ESC[0m` after it, then `ESC[?25h ESC[?1049l` on exit. The page-count steps
+    are unchanged, because their stdout is a file and `is_terminal` is false there.
+
+    What the step cannot cover is raw mode: it needs keys typed at the console, and a pager
+    holding the console cannot be typed into by this harness (the same limit item 75 records),
+    so in that step `enable_raw_mode` takes its redirected-stdin no-op. With a console stdin,
+    which is a user running `more file` at the shell, it is the real path.
+
+    Anything else that asks `IsTerminal` follows, since the answer is no longer a constant:
+    clap's colour choice and uucore's diagnostic carets would now see a terminal on the console.
+    Nothing in the scenario compares coloured output, and the gate's "a tool reported an error"
+    grep stayed clean, so no step depended on the old answer.
+
+    Gates after `just bootstrap all`, which rebuilt std for x86_64, riscv64, aarch64 and
+    wasm32-minix: `cargo test --workspace`, `cargo clippy --all-targets -- -D warnings`,
+    `just check`, `just test-arches`, `just test-coreutils-minix` on the three arches (173 steps
+    each), `just image x86`, `sh tools/wasm-verify.sh` (83/83, 22/22, 46/46).
+    `just verify-stage1` checks the *published* stage1 asset and runs on Linux/WSL only, so it
+    was not run here; the toolchain was built from the fork's sources instead.
+    (`rust/library/std/src/sys/pal/minix/is_terminal.rs`,
+    `tools/smoke/coreutils-minix.tsv`)
 
 ---
 

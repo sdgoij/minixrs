@@ -347,13 +347,13 @@ coreutils printf ' q' > mq2
 coreutils cat mq2 | coreutils more -n 3 mp > mo3	
 coreutils cat mo3 | coreutils wc -l	6
 
-# The same pager with the console for its output: the page is drawn on the screen
-# and the key still comes from the pipe. Here the applet takes its pipe output
-# path only because std cannot yet tell that standard output is the console
-# (KNOWN_ISSUES 76), so this step covers the page drawing and the key read on the
-# console. The redirect is what makes the exit status visible: a `more` that hung
-# would never reach the shell's prompt, and one that exited non-zero would leave
-# `mo2` empty.
-coreutils cat mq | coreutils more -n 3 mp && coreutils echo MORE-OK > mo2	
+# The same pager with the console for its output: standard output is a terminal,
+# so this is the alternate-screen, raw-mode and erase path, and the screen shows
+# `ESC[?1049h` in the log. The keys still come from the pipe. The redirect makes
+# the exit status visible: a `more` that hung would never reach the shell's
+# prompt, and one that exited non-zero would leave `mo2` empty. The trailing
+# `echo` is what ends the line the pager's last status bar left the cursor on,
+# so the next prompt starts a line for the harness to find.
+coreutils cat mq | coreutils more -n 3 mp && coreutils echo MORE-OK > mo2 && coreutils echo	
 coreutils cat mo2	MORE-OK
 coreutils echo AFTER-MORE	AFTER-MORE
