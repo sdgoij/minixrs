@@ -4224,11 +4224,16 @@ pub unsafe fn handle_vfs_reply(_vfs_ep: i32, msg: &mut Message) {
             }
 
             // Schedule the child (matching C: sched_start_user).
-            // This clears RTS_NO_QUANTUM on the child and enqueues it.
+            // This clears RTS_NO_QUANTUM on the child and enqueues it. The priority is
+            // -1 ("keep what the fork gave it"): `SYS_FORK` copied the parent's Proc, so the
+            // child already carries the parent's priority, and overwriting it here put every
+            // child of the shell on queue 0, above all the servers. A user thread spinning in
+            // `Backoff::spin_heavy` then starved VM and its own page fault never resolved
+            // (`KNOWN_ISSUES` item 63).
             let mut sched_msg = [0u8; 64];
             sched_msg[8..12].copy_from_slice(&proc_e.to_le_bytes()); // endpoint
             sched_msg[12..16].copy_from_slice(&200i32.to_le_bytes()); // quantum (ticks)
-            sched_msg[16..20].copy_from_slice(&0i32.to_le_bytes()); // priority (0 = same as boot procs)
+            sched_msg[16..20].copy_from_slice(&(-1i32).to_le_bytes()); // priority: inherited
             sched_msg[20..24].copy_from_slice(&0i32.to_le_bytes()); // cpu
             let sched_result = minix_rt::kernel_call(3, &mut sched_msg);
             if sched_result != 0 {

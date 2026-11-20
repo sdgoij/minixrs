@@ -23,14 +23,12 @@ coreutils wc -c t1.txt	0 t1.txt
 coreutils ln -s nowhere thelink	
 coreutils touch -h -t 202001010000 thelink	
 coreutils wc -c t1.txt	0 t1.txt
-# `du` spawns a printer thread, and a thread's first text-page fault after a
-# *second exec in one slot* is never resolved on any arch (`KNOWN_ISSUES.md` item
-# 63). `env` is the only applet here that execs twice: the shell forks and execs
-# coreutils/env, which execs coreutils/<applet> in the same slot. So `du` runs
-# before the `env` section below, and the whole sequence runs after it only where
-# the defect does not bite. Measured on x86_64: `coreutils env FOO=1 coreutils
-# true; coreutils du -b /etc/group` hangs, while the same `du` after a single
-# `coreutils true` prints `39\t/etc/group`.
+# `du` spawns a printer thread. A spinning user thread used to be able to starve VM
+# (`KNOWN_ISSUES.md` item 63): PM scheduled every forked child on queue 0, above the
+# servers on queue 7, so the printer's `thread_yield` loop kept VM from resolving the
+# main thread's text-page fault. Fork now keeps the priority `SYS_FORK` inherited, and
+# the `du` step after the `env` section is that regression's pin: `env` execs twice in
+# one slot, which is the sequence that used to hang.
 # `du` reads `stat` through uucore's fsext and the safe-traversal walk.
 coreutils cp /etc/group cpg	
 coreutils head -1 cpg	root:x:0:
@@ -45,6 +43,9 @@ coreutils env -u HOME coreutils echo ENV-UNSET-OK	ENV-UNSET-OK
 # which an exec preserves, and a blocked mask.
 coreutils env --ignore-signal=PIPE coreutils echo ENV-IGNORE-OK	ENV-IGNORE-OK
 coreutils env --block-signal=PIPE coreutils echo ENV-BLOCK-OK	ENV-BLOCK-OK
+# The item-63 regression: `env` above exec'd twice in one slot, and the printer thread
+# `du` starts must still let VM resolve its first text-page fault.
+coreutils du -b /etc/group	[0-9]+[[:space:]]+/etc/group
 # `nohup` ignores SIGHUP, replaces stdin with `/dev/null` and appends to `nohup.out`
 # when stdout is the console. It is also the one applet that creates a file with
 # `O_APPEND`, which the std PAL cannot do (`KNOWN_ISSUES.md` item 71); its own minix
@@ -204,7 +205,7 @@ coreutils chroot jail /echo JAIL-OK	JAIL-OK
 #
 # `cp`: the ordinary copy is std's `fs::copy`; `-R` walks a directory through
 # uucore's safe-copy.
-# `du` already ran above (item 63): the `env` steps exec twice in one slot.
+# `du` ran above, and again after the `env` section (item 63's regression pin).
 coreutils mkdir lsd1	
 coreutils touch lsd1/only	
 coreutils ln -s nowhere lsd1/dangling	

@@ -180,101 +180,8 @@ the burst-overflow reading in item 37, are under `# Resolved issues`.
 
 ## AArch64 (`[aarch64]`)
 
-63. **A thread's first text-page fault is never resolved once another process has exec'd
-    twice in one slot, so the command never returns (found 2026-11-19).** `coreutils du` is the
-    reproducer because it is the only applet in the smoke fixture that spawns a thread (its
-    printer, `thread::spawn`). On aarch64, once any process has read a directory
-    (`ls <dir>`, `cp -R`, or `du`'s own walk), a later `du` never answers; x86_64 and riscv64
-    ran the same sequence and finished. Measured on a fresh aarch64 boot:
-    `mkdir d1; touch d1/f; coreutils ls -1 d1; coreutils du -b cpg` hangs, while the same
-    `du` with no listing first prints `39\tcpg`. `coreutils cp -R dsrc cdst` is an
-    equivalent trigger, which is why the fixture's `du` step was moved ahead of both.
-
-    What the guest is doing. Sampling `info registers` through the QEMU monitor while it
-    hangs alternates between EL0 at a coreutils address and EL1 in `el0_sync_return` /
-    `aarch64_post_syscall`: the process is executing and taking syscalls, not deadlocked.
-    The kernel proc table (`PROC_TABLE_ALIGNED`, `Proc` stride 0x3a0, `p_rts_flags` at
-    +0x150) shows the `du` slot with `rts=0x400` (`RTS_PAGEFAULT`), and `PAGE_FAULT_INFO`
-    for it records `fault=0x113d7b4, err=0x14`, a translation fault on an *instruction
-    fetch* at an address inside coreutils' executable segment (`0x1000000..0x12d4204`). The
-    slot's `p_reg` holds `elr_el1` (+0x100) equal to that same address, so the faulting
-    thread is parked with its PC on the unmapped page. The other thread (the printer) is the
-    one whose text page is first touched; the main thread spins in `std::sync::mpmc`'s
-    `Backoff::spin_heavy` (a `thread_yield` loop) waiting for a channel the parked thread
-    never drains.
-
-    Ruled out. It is not the FPU/SIMD save/restore: `fpu::frame_save`/`frame_load` swap the
-    exception frame's 512-byte SIMD block, and that path is present on all three arches. It
-    is not a worker with its own page table: `thread::create` copies `p_seg.p_cr3` from the
-    main slot, so threads share the address space. It is not `cp -R` itself: a plain
-    `ls -1 <dir>` triggers it, so the common factor is the directory read, not the copy.
-
-    Followed into VM. The page is a `VR_FILE` region, so `handle_pagefault_for` takes the
-    file-backed branch and calls `advance_fault`, then `start_file_page`, then an FDIO request
-    to VFS (`VMVFSREQ_FDIO`, the page filled into VM's own `host_va`). That returns
-    `PageOutcome::Pending`, which leaves the fault parked until `finish_file_page` runs on
-    VFS's reply; only then does `advance_fault` map the page and clear the fault, and nothing
-    else clears it. VM's own mismatch, unmatched-reply and pool-exhausted diagnostics in
-    `vm/vfs_request.rs` did not print on the wedged boot, so no reply was misrouted and the
-    request pool was not exhausted. The page is *absent* (a translation fault), so the
-    orphan-placeholder recovery in `start_file_page` (a present page without the user bit)
-    does not run. That leaves one shape: `page_pending(ep, page_addr)` matches a pool job
-    that is still `busy` and will never complete, either an FDIO reply that never arrives or
-    a job left in flight. Note that `vfs_request::page_pending`'s comment described a
-    zero-filled placeholder mapped at the VA; `start_file_page` maps nothing there any more
-    (the frame lives in VM's `host_va`), so that comment was corrected with the diagnostic
-    below.
-
-    Status at HEAD (2026-11-19, after `nproc` grew the multicall). The window moved back, this
-    time on x86_64, and the trigger is now known to be a **second exec in one slot**:
-
-        coreutils env FOO=1 coreutils true
-        coreutils du -b /etc/group        (hangs; a fresh 512 MiB boot)
-
-    A single exec does not do it: `coreutils true` followed by the same `du` prints
-    `39\t/etc/group`. `env` is the only applet that replaces its own image after the shell's
-    fork+exec. `coreutils env HOME=/tmp /bin/echo ENV-OK` triggers it too, so the second image
-    need not be the same file, and a `sleep 1` between the two commands changes nothing. The
-    fixture therefore runs `du` before its `env` section.
-
-    The pool probe was run against this guest (`target/probe63.py`, the recipe above corrected
-    for x86: VM's `NEXT_REQID` is `0x40134a0`, `POOL` `0x40134a8` and `PARKED` `0x4017ba8`, from
-    `llvm-nm` on `target/x86_64-pc-minix/release/vm`, and the physical address is `loaded phys
-    + VA - 0x4000000`). `PAGE_FAULT_INFO` (`0x235a30` in `kernel-boot`) held slot 24 with
-    `fault=0x41bc204, err=0x14` (not present, user, instruction fetch), and `NEXT_REQID` read
-    1151, so the window was the live pool. Neither `ep=0x28018` (generation 5, slot 24) nor
-    `page_addr=0x41bc000` occurs anywhere in it, so the fault is **not** parked on an in-flight
-    fill. That rules out the lost-FDIO-reply shape for this occurrence. What is left is a path
-    that returned `Done` without mapping the page, or a fault dropped before the pool saw it.
-
-    Status before that (after item 64 added `uname` and `arch`). The reproducer did not hang:
-    the gate and thirteen runs of the heavier scenario passed, where the same sequence hung
-    every time before the multicall grew. The fault address `0x113d7b4` was specific to that
-    binary's layout (adding applets moves `.text`), so this is intermittent and
-    layout-sensitive rather than fixed. Layout dependence does not fit a lost reply well (that
-    would not care where `.text` sits), which is part of why the pool probe above mattered.
-
-    Probe, prepared but not run because no wedged guest was available. VM's `NEXT_REQID` is at
-    VA `0x10124a0` and `POOL` at `0x10124a8` (both in the server's `.data`); the physical
-    address is the `loaded phys` from the boot line `/sbin/vm: loaded phys=...` plus
-    `(VA - 0x1000000)` on aarch64 (x86 userland links at `0x4000000`, so subtract that
-    there). Dumping 64 KiB from `NEXT_REQID` covers `POOL` and `PARKED`, and the
-    decisive search is for the fault's own values, `ep=0x28018` and `page_addr=0x113d000`, in
-    the same node. If both are present, a `Job::Page` is still in flight and the question is
-    why VFS never answered that FDIO; if neither is, the fault is not parked on a fill and
-    `start_file_page` returned `Done` without mapping.
-
-    A permanent diagnostic now covers one half of this. `page_pending` takes the faulting cr3
-    and, when the in-flight fill it matches was started for a different address space (the
-    process exec'd after the fill began), reports once as `VM: vfs_request: ep ... page ...:
-    fill cr3 ... is not fault cr3 ... (reqid ...)`. That fill can never resolve the new fault,
-    so the wait has no end; the reply is left alone rather than racing a second fill into an
-    address space that may be gone. The line never appeared across `just test-arches`, so it
-    does not false-positive on ordinary faults and file fills. The other half, a reply lost
-    while the cr3 still matches, has no timestamp to compare and stays silent; catching it
-    needs a watchdog, which the port has no periodic VM wakeup for today.
-    `tools/smoke/coreutils-minix.tsv` still runs `du` before the first listing, and the pool
-    dump above remains the way to see a same-cr3 stall.
+No open issues. Item 63, a thread's text-page fault that a spinning user process kept VM
+from resolving, is under `# Resolved issues`.
 
 ---
 
@@ -2455,6 +2362,41 @@ the burst-overflow reading in item 37, are under `# Resolved issues`.
     `rustix/src/termios/types.rs`, `rustix/src/termios/ioctl.rs`,
     `coreutils/src/uu/stty/src/minixterm.rs`, `coreutils/src/uu/stty/Cargo.toml`,
     `coreutils/Cargo.toml`, `Cargo.toml`)
+
+63. **~~A thread's first text-page fault was never resolved after a second exec in one
+    slot~~: user processes no longer outrank the servers (2026-11-20).** The fault was
+    real and ordinary: `du`'s printer thread took a demand fault on a `.text` page, and the
+    main thread waited for it in `std::sync::mpmc`'s `Backoff::spin_heavy`, a
+    `thread_yield` loop. The fault was never handled because VM never ran. PM's fork path
+    scheduled every child with `SYS_SCHEDULE` priority 0 ("same as boot procs", a comment
+    left over from when boot processes were queue 0), while every server is on queue 7. A
+    user process on queue 0 therefore preempted VM forever, and the printer's yield loop
+    kept it there. Nothing was lost or misrouted, which is why the request-pool probe and a
+    `-d int` trace both came back empty: the guest was not re-faulting, it was starved.
+    Measured at the hang on x86_64: the CPU sits in `syscall_handler_c`'s serial drain on the
+    printer's CR3, VM is runnable on queue 7 and never picked, and `PAGE_FAULT_INFO[p_nr 24]`
+    holds the fault with no fill in flight. The earlier aarch64 reading fits: after a
+    directory read more `.text` pages are cold, so the worker faults where before it found
+    them present.
+
+    `SYS_FORK` copies the parent's whole `Proc`, so the child already inherits the parent's
+    priority (7). PM now passes -1 to `SYS_SCHEDULE`, and the kernel's `sched_proc` reads -1
+    as "leave this field alone" for both priority and quantum, as C's `kernel/system.c:662`
+    does; out-of-range values are rejected instead of stored.
+
+    The fixture runs `du -b /etc/group` straight after the `env` steps, which is the exact
+    sequence that hung, and the old "run `du` before `env`" ordering note is gone. The step
+    failed before this change (the same two typed commands hung the guest) and passes now.
+    Host tests: `test_sched_proc_keeps_the_inherited_priority_on_minus_one` fails on the old
+    unconditional store, and `test_sched_proc_sets_priority` pins the set path.
+
+    Verified in the guest on all three arches: the two-command reproducer that hung every
+    time prints `39` and the path, and the 156-step coreutils fixture passes. Gates:
+    `cargo test --workspace`, `cargo clippy --all-targets -- -D warnings`, `just check`,
+    `just test-arches`, `just test-coreutils-minix` on the three arches, `just image` on the
+    three, `sh tools/wasm-verify.sh` (83/83, 22/22, 46/46), `just test-linux`.
+    (`crates/kernel/src/system.rs`, `crates/servers/src/pm.rs`,
+    `tools/smoke/coreutils-minix.tsv`)
 
 64. **Eighteen more applets are in `feat_minix`, so `ls`, `cp`, `mv`, `du`, `uname` and the
     small unix set run on all three arches (2026-11-19).** The gate is

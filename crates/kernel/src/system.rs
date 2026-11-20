@@ -1879,15 +1879,28 @@ pub unsafe fn clear_ipc_refs(rp: *mut Proc) {
 
 // sched_proc (skeleton)
 
-/// Notify a process's scheduler (skeleton).
+/// Apply a scheduling parameter set to a process.
+///
+/// `-1` means "leave this field alone", as in C's `sched_proc` (`kernel/system.c:662`):
+/// a fork copies the parent's whole Proc (`*rpc = *rpp`), so a child already carries an
+/// inherited priority, and a caller that has none of its own asks for that to stand.
 ///
 /// # Safety
 ///
 /// Process must be valid.
 pub unsafe fn sched_proc(rp: *mut Proc, priority: i8, quantum: i32) -> i32 {
     unsafe {
-        (*rp).p_priority = priority;
-        if quantum > 0 {
+        if priority < -1 || priority as i32 >= crate::proc::NR_SCHED_QUEUES as i32 {
+            return crate::ipc::EINVAL;
+        }
+        if quantum < 1 && quantum != -1 {
+            return crate::ipc::EINVAL;
+        }
+        if priority != -1 {
+            (*rp).p_priority = priority;
+        }
+        if quantum != -1 {
+            (*rp).p_quantum_size_ms = quantum as u32;
             (*rp).p_cpu_time_left = crate::clock::ms_2_cpu_time(quantum as usize);
         }
         OK
@@ -6227,6 +6240,10 @@ mod tests {
             let mut msg = [0u8; MESSAGE_SIZE];
             let ep = crate::table::make_endpoint(0, 1); // valid endpoint
             msg_write_i32(&mut msg, SCHEDULE_ENDPT_OFF, ep);
+            // A real scheduler sends a priority and a quantum; 0 for the quantum is
+            // rejected (`sched_proc`), and this test is about dispatch, not validation.
+            msg_write_i32(&mut msg, SCHEDULE_PRIORITY_OFF, 7);
+            msg_write_i32(&mut msg, SCHEDULE_QUANTUM_OFF, 100);
             let result = do_schedule_handler(rp, &mut msg);
             // p_scheduler == caller check is currently disabled —
             // the privilege system is incomplete. Once SYS_SCHEDCTL
@@ -6626,9 +6643,10 @@ mod tests {
         unsafe {
             proc_init();
             let rp = crate::table::proc_addr(0);
-            let result = sched_proc(rp, 7, 0);
+            let result = sched_proc(rp, 7, 100);
             assert_eq!(result, OK);
             assert_eq!((*rp).p_priority, 7);
+            assert_eq!((*rp).p_quantum_size_ms, 100);
         }
     }
 
@@ -6995,6 +7013,35 @@ mod tests {
                 flags & RtsFlags::SIGNALED.bits() != 0,
                 "do_kill should set SIGNALED on target"
             );
+        }
+    }
+
+    #[test]
+    fn test_sched_proc_keeps_the_inherited_priority_on_minus_one() {
+        unsafe {
+            init_signal_env();
+            let rp = crate::table::proc_addr(0);
+            (*rp).p_priority = 7;
+            (*rp).p_quantum_size_ms = 200;
+            (*rp).p_cpu_time_left = 0;
+
+            // -1 is C's "leave the field alone" (`system.c:662`). A fork inherits the
+            // parent's priority, and PM sends -1 so the inherited value stands; sending 0
+            // here put every child of the shell above the servers, and a spinning thread
+            // starved VM (`KNOWN_ISSUES` item 63).
+            assert_eq!(sched_proc(rp, -1, -1), OK);
+            assert_eq!((*rp).p_priority, 7, "priority -1 leaves the inherited value");
+            assert_eq!((*rp).p_quantum_size_ms, 200, "quantum -1 leaves it alone");
+
+            assert_eq!(sched_proc(rp, 3, 100), OK);
+            assert_eq!((*rp).p_priority, 3);
+            assert_eq!((*rp).p_quantum_size_ms, 100);
+
+            // Out-of-range values are rejected instead of stored.
+            assert_eq!(sched_proc(rp, -2, 100), crate::ipc::EINVAL);
+            assert_eq!(sched_proc(rp, 16, 100), crate::ipc::EINVAL);
+            assert_eq!(sched_proc(rp, 3, 0), crate::ipc::EINVAL);
+            assert_eq!((*rp).p_priority, 3);
         }
     }
 
