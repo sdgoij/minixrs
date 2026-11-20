@@ -61,6 +61,9 @@ pub struct Screen {
     /// CSI parameters, in order; only `H`/`f` reads the second.
     params: [u32; 2],
     nparams: usize,
+    /// The CSI ended in a private marker (`?`, `>`, `<`, `=`), which names a
+    /// mode rather than an operation this console has.
+    private: bool,
 }
 
 impl Default for Screen {
@@ -80,6 +83,7 @@ impl Screen {
             state: ST_NORMAL,
             params: [0; 2],
             nparams: 0,
+            private: false,
         }
     }
 
@@ -109,6 +113,7 @@ impl Screen {
                     self.state = ST_CSI;
                     self.params = [0; 2];
                     self.nparams = 0;
+                    self.private = false;
                 }
                 // Anything else is a two-byte sequence this console does not act on
                 // (`ESC 7`/`ESC 8` among them); the escape is consumed, the byte is not printed.
@@ -122,10 +127,20 @@ impl Screen {
                     }
                 }
                 b';' => self.nparams = (self.nparams + 1).min(self.params.len()),
+                // A private marker turns the sequence into a mode request
+                // (`ESC[?25l` hides the cursor); the bytes that follow are still
+                // parameters or the final byte, so parsing carries on.
+                b'?' | b'>' | b'<' | b'=' => self.private = true,
                 _ => {
                     self.state = ST_NORMAL;
                     let params = self.params;
-                    self.csi_final(ch, params);
+                    // A private sequence names a mode this console does not have,
+                    // and dropping it whole is what keeps its digits from
+                    // printing as text.
+                    if !self.private {
+                        self.csi_final(ch, params);
+                    }
+                    self.private = false;
                 }
             },
             _ => {}
@@ -534,6 +549,18 @@ mod tests {
         let mut s = Screen::new();
         // SGR: the console drops it rather than printing `[1m`.
         for &b in b"a\x1b[1mb" {
+            s.feed(b);
+        }
+        assert_row(&s, 0, b"ab");
+    }
+
+    #[test]
+    fn test_private_sequence_is_consumed_not_printed() {
+        let mut s = Screen::new();
+        // What a pager sends to take the alternate screen and hide the cursor
+        // (`more`, `vi`): private sequences, which name no attribute the console
+        // has, and whose digits must not reach the screen.
+        for &b in b"a\x1b[?25l\x1b[?1049hb" {
             s.feed(b);
         }
         assert_row(&s, 0, b"ab");

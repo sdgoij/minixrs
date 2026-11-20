@@ -324,3 +324,36 @@ coreutils timeout 1 coreutils sleep 5
 coreutils echo AFTER-TIMEOUT	AFTER-TIMEOUT
 coreutils timeout -s KILL 1 coreutils sleep 5	
 coreutils echo AFTER-KILL	AFTER-KILL
+# `more`: the pager draws a screenful and then reads keys from standard input.
+# Its crossterm dependency selects `mio` for events, which has no minix arm, so
+# on minix the terminal surface is `src/uu/more/src/minixterm.rs`
+# (KNOWN_ISSUES.md 75).
+#
+# A pager waits for a key, and this harness only types when the shell is back at
+# its prompt, so the keys are piped in instead. `-n 3` pages three lines (the
+# applet adds one to the count for the status bar), the page goes to a file, and
+# `wc -l` counts it: the status bar has no newline of its own. The redirect rather
+# than a second pipe because a three-stage pipeline faults on riscv64 before the
+# pager is involved (KNOWN_ISSUES 78). `printf q` writes the key with no newline.
+coreutils seq 100 199 > mp	
+coreutils printf q > mq	
+coreutils cat mq | coreutils more -n 3 mp > mo	
+coreutils cat mo | coreutils wc -l	3
+# A second key and a second page: space pages down and q quits, so the page in
+# the file holds six lines. Both bytes reach the applet in one read, which is the
+# case the key queue exists for: the descriptor has nothing left while the second
+# key is still held.
+coreutils printf ' q' > mq2	
+coreutils cat mq2 | coreutils more -n 3 mp > mo3	
+coreutils cat mo3 | coreutils wc -l	6
+
+# The same pager with the console for its output: the page is drawn on the screen
+# and the key still comes from the pipe. Here the applet takes its pipe output
+# path only because std cannot yet tell that standard output is the console
+# (KNOWN_ISSUES 76), so this step covers the page drawing and the key read on the
+# console. The redirect is what makes the exit status visible: a `more` that hung
+# would never reach the shell's prompt, and one that exited non-zero would leave
+# `mo2` empty.
+coreutils cat mq | coreutils more -n 3 mp && coreutils echo MORE-OK > mo2	
+coreutils cat mo2	MORE-OK
+coreutils echo AFTER-MORE	AFTER-MORE

@@ -169,32 +169,64 @@ are arch-specific, `[env]` is tooling/platform, not kernel.
     minix arm that calls `rustix::fs::open` with the flags directly; remove that arm when
     the PAL is fixed and the fixture still passes. (`rust/library/std/src/sys/pal/minix/fs.rs`)
 
-75. **`more` cannot be added yet: its crossterm dependency pulls in `mio`, which does not
-    build on minix (found 2026-11-20).** `uu_more` uses crossterm's `events` feature for
-    key handling. That feature selects crossterm's event source, which is `mio`; `mio` is
-    unix-only in the ways this port is not yet: it converts `std::os::minix::net::UnixStream`
-    to `OwnedFd` (no `From` impl), needs `IoSourceState`/`Selector`/`Waker`, and asks the
-    libc fork for `pthread_mutex_t`, `pthread_cond_t` and their initializers, none of which
-    exist. Building `feat_minix` with `more` fails in `mio` before any of the applet's own
-    code compiles.
+76. **The std PAL's `IsTerminal` answers false for every stream, so no program can tell it is on
+    the console (found 2026-11-20, while adding `more`).**
+    `rust/library/std/src/sys/pal/minix/is_terminal.rs` is a stub that returns `false`, with a
+    comment saying the kernel exposes no `isatty`. That is out of date: `fstat` answers the file
+    type, and item 68's `test -t` already reads it through `rustix::termios::isatty`. `more` is
+    the first applet whose behaviour depends on the answer, and it takes its `Pipe` output path
+    with a console stdout: it pages and reads keys, but without raw mode, so the console's line
+    discipline makes every key need Enter, and the alternate screen is never taken (item 75).
+    The fix is the C library's check (`st_mode & S_IFMT == S_IFCHR`) behind the PAL's generic
+    parameter, which has to name the descriptor the way the unix PAL does. The PAL is compiled
+    into the toolchain, so it is a `just bootstrap` + `just verify-stage1` batch (item 71's
+    neighbourhood), not an applet. (`rust/library/std/src/sys/pal/minix/is_terminal.rs`)
 
-    The applet is otherwise small: `more` already has a `Pipe` output path for a non-terminal
-    stdout, so `more file > out` would be testable without interaction, and the interactive
-    path could be gated by typing keys into the console the way the burst scenario types
-    lines. The work is a minix terminal facade for the small crossterm surface `more` uses
-    (`enable_raw_mode`/`disable_raw_mode`, `terminal::size`, `Event::read`, the cursor/clear
-    commands, and the `KeyEvent`/`KeyCode`/`KeyModifiers` types its match arms name), with
-    crossterm moved to a non-minix target dependency, in the shape `stty`'s
-    `src/uu/stty/src/minixterm.rs` already uses. `timeout` (item 74) took the same
-    applet-local facade route and needed no crossterm.
-    (`coreutils/src/uu/more/src/more.rs`, `coreutils/src/uu/more/Cargo.toml`)
+77. **The tty reports a zero window size, so a full-screen program cannot learn the console's
+    geometry (found 2026-11-20, while adding `more`).** The reference's `tty.c` starts
+    `winsize_defaults` as all zeroes and this port keeps that, so `TIOCGWINSZ` on the console
+    answers `0 0` (`stty size` prints it, and the fixture pins that answer). A pager's page
+    length comes from it, so `more file` pages one line at a time until `-n` is given. The
+    console's own model is 80x24 (`crates/servers/src/console.rs`), but the serial console's
+    size belongs to the host terminal, which the guest cannot ask, so what to answer is a
+    decision (a default geometry on the console line, a size the front end sets once, or a
+    report the kernel passes through) rather than a lookup. Recorded rather than guessed.
+    (`crates/servers/src/tty.rs`, `crates/servers/src/console.rs`,
+    `tools/smoke/coreutils-minix.tsv`)
 
 ---
 
 ## RISC-V (`[riscv]`)
 
-No open issues. The RISC-V clock, heap, trap-state and FP-image defects in item 6, and
-the burst-overflow reading in item 37, are under `# Resolved issues`.
+78. **A three-stage pipeline kills the machine with an unhandled load access fault, in one of
+    its children (found 2026-11-20, while testing `more`).**
+
+    ```
+    coreutils seq 1 3 > ts
+    coreutils cat ts | coreutils tr a b | coreutils wc -l
+    ```
+
+    answers `tr: write error: Unknown error 32` (EPIPE) and then
+    `!trap cause=5 stval=0x10020000 sepc=0x100d8ac mode=user`, after which the guest is silent:
+    cause 5 is a load **access** fault (RISC-V 13/15 are the page-fault causes), so the kernel's
+    `trap.rs` `unhandled` arm halts in `wfi` rather than forwarding it to VM. `sepc` and `stval`
+    are the *same* when the middle stage is `tr` and when it is `more`, i.e. the fault is in the
+    multicall's shared startup code rather than in either applet, and the address is one the
+    process's own image should cover.
+
+    It is the middle stage's write that starts it: `coreutils cat ts | coreutils true |
+    coreutils wc -l` (a middle stage that exits without writing) answers `0` and the guest
+    survives. Two stages are fine (`ls | wc -l` is in the coreutils scenario), and the same
+    three-stage line is green on x86_64 and aarch64, so it is RISC-V's page-table or
+    address-space handling under three children of the same 6 MB binary alive at once. The
+    `more` fixture step therefore writes its page to a file and reads it back with a second
+    pipe-stage, with a comment naming this item.
+
+    Next step is an LLDB session on the three-child case (the `aarch64-debugging` skill's flow,
+    on riscv64) to read the trapping process's satp and the PTE for `0x10020000`, and to say
+    whether the fault is a supervisor-only mapping or a table the process should not be using.
+    (`crates/arch-riscv64/src/trap.rs`, `crates/userland/src/shell.rs`,
+    `tools/smoke/coreutils-minix.tsv`)
 
 ---
 
@@ -2732,6 +2764,58 @@ from resolving, is under `# Resolved issues`.
     `coreutils/src/uu/timeout/src/platform/{mod,unix,windows}.rs`,
     `coreutils/src/uu/timeout/src/timeout.rs`, `coreutils/Cargo.toml`,
     `libc/src/minix/time.rs`, `tools/smoke/coreutils-minix.tsv`, `Justfile`)
+
+75. **`more` is in `feat_minix`, with its own terminal surface over the console
+    (2026-11-20).** The blocker was `crossterm`'s: its `events` feature selects `mio`, and
+    `mio` has no minix arm (no `From<UnixStream> for OwnedFd`, no
+    `IoSourceState`/`Selector`/`Waker`, and no `pthread_mutex_t`/`pthread_cond_t` in the libc
+    fork). What a pager needs from a terminal is far smaller than what `mio` provides: the ANSI
+    sequences for the alternate screen, the cursor and erasing, the console's size, raw mode,
+    and a decoder for the bytes on standard input.
+
+    `src/uu/more/src/minixterm.rs` is that surface in crossterm's shape (`Command`,
+    `QueueableCommand`, `ExecutableCommand`, `terminal`, `cursor`, `style`, `event`), and
+    `more.rs` reaches it through `use crate::minixterm as crossterm;`, so every other line of
+    the applet is upstream's and `crossterm` moved to a `cfg(not(target_os = "minix"))`
+    dependency. The decoder names the keys the applet's match arms name, keeps the sequences
+    the console can send (arrows, `PageUp`/`PageDown`, `Home`/`End`, `Enter`, `Backspace`,
+    `Tab`, `^A`-`^Z` as `Char`+`CONTROL`, UTF-8), and consumes a private CSI sequence whole.
+
+    Three details are the port's own. Raw mode is a no-op when standard input is not a
+    terminal, where crossterm answers `ENOTTY`: there is no line discipline to switch off, and
+    failing there would stop the pager running from a script. Keys are read through std's
+    standard input, the only handle that reaches the console (descriptor 0 is the kernel's
+    console path until the shell redirects it, and `rustix` and std both go to VFS directly for
+    descriptors), and every byte is moved into a queue the module owns, because std's input is
+    buffered: one read can bring back an escape sequence or a burst of keys, and a `poll` of
+    the descriptor would then say "nothing" while keys were still held.
+
+    The wserver console model gained the private-sequence rule it was missing: it ended a
+    sequence at the `?`, so `ESC[?25l` printed `25l` on the screen. It now marks the sequence
+    private and drops it whole, with a host test that fails without the change (measured: the
+    row became `a25l1049hb`).
+
+    Two defects surfaced and are recorded rather than fixed, because neither is in the
+    applet: items 76 (the std PAL's `IsTerminal` is false for every stream, so `more` takes its
+    pipe output path with a console stdout: it pages and reads keys, but the console stays in
+    its line discipline, so a key needs Enter and the alternate screen is never taken) and 77
+    (the tty reports a zero window size, so a page without `-n` is one line). Item 78, the
+    riscv64 three-stage pipeline fault, is why the fixture's page goes to a file.
+
+    The scenario gained ten steps: a 100-line file, two key files (one byte, and a space
+    followed by `q`), and three pager runs with the keys piped in (a pager holds the console,
+    and this harness only types when the shell is back at its prompt). Two runs write the page
+    to a file and count it with `wc -l`: three lines for `-n 3` (the applet adds one for the
+    status bar), and six when `space` pages down before `q` quits, which is also the case the
+    key queue exists for, since both bytes arrive in one read. The third draws on the console
+    and proves the exit status by writing the next command's output to a file that a further
+    step reads. 173 steps, green on all three arches.
+
+    Gates: `cargo test --workspace`, `cargo clippy --all-targets -- -D warnings`, `just check`,
+    `just test-coreutils-minix` on x86_64, riscv64 and aarch64, `sh tools/wasm-verify.sh`.
+    (`coreutils/src/uu/more/src/minixterm.rs`, `coreutils/src/uu/more/src/more.rs`,
+    `coreutils/src/uu/more/Cargo.toml`, `coreutils/Cargo.toml`,
+    `crates/servers/src/console.rs`, `tools/smoke/coreutils-minix.tsv`, `Justfile`)
 
 ---
 
