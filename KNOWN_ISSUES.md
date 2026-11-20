@@ -195,29 +195,51 @@ are arch-specific, `[env]` is tooling/platform, not kernel.
     shell's own table is clean too: the same dump as a plain command shows 0-2 as the console
     and nothing leaked, both before and after a pipeline.
 
-    An attempt to rebuild that shape inside `pipetest` (two pipes, one child per stage, the
-    shell's `dup2` and close sequence, each stage execing on to a check) did not get far: a
-    child that exec'd `/bin/pipetest stage0` ran the *whole suite* instead, answering status
-    11, which only the suite's ftruncate check returns, while the same command typed at the
-    shell runs the stage. So an exec issued from the probe arrived with `argc == 1` and lost
-    its argument, and the probe could not tell its stages apart. That is worth a look on its
-    own (the shell's execs with arguments do arrive; the coreutils gate parses flags), but it
-    is not this item, so the attempt was dropped rather than shipped.
+    *Measured 2026-11-20, second pass: the stage that fails is the last one, and it dies by
+    signal.* `w_exitcode` (`crates/servers/src/pm.rs`) packs a signal death as `(0 << 8) | sig`,
+    not as `0x80 | sig`, so status 11 is `SIGSEGV` and not an exit code (the shell's comment
+    about `0x80 | signo` is stale). An attempt to rebuild the pipeline inside `pipetest` had
+    every stage child answer status 11, so those children crashed instead of losing arguments,
+    and the earlier note here about an `argc == 1` exec was wrong.
+
+    With the middle stage made a shell builtin (`echo`, which writes one line and never reads),
+    the last stage is isolated in the same boot, after one cold pipeline has warmed the
+    multicall's pages. Five pipelines in a row, same binary, same wiring:
+
+    ```
+    coreutils cat mp | echo Y | coreutils cat      ->  Y
+    coreutils cat mp | echo Y | coreutils cat -    ->  nothing
+    coreutils cat mp | echo Y | coreutils wc -l    ->  nothing, and `&& echo W-OK` does not run
+    coreutils cat mp | echo Y | coreutils head -1  ->  nothing
+    coreutils cat mp | echo Y | coreutils cat      ->  Y
+    ```
+
+    So the middle stage's write reaches a reader that is there (`cat` prints `Y`), and the
+    last stage fails by itself, silently and non-zero. The difference between the first and
+    second line is one argument: `cat` with none runs, `cat -` dies. `coreutils echo LAST` and
+    `pipetest fds <path>` also survive with arguments, and neither reads standard input, so
+    what the last stage does with its own arguments is a different code path (uutils' `cat`
+    reads a *file* per operand, and `wc -l`/`head -1` build a `BufReader`) rather than a
+    different descriptor. The middle's `EPIPE` in the `sort` case is a consequence: the last
+    stage died before the middle got round to writing.
 
     What is established: the fork, the descriptor-table copy, the `dup2` wiring and the closes
-    all leave the last stage holding the right pipe, and `pipe_check`'s EPIPE
-    (`find_filp_vp` returning null while a reader holds the pipe) is a claim that this model
-    says cannot happen. Either the model is wrong about when the last child's inherited
-    descriptors are counted, or the writer's vnode is not the one the reader holds.
+    all leave the last stage holding the right pipe (the `fds` dump says so, in a run where the
+    middle was already told the pipe had no reader), and the last stage then dies without a
+    message. That is item 63's family (an exec'd process faulting on a page VM does not
+    resolve) reaching a *signal* instead of a parked `RTS_PAGEFAULT`, and the pipeline is the
+    shape that makes it visible on riscv64.
 
-    What this rules out: the earlier guess below was wrong, the last stage's descriptors are
-    correct, and the command line is irrelevant (`wc -c` and `wc` pass in runs where `wc -l`
-    fails, and the reverse happens too). Next: break on `pipe_check`'s EPIPE return through the
-    guest's gdbstub and dump the filp table, to see whether the writer's `filp_vno` differs from
-    the reader's or the reader's filp is counted out at that instant.
-    (`crates/servers/src/vfs/pipe.rs`, `crates/servers/src/vfs/filedes.rs`,
-    `crates/servers/src/vfs/call.rs`, `crates/userland/src/bin/pipetest.rs`,
-    `crates/userland/src/shell.rs::run_pipeline`)
+    What this rules out: the earlier guess below was wrong (the last stage's descriptors are
+    correct), VFS's pipe bookkeeping is not where the defect is, and the command line only
+    decides which applet's code path runs first. Next: find the fault that kills the last
+    stage. The cheapest handle is the kernel's fault path on riscv64 with the guest's gdbstub,
+    catching the `SIGSEGV` delivery to the stage and reading `stval`/`sepc`, then comparing the
+    page it wanted with what VM has mapped for that process; item 63's resolution (`du`'s
+    printer thread and the text-page pre-fault) is the same machinery.
+    (`crates/servers/src/vfs/pipe.rs`, `crates/servers/src/vfs/call.rs`,
+    `crates/userland/src/bin/pipetest.rs`, `crates/userland/src/shell.rs::run_pipeline`,
+    `crates/servers/src/vm/`, `crates/arch-riscv64/src/trap.rs`)
 
     *The guess this replaces, kept because it is what the next session would otherwise redo:*
     the shell's pipeline setup, or VFS's pipe lifetime. A stage's write reaching a pipe with no
