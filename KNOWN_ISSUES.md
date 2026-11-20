@@ -179,12 +179,52 @@ are arch-specific, `[env]` is tooling/platform, not kernel.
     step in `tools/smoke/coreutils-minix.tsv` redirects its page to a file and counts it with a
     second pipe for this reason.
 
-    Next step: the shell's pipeline setup, or VFS's pipe lifetime. A stage's write reaching a
-    pipe with no reader means the reader's descriptor was closed early, so the reader's `stdin`
-    is probably the wrong pipe end (the first stage's, not the middle stage's): with `cat` in
-    the middle the write happens before the mix-up can be observed, which is why it looks
-    applet-specific. (`crates/servers/src/vfs/pipe.rs`,
-    `crates/servers/src/vfs/filedes.rs`, `coreutils/src/uu/tr`, the shell's pipeline arm)
+    *Measured 2026-11-20: the wiring is not the defect, and the failure is not random.* A
+    three-stage pipeline run as the first command after a boot prints its answer; the same
+    command, run again in that boot, answers EPIPE every time (one boot printed `100` for the
+    first, then failed five times in a row, with two working 2-stage pipelines in between). So
+    the trigger is state the first pipeline leaves behind, and a warm page cache (item 5
+    measured the second exec of the multicall at 9 file requests against 1079 for the first)
+    is the leading candidate: warm, the middle stage reaches its write sooner.
+
+    The stage wiring was measured rather than assumed. `pipetest fds <path>`, the mode added to
+    the pipe probe for this item, dumps a process's open descriptors; as the *last* stage of the
+    failing command it reports fd 0 as an `S_IFIFO` naming the second pipe, fd 1 and fd 2 as the
+    console, nothing above fd 3, and a write to fd 0 refused, so it holds the read end of the
+    right pipe, alive, after the middle stage was already told the pipe has no reader. The
+    shell's own table is clean too: the same dump as a plain command shows 0-2 as the console
+    and nothing leaked, both before and after a pipeline.
+
+    An attempt to rebuild that shape inside `pipetest` (two pipes, one child per stage, the
+    shell's `dup2` and close sequence, each stage execing on to a check) did not get far: a
+    child that exec'd `/bin/pipetest stage0` ran the *whole suite* instead, answering status
+    11, which only the suite's ftruncate check returns, while the same command typed at the
+    shell runs the stage. So an exec issued from the probe arrived with `argc == 1` and lost
+    its argument, and the probe could not tell its stages apart. That is worth a look on its
+    own (the shell's execs with arguments do arrive; the coreutils gate parses flags), but it
+    is not this item, so the attempt was dropped rather than shipped.
+
+    What is established: the fork, the descriptor-table copy, the `dup2` wiring and the closes
+    all leave the last stage holding the right pipe, and `pipe_check`'s EPIPE
+    (`find_filp_vp` returning null while a reader holds the pipe) is a claim that this model
+    says cannot happen. Either the model is wrong about when the last child's inherited
+    descriptors are counted, or the writer's vnode is not the one the reader holds.
+
+    What this rules out: the earlier guess below was wrong, the last stage's descriptors are
+    correct, and the command line is irrelevant (`wc -c` and `wc` pass in runs where `wc -l`
+    fails, and the reverse happens too). Next: break on `pipe_check`'s EPIPE return through the
+    guest's gdbstub and dump the filp table, to see whether the writer's `filp_vno` differs from
+    the reader's or the reader's filp is counted out at that instant.
+    (`crates/servers/src/vfs/pipe.rs`, `crates/servers/src/vfs/filedes.rs`,
+    `crates/servers/src/vfs/call.rs`, `crates/userland/src/bin/pipetest.rs`,
+    `crates/userland/src/shell.rs::run_pipeline`)
+
+    *The guess this replaces, kept because it is what the next session would otherwise redo:*
+    the shell's pipeline setup, or VFS's pipe lifetime. A stage's write reaching a pipe with no
+    reader means the reader's descriptor was closed early, so the reader's `stdin` was thought
+    to be the wrong pipe end (the first stage's, not the middle stage's), which would make `cat`
+    in the middle pass because its write happens before the mix-up can be observed. The fd dump
+    above refutes that: the last stage's stdin is the second pipe's read end.
 
 ---
 

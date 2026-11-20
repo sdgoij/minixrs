@@ -24,7 +24,23 @@ fn host_panic(_: &core::panic::PanicInfo) -> ! {
 
 #[allow(clippy::missing_safety_doc)]
 #[unsafe(no_mangle)]
-pub unsafe fn main(_argc: i32, _argv: *const *const u8) -> i32 {
+pub unsafe fn main(argc: i32, argv: *const *const u8) -> i32 {
+    // `pipetest fds <path>` writes this process's open descriptors to `path` instead of running
+    // the suite. It is how KNOWN_ISSUES 79's pipeline state was read: a probe started as a
+    // pipeline stage reports what the shell's wiring actually gave it.
+    let mut arg_buf = [""; 64];
+    let args = unsafe { userland::parse_args(argc, argv, &mut arg_buf) };
+    match args.get(1).copied() {
+        Some("fds") => return dump_fds(args.get(2).copied()),
+        // An argument this binary does not know is a caller's mistake, not a reason to run
+        // the whole suite and report `pipetest: OK` for it.
+        Some(other) if !other.is_empty() => {
+            userland::write_err(b"pipetest: unknown mode\n");
+            return 61;
+        }
+        _ => {}
+    }
+
     let (r, w) = match minix_std::fs::pipe() {
         Ok(p) => p,
         Err(_) => {
@@ -224,6 +240,102 @@ pub unsafe fn main(_argc: i32, _argv: *const *const u8) -> i32 {
 
     userland::write_out(b"pipetest: OK\n");
     0
+}
+
+/// Write this process's open descriptors to `path`, one line each.
+///
+/// `pipetest fds <path>` is how a probe started as a pipeline stage reports what it inherited:
+/// the file type says whether fd 0 is the pipe or the console, and an fd above 2 that is still
+/// open is one the caller did not release. The trailing write checks tell the two pipe ends
+/// apart, because a write to a read end is refused and a write to a write end is not.
+#[cfg(target_os = "minix")]
+fn dump_fds(path: Option<&str>) -> i32 {
+    let Some(path) = path else {
+        userland::write_err(b"pipetest: fds needs a path\n");
+        return 1;
+    };
+    let fd = match unsafe {
+        minix_std::fs::open(
+            path.as_bytes(),
+            minix_std::fs::O_CREAT | minix_std::fs::O_WRONLY | minix_std::fs::O_TRUNC,
+            0o644,
+        )
+    } {
+        Ok(fd) => fd,
+        Err(_) => {
+            userland::write_err(b"pipetest: fds open failed\n");
+            return 2;
+        }
+    };
+    let mut line = [0u8; 64];
+    for i in 0..64i32 {
+        let Ok(st) = minix_std::fs::fstat(i) else {
+            continue;
+        };
+        let mut n = 0usize;
+        let head = b"fd ";
+        line[..head.len()].copy_from_slice(head);
+        n += head.len();
+        n = put_dec(&mut line, n, i);
+        let mid = b" mode ";
+        line[n..n + mid.len()].copy_from_slice(mid);
+        n += mid.len();
+        n = put_dec(&mut line, n, (st.st_mode & 0o170000) as i32);
+        let ino = b" ino ";
+        line[n..n + ino.len()].copy_from_slice(ino);
+        n += ino.len();
+        n = put_dec(&mut line, n, st.st_ino as i32);
+        line[n] = b'\n';
+        n += 1;
+        let _ = unsafe { minix_std::fs::write(fd, &line[..n]) };
+    }
+    // Direction check: a write to a pipe's read end is `EBADF`, so a write that succeeds means
+    // the descriptor is the write end of the very pipe it was supposed to read.
+    let w0 = unsafe { minix_std::fs::write(0, b"Z") };
+    let mut line = [0u8; 48];
+    let mut n = 0usize;
+    let head = b"write0 ";
+    line[..head.len()].copy_from_slice(head);
+    n += head.len();
+    n = put_dec(&mut line, n, w0.map(|v| v as i32).unwrap_or(-1));
+    line[n] = b'\n';
+    n += 1;
+    let _ = unsafe { minix_std::fs::write(fd, &line[..n]) };
+
+    let _ = minix_std::fs::close(fd);
+    0
+}
+
+#[cfg(not(target_os = "minix"))]
+fn dump_fds(_path: Option<&str>) -> i32 {
+    0
+}
+
+/// Append `v` in decimal to `buf` at `at`, returning the new length.
+#[cfg(target_os = "minix")]
+fn put_dec(buf: &mut [u8], at: usize, v: i32) -> usize {
+    let mut n = at;
+    let mut digits = [0u8; 12];
+    let mut k = 0usize;
+    let mut x = v.unsigned_abs();
+    loop {
+        digits[k] = b'0' + (x % 10) as u8;
+        x /= 10;
+        k += 1;
+        if x == 0 {
+            break;
+        }
+    }
+    if v < 0 {
+        buf[n] = b'-';
+        n += 1;
+    }
+    while k > 0 {
+        k -= 1;
+        buf[n] = digits[k];
+        n += 1;
+    }
+    n
 }
 
 /// Busy-wait `ms` of the monotonic clock. True when the clock was readable.
