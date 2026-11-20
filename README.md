@@ -204,7 +204,7 @@ object costs one region per `PT_LOAD` — three, now that the `GNU_RELRO` segmen
 is not linked.
 
 Building anything dynamic goes through the fork's `-elf` (position-independent) targets, which
-`just bootstrap` builds. `tools/build-dynlibc.py` builds `libc.so` and `dynclib` with them
+`just bootstrap` builds. `cargo xtask build dynlibc` builds `libc.so` and `dynclib` with them
 (`just dynlib-<arch>`, which every image build runs). `just cdyn tools/myprog.c` links a
 program of your own the way that script links `dynclib` — `-Bdynamic`, `-l:libc.so`,
 `--allow-shlib-undefined` for the TLS symbols the loader supplies, and

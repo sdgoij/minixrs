@@ -60,7 +60,7 @@ pub const BOOT_BINS: &[(&str, &str)] = &[
     // The dynamic-linking trio: the loader, the shared C library, and one C program
     // linked against it rather than against the `minix-libc` rlib. `just dynlib-<arch>`
     // builds them — the loader from `crates/ldso` with `tools/minix-ldso.ld`, the other
-    // two with `tools/build-dynlibc.py` — and every image-assembling recipe depends on
+    // two with `cargo xtask build dynlibc` — and every image-assembling recipe depends on
     // it, so dynamic linking is something an image *has* rather than something only its
     // gate builds.
     //

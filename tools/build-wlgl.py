@@ -7,8 +7,8 @@ image has none: `crates/minix-libc/src/lib.rs` answers NULL for `dlopen` there b
 design. Mesa is only reachable through the loader, so any program that renders with
 GL — a client here, and a compositor later — must be a dynamic image.
 
-The link is the same shape `tools/build-gltest.py` and `tools/cdyn.py` give their C
-clients: the arch's C `crt0.o` provides `_start`, `minix-user.ld` lays the image out,
+The link is the same shape `tools/build-gltest.py` gives its C client and `cargo xtask build
+cdyn` gives a program of yours: the arch's C `crt0.o` provides `_start`, `minix-user.ld` lays the image out,
 and `-Bdynamic` + `--dynamic-linker=/libexec/ld.so` make `libc.so`, `libEGL.so.1` and
 `libGLESv2.so.2` resolve at run time. What differs is the Rust half: the Wayland
 protocol client is `crates/userland`'s `wlclient` module, linked in as an rlib, so the

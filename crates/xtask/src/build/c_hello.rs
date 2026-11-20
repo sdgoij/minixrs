@@ -36,7 +36,7 @@ const PROGRAMS: [(&str, &str); 3] = [
 /// The crate that puts `minix-libc` in the link. The C objects call its
 /// `extern "C"` symbols, but rustc only adds an rlib to the link when the local
 /// crate references it.
-const LINK_STUB: &str = "\
+pub(crate) const LINK_STUB: &str = "\
 #![no_std]
 #![no_main]
 

@@ -435,7 +435,7 @@ by a toolchain an ordinary image build must not depend on, so they go in the way
 - **Phase 3 needed no fork either.** `crates/minix-libc` is a Rust library, so its shared
   object is built by rustc rather than LLD — `cargo rustc -p minix-libc --crate-type
   cdylib` — and three things had to be arranged for that to work
-  (`tools/build-dynlibc.py`):
+  (`cargo xtask build dynlibc`):
 
   1. **A PIC/`cdylib` target of the fork's own: the `-elf` triples**
      (`compiler/rustc_target/src/spec/targets/*_minix_elf.rs`, registered in
@@ -508,7 +508,7 @@ As built:
 
 1. The `.so` needs no script of our own — `lld -shared -soname` (§6.5); the loader does
    (`tools/minix-ldso.ld`). Sources: `tools/libdyn.c`, `tools/dynhello.c`,
-   `tools/build-dynlink.py`.
+   `cargo xtask build dynlink`.
 2. `crates/ldso`: `src/elf.rs` + `src/reloc.rs` are host-testable (11 tests), while
    `src/rtld.rs`/`src/bin/ldso.rs` sit behind the `bin` feature so host `clippy`/`test`
    skip the minix-only `_start`. `_start` reads the header-page register, relocates, and
@@ -618,7 +618,7 @@ with, a weak reference resolving to 0 and the strong one failing, the allocator 
 
 `libdyn.so` now names `libdyn2.so` three ways in one link: the soname (which the loader has
 to find on its search path), `/lib/libdyn2.so`, and `/lib/./libdyn2.so`. The last two are
-*sonames* on link-only copies of the same object (`tools/build-dynlink.py::ALIASES`), so all
+*sonames* on link-only copies of the same object (`crates/xtask/src/build/dynlink.rs`, `ALIASES`), so all
 three names are one file with one inode and only the first is installed. The loader settles
 them by the resolved path, then by `st_dev`/`st_ino`, and maps once.
 
@@ -705,9 +705,9 @@ what measures it; the pin for the loader's own table is a `const _: () = assert!
 
 As built:
 
-- `tools/build-dynlibc.py` builds `libc.so` (`cargo rustc --crate-type cdylib` under the
+- `cargo xtask build dynlibc` builds `libc.so` (`cargo rustc --crate-type cdylib` under the
   dyn target, `--features so`, soname `libc.so`) and `tools/dynclib.c` linked against it,
-  and `dynlink-x86` runs it after `tools/build-dynlink.py`.
+  and `dynlink-x86` runs it after `cargo xtask build dynlink`.
 
     Those two objects moved when dynamic linking became something an image *has* rather
     than something only its gate built: the script now writes them into the release

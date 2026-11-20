@@ -15,7 +15,7 @@ run build scripts (e.g. the minixrs crates' build.rs) when compiling for a
 minix target.
 
 Each minix triple is listed with its `-elf` form: the position-independent
-target a shared object is built for (`tools/build-dynlibc.py`). Those, and
+target a shared object is built for (`cargo xtask build dynlibc`). Those, and
 `wasm32-minix` (the target `tools/wasm-servers/build.sh` builds the wasm
 kernel, servers and program modules for), are the targets whose sysroot the
 `no-std` key narrows to `core` and `alloc`, because neither a shared object

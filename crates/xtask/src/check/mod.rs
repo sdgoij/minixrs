@@ -56,11 +56,4 @@ fn walk(dir: &Path, extension: &str, found: &mut Vec<PathBuf>) -> io::Result<()>
 
 /// `path` relative to `base` with `/` separators, so a message reads the same
 /// on Windows as it does in CI.
-pub(crate) fn relative_posix(base: &Path, path: &Path) -> String {
-    path.strip_prefix(base)
-        .unwrap_or(path)
-        .components()
-        .filter_map(|component| component.as_os_str().to_str())
-        .collect::<Vec<_>>()
-        .join("/")
-}
+pub(crate) use crate::paths::relative_posix;

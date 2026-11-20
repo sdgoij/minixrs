@@ -412,14 +412,16 @@ function over text with fixture tests; the port was checked against the Python
 on the real tree, on a passing tree and on a failing one, before the scripts
 were deleted.
 
-**Phase 1, first slice landed.** `cargo xtask build c-hello|std-hello` replaces
+**Phase 1, two slices landed.** `cargo xtask build c-hello|std-hello` replaces
 the two builders `bootstrap` uses, with the arch table (`arch.rs`), the hermetic
-C flags (`cc.rs`) and the toolchain lookup (`toolchain.rs`) as Rust. The four
-target artifacts were byte-identical to the Python build's before the scripts
-went, and `crates/kernel/build.rs`'s "build it with ..." errors name the new
-command. Still Python: `cc-minix`, `cc-dso-minix`, `cdyn`,
-`build-dynlibc`/`build-dynlink`, `build-libcxx`/`libcxx-toolchain`, and the
-`build-*` probe and Wayland clients. `ccarch.py` and `ccflags.py` stay with
+C flags (`cc.rs`) and the toolchain lookup (`toolchain.rs`) as Rust. Then
+`cargo xtask build dynlibc|dynlink|cdyn` replaced the dynamic-linking trio, on
+the shared link core in `dynamic.rs` (`dyn` is a Rust keyword). The four smoke
+binaries and the twelve dynamic artifacts were byte-identical to the Python
+build's before the scripts went, and `crates/kernel/build.rs`'s "build it with
+..." errors name the new commands. Still Python: `cc-minix`, `cc-dso-minix`,
+`build-libcxx`/`libcxx-toolchain`, `build-bash`/`fetch-bash`/`build-mesa`, and
+the `build-*` probe and Wayland clients. `ccarch.py` and `ccflags.py` stay with
 them; `crates/xtask` carries a copy of both tables until the last importer
 moves, which is the bounded duplication section 3.10 describes.
 

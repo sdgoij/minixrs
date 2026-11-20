@@ -938,16 +938,16 @@ test-dynlink-x86 boot-timeout="40": dynlink-x86
     FEED_SCENARIO=tools/smoke/dyn.tsv sh tools/smoke/feed.sh target/test-dynlink-x86.log {{boot-timeout}} qemu-system-x86_64 -nographic -m 256M -no-reboot -vga none -device bochs-display,id=fb0 -kernel target/images/x86_64-pc-minix/minix-x86.elf -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0 -device virtio-tablet-pci,display=fb0
     @echo "dynlink: /bin/dynhello printed what only the shared objects contain, before and after a fork and an exec, and /bin/dynclib ran against libc.so (x86_64)"
 
-# The same artifacts for riscv64. `tools/build-dynlink.py` and
-# `tools/build-dynlibc.py` take the target; only the loader's `_start` and its TLS
+# The same artifacts for riscv64. `cargo xtask build dynlink` and
+# `cargo xtask build dynlibc` take the target; only the loader's `_start` and its TLS
 # placement differ between them (`crates/ldso`).
 dynlib-riscv64:
     @test -n "{{stage1-rustc}}" || (echo 'error: stage1 rustc not found — run `just bootstrap` first' >&2 && exit 1)
     RUSTC="{{stage1-rustc}}" RUSTFLAGS="-C link-arg=-Ttools/minix-ldso.ld -C link-arg=--no-eh-frame-hdr" cargo build -p ldso --bin ldso --features bin --target riscv64gc-unknown-minix --release
-    python tools/build-dynlibc.py riscv64
+    cargo xtask build dynlibc riscv64
 
 dynlink-riscv64: dynlib-riscv64
-    python tools/build-dynlink.py riscv64
+    cargo xtask build dynlink riscv64
 
 # The dynamic-linking gate for riscv64: the same `tools/smoke/dyn.tsv` scenario as
 # x86_64, which is deliberately arch-neutral — it asserts on symbols only the shared
@@ -965,10 +965,10 @@ test-dynlink-riscv64 boot-timeout="60": dynlink-riscv64
 dynlib-aarch64:
     @test -n "{{stage1-rustc}}" || (echo 'error: stage1 rustc not found — run `just bootstrap` first' >&2 && exit 1)
     RUSTC="{{stage1-rustc}}" RUSTFLAGS="-C link-arg=-Ttools/minix-ldso.ld -C link-arg=--no-eh-frame-hdr" cargo build -p ldso --bin ldso --features bin --target aarch64-unknown-minix --release
-    python tools/build-dynlibc.py aarch64
+    cargo xtask build dynlibc aarch64
 
 dynlink-aarch64: dynlib-aarch64
-    python tools/build-dynlink.py aarch64
+    cargo xtask build dynlink aarch64
 
 test-dynlink-aarch64 boot-timeout="60": dynlink-aarch64
     DYNLINK_BINS='/lib/libdyn.so=target/dynlink/aarch64/libdyn.so;/lib/libdyn2.so=target/dynlink/aarch64/libdyn2.so;/lib/libdyn3.so=target/dynlink/aarch64/libdyn3.so;/bin/dynhello=target/dynlink/aarch64/dynhello;/lib/libdlopen.so=target/dynlink/aarch64/libdlopen.so;/lib/libtls1.so=target/dynlink/aarch64/libtls1.so;/bin/dynopen=target/dynlink/aarch64/dynopen' just build-aarch64
@@ -980,15 +980,15 @@ test-dynlink-aarch64 boot-timeout="60": dynlink-aarch64
     @echo "dynlink: /bin/dynhello printed what only the shared objects contain, before and after a fork and an exec, and /bin/dynclib ran against libc.so (aarch64)"
 
 # The gate on `just cdyn` — the recipe a user is told to use for a program of their own.
-# Every other recipe here builds its programs with `tools/build-dynlink.py` or
-# `tools/build-dynlibc.py`; this one goes through the recipe's own interface and boots what
-# it produced, which is what makes the two commands `tools/cdyn.py` prints for a user
+# Every other recipe here builds its programs with `cargo xtask build dynlink` or
+# `cargo xtask build dynlibc`; this one goes through the recipe's own interface and boots what
+# it produced, which is what makes the two commands `cargo xtask build cdyn` prints for a user
 # something that has been run at least once. The link underneath is that script's, the same
 # one the shipped `/bin/dynclib` gets.
 #
 # The injection is `MINIXFS_EXTRA` set inside the recipe, so the Justfile's
 # `MSYS2_ENV_CONV_EXCL` covers it. A user setting the variable in their own shell has to
-# cover it themselves, which is why the hint `tools/cdyn.py` prints names that variable on
+# cover it themselves, which is why the hint `cargo xtask build cdyn` prints names that variable on
 # Windows.
 test-cdyn-x86 boot-timeout="40": dynlib-x86
     just cdyn tools/cdyn-demo.c x86
@@ -1925,34 +1925,34 @@ fetch-mesa arch="x86" *args:
 # the boot path carries one, so an image with these three boots exactly as before
 # (`.notes/dynamic_linking.md` D2).
 #
-# The loader lands in the release dir from cargo, and `tools/build-dynlibc.py` puts the
+# The loader lands in the release dir from cargo, and `cargo xtask build dynlibc` puts the
 # other two there, the way `cargo xtask build c-hello` does for helloc/ctest.
 dynlib-x86:
     @test -n "{{stage1-rustc}}" || (echo 'error: stage1 rustc not found - run `just bootstrap` first' >&2 && exit 1)
     RUSTC="{{stage1-rustc}}" RUSTFLAGS="-C link-arg=-Ttools/minix-ldso.ld -C link-arg=--no-eh-frame-hdr" cargo build -p ldso --bin ldso --features bin --target x86_64-pc-minix --release
-    python tools/build-dynlibc.py x86
+    cargo xtask build dynlibc x86
 
-# What the loader's *own* gate needs on top of `dynlib-x86`: `tools/build-dynlink.py`
+# What the loader's *own* gate needs on top of `dynlib-x86`: `cargo xtask build dynlink`
 # builds `libdyn*.so` and `dynhello` (resolution, the region budget), `libdlopen.so`,
 # `libtls1.so` and `dynopen` (the `dlopen` steps), whose strings live only in the objects
 # and which no image ships. `test-dynlink-x86` injects them into a standard image
 # (`DYNLINK_BINS`) and boots it.
 dynlink-x86: dynlib-x86
-    python tools/build-dynlink.py x86
+    cargo xtask build dynlink x86
 
 # Build a C program of your own against the shared C library. `just cdyn tools/myprog.c`
 # writes `target/dync/<arch>/<stem>`, and the program runs on a booted system with nothing
 # else added: every image already carries `/lib/libc.so` and the loader the program asks
-# for. `tools/cdyn.py` then prints the two commands that boot it — the second sets
+# for. `cargo xtask build cdyn` then prints the two commands that boot it — the second sets
 # `MINIXFS_EXTRA`, and on Windows it is prefixed with `MSYS2_ENV_CONV_EXCL` so the `/bin/...`
 # value survives MSYS's path conversion (a value that does not is refused by
 # `crates/kernel/build.rs`).
 #
-# `tools/cdyn.py` is the same link `tools/build-dynlibc.py` gives the shipped
+# `cargo xtask build cdyn` is the same link `cargo xtask build dynlibc` gives the shipped
 # `/bin/dynclib`, so a program of your own gets the flags that program is tested with, and
 # `just test-cdyn-x86` is the gate on this recipe.
 cdyn src arch="x86":
-    python tools/cdyn.py {{arch}} {{src}}
+    cargo xtask build cdyn {{src}} --target {{arch}}
 
 # Build the C++ runtime (libc++ + libc++abi) for one minix target and merge them
 # into target/cxx/<arch>/minix-runtime/libstdc++.a — the archive Mesa's shared

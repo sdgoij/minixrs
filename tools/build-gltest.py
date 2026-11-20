@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Build the surfaceless-EGL GLES2 triangle (§6.10 3c-2) against Mesa's DSOs.
 
-The client is a normal dynamic minix executable, the same shape `tools/cdyn.py`
+The client is a normal dynamic minix executable, the same shape `cargo xtask build cdyn`
 builds (non-PIC, `PT_INTERP` = the loader, `DT_NEEDED` libs resolved at run
 time), with two additions: Mesa's headers on the compile line, and
 `-l:libEGL.so.1 -l:libGLESv2.so.2` on the link, read from the staged

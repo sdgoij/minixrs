@@ -19,7 +19,7 @@ minix C build already shares:
     object takes so it costs three VM regions and not four, against the port's
     `libc.so` (`target/<triple>/release/libc.so`, the object `just dynlib-<arch>`
     publishes). A program links with `tools/crt0-<arch>.S` and the loader's
-    `PT_INTERP` (`/libexec/ld.so`), the same two things `tools/cdyn.py` supplies
+    `PT_INTERP` (`/libexec/ld.so`), the same two things `cargo xtask build cdyn` supplies
     through rustc — here without rustc, because a build system calls this for
     every link.
 

@@ -3,9 +3,8 @@
 
 The stage1 compiler is the one with the minix targets built in and a sysroot for
 them, so it is the `RUSTC` of every minix build: the Justfile's `stage1-rustc`,
-and the scripts that invoke rustc directly (`tools/build-dynlibc.py` through
-`tools/cdyn.py`, `tools/build-dynlink.py`, `tools/cc-minix.py`'s wrapper).
-`crates/xtask` has the same lookup for the binaries it builds.
+and `tools/cc-minix.py`'s wrapper, the one script left that invokes rustc
+directly. `crates/xtask` has the same lookup for the binaries it builds.
 
 Candidates, in order:
 

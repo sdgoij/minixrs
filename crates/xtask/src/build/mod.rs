@@ -5,6 +5,9 @@
 //! against. The argv is the contract, so every command is echoed before it runs.
 
 pub mod c_hello;
+pub mod cdyn;
+pub mod dynlibc;
+pub mod dynlink;
 pub mod std_hello;
 
 use std::fs;

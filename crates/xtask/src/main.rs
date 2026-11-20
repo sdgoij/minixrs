@@ -21,6 +21,8 @@ mod arch;
 mod build;
 mod cc;
 mod check;
+mod dynamic;
+mod paths;
 mod toolchain;
 
 fn main() -> ExitCode {
@@ -82,6 +84,15 @@ fn run_build(root: &Path, matches: &clap::ArgMatches) -> io::Result<bool> {
     match matches.subcommand() {
         Some(("c-hello", matches)) => build::c_hello::run(root, target(matches)),
         Some(("std-hello", matches)) => build::std_hello::run(root, target(matches)),
+        Some(("dynlibc", matches)) => build::dynlibc::run(root, target(matches)),
+        Some(("dynlink", matches)) => build::dynlink::run(root, target(matches)),
+        Some(("cdyn", matches)) => {
+            let Some(source) = matches.get_one::<String>("source") else {
+                unreachable!("clap requires a source")
+            };
+            let name = matches.get_one::<String>("name").map(String::as_str);
+            build::cdyn::run(root, target(matches), Path::new(source), name)
+        }
         _ => unreachable!("clap requires a build subcommand"),
     }
 }
@@ -143,8 +154,42 @@ fn command() -> clap::Command {
                     clap::Command::new("std-hello")
                         .about("The std smoke binary: /bin/hello")
                         .arg(target_arg("x86_64-pc-minix")),
+                )
+                .subcommand(
+                    clap::Command::new("dynlibc")
+                        .about("The shared C library and the program linked against it")
+                        .arg(target_arg("x86")),
+                )
+                .subcommand(
+                    clap::Command::new("dynlink")
+                        .about("The loader gate's objects and programs under target/dynlink")
+                        .arg(target_arg("x86")),
+                )
+                .subcommand(
+                    clap::Command::new("cdyn")
+                        .about("Link a C program of your own against /lib/libc.so")
+                        .arg(
+                            clap::Arg::new("source")
+                                .value_name("SOURCE")
+                                .required(true)
+                                .help("The C file to compile"),
+                        )
+                        .arg(
+                            clap::Arg::new("name")
+                                .value_name("NAME")
+                                .help("The program's name (default: the source's stem)"),
+                        )
+                        .arg(target_option("x86")),
                 ),
         )
+}
+
+fn target_option(default: &'static str) -> clap::Arg {
+    clap::Arg::new("target")
+        .long("target")
+        .value_name("TARGET")
+        .default_value(default)
+        .help("An arch name or a minix triple")
 }
 
 fn target_arg(default: &'static str) -> clap::Arg {
