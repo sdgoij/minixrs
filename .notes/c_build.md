@@ -466,7 +466,7 @@ no `ar`, `ar` otherwise) — the same hermetic C compile bash's build uses.
 ## The headers: generated, and the two sides now agree
 
 `tools/gen-c-headers.py` derives the C headers from the libc with cbindgen and
-writes them to `target/c-include/` (13 headers), and `tools/check-c-headers.py`
+writes them to `target/c-include/` (13 headers), and `cargo xtask check headers`
 asserts the two sides agree in both directions. It reports 0 in each direction:
 386 exports, 382 declarations.
 

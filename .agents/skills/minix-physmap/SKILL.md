@@ -1,6 +1,6 @@
 ---
 name: minix-physmap
-description: Physical-memory traps in the MINIX/Rust kernel — the kernel runs on the calling process's page tables, so a physical address used as a pointer can be shadowed by a user mapping. Use when a kernel read or write touches a frame, a page table, a grant table or a device register; when turning a physical address (`pte_to_phys`, a frame mask, a `*_phys`/`*_pa` value) into a pointer; when adding a kernel mapping; or when a copy lands in the wrong process or a reply comes back as zeros. Covers `phys_to_virt`/`frame_ptr`/`table_ptr`/`phys_ptr`, `identity_map_top()`, `MAX_USER_ADDRESS` and `tools/check-physmap.py`.
+description: Physical-memory traps in the MINIX/Rust kernel — the kernel runs on the calling process's page tables, so a physical address used as a pointer can be shadowed by a user mapping. Use when a kernel read or write touches a frame, a page table, a grant table or a device register; when turning a physical address (`pte_to_phys`, a frame mask, a `*_phys`/`*_pa` value) into a pointer; when adding a kernel mapping; or when a copy lands in the wrong process or a reply comes back as zeros. Covers `phys_to_virt`/`frame_ptr`/`table_ptr`/`phys_ptr`, `identity_map_top()`, `MAX_USER_ADDRESS` and `cargo xtask check physmap`.
 ---
 
 # Physical memory and the physmap
@@ -29,7 +29,7 @@ Never cast a physical address to a pointer. Convert it:
 - `pte_to_phys(..)` returns a number that *looks* like a pointer and was one for this port's whole
   history. Converting it is the rule — for page tables (P2b) and for frames (P3/P4).
 
-`tools/check-physmap.py`, wired into `just check`, enforces this over `crates/kernel/src` and
+`cargo xtask check physmap`, wired into `just check`, enforces this over `crates/kernel/src` and
 `crates/arch-*/src`: it rejects a page-table-derived quantity (`pte_to_phys`/`pte_frame`/a frame
 mask) or a `*_phys`/`*_pa`/`pa`/`phys` binding cast to a pointer unless the line converts through
 `phys_to_virt`/`frame_ptr`/`table_ptr`/`phys_ptr`. It skips each file's `#[cfg(test)] mod tests`
@@ -87,7 +87,7 @@ reason.
 ## Where this is pinned
 
 - `.notes/physmap.md` — the invariant, the per-stage plan (P1–P6) and the audit of every deref site.
-- `tools/check-physmap.py` — the static rule; run by `just check`.
+- `cargo xtask check physmap` — the static rule; run by `just check`.
 - `crates/kernel/src/pagetable.rs` (`table_ptr`, `frame_ptr`) and each arch's `vmparam.rs`
   (`phys_to_virt`, `identity_map_top`, the compile-time pins).
 - Boot tests: `test_walk_through_the_physmap` (P2c) and

@@ -3691,7 +3691,7 @@ screen, therefore still appears after its prompt.
   (`tools/c-include`, `crates/minix-libc`)
 - **The C headers are generated and checked, and both sides agree.**
   `tools/gen-c-headers.py` derives the headers from the libc with cbindgen into
-  `target/c-include/`; `tools/check-c-headers.py` asserts the two sides agree and
+  `target/c-include/`; `cargo xtask check headers` asserts the two sides agree and
   now reports 0 in each direction: 363 exports, 359 declarations.
   The checker had been under-reporting in three ways, all fixed: a prototype
   wrapped over two lines was not a declaration to it (`pthread_create`, `qsort`,
@@ -3708,7 +3708,7 @@ screen, therefore still appears after its prompt.
   `SEEK_SET`, the errno numbers, struct layouts), so each hand-authored header
   has to keep its types and macros and take the generated declarations, after
   which the check reads the set the compiler actually gets.
-  (`tools/gen-c-headers.py`, `tools/check-c-headers.py`)
+  (`tools/gen-c-headers.py`, `cargo xtask check headers`)
 - **`/bin/ctest` is embedded but no gate drives it.** `tools/ctest.c` is the C
   smoke test (errno, the malloc family, stdio, strings, pthreads, the `scanf`
   family — the only on-target call of those variadic entry points anywhere in the

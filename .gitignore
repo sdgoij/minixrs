@@ -1,6 +1,9 @@
 /target
 /tools/probes
 /tools/__pycache__
+# `cargo xtask`'s build dir (see the alias in `.cargo/config.toml`): outside
+# `target/` on purpose, so a clean cannot delete the running tool.
+/.xtask
 **/node_modules
 **/target
 *.wasm

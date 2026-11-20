@@ -48,6 +48,10 @@ members = [
     "crates/ui",
     "crates/userland",
     "crates/wayland",
+    # Host-side tooling, run as `cargo xtask`. A `std` binary for the host: it
+    # must not depend on a target crate, or feature unification could reach a
+    # minix build through it.
+    "crates/xtask",
 ]
 
 [workspace.package]
@@ -57,6 +61,19 @@ license = "GPL2.0"
 
 [workspace.dependencies]
 bitflags = { version = "2", default-features = false }
+
+# `crates/xtask` only. No colour: the gates print to a CI log, and `color`
+# pulls the anstream stack in for nothing.
+clap = { version = "4.6", default-features = false, features = [
+    "std",
+    "help",
+    "usage",
+    "error-context",
+    "suggestions",
+] }
+# The static gates are text scanners; `regex-lite` is the one-crate subset, and
+# a lookahead-free rewrite of the only pattern that wanted one.
+regex-lite = "0.1"
 
 # The host toolchain (rustup) has no minix target, so `target_os = "minix"`
 # would trip `unexpected_cfgs`; the fork's rustc knows the value natively.

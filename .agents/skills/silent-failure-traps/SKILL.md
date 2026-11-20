@@ -144,7 +144,7 @@ working shell).
   the multicall: every local gate had the binary from an earlier `build-aarch64`, so the gap could
   not appear on a machine that had ever built the arch. `crates/kernel/build.rs` panics on *any*
   missing `BOOT_BINS` entry, so a recipe that builds `kernel-boot` must depend on
-  `userland-<arch>`, `coreutils-<arch>` and `dynlib-<arch>`; `tools/check-justfile.py` (run by
+  `userland-<arch>`, `coreutils-<arch>` and `dynlib-<arch>`; `cargo xtask check justfile` (run by
   `just check`) pins that, and to see the failure by hand, move the artifact aside first
   (`rm target/<triple>/release/<bin>`) rather than trusting a green run.
 

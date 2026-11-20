@@ -1,3 +1,11 @@
+[alias]
+# `cargo xtask <command>`: the host tooling in `crates/xtask`. The separate
+# target dir keeps the binary out of `target/`, which `bootstrap` cleans; on
+# Windows `cargo clean` cannot delete an executable that is still running, and
+# the tool that runs `bootstrap` is exactly that executable. Run it from the
+# repository root, since a relative `--target-dir` is resolved from the cwd.
+xtask = "run --quiet --package xtask --target-dir .xtask --"
+
 [target.riscv64gc-unknown-minix]
 rustflags = ["-C", "link-arg=-Ttools/minix-raw-riscv64.ld"]
 

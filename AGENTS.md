@@ -80,10 +80,10 @@ just image <arch>
 - **A physical address is not a pointer.** The kernel runs on the calling
   process's page tables, so a user mapping can shadow a frame. Convert through
   `phys_to_virt`/`frame_ptr`/`table_ptr`, or carry `physmap-ok: <reason>` where
-  a cast is genuinely safe. `tools/check-physmap.py` is the gate; `minix-physmap`
-  is the detail.
+  a cast is genuinely safe. `cargo xtask check physmap` is the gate;
+  `minix-physmap` is the detail.
 - **The C headers in `tools/c-include` are a contract** for bash, libc++, and
-  the C/C++ smoke tests. `tools/check-c-headers.py` catches an export and its
+  the C/C++ smoke tests. `cargo xtask check headers` catches an export and its
   declaration drifting apart.
 - **Windows host tests and Linux host tests differ.** `just test-linux` runs the
   Linux suite and clippy in a read-only container; use it before pushing a

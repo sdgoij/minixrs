@@ -51,7 +51,7 @@ toolchain. `.notes/wayland.md` §6.10 is the design; these are the recipes and t
 
 ## Traps that cost a session
 
-- **A C header a C++ TU includes must carry `extern "C"`, or the C++ consumer mangles the name.** Then nothing defines it and the loader reports an unresolved symbol like `_Z16__errno_locationv` (or `_Z18pthread_mutex_lockP15pthread_mutex_t`). `tools/c-include` is mostly guarded already; `errno.h`, `pthread.h`, `sched.h` and `sys/file.h` were the ones that were not, and only the C++ build (`just libcxx <arch>`, then the Mesa relink) surfaced them. `tools/check-c-headers.py` is the contract check, not this.
+- **A C header a C++ TU includes must carry `extern "C"`, or the C++ consumer mangles the name.** Then nothing defines it and the loader reports an unresolved symbol like `_Z16__errno_locationv` (or `_Z18pthread_mutex_lockP15pthread_mutex_t`). `tools/c-include` is mostly guarded already; `errno.h`, `pthread.h`, `sched.h` and `sys/file.h` were the ones that were not, and only the C++ build (`just libcxx <arch>`, then the Mesa relink) surfaced them. `cargo xtask check headers` is the contract check, not this.
 - **The libc++ runtime is a separate build from Mesa's.** A `tools/c-include` fix
   reaches libc++ only after `just libcxx <arch>`; Mesa alone will still link the old
   `target/cxx/<arch>/minix-runtime/libstdc++.a` and keep the mangled reference.
