@@ -212,9 +212,9 @@ coreutils ln -s nowhere lsd1/dangling
 coreutils ls -1 lsd1/dangling	lsd1/dangling
 coreutils ls -d lsd1	lsd1
 coreutils ls /bin/coreutils	/bin/coreutils
-# The console reports a 0x0 window size, so `ls` takes its non-terminal path
-# (one entry per line) even though stdout is the tty. Counting the lines is
-# the whole-line assertion a multi-line listing cannot be.
+# `ls` with a pipe for stdout lists one entry per line rather than in columns,
+# so counting the lines is the whole-line assertion a multi-line listing cannot
+# be.
 coreutils ls lsd1 | coreutils wc -l	2
 coreutils ls -a lsd1 | coreutils wc -l	4
 coreutils ls -l lsd1/dangling	lrwxrwxrwx[[:space:]]+1[[:space:]]+root[[:space:]]+root[[:space:]]+7[[:space:]].*lsd1/dangling -> nowhere
@@ -288,13 +288,15 @@ coreutils tty	/dev/tty
 # `stty` reads and writes the tty server's `struct termios` through
 # `src/uu/stty/src/minixterm.rs`, the `nix`-shaped surface over `rustix::termios`
 # (`nix` has no minix support, and the port's termios is NetBSD's: speeds are
-# rates, not flag bits, which is why minix takes stty's `bsd` path). The console
-# is a serial line, so there is no window size and `size` answers `0 0`. The
+# rates, not flag bits, which is why minix takes stty's `bsd` path). `size` reads
+# `TIOCGWINSZ`, which a console line answers with the port's console geometry
+# rather than with the zeroes the reference leaves (`KNOWN_ISSUES.md` 77,
+# `.notes/tty.md`). The
 # second `-g` is the write path: `sane` changes `ixany` and two control
 # characters, so the save line differs from the first, a read-only `stty` would
 # print it twice.
 coreutils stty -g	2b02:7:4b00:5cf:4:ff:ff:8:17:15:12:ff:3:1c:1a:19:11:13:16:f:1:0:14:ff
-coreutils stty size	0 0
+coreutils stty size	24 80
 coreutils stty cs8 -parity	
 coreutils stty sane	
 coreutils stty -g	2302:7:4b00:5cf:4:0:0:7f:17:15:12:ff:3:1c:1a:19:11:13:16:f:1:0:14:ff

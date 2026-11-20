@@ -42,6 +42,16 @@ pub const NR_PTYS: usize = 4;
 /// First minor for console devices.
 pub const CONS_MINOR: u32 = 0;
 
+/// Console geometry in cells, which is what `TIOCGWINSZ` answers on a console
+/// line so a full-screen program can learn its page length.
+///
+/// 80 columns is not the desktop's width but the shell's assumption: its line
+/// editor blanks a row with `SCR_COLS - 1` spaces (`userland::shell`), so a
+/// narrower model would wrap where the editor believes it will not. 24 rows is
+/// the cell grid the console's screen model composes (`console.rs`).
+pub const CONSOLE_ROWS: u16 = 24;
+pub const CONSOLE_COLS: u16 = 80;
+
 /// Minor for the log device.
 pub const LOG_MINOR: u32 = 15;
 
@@ -365,6 +375,24 @@ impl WinSize {
         Self {
             ws_row: 0,
             ws_col: 0,
+            ws_xpixel: 0,
+            ws_ypixel: 0,
+        }
+    }
+
+    /// The size a console line reports until someone sets one.
+    ///
+    /// The cell grid the wserver console composes is the port's definition of
+    /// its console geometry (`CONSOLE_ROWS` and `CONSOLE_COLS`), and the
+    /// shell's line editor already blanks a row with `COLS - 1` spaces because
+    /// it assumes those columns. Answering that geometry is what lets a
+    /// full-screen program ask `TIOCGWINSZ` for a page length: the reference's
+    /// `winsize_defaults` stays zeroed, which leaves the program to guess at a
+    /// size the machine does know. `.notes/tty.md` records the deviation.
+    const fn console() -> Self {
+        Self {
+            ws_row: CONSOLE_ROWS,
+            ws_col: CONSOLE_COLS,
             ws_xpixel: 0,
             ws_ypixel: 0,
         }
@@ -1719,6 +1747,7 @@ pub fn tty_init(system_hz_val: u32) {
         tp.tty_outcaller = NONE;
         tp.tty_iocaller = NONE;
         tp.tty_termios = Termios::defaults();
+        tp.tty_winsize = WinSize::zeroed();
 
         // Set up default device function pointers.
         tp.tty_icancel_fn = tty_devnop;
@@ -1739,6 +1768,7 @@ pub fn tty_init(system_hz_val: u32) {
             tp.tty_devread = console_read;
             tp.tty_devwrite = console_write;
             tp.tty_echo_fn = console_echo;
+            tp.tty_winsize = WinSize::console();
         } else if s < NR_CONS + NR_RS_LINES {
             // RS-232 lines: rs_init will be called by the serial driver.
             tp.tty_minor = RS232_MINOR + s as u32 - NR_CONS as u32;
@@ -2190,7 +2220,11 @@ pub fn do_close(minor: DevMinor) -> i32 {
         (tp.tty_ocancel)(tp, 0);
         (tp.tty_close)(tp, 0);
         tp.tty_termios = Termios::defaults();
-        tp.tty_winsize = WinSize::zeroed();
+        tp.tty_winsize = if isconsole(tp) {
+            WinSize::console()
+        } else {
+            WinSize::zeroed()
+        };
         setattr(tp);
     }
 
@@ -4438,11 +4472,43 @@ mod tests {
         tp.tty_devread = |_, _| 0;
         tp.tty_openct = 1;
         tp.tty_pgrp = 123;
+        tp.tty_winsize = WinSize {
+            ws_row: 40,
+            ws_col: 100,
+            ws_xpixel: 0,
+            ws_ypixel: 0,
+        };
 
         let r = do_close(CONS_MINOR);
         assert_eq!(r, OK);
         assert_eq!(tp.tty_pgrp, 0);
         assert_eq!(tp.tty_openct, 0);
+        // A console line returns to the console's geometry rather than to zero,
+        // so a program that reopens it still gets a page length.
+        assert_eq!(tp.tty_winsize.ws_row, crate::console::ROWS as u16);
+        assert_eq!(tp.tty_winsize.ws_col, crate::console::COLS as u16);
+    }
+
+    #[test]
+    fn test_console_reports_the_console_geometry() {
+        // A full-screen program asks `TIOCGWINSZ` for its page length, and the
+        // port know its console's: `console::ROWS` x `console::COLS` is the grid
+        // the wserver console composes, and the shell's line editor blanks a row
+        // with `COLS - 1` spaces on the same assumption. The reference's
+        // `winsize_defaults` stays zeroed (`.notes/tty.md`).
+        let _lock = TestLockGuard::acquire();
+        tty_init(100);
+
+        let console = table_mut(0);
+        assert_eq!(console.tty_winsize.ws_row, crate::console::ROWS as u16);
+        assert_eq!(console.tty_winsize.ws_col, crate::console::COLS as u16);
+
+        // A pty slave reports nothing until its master sets a size: wterm does
+        // that from its own grid at startup, and
+        // `test_master_tiocswinsz_forwards_to_slave` covers the set.
+        let slave = table_mut(NR_CONS + NR_RS_LINES);
+        assert_eq!(slave.tty_winsize.ws_row, 0);
+        assert_eq!(slave.tty_winsize.ws_col, 0);
     }
 
     fn setup_try(tp: &mut Tty) {

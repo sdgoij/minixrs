@@ -28,11 +28,11 @@
 
 use minix_std::wserver::{ws_create, ws_cursor, ws_flush, ws_reply_status, ws_reply_wid, ws_text};
 
-/// Console geometry in cells. 80 columns is not the desktop's width but the shell's assumption:
-/// its line editor blanks a row with `SCR_COLS - 1` spaces (`userland::shell`), so a narrower model
-/// would wrap where the editor believes it will not.
-pub const COLS: usize = 80;
-pub const ROWS: usize = 24;
+/// Console geometry in cells. It is `tty.rs`'s answer to `TIOCGWINSZ` on a
+/// console line, so a program's page length and this model's size cannot drift
+/// apart. The reason for the numbers is on those constants.
+pub const COLS: usize = crate::tty::CONSOLE_COLS as usize;
+pub const ROWS: usize = crate::tty::CONSOLE_ROWS as usize;
 
 /// The console's window on the desktop: centred, and exactly its cells plus a title bar.
 const WIN_X: i32 = 192;

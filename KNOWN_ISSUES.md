@@ -169,18 +169,6 @@ are arch-specific, `[env]` is tooling/platform, not kernel.
     minix arm that calls `rustix::fs::open` with the flags directly; remove that arm when
     the PAL is fixed and the fixture still passes. (`rust/library/std/src/sys/pal/minix/fs.rs`)
 
-77. **The tty reports a zero window size, so a full-screen program cannot learn the console's
-    geometry (found 2026-11-20, while adding `more`).** The reference's `tty.c` starts
-    `winsize_defaults` as all zeroes and this port keeps that, so `TIOCGWINSZ` on the console
-    answers `0 0` (`stty size` prints it, and the fixture pins that answer). A pager's page
-    length comes from it, so `more file` pages one line at a time until `-n` is given. The
-    console's own model is 80x24 (`crates/servers/src/console.rs`), but the serial console's
-    size belongs to the host terminal, which the guest cannot ask, so what to answer is a
-    decision (a default geometry on the console line, a size the front end sets once, or a
-    report the kernel passes through) rather than a lookup. Recorded rather than guessed.
-    (`crates/servers/src/tty.rs`, `crates/servers/src/console.rs`,
-    `tools/smoke/coreutils-minix.tsv`)
-
 ---
 
 ## RISC-V (`[riscv]`)
@@ -2784,9 +2772,10 @@ from resolving, is under `# Resolved issues`.
 
     Two defects surfaced and were recorded rather than fixed in that commit, because neither is
     in the applet: item 76 (the std PAL's `IsTerminal` answered false for every stream, so
-    `more` took its pipe output path with a console stdout) and item 77 (the tty reports a zero
-    window size, so a page without `-n` is one line). Item 76 is fixed, which is what turns the
-    fixture's console step into the alternate-screen path. Item 78, the riscv64 three-stage
+    `more` took its pipe output path with a console stdout) and item 77 (the tty reported a zero
+    window size, so a page without `-n` was one line). Both are fixed now, which is what turns
+    the fixture's console step into the alternate-screen path and its page length into the
+    console's own 24 rows. Item 78, the riscv64 three-stage
     pipeline fault, is why the fixture's page goes to a file.
 
     The scenario gained ten steps: a 100-line file, two key files (one byte, and a space
@@ -2837,6 +2826,43 @@ from resolving, is under `# Resolved issues`.
     `just verify-stage1` checks the *published* stage1 asset and runs on Linux/WSL only, so it
     was not run here; the toolchain was built from the fork's sources instead.
     (`rust/library/std/src/sys/pal/minix/is_terminal.rs`,
+    `tools/smoke/coreutils-minix.tsv`)
+
+77. **A console line reports the console's geometry, so a page has a length (2026-11-20).**
+    `TIOCGWINSZ` is how a full-screen program learns how big its terminal is, and every line
+    here answered `0 0`, because the reference's `winsize_defaults` is all zeroes and
+    `tty_init` assigns it (`minix/drivers/tty/tty/tty.c:126,773`). `more` takes its page length
+    straight from `terminal::size()`, so a zero answer was one line per page.
+
+    A console line now answers 24x80, and the numbers have one home: `tty::CONSOLE_ROWS` and
+    `tty::CONSOLE_COLS` are what the console's screen model sizes its window from
+    (`console.rs`'s `ROWS`/`COLS` now alias them), so what a front end draws and what a program
+    is told cannot drift apart. They are the numbers the shell already assumes: its line editor
+    blanks a row with `COLS - 1` spaces.
+
+    It is a deliberate deviation from MINIX 3.3.0, whose console answers zero, recorded with its
+    reason in `.notes/tty.md`: the port composes the console's cells, so it knows the number,
+    where a zero answer leaves the program to guess (NetBSD's `more` falls back to 24, uutils'
+    does not). It is not the serial host terminal's size, which QEMU's stdio chardev never tells
+    the guest, so a host window that is 200x50 sees a pager page 23 lines.
+
+    A pty slave still answers zero until its master sets a size, which is where the reference
+    leaves it: that number is the emulator's, and `wterm` sends `TIOCSWINSZ` from its own grid
+    before it forks the shell. `tty_init` resets every line's size now, and closing a console
+    line's last descriptor restores the console geometry rather than zero.
+
+    `stty size` prints `24 80` in the fixture, on all three arches (it printed `0 0`, and the
+    scenario pinned that with a comment saying the console had no window size). The page length
+    itself is not asserted from the fixture: `more` only asks the console for its size when its
+    stdout is the console, and a pager holding the console cannot be typed into by the harness.
+    `ls`'s pipe-stdout steps are unaffected, and their comment no longer claims the zero.
+
+    Gates: `cargo test --workspace` (the new `test_console_reports_the_console_geometry` fails
+    on the old answer, `left: 0, right: 24`, and `test_do_close_resets_state` now pins the
+    restore), `cargo clippy --all-targets -- -D warnings`, `just check`, `just test-arches`,
+    `just test-coreutils-minix` on x86_64, riscv64 and aarch64 (173 steps each),
+    `sh tools/wasm-verify.sh` (83/83, 22/22, 46/46).
+    (`crates/servers/src/tty.rs`, `crates/servers/src/console.rs`, `.notes/tty.md`,
     `tools/smoke/coreutils-minix.tsv`)
 
 ---
