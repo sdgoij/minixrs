@@ -197,11 +197,46 @@ are arch-specific, `[env]` is tooling/platform, not kernel.
     `more` fixture step therefore writes its page to a file and reads it back with a second
     pipe-stage, with a comment naming this item.
 
-    Next step is an LLDB session on the three-child case (the `aarch64-debugging` skill's flow,
-    on riscv64) to read the trapping process's satp and the PTE for `0x10020000`, and to say
-    whether the fault is a supervisor-only mapping or a table the process should not be using.
-    (`crates/arch-riscv64/src/trap.rs`, `crates/userland/src/shell.rs`,
-    `tools/smoke/coreutils-minix.tsv`)
+    **Narrowed 2026-11-20 (same session, after items 75 to 77).** The failure needs two things: a
+    pipeline that ran earlier in the boot, and a three-stage pipeline after it.
+
+    | Scenario, after `coreutils seq 1 3 > ts` | Result |
+    |---|---|
+    | `cat ts \| wc -l` twice | ok |
+    | `cat ts \| wc -l`, then `cat ts \| tr a b \| wc -l` | traps, 3 of 3 runs |
+    | `cat ts \| tr a b \| wc -l` twice | the first works, the second traps |
+    | `cat ts \| tr a b \| wc -l` as the boot's first pipeline | ok |
+    | `cat ts \| true \| wc -l`, after a two-stage run | traps |
+
+    So the EPIPE the middle stage prints is a symptom, not the trigger: a three-stage pipeline
+    whose middle stage writes nothing (`true`) traps the same way, and a middle-stage EPIPE on
+    its own (`cat ts \| tr a b \| true`, no pipeline before it) does not.
+
+    The trap is a U-mode load access fault whose `sepc = 0x100d8ac` decodes to `ld a0, 0xc0(sp)`
+    in the multicall, and whose `stval` is a page **inside that multicall's own .text**
+    (`0x1001f000` in this build, `0x10020000` in the one before the toolchain rebuild). Since
+    `stval == sp + 0xc0`, the *stack pointer* was a text address (0x1001ef40) at that moment, in
+    a process whose stack is at 0x3fcf... by every other measurement (a live `ecall` frame on
+    the boot stack has `sp = 0x3fcfff00`). So something hands a pipeline child a code address as
+    its stack. QEMU raises an *access* fault rather than a page fault for a PTE with reserved
+    bits, which is one more thing to check on the way.
+
+    Instrument note for the next session: on the halted guest, `lldb`'s `memory read` of kernel
+    BSS virtual addresses returned zeros (`0x8023c918` and `PROC_TABLE_ALIGNED` alike), while
+    the HMP monitor's `xp` of the same physical addresses returned the real frame. Use
+    `-monitor tcp:127.0.0.1:4444,server,nowait` and `xp`. The boot stack's U-mode frame sits at
+    `__boot_stack_top - 296`, with `sepc` at +256, `sstatus` at +264, `scause` at +272, `stval`
+    at +288 and the interrupted `sp` at +16; when the fatal fault is taken *inside* a syscall
+    (the frame's `scause` is 8, an `ecall` from U-mode), the frame that matters is the S-mode
+    one 320 bytes below the interrupted kernel `sp`, not the one on top.
+
+    Next step: decode that S-mode frame's `sepc` (a kernel PC) and check the PTE for the page
+    `sp` points at, then walk back to what set `sp`. The shell's `lift_pipe_fds` (fds 62/63 for
+    the first pipe, 60/61 for the second) and its `pipe()` returning 0/1 while the shell's own
+    stdio is on the kernel console are the places to look first, since a second pipeline is what
+    makes the difference.
+    (`crates/arch-riscv64/src/trap.rs`, `crates/arch-riscv64/src/trap_asm.rs`,
+    `crates/userland/src/shell.rs`, `tools/smoke/coreutils-minix.tsv`)
 
 ---
 
