@@ -152,23 +152,6 @@ are arch-specific, `[env]` is tooling/platform, not kernel.
     needs (a second VFS thread, or VFS answering the ioctl itself as it does for the socket ones)
     is a decision for whoever first needs a file-backed block device.
 
-71. **The std PAL drops `O_CREAT` whenever append is set, so no appender can create its
-    file (found 2026-11-19).** `rust/library/std/src/sys/pal/minix/fs.rs`'s
-    `get_creation_mode` returns `0` for any `(_, true)` pair, so
-    `OpenOptions::new().create(true).append(true)` opens with `O_APPEND` and no `O_CREAT`:
-    `minix_std::fs::open` then sends `VFS_OPEN` instead of `VFS_CREAT` and a file that does
-    not exist yet answers `ENOENT`. Reproducer: `coreutils seq 1 2 > src.txt; coreutils tee
-    -a app.txt < src.txt` (the shell has no `<`, so use a pipe) prints `tee: app.txt: No
-    such file or directory`. Upstream's unix `get_creation_mode` (`sys/fs/unix.rs`) allows
-    the combination and returns `O_CREAT`; the minix copy should mirror that three-arm
-    match, erroring only for `truncate && append`.
-
-    It is recorded rather than fixed because the std PAL is compiled into the toolchain:
-    a change here needs `just bootstrap` and `just verify-stage1` before anything can
-    observe it, which is a toolchain batch, not an applet. `nohup` (item 70) carries a
-    minix arm that calls `rustix::fs::open` with the flags directly; remove that arm when
-    the PAL is fixed and the fixture still passes. (`rust/library/std/src/sys/pal/minix/fs.rs`)
-
 ---
 
 ## RISC-V (`[riscv]`)
@@ -2864,6 +2847,47 @@ from resolving, is under `# Resolved issues`.
     `sh tools/wasm-verify.sh` (83/83, 22/22, 46/46).
     (`crates/servers/src/tty.rs`, `crates/servers/src/console.rs`, `.notes/tty.md`,
     `tools/smoke/coreutils-minix.tsv`)
+
+71. **~~The std PAL dropped `O_CREAT` whenever append was set~~**: FIXED (2026-11-20). The
+    PAL's `get_creation_mode` returned `0` for any `(_, true)` pair, so
+    `OpenOptions::new().create(true).append(true)` opened with `O_APPEND` and no `O_CREAT`;
+    `minix_std::fs::open` sent `VFS_OPEN`, and a file that did not exist answered `ENOENT`
+    (`tee: app.txt: No such file or directory`). The minix copy now mirrors upstream unix's
+    three arms: `(false, false)` rejects create/truncate/create_new, `(_, true)` rejects
+    only `truncate && create_new`, and the four-way creation table is unchanged.
+    `nohup`'s minix-only `open_output_file` arm (a direct `rustix::fs::open`) is gone, so it
+    uses the shared unix arm on the std path like every other applet.
+
+    The PAL is compiled into the toolchain, so the fix needs `just bootstrap all` before
+    anything can observe it. With the rebuilt stage1, `cat src.txt | tee -a app.txt` creates
+    the file; the same probe then exposed item 80, because the second run overwrote the
+    first.
+    (`rust/library/std/src/sys/pal/minix/fs.rs`, `coreutils/src/uu/nohup/src/nohup.rs`,
+    `coreutils/src/uu/nohup/src/platform/unix.rs`)
+
+80. **~~VFS ignored `O_APPEND`, so an append wrote at the descriptor's position~~**: FIXED
+    (2026-11-20). `write_fd` took every write's position from `filp_pos` and never looked at
+    `filp_flags`, so a file opened with `O_APPEND` wrote at offset 0 and `tee -a` overwrote
+    it on each run (`wc -l` answered 2 where 9 was expected). Both `do_open` and `do_creat`
+    record the flag in the filp, so nothing was lost at open: the write path was the whole
+    of it.
+
+    `append_position` now chooses the position: a regular file whose filp carries `O_APPEND`
+    writes at the vnode's size, while `pwrite` keeps its own explicit offset (POSIX says the
+    flag does not apply to it). `grow_cached_size` then advances the cached size from the FS
+    reply, which is what the *next* append through the same descriptor reads; without it a
+    second chunk would land back at the size the file had when it was opened. The two
+    mirror `rw_chunk`/`read_write` in `minix/servers/vfs/read.c`.
+
+    Found while fixing item 71, where the create half made the first `tee -a` succeed and
+    the second silently overwrite it. Pinned by the `tee -a` steps in the coreutils fixture
+    (2 lines, then 9, then `tail -1` answering `7`) and by two host tests,
+    `append_writes_start_at_the_end_of_the_file` and `an_append_write_grows_the_cached_size`.
+
+    Gates: `cargo test --workspace`, `cargo clippy --all-targets -- -D warnings`,
+    `just check`, `just test-coreutils-minix` on x86_64, riscv64 and aarch64,
+    `just test-arches`, `just test-linux`.
+    (`crates/servers/src/vfs/call.rs`, `tools/smoke/coreutils-minix.tsv`)
 
 ---
 

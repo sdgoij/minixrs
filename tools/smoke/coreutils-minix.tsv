@@ -47,11 +47,11 @@ coreutils env --block-signal=PIPE coreutils echo ENV-BLOCK-OK	ENV-BLOCK-OK
 # `du` starts must still let VM resolve its first text-page fault.
 coreutils du -b /etc/group	[0-9]+[[:space:]]+/etc/group
 # `nohup` ignores SIGHUP, replaces stdin with `/dev/null` and appends to `nohup.out`
-# when stdout is the console. It is also the one applet that creates a file with
-# `O_APPEND`, which the std PAL cannot do (`KNOWN_ISSUES.md` item 71); its own minix
-# open arm is what makes this work, so this is that arm's gate too. Note that
-# `nohup` prints its notice as `nohup: ...`, so it is deliberately absent from the
-# recipe's "a tool reported an error" regex.
+# when stdout is the console, so it is the applet that first needed a create with
+# `O_APPEND`; since item 71 it goes through the std PAL like every other applet, and
+# since item 80 the append itself is VFS's. Note that `nohup` prints its notice as
+# `nohup: ...`, so it is deliberately absent from the recipe's "a tool reported an
+# error" regex.
 coreutils rm -f nohup.out	
 coreutils nohup coreutils echo NOHUP-OK	
 coreutils cat nohup.out	NOHUP-OK
@@ -59,6 +59,19 @@ coreutils cat nohup.out	NOHUP-OK
 # output is the caller's redirection.
 coreutils nohup coreutils echo NH-PIPE-OK > nhpiped	
 coreutils cat nhpiped	NH-PIPE-OK
+# `tee -a` is the append path: `OpenOptions::create(true).append(true)` has to reach
+# VFS as `O_CREAT|O_APPEND` (KNOWN_ISSUES.md item 71), and VFS has to honour `O_APPEND`
+# on the write (item 80). The first run creates the file, so it is the create half that
+# would answer ENOENT; the second appends to it, so the count reaches 9 only if the write
+# went to the end of the file rather than to the descriptor's position 0. `tail -1` is
+# the same fact read back from the file instead of counted.
+coreutils seq 1 2 > tee.src	
+coreutils cat tee.src | coreutils tee -a tee.out > tee.log	
+coreutils cat tee.out | coreutils wc -l	2
+coreutils seq 7 > tee7.src	
+coreutils cat tee7.src | coreutils tee -a tee.out > tee2.log	
+coreutils cat tee.out | coreutils wc -l	9
+coreutils cat tee.out | coreutils tail -1	7
 # `rm` and `chmod`, the two uucore's safe-traversal arm unblocked (item 52).
 # Nothing here asserts a message: the shell runs as root, so a mode change has
 # no observable *effect*, and the markers are what the recipe's log check reads.

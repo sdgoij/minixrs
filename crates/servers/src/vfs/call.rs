@@ -639,6 +639,33 @@ unsafe fn rw_offset(vp: *const Vnode, at: Option<u64>, filp_pos: i64) -> Result<
     i64::try_from(at).map_err(|_| EINVAL)
 }
 
+/// Where a write starts: a regular file opened with `O_APPEND` appends at the
+/// end of the file whatever the descriptor's seek position says, and `pwrite`
+/// keeps its own explicit offset (POSIX: the flag does not apply to it).
+///
+/// C source: `minix/servers/vfs/read.c` â€” `rw_chunk()` (lines 218-222)
+fn append_position(is_regular: bool, filp_flags: u32, file_size: i64, pos: i64) -> i64 {
+    if is_regular && filp_flags & O_APPEND != 0 {
+        file_size
+    } else {
+        pos
+    }
+}
+
+/// Grow the cached size after a write that ended past it.
+///
+/// C source: `minix/servers/vfs/read.c` â€” `read_write()` (lines 240-246)
+///
+/// The cache is what a second `O_APPEND` write through the same descriptor
+/// reads as the end of file, so leaving it stale would put that write back at
+/// the size the file had when it was opened and overwrite the first.
+fn grow_cached_size(v_size: &mut i64, mode: u32, new_pos: i64) {
+    let kind = mode & S_IFMT;
+    if (kind == S_IFREG || kind == S_IFDIR) && new_pos > *v_size {
+        *v_size = new_pos;
+    }
+}
+
 /// Perform the `read(fd, buf, count)` system call.
 ///
 /// C source: `minix/servers/vfs/read.c` â€” `do_read()` (line 31)
@@ -844,6 +871,16 @@ fn write_fd(at: Option<u64>) -> i32 {
             Ok(pos) => pos,
             Err(err) => return err,
         };
+        let pos = if at.is_some() {
+            pos
+        } else {
+            append_position(
+                (*vp).v_mode & S_IFMT == S_IFREG,
+                filp.filp_flags,
+                (*vp).v_size,
+                pos,
+            )
+        };
         // Pipes route through PFS (C rw_pipe): readiness check, then
         // req_write into PFS's block cache. A full pipe suspends the writer.
         if ((*vp).v_mode & S_IFMT) == S_IFIFO {
@@ -918,6 +955,9 @@ fn write_fd(at: Option<u64>) -> i32 {
         );
         if r >= 0 && at.is_none() {
             filp.filp_pos = new_pos;
+        }
+        if r >= 0 {
+            grow_cached_size(&mut (*vp).v_size, (*vp).v_mode, new_pos);
         }
         r
     }
@@ -4539,6 +4579,36 @@ mod tests {
     #[test]
     fn test_gcov_flush_returns_enosys() {
         assert_eq!(do_gcov_flush(), ENOSYS);
+    }
+
+    #[test]
+    fn append_writes_start_at_the_end_of_the_file() {
+        // `tee -a` is the case that found this: the descriptor's position is 0
+        // because the file was just created, and writing there overwrote what
+        // an earlier run had appended.
+        assert_eq!(append_position(true, O_APPEND, 42, 0), 42);
+        // The same file without the flag still honours the seek position.
+        assert_eq!(append_position(true, 0, 42, 0), 0);
+        // Neither a pipe nor a device has an end of file to append at.
+        assert_eq!(append_position(false, O_APPEND, 42, 7), 7);
+    }
+
+    #[test]
+    fn an_append_write_grows_the_cached_size() {
+        // A first append at 0 writes 5 bytes; the cache must reach 5, or the
+        // next append through the same descriptor lands back at 0.
+        let mut size = 0i64;
+        grow_cached_size(&mut size, S_IFREG, 5);
+        assert_eq!(size, 5);
+        grow_cached_size(&mut size, S_IFREG, 11);
+        assert_eq!(size, 11);
+        // A write that ends before the current end changes nothing.
+        grow_cached_size(&mut size, S_IFREG, 3);
+        assert_eq!(size, 11);
+        // A device has no size to grow.
+        let mut dev_size = 1i64;
+        grow_cached_size(&mut dev_size, S_IFCHR, 99);
+        assert_eq!(dev_size, 1);
     }
 
     #[test]
