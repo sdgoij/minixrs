@@ -198,10 +198,19 @@ build target="x86":
 
 # build-x86* embeds /bin/coreutils, so the multicall must be built and copied
 # into the shared target dir first.
+#
+# The embedded root gets 5120 zones (20 MiB) rather than `crates/boot-image`'s 16 MiB
+# default: the x86 userland fills 4082 of those 4096 zones once `/bin/bash` is injected, so
+# at the default the builder refuses the image for want of a free zone. `/bin/bash` reaches
+# this recipe through `MINIXFS_EXTRA`, named by `image-x86` (the release artifact) and
+# `test-bash-x86`. 32 MiB, which `image-riscv64` uses, is not available here: the boot code
+# copies the embedded root into physical RAM for the ramdisk server (`boot_init.rs`), so
+# every zone added costs the guest a byte of its 256 MiB, and 8192 runs out of memory for a
+# brk heap at `-m 256M`. A caller with a larger payload still overrides `MINIXFS_BLOCKS`.
 build-x86: userland-x86 coreutils-x86 dynlib-x86
     rm -f target/mkboot target/mkboot.exe
     "{{stage1-rustc}}" tools/mkboot.rs --edition 2024 -o target/mkboot
-    target/mkboot embed_initramfs,embed_minixfs
+    MINIXFS_BLOCKS="${MINIXFS_BLOCKS:-5120}" target/mkboot embed_initramfs,embed_minixfs
 
 build-x86-test: userland-x86 coreutils-x86 dynlib-x86
     rm -f target/mkboot target/mkboot.exe
@@ -874,10 +883,9 @@ test-bash-x86 boot-timeout="40":
     FEED_SCENARIO=tools/smoke/bash.tsv sh tools/smoke/feed.sh target/test-bash-x86.log {{boot-timeout}} qemu-system-x86_64 -nographic -m 256M -no-reboot -vga none -device bochs-display,id=fb0 -kernel target/images/x86_64-pc-minix/minix-x86.elf -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0 -device virtio-tablet-pci,display=fb0
     @echo "bash: every step of tools/smoke/bash.tsv answered (x86_64)"
 
-# The riscv64 build's bash is the one that does not fit: with it in the embedded image the
-# default 16 MiB filesystem fails to build (`zone 4096 out of bounds`), and `MINIXFS_BLOCKS`
-# is the knob for exactly that (`crates/kernel/build.rs`). x86_64 and aarch64 still fit, so
-# they keep the default and their kernels stay as small as they were.
+# The shell does not fit the 16 MiB default here either; riscv64 boots fine at 8192, the
+# value `image-riscv64` uses, so this gate uses it too (`build-x86` records what the window
+# costs the guest and why x86 cannot take the larger one).
 test-bash-riscv64 boot-timeout="60":
     MINIXFS_EXTRA='/bin/bash=target/bash/riscv64/bash' MINIXFS_BLOCKS=8192 just build-riscv64
     @just _assert-qemu-version qemu-system-riscv64
