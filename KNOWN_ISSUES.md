@@ -182,23 +182,48 @@ are arch-specific, `[env]` is tooling/platform, not kernel.
     ```
 
     answers `tr: write error: Unknown error 32` (EPIPE) and then
-    `!trap cause=5 stval=0x10020000 sepc=0x100d8ac mode=user`, after which the guest is silent:
-    cause 5 is a load **access** fault (RISC-V 13/15 are the page-fault causes), so the kernel's
-    `trap.rs` `unhandled` arm halts in `wfi` rather than forwarding it to VM. `sepc` and `stval`
-    are the *same* when the middle stage is `tr` and when it is `more`, i.e. the fault is in the
-    multicall's shared startup code rather than in either applet, and the address is one the
-    process's own image should cover.
+    `!trap cause=5 stval=0x10020000 sepc=0x100d8ac mode=user`, after which the guest is silent.
+    Cause 5 is a load **access** fault (RISC-V's 13 and 15 are the page-fault causes), and
+    `trap.rs`'s `unhandled` arm halts in `wfi` rather than giving the process a signal, so a bad
+    page in one child stops the machine. `sepc` is the same when the middle stage is `tr` and
+    when it is `more` because it is shared library code, not either applet. Two stages are fine
+    (`ls | wc -l` is in the coreutils scenario) and the same three-stage line is green on
+    x86_64 and aarch64, so it is riscv64's address-space handling. The `more` fixture step
+    therefore writes its page to a file and reads it back with a second pipe-stage, with a
+    comment naming this item.
 
-    It is the middle stage's write that starts it: `coreutils cat ts | coreutils true |
-    coreutils wc -l` (a middle stage that exits without writing) answers `0` and the guest
-    survives. Two stages are fine (`ls | wc -l` is in the coreutils scenario), and the same
-    three-stage line is green on x86_64 and aarch64, so it is RISC-V's page-table or
-    address-space handling under three children of the same 6 MB binary alive at once. The
-    `more` fixture step therefore writes its page to a file and reads it back with a second
-    pipe-stage, with a comment naming this item.
+    **What actually fails (measured 2026-11-20, after items 75 to 77).** A page of the
+    process's own mapping has a page-table entry whose frame is physical address **0**, and a
+    load from it is an access fault rather than a page fault, so the kernel halts the machine
+    instead of killing the process.
 
-    **Narrowed 2026-11-20 (same session, after items 75 to 77).** The failure needs two things: a
-    pipeline that ran earlier in the boot, and a three-stage pipeline after it.
+    The trap frame says so directly. It is a U-mode trap (`sstatus` at frame+264 has SPP=0),
+    `scause`=5, `stval`=0x1001f000, `sepc`=0x100d8ac, and the interrupted `sp` (frame+16) is
+    0x3fcfd960, an ordinary user stack address: the stack pointer is not involved. Walking the
+    trapped process's Sv39 tables (`satp` root from the monitor) for the pages around `stval`:
+
+    | VA | PTE | flags | frame |
+    |---|---|---|---|
+    | 0x10006000 (and every page walked up to 0x1001e000) | 0x21890c17, 0x21891417, ... | V R W U | 0x86243000, 0x86245000, ... 0x86257000 |
+    | 0x1001f000 | 0x00000053 | V R U (no W) | **0x0** |
+    | 0x10020000 | 0x0 | invalid | - |
+
+    So 0x10000000 is the riscv64 **mmap base** (`hal::mmap_base()`), the pages of that run are
+    mapped writable to frames that ascend by one page each, and the page just past the run is
+    mapped *read-only* to physical 0. Physical 0 is not RAM, so QEMU raises a load **access** fault
+    (cause 5, which `trap.rs` treats as fatal) where an unmapped or write-protected page would
+    have been a page fault and a `SIGSEGV`. `a1`, `a6` and `s5` in the frame all hold
+    0x1001f000, so the process was using it as a buffer when it touched it.
+
+    The read-only flags are the clue: `finish_page` (`vm/mod.rs`) builds exactly `MAP_USER`, no
+    `MAP_WRITE`, no `MAP_EXEC`, for a read-only non-exec page, and `map_cached_page` does the
+    same. Both map a *frame they hold*, so either a `PageState` reached `finish_page` with its
+    pre-allocation `pa: 0`, or a cache entry exists whose `phys` is 0. Neither is the
+    anonymous-mmap loop (`do_mmap`'s shared-arm allocates and maps page by page and checks
+    `pa == 0`), which is what built the 32 good pages above.
+
+    The failure needs two things: a pipeline that ran earlier in the boot, and a three-stage
+    pipeline after it.
 
     | Scenario, after `coreutils seq 1 3 > ts` | Result |
     |---|---|
@@ -210,33 +235,36 @@ are arch-specific, `[env]` is tooling/platform, not kernel.
 
     So the EPIPE the middle stage prints is a symptom, not the trigger: a three-stage pipeline
     whose middle stage writes nothing (`true`) traps the same way, and a middle-stage EPIPE on
-    its own (`cat ts \| tr a b \| true`, no pipeline before it) does not.
+    its own (`cat ts \| tr a b \| true`, no pipeline before it) does not. The working theory is
+    free-frame pressure (a second pipeline leaves fewer), which would make the frame-0 mapping
+    the *failure* path of an allocation whose result reached a mapping call.
 
-    The trap is a U-mode load access fault whose `sepc = 0x100d8ac` decodes to `ld a0, 0xc0(sp)`
-    in the multicall, and whose `stval` is a page **inside that multicall's own .text**
-    (`0x1001f000` in this build, `0x10020000` in the one before the toolchain rebuild). Since
-    `stval == sp + 0xc0`, the *stack pointer* was a text address (0x1001ef40) at that moment, in
-    a process whose stack is at 0x3fcf... by every other measurement (a live `ecall` frame on
-    the boot stack has `sp = 0x3fcfff00`). So something hands a pipeline child a code address as
-    its stack. QEMU raises an *access* fault rather than a page fault for a PTE with reserved
-    bits, which is one more thing to check on the way.
+    Instrument notes, all measured, for the next session:
 
-    Instrument note for the next session: on the halted guest, `lldb`'s `memory read` of kernel
-    BSS virtual addresses returned zeros (`0x8023c918` and `PROC_TABLE_ALIGNED` alike), while
-    the HMP monitor's `xp` of the same physical addresses returned the real frame. Use
-    `-monitor tcp:127.0.0.1:4444,server,nowait` and `xp`. The boot stack's U-mode frame sits at
-    `__boot_stack_top - 296`, with `sepc` at +256, `sstatus` at +264, `scause` at +272, `stval`
-    at +288 and the interrupted `sp` at +16; when the fatal fault is taken *inside* a syscall
-    (the frame's `scause` is 8, an `ecall` from U-mode), the frame that matters is the S-mode
-    one 320 bytes below the interrupted kernel `sp`, not the one on top.
+    - `lldb`'s `memory read` on the halted guest returned zeros for kernel BSS virtual addresses
+      (`0x8023c918` and `PROC_TABLE_ALIGNED` alike) while the HMP monitor's `xp` of the same
+      addresses returned the real frame. Use `-monitor tcp:127.0.0.1:4444,server=on,wait=on`
+      and `xp`, and connect to the monitor *before* the serial chardev (QEMU opens them in order
+      and blocks on each `wait=on` one).
+    - Scripted input on stdio is mangled once `-monitor tcp:` is added, so drive the guest over
+      `-serial tcp:...` as well. `target/riscv_trap_probe.py` is that harness: it types the
+      scenario, waits for `!trap`, then dumps the frame and walks the tables.
+    - The boot stack's U-mode frame sits at `__boot_stack_top - 296`: `ra` at +8, interrupted
+      `sp` at +16 (and again at +280), `sepc` at +256, `sstatus` at +264, `scause` at +272,
+      `stval` at +288. For the frame layout, read `trap_asm.rs` rather than trusting a
+      disassembler: this `llvm-objdump` prints wrong mnemonics for RVC instructions (0x650e is
+      `c.ld a1, 8(a0)`, not the `ld a0, 0xc0(sp)` it shows), which sent an earlier reading of
+      this item down the wrong path.
 
-    Next step: decode that S-mode frame's `sepc` (a kernel PC) and check the PTE for the page
-    `sp` points at, then walk back to what set `sp`. The shell's `lift_pipe_fds` (fds 62/63 for
-    the first pipe, 60/61 for the second) and its `pipe()` returning 0/1 while the shell's own
-    stdio is on the kernel console are the places to look first, since a second pipeline is what
-    makes the difference.
-    (`crates/arch-riscv64/src/trap.rs`, `crates/arch-riscv64/src/trap_asm.rs`,
-    `crates/userland/src/shell.rs`, `tools/smoke/coreutils-minix.tsv`)
+    Next step: find the call that maps a frame-0 page with read-only flags. A watch on
+    `vm_map_page_in` taking `pa == 0`, or reading VM's region list for the trapped process to
+    see which region owns 0x1001f000 and which of its pages the fault-in path handled last,
+    would settle it. Separately, `trap.rs`'s `unhandled` arm should deliver a `SIGSEGV` for a
+    U-mode access fault instead of halting the machine: a process's bad page is not a reason to
+    stop the system, and it is why this defect reads as "the guest is silent".
+    (`crates/servers/src/vm/mod.rs`, `crates/servers/src/vm/cache.rs`,
+    `crates/arch-riscv64/src/trap.rs`, `crates/arch-riscv64/src/trap_asm.rs`,
+    `crates/arch-riscv64/src/hal.rs`)
 
 ---
 
