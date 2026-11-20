@@ -311,3 +311,16 @@ coreutils csplit cs.txt 2
 coreutils head -1 xx00	1
 # `kill -0` only checks that pid 1 exists, through PM's signal call.
 coreutils kill -0 1 && coreutils echo KILL-OK	KILL-OK
+# `timeout` blocks the wait signals, arms `alarm(2)` and lets the child run under
+# `sigsuspend`; its platform arm is `src/uu/timeout/src/platform/minix.rs`, because
+# uucore's `ChildExt` is built on `nix`. The shell has no `;`, `||` or `$?`, so the
+# timed-out runs are a bare command with no expectation: the next step's prompt is the
+# evidence that `timeout` returned, and it only returns after signalling and reaping
+# the child. `&&` covers the success status.
+coreutils timeout 5 coreutils echo TIMEOUT-OK	TIMEOUT-OK
+coreutils timeout 5 coreutils true && coreutils echo TO-STATUS-OK	TO-STATUS-OK
+coreutils timeout 0 coreutils echo TO-ZERO-OK	TO-ZERO-OK
+coreutils timeout 1 coreutils sleep 5	
+coreutils echo AFTER-TIMEOUT	AFTER-TIMEOUT
+coreutils timeout -s KILL 1 coreutils sleep 5	
+coreutils echo AFTER-KILL	AFTER-KILL

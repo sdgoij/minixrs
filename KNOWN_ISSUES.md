@@ -169,6 +169,26 @@ are arch-specific, `[env]` is tooling/platform, not kernel.
     minix arm that calls `rustix::fs::open` with the flags directly; remove that arm when
     the PAL is fixed and the fixture still passes. (`rust/library/std/src/sys/pal/minix/fs.rs`)
 
+75. **`more` cannot be added yet: its crossterm dependency pulls in `mio`, which does not
+    build on minix (found 2026-11-20).** `uu_more` uses crossterm's `events` feature for
+    key handling. That feature selects crossterm's event source, which is `mio`; `mio` is
+    unix-only in the ways this port is not yet: it converts `std::os::minix::net::UnixStream`
+    to `OwnedFd` (no `From` impl), needs `IoSourceState`/`Selector`/`Waker`, and asks the
+    libc fork for `pthread_mutex_t`, `pthread_cond_t` and their initializers, none of which
+    exist. Building `feat_minix` with `more` fails in `mio` before any of the applet's own
+    code compiles.
+
+    The applet is otherwise small: `more` already has a `Pipe` output path for a non-terminal
+    stdout, so `more file > out` would be testable without interaction, and the interactive
+    path could be gated by typing keys into the console the way the burst scenario types
+    lines. The work is a minix terminal facade for the small crossterm surface `more` uses
+    (`enable_raw_mode`/`disable_raw_mode`, `terminal::size`, `Event::read`, the cursor/clear
+    commands, and the `KeyEvent`/`KeyCode`/`KeyModifiers` types its match arms name), with
+    crossterm moved to a non-minix target dependency, in the shape `stty`'s
+    `src/uu/stty/src/minixterm.rs` already uses. `timeout` (item 74) took the same
+    applet-local facade route and needed no crossterm.
+    (`coreutils/src/uu/more/src/more.rs`, `coreutils/src/uu/more/Cargo.toml`)
+
 ---
 
 ## RISC-V (`[riscv]`)
@@ -2681,6 +2701,37 @@ from resolving, is under `# Resolved issues`.
     `libc/src/minix/process.rs`, `tools/c-include/unistd.h`,
     `crates/boot-image/src/manifest.rs`, `crates/boot-image/src/minixfs.rs`,
     `coreutils/Cargo.toml`, `tools/smoke/coreutils-minix.tsv`, `Justfile`)
+
+74. **`timeout` is in `feat_minix`, with its own platform arm over the port's C library
+    (2026-11-20).** uucore's `ChildExt`, the wait-with-timeout `timeout` uses, is built on
+    `nix` and POSIX timers, and neither exists here; `uucore::process` already said the
+    minix arm belongs to the applet, as `env`'s signals do. The arm is
+    `src/uu/timeout/src/platform/minix.rs`: it blocks the wait set, arms `alarm(2)`, and
+    loops on `sigsuspend` plus a non-blocking `Child::try_wait`, taking the signal number
+    from a recording handler. `wait_or_timeout` moved into each platform module so
+    `timeout.rs` names no platform type.
+
+    Two port limits shape it. There are no process groups (`setpgid` is a PM call the port
+    does not have), so the child stays in the caller's group and `send_signal_group` is a
+    no-op; signalling the group would reach `timeout` and the shell. And the std PAL does
+    not run `pre_exec` closures, so the mask is blocked after the spawn rather than in the
+    child: the command starts with the mask the shell gave `timeout`. `alarm(2)` makes the
+    timeout whole-second. `--preserve-status` cannot report a signalled child's signal
+    because minix's `std::process::ExitStatus` exposes no `ExitStatusExt`; it reports the
+    generic timeout status instead, and recovering it needs that trait in the std PAL
+    (a bootstrap batch, item 71's neighbourhood).
+
+    The fixture gained five steps: a run that finishes, `&&` proving a zero status,
+    `timeout 0`, and one killed run per default and KILL signal, each followed by a command
+    that proves the guest is back at its prompt (the shell has no `;`, `||` or `$?`). The
+    applet only returns after signalling and reaping the child, so a signal that failed to
+    kill would hang the step. Verified on all three arches. Gates:
+    `cargo test --workspace`, `cargo clippy --all-targets -- -D warnings`, `just check`,
+    `just test-coreutils-minix` on the three arches, `just image` on the three,
+    `just test-linux`. (`coreutils/src/uu/timeout/src/platform/minix.rs`,
+    `coreutils/src/uu/timeout/src/platform/{mod,unix,windows}.rs`,
+    `coreutils/src/uu/timeout/src/timeout.rs`, `coreutils/Cargo.toml`,
+    `libc/src/minix/time.rs`, `tools/smoke/coreutils-minix.tsv`, `Justfile`)
 
 ---
 
