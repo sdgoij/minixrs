@@ -173,98 +173,35 @@ are arch-specific, `[env]` is tooling/platform, not kernel.
 
 ## RISC-V (`[riscv]`)
 
-78. **A three-stage pipeline kills the machine with an unhandled load access fault, in one of
-    its children (found 2026-11-20, while testing `more`).**
+79. **A three-stage pipeline loses the middle stage's write, which reports EPIPE (found
+    2026-11-20, separated from item 78).**
 
     ```
     coreutils seq 1 3 > ts
     coreutils cat ts | coreutils tr a b | coreutils wc -l
     ```
 
-    answers `tr: write error: Unknown error 32` (EPIPE) and then
-    `!trap cause=5 stval=0x10020000 sepc=0x100d8ac mode=user`, after which the guest is silent.
-    Cause 5 is a load **access** fault (RISC-V's 13 and 15 are the page-fault causes), and
-    `trap.rs`'s `unhandled` arm halts in `wfi` rather than giving the process a signal, so a bad
-    page in one child stops the machine. `sepc` is the same when the middle stage is `tr` and
-    when it is `more` because it is shared library code, not either applet. Two stages are fine
-    (`ls | wc -l` is in the coreutils scenario) and the same three-stage line is green on
-    x86_64 and aarch64, so it is riscv64's address-space handling. The `more` fixture step
-    therefore writes its page to a file and reads it back with a second pipe-stage, with a
-    comment naming this item.
+    answers `tr: write error: Unknown error 32` (`EPIPE`) instead of `3`, and the same shape
+    with the pager in the middle (`coreutils cat mq | coreutils more -n 3 mp | coreutils wc -l`)
+    answers `more: Unknown error 32` (5 of 6 runs). A middle stage that streams (`cat`) does not
+    lose its write: `cat ts | cat | wc -l` and `cat ts | cat | cat | wc -l` printed `3` in every
+    run. So this is a stage that defers its write until it has read everything (`tr`) or until a
+    key arrives (`more`), against a downstream `wc` that has already exited, which means `wc`
+    saw end of file while the middle stage still held the write end of its input pipe.
 
-    **What actually fails (measured 2026-11-20, after items 75 to 77).** A page of the
-    process's own mapping has a page-table entry whose frame is physical address **0**, and a
-    load from it is an access fault rather than a page fault, so the kernel halts the machine
-    instead of killing the process.
+    Until item 78 was fixed the same line halted the machine, so this was invisible: the EPIPE
+    is what the stage printed on the way to the trap. Now the pipeline completes and the shell
+    prompt comes back, which is what makes the lost write the remaining defect. No fixture
+    asserts a `tr`-in-the-middle pipeline, which is why the gates never caught it; the `more`
+    step in `tools/smoke/coreutils-minix.tsv` redirects its page to a file and counts it with a
+    second pipe for this reason.
 
-    The trap frame says so directly. It is a U-mode trap (`sstatus` at frame+264 has SPP=0),
-    `scause`=5, `stval`=0x1001f000, `sepc`=0x100d8ac, and the interrupted `sp` (frame+16) is
-    0x3fcfd960, an ordinary user stack address: the stack pointer is not involved. Walking the
-    trapped process's Sv39 tables (`satp` root from the monitor) for the pages around `stval`:
-
-    | VA | PTE | flags | frame |
-    |---|---|---|---|
-    | 0x10006000 (and every page walked up to 0x1001e000) | 0x21890c17, 0x21891417, ... | V R W U | 0x86243000, 0x86245000, ... 0x86257000 |
-    | 0x1001f000 | 0x00000053 | V R U (no W) | **0x0** |
-    | 0x10020000 | 0x0 | invalid | - |
-
-    So 0x10000000 is the riscv64 **mmap base** (`hal::mmap_base()`), the pages of that run are
-    mapped writable to frames that ascend by one page each, and the page just past the run is
-    mapped *read-only* to physical 0. Physical 0 is not RAM, so QEMU raises a load **access** fault
-    (cause 5, which `trap.rs` treats as fatal) where an unmapped or write-protected page would
-    have been a page fault and a `SIGSEGV`. `a1`, `a6` and `s5` in the frame all hold
-    0x1001f000, so the process was using it as a buffer when it touched it.
-
-    The read-only flags are the clue: `finish_page` (`vm/mod.rs`) builds exactly `MAP_USER`, no
-    `MAP_WRITE`, no `MAP_EXEC`, for a read-only non-exec page, and `map_cached_page` does the
-    same. Both map a *frame they hold*, so either a `PageState` reached `finish_page` with its
-    pre-allocation `pa: 0`, or a cache entry exists whose `phys` is 0. Neither is the
-    anonymous-mmap loop (`do_mmap`'s shared-arm allocates and maps page by page and checks
-    `pa == 0`), which is what built the 32 good pages above.
-
-    The failure needs two things: a pipeline that ran earlier in the boot, and a three-stage
-    pipeline after it.
-
-    | Scenario, after `coreutils seq 1 3 > ts` | Result |
-    |---|---|
-    | `cat ts \| wc -l` twice | ok |
-    | `cat ts \| wc -l`, then `cat ts \| tr a b \| wc -l` | traps, 3 of 3 runs |
-    | `cat ts \| tr a b \| wc -l` twice | the first works, the second traps |
-    | `cat ts \| tr a b \| wc -l` as the boot's first pipeline | ok |
-    | `cat ts \| true \| wc -l`, after a two-stage run | traps |
-
-    So the EPIPE the middle stage prints is a symptom, not the trigger: a three-stage pipeline
-    whose middle stage writes nothing (`true`) traps the same way, and a middle-stage EPIPE on
-    its own (`cat ts \| tr a b \| true`, no pipeline before it) does not. The working theory is
-    free-frame pressure (a second pipeline leaves fewer), which would make the frame-0 mapping
-    the *failure* path of an allocation whose result reached a mapping call.
-
-    Instrument notes, all measured, for the next session:
-
-    - `lldb`'s `memory read` on the halted guest returned zeros for kernel BSS virtual addresses
-      (`0x8023c918` and `PROC_TABLE_ALIGNED` alike) while the HMP monitor's `xp` of the same
-      addresses returned the real frame. Use `-monitor tcp:127.0.0.1:4444,server=on,wait=on`
-      and `xp`, and connect to the monitor *before* the serial chardev (QEMU opens them in order
-      and blocks on each `wait=on` one).
-    - Scripted input on stdio is mangled once `-monitor tcp:` is added, so drive the guest over
-      `-serial tcp:...` as well. `target/riscv_trap_probe.py` is that harness: it types the
-      scenario, waits for `!trap`, then dumps the frame and walks the tables.
-    - The boot stack's U-mode frame sits at `__boot_stack_top - 296`: `ra` at +8, interrupted
-      `sp` at +16 (and again at +280), `sepc` at +256, `sstatus` at +264, `scause` at +272,
-      `stval` at +288. For the frame layout, read `trap_asm.rs` rather than trusting a
-      disassembler: this `llvm-objdump` prints wrong mnemonics for RVC instructions (0x650e is
-      `c.ld a1, 8(a0)`, not the `ld a0, 0xc0(sp)` it shows), which sent an earlier reading of
-      this item down the wrong path.
-
-    Next step: find the call that maps a frame-0 page with read-only flags. A watch on
-    `vm_map_page_in` taking `pa == 0`, or reading VM's region list for the trapped process to
-    see which region owns 0x1001f000 and which of its pages the fault-in path handled last,
-    would settle it. Separately, `trap.rs`'s `unhandled` arm should deliver a `SIGSEGV` for a
-    U-mode access fault instead of halting the machine: a process's bad page is not a reason to
-    stop the system, and it is why this defect reads as "the guest is silent".
-    (`crates/servers/src/vm/mod.rs`, `crates/servers/src/vm/cache.rs`,
-    `crates/arch-riscv64/src/trap.rs`, `crates/arch-riscv64/src/trap_asm.rs`,
-    `crates/arch-riscv64/src/hal.rs`)
+    Next step: the shell's pipeline setup, or VFS's pipe lifetime. A stage's write reaching a
+    pipe with no reader means the reader's descriptor was closed early, so the reader's `stdin`
+    is probably the wrong pipe end (the first stage's, not the middle stage's): with `cat` in
+    the middle the write happens before the mix-up can be observed, which is why it looks
+    applet-specific. (`crates/servers/src/vfs/pipe.rs`,
+    `crates/servers/src/vfs/filedes.rs`, `coreutils/src/uu/tr`, the shell's pipeline arm)
 
 ---
 
@@ -3011,6 +2948,79 @@ from resolving, is under `# Resolved issues`.
 ---
 
 ## RISC-V (`[riscv]`)
+
+78. **A three-stage pipeline killed the machine with an unhandled access fault (2026-11-20).**
+
+    ```
+    coreutils seq 1 3 > ts
+    coreutils cat ts | coreutils tr a b | coreutils wc -l
+    ```
+
+    ended in `!trap cause=5 stval=0x1001f000 sepc=0x100d8ac mode=user` and a machine that never
+    spoke again, in 3 of 3 runs once a two-stage pipeline had run in the same boot.
+
+    **The fault was VM's own, not a child's.** `0x100d8ac` is `ld a7, 0(a6)` inside
+    `compiler_builtins`' `memcpy` in VM's image (the same offset in `coreutils` is
+    `ld a0, 0xc0(sp)`, an RVC instruction whose operands are none of the frame's), and the
+    frame's `a6` held the VA the load faulted on. The VA is in VM's scratch window
+    (`hal::vm_scratch_base()` = 0x10000000, not the mmap base the first write-up assumed): the
+    pages below it were the frame-refcount window `pb_init` maps, one ascending frame each, and
+    the failing page was the next scratch slot, mapped `V R U` to physical **0** (PTE 0x53,
+    which is `MAP_PRESENT | MAP_USER | MAP_READ`, the flags both `with_table` helpers use).
+
+    **What asked for frame 0.** Breaking on the kernel's `map_page` with `pa == 0` caught the
+    call as `map_page(cr3 = VM's own root, va = <scratch>, pa = 0, flags = 0x13)`, issued with
+    `ra = 0x100a5d4`, which is inside `vm_destroy` (where `free_address_space` is inlined) at
+    the loop that descends into a root entry. That loop had copied the address space it was
+    tearing down to `sp + 0x408` first, and the copy was **plain data** (3, 0xffffffff, and
+    pointers into VM's own image), not a page table: the entry it followed, index 20, was 0x1, a
+    non-leaf pointer to physical 0. The address space being walked therefore had a root that was
+    no longer a page table: the process was running on a root page that had already been
+    released and handed out again. The kernel agreed with the handle (`p_cr3` of the exiting
+    endpoint's `Proc` entry, read out of `PROC_TABLE_ALIGNED`, held that same page), so this was
+    not a VM bookkeeping slip. Free-frame pressure from the earlier pipeline is what makes the
+    reuse land before the teardown, which is why the reproducer needs that history.
+
+    **What was fixed.**
+
+    - A teardown walk now follows an entry only when its target is a frame: `table_frame` in
+      `vm/proc.rs` rejects an absent entry, a leaf above the bottom level, frame 0, and any
+      address the identity map does not cover, and `vm/cow.rs`'s fork walk uses the same
+      predicate. A walk over a released root now leaks that subtree instead of mapping frame 0.
+    - `vm/proc.rs` used its own copies of x86's page-table bits. `PG_PS = 0x080` is the **Dirty**
+      bit on riscv64 (SV39 recognises a leaf by R|W|X), so a leaf that was never written looked
+      like a table and the walk descended into it; `PG_RW = 0x002` is PTE_R, so
+      `make_pte_readonly` was clearing the *read* bit and turning the page into a table pointer;
+      `PG_FRAME` is x86's frame mask, so `pt_free_internal` freed addresses that are not frames.
+      All of them are the arch's now (`kernel::pagetable::{PG_P, PG_PS}`, `hal::pte_to_phys`,
+      `hal::pte_writable`).
+    - `arch-riscv64/src/trap.rs` forwards access faults (causes 1, 5 and 7) to the fault handler
+      like page faults, so a page whose frame is not memory is a `SIGSEGV` for the process that
+      touched it instead of a machine that halts in `wfi`. That is the half of this item that
+      was about the kernel, and it is why the defect used to read as "the guest went silent".
+
+    **Negative result, measured.** Having `get_p_cr3` honour `QUERY_PROC`'s `in_use` field was
+    tried and reverted: the field is 0 whenever the kernel has released the slot, which happens
+    on some exit paths here, so answering "no table" left the whole address space unfreed and
+    `just test-coreutils-minix-riscv64` then died for want of memory at exec 152 of 173. The
+    exit protocol reads the handle before `SYS_CLEAR`, so the handle is the process's own; the
+    comment in `get_p_cr3` records why the field is not consulted.
+
+    **What is not identified.** Which path releases a root while the process still names it. The
+    two candidates are the exec window (`VM_EXEC_NEWMEM` frees the pre-exec root while the
+    kernel's `p_cr3` still names it, until `SYS_EXEC_LOAD` replaces it) and `free_address_space`
+    running twice for one address space. The guard above makes either harmless for the machine,
+    but a teardown that meets a released root still frees that page, so this wants finding.
+
+    **Validation.** `just test-coreutils-minix-riscv64` is green (173 steps, including the `more`
+    steps that used to need their workaround), and the reproducer returns to its prompt in 3 of
+    3 runs where it used to halt in 3 of 3 (the middle stage still reports EPIPE in most runs:
+    that is item 79, which was hidden behind this one). Host tests, clippy, `just check` and
+    `just test-arches` are green. `vm/proc.rs`'s host test
+    `table_frame_follows_only_real_tables` fails without the guard (it answers `Some(0)` for an
+    entry naming frame 0).
+    (`crates/servers/src/vm/proc.rs`, `crates/servers/src/vm/cow.rs`,
+    `crates/arch-riscv64/src/trap.rs`, `crates/arch-riscv64/src/hal.rs`)
 
 1. **Piped serial input can lose bytes under instant `-qmp`/`-s` bursts** —
    the SIE fix (Phase E) landed: `trap_asm.rs` re-enables `SIE` during

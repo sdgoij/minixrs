@@ -11,6 +11,9 @@ pub mod cause {
     pub const SUP_SW_INTR: u64 = 1;
     pub const SUP_TIMER_INTR: u64 = 5;
     pub const SUP_EXT_INTR: u64 = 9;
+    pub const INSTR_ACCESS_FAULT: u64 = 1;
+    pub const LOAD_ACCESS_FAULT: u64 = 5;
+    pub const STORE_ACCESS_FAULT: u64 = 7;
     pub const ECALL_UMODE: u64 = 8;
     pub const ECALL_SMODE: u64 = 9;
     pub const INSTR_PAGE_FAULT: u64 = 12;
@@ -293,7 +296,20 @@ pub unsafe extern "C" fn trap_handler(frame: &mut [u8; 296]) {
                     unsafe { hook(frame) };
                 }
             }
-            cause::INSTR_PAGE_FAULT | cause::LOAD_PAGE_FAULT | cause::STORE_PAGE_FAULT => {
+            // Page faults and access faults are the same thing to the rest of
+            // the system: an access fault is what RISC-V raises instead of a page
+            // fault when the leaf is there but its physical address is not RAM (a
+            // stale entry naming frame 0, which is not memory), or when the walk
+            // itself hits a device window. Without this arm a process that touched
+            // such a page stopped the machine in `wfi`, because nothing turned an
+            // access fault into a signal (KNOWN_ISSUES 78); the fault gate below
+            // is address-based, so VM gets to decide as it does for a page fault.
+            cause::INSTR_PAGE_FAULT
+            | cause::LOAD_PAGE_FAULT
+            | cause::STORE_PAGE_FAULT
+            | cause::INSTR_ACCESS_FAULT
+            | cause::LOAD_ACCESS_FAULT
+            | cause::STORE_ACCESS_FAULT => {
                 // The fault address comes from the frame, where the trap entry
                 // saved `stval` — not from the live CSR, which a nested trap can
                 // have overwritten by the time this handler runs (see the note in
@@ -313,8 +329,12 @@ pub unsafe extern "C" fn trap_handler(frame: &mut [u8; 296]) {
                 // The cause-to-code table is in `faultcode` so the host suite can
                 // cover it: this module is compiled only for the target.
                 let access = match code {
-                    cause::INSTR_PAGE_FAULT => crate::faultcode::Access::Fetch,
-                    cause::STORE_PAGE_FAULT => crate::faultcode::Access::Store,
+                    cause::INSTR_PAGE_FAULT | cause::INSTR_ACCESS_FAULT => {
+                        crate::faultcode::Access::Fetch
+                    }
+                    cause::STORE_PAGE_FAULT | cause::STORE_ACCESS_FAULT => {
+                        crate::faultcode::Access::Store
+                    }
                     _ => crate::faultcode::Access::Load,
                 };
                 let error_code = crate::faultcode::page_fault_code(access, spp == 0);

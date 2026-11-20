@@ -17,7 +17,7 @@
 //! could not do it at all in the 512 MiB the other gates run in.
 
 use crate::vm::pb;
-use crate::vm::proc::Vmproc;
+use crate::vm::proc::{Vmproc, table_frame};
 use kernel::hal::{pte_is_user, pte_is_writable, pte_set_writable, pte_to_phys, pte_user_owned};
 use kernel::pagetable::{PG_P, PG_PS};
 
@@ -91,11 +91,18 @@ unsafe fn register_table(cr3: u64, phys: u64, ep: i32, level: u32, va_base: u64)
         }
         // A block entry above the bottom level is a huge mapping: the kernel's
         // identity map, a device block, or the low-GB alias. None of them maps a
-        // frame this process owns, so there is nothing to share.
+        // frame this process owns, so there is nothing to share. Below that, the
+        // entry must name a frame the identity map covers: a table that is not
+        // one is a stale entry, and mapping frame 0 is what makes the kernel
+        // report an access fault (KNOWN_ISSUES 78).
         if entry & PG_PS != 0 {
             continue;
         }
-        if unsafe { register_table(cr3, pte_to_phys(entry), ep, level - 1, entry_va) } != 0 {
+        let Some(frame) = table_frame(entry) else {
+            result = -1;
+            continue;
+        };
+        if unsafe { register_table(cr3, frame, ep, level - 1, entry_va) } != 0 {
             result = -1;
         }
     }

@@ -335,8 +335,9 @@ coreutils echo AFTER-KILL	AFTER-KILL
 # its prompt, so the keys are piped in instead. `-n 3` pages three lines (the
 # applet adds one to the count for the status bar), the page goes to a file, and
 # `wc -l` counts it: the status bar has no newline of its own. The redirect rather
-# than a second pipe because a three-stage pipeline faults on riscv64 before the
-# pager is involved (KNOWN_ISSUES 78). `printf q` writes the key with no newline.
+# than a second pipe because a middle stage that defers its write loses it on
+# riscv64, reporting EPIPE (KNOWN_ISSUES 79). `printf q` writes the key with no
+# newline.
 coreutils seq 100 199 > mp	
 coreutils printf q > mq	
 coreutils cat mq | coreutils more -n 3 mp > mo	

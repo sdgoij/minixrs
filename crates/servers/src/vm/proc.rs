@@ -13,18 +13,39 @@ use kernel::vm::{self, NO_MEM};
 
 use crate::vm::region::RegionList;
 
-const PG_P: u64 = 0x001;
-const PG_U: u64 = 0x004;
-const PG_PS: u64 = 0x080;
-const PG_RW: u64 = 0x002;
-const PG_FRAME: u64 = 0x000FFFFFFFFFF000;
-const PG_PTEMASK: u64 = 0xFFF;
+// The page-table bits come from the arch, not from x86's numbers: on riscv64 a
+// leaf is recognised by R|W|X and `0x80` is the Dirty bit, which a page that was
+// never written does not have. A local copy of x86's values made the teardown
+// walks descend into leaves as if they were tables.
+use kernel::hal::pte_to_phys;
+use kernel::pagetable::{PG_P, PG_PS};
 
 type PtEntry = u64;
 
 const USER_PML4_ENTRIES: usize = 256;
 const NENTRIES: usize = 512;
 const PAGE_SIZE: u64 = kernel::vm::VM_PAGE_SIZE as u64;
+
+/// The frame a present, non-leaf entry names, when a walk may descend into it.
+///
+/// A teardown reaches a table page by mapping its frame into VM's own scratch
+/// window, so an entry whose target is frame 0, or an address the identity map
+/// does not cover, is not a table. Following one maps frame 0 (which the kernel
+/// reports as an access fault and the machine treats as fatal) or a device
+/// window, and frees whatever the bogus "table" seems to hold. An address space
+/// whose root was freed while the process still named it is exactly that case,
+/// and a teardown can only leak such a subtree, never dereference it
+/// (KNOWN_ISSUES 78).
+pub(crate) fn table_frame(entry: u64) -> Option<u64> {
+    if entry & PG_P == 0 || entry & PG_PS != 0 {
+        return None;
+    }
+    let frame = pte_to_phys(entry);
+    if frame == 0 || !kernel::hal::pte_is_valid_phys(frame) {
+        return None;
+    }
+    Some(frame)
+}
 
 /// Per-process VM state, analogous to MINIX's `struct vmproc`.
 #[derive(Clone, Copy, Default)]
@@ -251,7 +272,7 @@ unsafe fn get_p_cr3(ep: Endpoint) -> u64 {
         const QP: i32 = 5;
         const SO: usize = 8;
         const CO: usize = 12;
-        // PA_OFF = 40 holds CR3 in QUERY_PROC reply
+        // PA_OFF = 40 holds the address-space handle in the QUERY_PROC reply.
         const PAO: usize = 40;
         let mut msg = [0u8; 64];
         msg[SO..SO + 4].copy_from_slice(&QP.to_le_bytes());
@@ -260,6 +281,12 @@ unsafe fn get_p_cr3(ep: Endpoint) -> u64 {
         if r != 0 {
             return 0;
         }
+        // The kernel answers the handle even for a slot it has already released
+        // (`in_use` is 0 there while the dead process's last `p_cr3` stays in the
+        // field), and every exit path here reads it before SYS_CLEAR frees the
+        // slot, so the handle is the process's own. Answering 0 for a released
+        // slot was tried and leaked the whole address space on exit, which showed
+        // up as the coreutils scenario dying for want of memory 150 execs in.
         u64::from_le_bytes(msg[PAO..PAO + 8].try_into().unwrap_or([0; 8]))
     }
     #[cfg(not(target_os = "minix"))]
@@ -431,7 +458,6 @@ pub(crate) unsafe fn free_address_space(cr3: u64, skip: &[(u64, u64)]) {
     unsafe {
         use crate::vm::{vm_free_pages, vm_mappage, vm_unmappage};
         use kernel::hal::{pte_to_phys, pte_user_owned};
-        use kernel::pagetable::{PG_P, PG_PS};
         // Map table pages readable (see cow.rs): on SV39 a V|U-only leaf is
         // a table pointer, so reading the PTEs would fault. MAP_READ is 0 on
         // x86/aarch64 and PTE_R on RISC-V.
@@ -496,11 +522,11 @@ pub(crate) unsafe fn free_address_space(cr3: u64, skip: &[(u64, u64)]) {
                         }
                         continue;
                     }
-                    if e & PG_PS != 0 {
-                        continue; // block/huge leaf — shared identity
-                    }
+                    let Some(frame) = table_frame(e) else {
+                        continue;
+                    };
                     unsafe {
-                        walk_table(pte_to_phys(e), level - 1, entry_va, flags, skip);
+                        walk_table(frame, level - 1, entry_va, flags, skip);
                     }
                 }
             }
@@ -513,19 +539,10 @@ pub(crate) unsafe fn free_address_space(cr3: u64, skip: &[(u64, u64)]) {
         let root_step = PAGE_SIZE << (top * 9);
         if let Some(root) = with_table(cr3, map_flags, |t| *t) {
             for (idx, &e) in root.iter().enumerate().take(USER_PML4_ENTRIES) {
-                if e & PG_P == 0 {
+                let Some(frame) = table_frame(e) else {
                     continue;
-                }
-                if e & PG_PS != 0 {
-                    continue; // block/huge leaf — shared identity
-                }
-                walk_table(
-                    pte_to_phys(e),
-                    top - 1,
-                    (idx as u64) * root_step,
-                    map_flags,
-                    skip,
-                );
+                };
+                walk_table(frame, top - 1, (idx as u64) * root_step, map_flags, skip);
             }
         }
         let _ = vm_free_pages(cr3, 1);
@@ -734,19 +751,11 @@ pub(crate) unsafe fn free_user_range(cr3: u64, va_start: u64, va_end: u64, skip:
                         }
                         continue;
                     }
-                    if e & PG_PS != 0 {
-                        continue; // block/huge leaf — shared identity
-                    }
+                    let Some(frame) = table_frame(e) else {
+                        continue;
+                    };
                     unsafe {
-                        walk_table(
-                            pte_to_phys(e),
-                            level - 1,
-                            entry_va,
-                            flags,
-                            va_start,
-                            va_end,
-                            skip,
-                        );
+                        walk_table(frame, level - 1, entry_va, flags, va_start, va_end, skip);
                     }
                 }
             }
@@ -757,25 +766,14 @@ pub(crate) unsafe fn free_user_range(cr3: u64, va_start: u64, va_end: u64, skip:
         let root_step = PAGE_SIZE << (top * 9);
         if let Some(root) = with_table(cr3, map_flags, |t| *t) {
             for (idx, &e) in root.iter().enumerate().take(USER_PML4_ENTRIES) {
-                if e & PG_P == 0 {
+                let Some(frame) = table_frame(e) else {
                     continue;
-                }
-                if e & PG_PS != 0 {
-                    continue; // block/huge leaf — shared identity
-                }
+                };
                 let entry_va = (idx as u64) * root_step;
                 if entry_va + root_step <= va_start || entry_va >= va_end {
                     continue;
                 }
-                walk_table(
-                    pte_to_phys(e),
-                    top - 1,
-                    entry_va,
-                    map_flags,
-                    va_start,
-                    va_end,
-                    skip,
-                );
+                walk_table(frame, top - 1, entry_va, map_flags, va_start, va_end, skip);
             }
         }
     }
@@ -916,7 +914,7 @@ unsafe fn pt_free_internal(pml4_pa: u64) {
             if entry & PG_P == 0 {
                 continue;
             }
-            let pdpt_pa = entry & PG_FRAME;
+            let pdpt_pa = pte_to_phys(entry);
             if i >= USER_PML4_ENTRIES {
                 continue;
             }
@@ -930,7 +928,7 @@ unsafe fn pt_free_internal(pml4_pa: u64) {
                 if pdpte & PG_P == 0 || pdpte & PG_PS != 0 {
                     continue;
                 }
-                let pd_pa = pdpte & PG_FRAME;
+                let pd_pa = pte_to_phys(pdpte);
                 let pd_va = crate::vm::vm_mappage(pd_pa, VM_MAP_FLAGS);
                 if pd_va == 0 {
                     continue;
@@ -941,7 +939,7 @@ unsafe fn pt_free_internal(pml4_pa: u64) {
                     if pde & PG_P == 0 || pde & PG_PS != 0 {
                         continue;
                     }
-                    let pt_pa = pde & PG_FRAME;
+                    let pt_pa = pte_to_phys(pde);
                     crate::vm::vm_free_pages(pt_pa, 1);
                 }
                 crate::vm::vm_unmappage(pd_va);
@@ -964,12 +962,12 @@ unsafe fn make_pte_readonly(cr3: u64, va: u64) -> i32 {
         match pagetable::walk(cr3, va) {
             Ok(result) => {
                 let pte_val = result.pte_value;
-                if pte_val & PG_P == 0 || pte_val & PG_RW == 0 {
+                if pte_val & PG_P == 0 || !kernel::hal::pte_is_writable(pte_val) {
                     // Not present or already read-only — nothing to do.
                     return 0;
                 }
-                // Clear PG_RW and write the PTE back.
-                let new_val = pte_val & !PG_RW;
+                // Clear the arch's write bit and write the PTE back.
+                let new_val = pte_val & !kernel::hal::pte_writable();
                 core::ptr::write(result.pte_virt, new_val);
                 0
             }
@@ -1128,7 +1126,7 @@ pub unsafe fn vm_collect(ep: Endpoint, addr: u64, pages: u32) -> i32 {
             let va = addr + (i as u64) * 0x1000;
             match pagetable::walk(cr3, va) {
                 Ok(result) => {
-                    let pa = result.pte_value & PG_FRAME;
+                    let pa = pte_to_phys(result.pte_value);
                     // Write the physical address to a volatile location,
                     // so the caller can read it.  In the full MINIX
                     // implementation, this would populate a region/phys
@@ -1205,6 +1203,35 @@ mod tests {
             assert_eq!(vmp.vm_pml4_phys, 0, "stale root must be cleared");
             vmproc_free(ep);
         }
+    }
+
+    #[test]
+    fn table_frame_follows_only_real_tables() {
+        // A teardown walk may not dereference an entry that does not name a
+        // table: mapping frame 0 is an access fault the kernel treats as fatal,
+        // and it is how the riscv64 pipeline trap arrived (KNOWN_ISSUES 78).
+        let table = 0x1234_5000u64;
+        assert_eq!(
+            table_frame(kernel::hal::build_pte(table, PG_P)),
+            Some(table),
+            "a present, non-leaf entry naming a frame is followed"
+        );
+        assert_eq!(table_frame(0), None, "an absent entry is skipped");
+        assert_eq!(
+            table_frame(kernel::hal::build_pte(table, PG_P | PG_PS)),
+            None,
+            "a leaf above the bottom level is a block, not a table"
+        );
+        assert_eq!(
+            table_frame(PG_P),
+            None,
+            "a non-leaf entry naming frame 0 is not a table"
+        );
+        assert_eq!(
+            table_frame(kernel::hal::build_pte(kernel::pagetable::PG_FRAME, PG_P)),
+            None,
+            "a target outside the identity map is not a table"
+        );
     }
 
     #[test]
