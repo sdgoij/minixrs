@@ -9,7 +9,7 @@ steps reach, assembled from the two halves the port already has:
   * **compile** — clang with the port's headers, hermetic and freestanding.
     `tools/ccflags.py` has why none of those flags is optional.
   * **link** — the fork's stage1 rustc with the arch's `tools/crt0-<arch>.S`
-    and the minix-libc rlib, which is the same pair `tools/build-c-hello.py`
+    and the minix-libc rlib, which is the same pair `cargo xtask build c-hello`
     assembles by hand for `/bin/helloc`.
 
 Point a build at it by name, exactly as a cross build would, naming the target
@@ -44,7 +44,7 @@ LD_SCRIPT = ROOT / "tools" / "minix-user.ld"
 WORK_ROOT = ROOT / "target" / "cc-minix"
 
 # The rustc link wants a crate root; this one pulls the libc in and is otherwise
-# empty, the same stub tools/build-c-hello.py writes.
+# empty, the same stub cargo xtask build c-hello writes.
 STUB = """#![no_std]
 #![no_main]
 extern crate minix_libc;

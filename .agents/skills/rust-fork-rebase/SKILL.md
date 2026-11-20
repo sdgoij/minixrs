@@ -181,8 +181,8 @@ So after any clean, rebuild the smoke-test binaries before any `just build-*`:
 
 ```sh
 cargo clean
-python tools/build-std-hello.py all   # /bin/hello for all three triples
-python tools/build-c-hello.py         # helloc + ctest (x86)
+cargo xtask build std-hello all   # /bin/hello for all three triples
+cargo xtask build c-hello        # helloc + ctest (x86)
 ```
 
 **An orphaned QEMU blocks the clean.** A leftover `qemu-system-*` holds
@@ -215,8 +215,8 @@ path entry pointing at a checked-out fork.
 Smoke tests use the stage1 rustc directly — no cargo, no network:
 
 ```sh
-python tools/build-std-hello.py all      # /bin/hello for all three minix triples
-python tools/build-c-hello.py            # helloc + ctest (x86 only)
+cargo xtask build std-hello all      # /bin/hello for all three minix triples
+cargo xtask build c-hello           # helloc + ctest (x86 only)
 ```
 
 The C smoke test compiles with the host's clang, so its version has to stay at least as

@@ -89,8 +89,9 @@ of `run`, `mkfs`, `image`, `gltriangle`, `export`, `desktop`.
    `fetch-bash.py` (179), `mirror-bash.py`, `ccarch.py`, `ccflags.py`.
    Mostly path resolution, small files, a few network fetches. The pin modules
    are *imported as modules* by release workflows (section 3.6).
-2. **Build wrappers around clang, rustc and meson.** `build-c-hello.py` (170),
-   `build-std-hello.py` (153), `build-dynlibc.py` (147), `build-dynlink.py`
+2. **Build wrappers around clang, rustc and meson.** `build-c-hello.py` (170,
+   now `cargo xtask build c-hello`), `build-std-hello.py` (153, now
+   `cargo xtask build std-hello`), `build-dynlibc.py` (147), `build-dynlink.py`
    (255), `build-gltest.py`, `build-gui.py`, `build-gbmtest.py`,
    `build-wlcompose.py`, `build-wlgl.py`, `build-wldmabufgl.py`,
    `build-bash.py` (422), `build-mesa.py` (478), `build-libcxx.py` (153),
@@ -410,6 +411,17 @@ line, and `tools/check-c-headers.py`, `tools/check-physmap.py` and
 function over text with fixture tests; the port was checked against the Python
 on the real tree, on a passing tree and on a failing one, before the scripts
 were deleted.
+
+**Phase 1, first slice landed.** `cargo xtask build c-hello|std-hello` replaces
+the two builders `bootstrap` uses, with the arch table (`arch.rs`), the hermetic
+C flags (`cc.rs`) and the toolchain lookup (`toolchain.rs`) as Rust. The four
+target artifacts were byte-identical to the Python build's before the scripts
+went, and `crates/kernel/build.rs`'s "build it with ..." errors name the new
+command. Still Python: `cc-minix`, `cc-dso-minix`, `cdyn`,
+`build-dynlibc`/`build-dynlink`, `build-libcxx`/`libcxx-toolchain`, and the
+`build-*` probe and Wayland clients. `ccarch.py` and `ccflags.py` stay with
+them; `crates/xtask` carries a copy of both tables until the last importer
+moves, which is the bounded duplication section 3.10 describes.
 
 ### Phase 0 in detail, because it defines the shape of every later phase
 

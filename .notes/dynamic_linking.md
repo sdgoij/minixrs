@@ -172,7 +172,7 @@ register contract** (it avoids needing a full auxv on the first cut, §6.2), and
 | Userland link script | `tools/minix-user.ld` | fixed `BASE_ADDRESS = 0x01000000`; `.got`/`.got.plt` folded into `.data`; TLS sections defined |
 | Linker | `tools/lld.py` (rust-lld), `CARGO_TARGET_*_LINKER` in the `Justfile` | GNU-flavoured LLD, no `-shared`/`-pie` use yet |
 | Images | `boot-image/src/manifest.rs` (`BOOT_BINS`, `WASM_MODULES`), `crates/kernel/build.rs`, `MINIXFS_EXTRA`, `target/mkboot`, `target/mkfs` | binaries by cargo bin name; **no entry for a `.so` or a `/libexec` loader** |
-| C build | `tools/build-c-hello.py` (clang + `tools/crt0-<arch>.S` + link the `minix-libc` rlib with the fork rustc), `tools/cc-minix.py` | all static; `crt0` calls `_start` |
+| C build | `cargo xtask build c-hello` (clang + `tools/crt0-<arch>.S` + link the `minix-libc` rlib with the fork rustc), `tools/cc-minix.py` | all static; `crt0` calls `_start` |
 
 **The load-bearing conclusion:** the exec substrate (file regions, `MAP_FIXED`, identity
 clearing, the async FDIO path) is already the shape a loader needs. The missing pieces
@@ -711,7 +711,7 @@ As built:
 
     Those two objects moved when dynamic linking became something an image *has* rather
     than something only its gate built: the script now writes them into the release
-  directory (`target/<triple>/release/`, the way `tools/build-c-hello.py` places
+  directory (`target/<triple>/release/`, the way `cargo xtask build c-hello` places
   helloc/ctest), `BOOT_BINS` carries `/lib/libc.so` and `/bin/dynclib` alongside
   `/libexec/ld.so`, and every image-assembling recipe depends on `just dynlib-<arch>`.
     The gate injects only the loader's own test objects now (`libdyn*.so`, `dynhello`), and

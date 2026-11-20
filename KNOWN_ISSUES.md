@@ -3670,7 +3670,8 @@ screen, therefore still appears after its prompt.
   `/usr/include/strings.h`, which pulls `bits/types/locale_t.h`, which collided
   with the port's own `locale_t`. The flags — `-nostdinc -isystem
   <clang resource dir>/include -I tools/c-include` — now live in
-  `tools/ccflags.py`, shared by `tools/build-c-hello.py` and `tools/cc-minix.py`. A
+  `tools/ccflags.py` for the C project builds and `crates/xtask`'s `cc` module
+  for the smoke binaries. A
   missing header is a hard error now, which is the point. What it fixed, in
   order: `_POSIX_VERSION` had to exist for bash to stop using `union wait`;
   `HAVE_TERMIOS_H` answers no; `clock_t` needed a `sys/times.h` to be found
@@ -3678,7 +3679,7 @@ screen, therefore still appears after its prompt.
   typedef in the build tools); and `locale_utf8locale` needed `wcwidth`, without
   which `HANDLE_MULTIBYTE` is off while bash's globbing still uses an identifier
   only the multibyte branch declares. `.notes/c_build.md` has the write-up.
-  (`tools/ccflags.py`, `tools/build-c-hello.py`)
+  (`tools/ccflags.py`, `crates/xtask/src/cc.rs`)
 - **~~What the hermetic compile then exposed: the port's own missing headers~~
   — FIXED (2026-09-24).** With the host out of the picture the bash build's
   errors became a to-do list, and every entry is closed now: `termios.h` and the
@@ -3721,7 +3722,7 @@ screen, therefore still appears after its prompt.
   `FEED_SCENARIO=...` with `/bin/ctest` and the lines `scanf: ok`, `mkfifo: ok`,
   `getenv: hello` passes, and the same run with an impossible readback fails, so
   the check itself is sound. A scenario step is what would stop it depending on
-  that. (`tools/ctest.c`, `tools/build-c-hello.py`, `tools/smoke/feed.sh`)
+  that. (`tools/ctest.c`, `cargo xtask build c-hello`, `tools/smoke/feed.sh`)
 - **bash is a committed build with a gate (2026-09-25).** `tools/build-bash.py`
   fetches bash at a pinned upstream commit, rebuilds `minix-libc` with this
   host's stage1, configures against `tools/c-include`, links with

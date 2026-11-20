@@ -69,7 +69,7 @@ rust-channel := `sed -n 's/^channel = "\(.*\)"/\1/p' rust-toolchain.toml | tr -d
 # `[patch.crates-io]` it to the sibling fork, so cargo cannot resolve either
 # workspace without it. Regenerates `rust/config.toml` via
 # `tools/rust-config.py` for the requested arch, then runs x.py and builds the
-# `/bin/hello` std smoke-test binary with `tools/build-std-hello.py`.
+# `/bin/hello` std smoke-test binary with `cargo xtask build std-hello`.
 # Note: per-arch runs rebuild only that arch's std — x.py prunes the other
 # arches from the stage1 sysroot — so `all` (the default) is the complete
 # setup. Incremental afterwards; the first run downloads the stage0
@@ -108,12 +108,12 @@ _finish-bootstrap target:
     # it to report success) leaves the old rlibs behind, so assert it took
     # effect now rather than let it resurface minutes into a later build.
     @test -z "$(find coreutils/target -name '*.rlib' 2>/dev/null | head -1)" || (echo 'error: stale coreutils rlibs survived the clean - they fail later builds as E0463 or as clap TypeId panics' >&2 && exit 1)
-    python tools/build-std-hello.py {{target}}
+    cargo xtask build std-hello {{target}}
     # The C smoke-test binaries (helloc/ctest) also live under target/ and are
     # wiped by the clean. They build for all three arches now
     # (`just build-c-hello <arch>`), but the boot images embed them on x86_64
     # only (`crates/kernel/build.rs`), so only that one is rebuilt here.
-    if [ "{{target}}" = x86 -o "{{target}}" = all ]; then python tools/build-c-hello.py x86; fi
+    if [ "{{target}}" = x86 -o "{{target}}" = all ]; then cargo xtask build c-hello x86; fi
 
 # Install the prebuilt stage1 toolchain for the commit the `rust` submodule
 # pins, fetched from a release on the rust fork and checksum-verified, instead
@@ -1802,7 +1802,7 @@ test-waitid-aarch64 boot-timeout="60": build-aarch64
     FEED_SCENARIO=tools/smoke/waitid.tsv sh tools/smoke/feed.sh target/test-waitid-aarch64.log {{boot-timeout}} qemu-system-aarch64 -machine virt -cpu cortex-a57 -m 256M -nographic -no-reboot -global virtio-mmio.force-legacy=off -netdev user,id=net0 -device virtio-net-device,netdev=net0 -device virtio-gpu-device -device virtio-keyboard-device -kernel target/aarch64-unknown-minix/release/kernel-boot-aarch64
     @echo "waitid: status decoded, P_ALL named the child, unsupported states refused (aarch64)"
 
-# The C libc ABI, x86 only: `tools/build-c-hello.py` builds `/bin/cabi` for x86_64
+# The C libc ABI, x86 only: `cargo xtask build c-hello` builds `/bin/cabi` for x86_64
 # alone. `tools/smoke/cabi.tsv` asserts the `sockaddr_in` round trip (the only place
 # the header's layout and `minix-libc`'s decoder meet), `pipe2(O_NONBLOCK)` reaching
 # the pipe's read path, and an anonymous `mmap`.
@@ -1862,7 +1862,7 @@ build-c-hello arch="x86":
     #!/bin/sh
     set -eu
     test -n "{{stage1-rustc}}" || { echo 'error: stage1 rustc not found — run `just bootstrap` first' >&2; exit 1; }
-    python tools/build-c-hello.py {{arch}}
+    cargo xtask build c-hello {{arch}}
     # The re-embed is the x86 images' (target/mkboot assembles them, and needs one
     # `just build-x86` first); the other arches embed through their own
     # `just build-<arch>` — crates/kernel/build.rs.
@@ -1926,7 +1926,7 @@ fetch-mesa arch="x86" *args:
 # (`.notes/dynamic_linking.md` D2).
 #
 # The loader lands in the release dir from cargo, and `tools/build-dynlibc.py` puts the
-# other two there, the way `tools/build-c-hello.py` does for helloc/ctest.
+# other two there, the way `cargo xtask build c-hello` does for helloc/ctest.
 dynlib-x86:
     @test -n "{{stage1-rustc}}" || (echo 'error: stage1 rustc not found - run `just bootstrap` first' >&2 && exit 1)
     RUSTC="{{stage1-rustc}}" RUSTFLAGS="-C link-arg=-Ttools/minix-ldso.ld -C link-arg=--no-eh-frame-hdr" cargo build -p ldso --bin ldso --features bin --target x86_64-pc-minix --release

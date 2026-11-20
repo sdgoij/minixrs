@@ -1,5 +1,5 @@
 # Installs a clang from apt.llvm.org and puts it on PATH as the bare `clang` /
-# `clang++` everything calls: the Justfile recipes, `tools/build-c-hello.py`, and
+# `clang++` everything calls: the Justfile recipes, `cargo xtask build c-hello`, and
 # x.py's own C compiler detection.
 #
 # The archive's clang on ubuntu-24.04 is 18, years behind the dev machines, and

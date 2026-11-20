@@ -17,7 +17,11 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
+mod arch;
+mod build;
+mod cc;
 mod check;
+mod toolchain;
 
 fn main() -> ExitCode {
     let matches = command().get_matches();
@@ -35,6 +39,7 @@ fn main() -> ExitCode {
 
     let result = match matches.subcommand() {
         Some(("check", matches)) => run_check(&root, matches, &mut out, &mut err),
+        Some(("build", matches)) => run_build(&root, matches),
         _ => unreachable!("clap requires a subcommand"),
     };
 
@@ -71,6 +76,18 @@ fn run_check(
         Some(("justfile", _)) => check::justfile::run(root, out, err),
         _ => unreachable!("clap requires a check subcommand"),
     }
+}
+
+fn run_build(root: &Path, matches: &clap::ArgMatches) -> io::Result<bool> {
+    match matches.subcommand() {
+        Some(("c-hello", matches)) => build::c_hello::run(root, target(matches)),
+        Some(("std-hello", matches)) => build::std_hello::run(root, target(matches)),
+        _ => unreachable!("clap requires a build subcommand"),
+    }
+}
+
+fn target(matches: &clap::ArgMatches) -> Option<&str> {
+    matches.get_one::<String>("target").map(String::as_str)
 }
 
 fn command() -> clap::Command {
@@ -112,6 +129,29 @@ fn command() -> clap::Command {
                         .about("A recipe that builds kernel-boot depends on every image input"),
                 ),
         )
+        .subcommand(
+            clap::Command::new("build")
+                .about("Build a target program with the fork toolchain")
+                .subcommand_required(true)
+                .arg_required_else_help(true)
+                .subcommand(
+                    clap::Command::new("c-hello")
+                        .about("The C smoke binaries: /bin/helloc, /bin/ctest, /bin/cabi")
+                        .arg(target_arg("x86")),
+                )
+                .subcommand(
+                    clap::Command::new("std-hello")
+                        .about("The std smoke binary: /bin/hello")
+                        .arg(target_arg("x86_64-pc-minix")),
+                ),
+        )
+}
+
+fn target_arg(default: &'static str) -> clap::Arg {
+    clap::Arg::new("target")
+        .value_name("TARGET")
+        .default_value(default)
+        .help("An arch name or a minix triple, or `all`")
 }
 
 /// `--list` prints the tree the way `just --list` prints recipes: the command,

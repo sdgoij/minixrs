@@ -36,15 +36,15 @@ pub const BOOT_BINS: &[(&str, &str)] = &[
     // is the gate.
     ("/bin/coreutils", "coreutils"),
     // `/bin/hello` is the std smoke-test binary: it is NOT a `userland`
-    // cargo bin. Rebuild it with `tools/build-std-hello.py [target]`
+    // cargo bin. Rebuild it with `cargo xtask build std-hello [target]`
     // (compiles `tools/std-hello.rs` with the rust fork's stage1 compiler
     // against the fork's std), then re-run `target/mkboot` + `target/mkfs`
     // to embed it.
     ("/bin/hello", "hello"),
     // `/bin/helloc` is the C smoke-test binary: freestanding C linked
-    // against `minix-libc`. Rebuild it with `tools/build-c-hello.py`
+    // against `minix-libc`. Rebuild it with `cargo xtask build c-hello`
     // (clang + the fork's stage1 rustc), then re-assemble the images.
-    // Built for x86_64 only today (build-c-hello.py is x86-only); the
+    // Built for x86_64 only today: only the x86 recipe builds them, and the
     // kernel build.rs skips them on other arches.
     ("/bin/helloc", "helloc"),
     // `/bin/ctest` is the second C smoke test: uses the full libc (errno,

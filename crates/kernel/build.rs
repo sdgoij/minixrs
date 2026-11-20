@@ -220,10 +220,10 @@ fn missing_binary_hint(dest: &str, t: &targets::BuildTarget) -> String {
              run `just coreutils-{arch}` first (`just build-{arch}` runs it too)"
         ),
         "/bin/hello" => format!(
-            "the std smoke-test binary is built by `python tools/build-std-hello.py {arch}`"
+            "the std smoke-test binary is built by `cargo xtask build std-hello {arch}`"
         ),
         "/bin/helloc" | "/bin/ctest" | "/bin/cabi" => {
-            "the C smoke-test binaries are built by `python tools/build-c-hello.py \
+            "the C smoke-test binaries are built by `cargo xtask build c-hello \
              <arch>` — the images carry them on x86_64 only"
                 .to_string()
         }

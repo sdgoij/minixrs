@@ -7,7 +7,7 @@ worth keeping in view because the next section is where it stops.
 
 - The userland is Rust, built by the fork's stage1 for the in-tree minix targets.
 - The two in-tree C programs (`tools/hello.c`, `tools/ctest.c`) are built by
-  `tools/build-c-hello.py`: clang for the compile half
+  `cargo xtask build c-hello`: clang for the compile half
   (`--target=<machine>-unknown-none`), the fork's rustc for the link half,
   against `tools/c-include`, the target's `tools/crt0-<arch>.S`,
   `tools/minix-user.ld` and the `minix-libc` rlib.
@@ -49,7 +49,7 @@ and those programs have to be POSIX.
 
 On that host `tools/cc-minix.py` is that `cc` — the command a C project's own
 build system reaches, told which target it is for (`… cc-minix.py riscv64`, and
-x86_64 when it is not told) — doing the same two halves `build-c-hello.py`
+x86_64 when it is not told) — doing the same two halves `cargo xtask build c-hello`
 assembles by hand: compile with clang
 `--target=<machine>-unknown-none -ffreestanding -fno-stack-protector -fno-pic`
 (plus `-mno-red-zone` where the machine has a red zone, and RISC-V's
@@ -109,8 +109,9 @@ The failure that made it visible was `locale.h`: `HAVE_STRINGS_H` came from
 `/usr/include/strings.h`, which pulls `bits/types/locale_t.h`, which then
 collided with the port's own `locale_t`.
 
-The flags now live in `tools/ccflags.py`, shared by `tools/build-c-hello.py` and
-the bash `cc` so the two cannot drift:
+The flags live in `tools/ccflags.py` for the C project builds and in
+`crates/xtask`'s `cc` module for the smoke binaries, so a change goes in both
+until those builds move:
 
 ```
 -nostdinc -isystem $(clang -print-resource-dir)/include -I tools/c-include
@@ -291,9 +292,9 @@ changed, and this is what it took:
   link error, since a `double` would cross the Rust/C boundary in a register one
   side does not use. `-march=rv64gc -mabi=lp64d` is the fix. `-mno-red-zone` is
   accepted-but-unused on RISC-V, so it is passed only where a red zone exists.
-  Both live in `tools/ccarch.py`, which the three drivers share
-  (`cc-minix.py`, `build-c-hello.py`, `build-bash.py`), so a further target is one
-  entry rather than three.
+  Both live in `tools/ccarch.py`, which `cc-minix.py` and `build-bash.py` share,
+  and in `crates/xtask`'s `arch` module for the smoke binaries, so a further
+  target is one entry per copy rather than one per caller.
 
 Verified: `hello.c` and `ctest.c` link for all three targets; bash's configure,
 its 209 objects and its link succeed for all three (`just build-bash <arch>`); and
@@ -414,7 +415,7 @@ no `ar`, `ar` otherwise) — the same hermetic C compile bash's build uses.
 ## Traps
 
 - **The rlib has two builders, and each thinks its own build is current.**
-  `tools/build-c-hello.py` links with the *Windows* stage1, `tools/cc-minix.py`
+  `cargo xtask build c-hello` links with the *Windows* stage1, `tools/cc-minix.py`
   with the *Linux* one, and both write into `target/x86_64-pc-minix/release/deps/`.
   Measured: they do **not** always share a filename — editing the libc changed the
   hash, and two `libminix_libc-<hash>.rlib` files then sat in `deps/` at once. The

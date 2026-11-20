@@ -9,7 +9,7 @@ Produces, under `target/dynlink/`:
   (`/libexec/ld.so`) and `DT_NEEDED` for both objects.
 
 The executable is linked with the fork's stage1 rustc as the driver (the same way
-`tools/build-c-hello.py` does it), because its `write`/`exit` come from the
+`cargo xtask build c-hello` does it), because its `write`/`exit` come from the
 `minix-libc` rlib; the C objects and the shared objects are clang + LLD's work.
 
 Phase 0 was one object; Phase 1 needs two, because the loader's *base* allocator

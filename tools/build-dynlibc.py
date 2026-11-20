@@ -3,7 +3,7 @@
 linked against it.
 
 Produces, in the target's release directory (`target/<triple>/release/`, where
-`BOOT_BINS` reads them, the way `tools/build-c-hello.py` puts `helloc`/`ctest`
+`BOOT_BINS` reads them, the way `cargo xtask build c-hello` puts `helloc`/`ctest`
 there):
 
 * `libc.so` — the C library the port ships statically today, built

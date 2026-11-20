@@ -1,4 +1,4 @@
-//! Std smoke-test binary — built by `tools/build-std-hello.py`.
+//! Std smoke-test binary — built by `cargo xtask build std-hello`.
 //!
 //! Exercises the `std` PAL for the minix target end to end: the std
 //! `_start` bootstrap, `println!` through the VFS/serial fd path, a real

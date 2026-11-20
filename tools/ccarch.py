@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """The minix userland C targets, and what a C build has to be told to name one.
 
-Three drivers need the same answers — `tools/cc-minix.py` (the `cc` a C project's
-own build calls), `tools/build-c-hello.py` (the smoke binaries) and
-`tools/build-bash.py` — so the table lives here rather than three times over.
+Two drivers need the same answers: `tools/cc-minix.py` (the `cc` a C project's
+own build calls) and `tools/build-bash.py`. The smoke binaries moved to
+`crates/xtask`, which carries its own copy of this table; this one stays until
+those two scripts go.
 What the answers are is the point: the *minix* triple is what the rustc rlib is
 built for, and the clang *machine* is what the headers and the object code are
 compiled for. They are the same machine, one per arch, and the link step is
@@ -91,8 +92,8 @@ DEFAULT = X86_64
 """What a build that names no target gets: x86_64, which is what every caller
 did before there was a choice."""
 
-# Both the short names and the triples resolve, the way
-# `tools/build-std-hello.py` accepts them; `all` is what the Justfile passes to
+# Both the short names and the triples resolve, the way `cargo xtask build`
+# accepts them; `all` is what the Justfile passes to
 # mean "every target".
 BY_NAME = {arch.name: arch for arch in ALL} | {arch.triple: arch for arch in ALL}
 
