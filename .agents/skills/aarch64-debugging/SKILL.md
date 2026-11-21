@@ -253,9 +253,11 @@ The trace grows huge (~100+ MB/min during a livelock). Stop it once the pattern 
    "  enqueuing processes...", "  scheduler starting...", "  switching to userspace...").
    If per-process lines are missing, check the lib.rs serial_write cfg (gotcha 1).
 
-6. **`mkboot`/QEMU process lock (LNK1104)**: `target/mkboot(.exe)` is locked while a
-   build/QEMU process runs. `taskkill -F -IM qemu-system-aarch64.exe; taskkill -F -IM qemu-system-x86_64.exe`
-   then re-run. There is no separate `jsh` anymore — Just uses the default shell.
+6. **A locked build tool (LNK1104)**: QEMU holds its image open, so a later link can still
+   fail. `taskkill -F -IM qemu-system-aarch64.exe; taskkill -F -IM qemu-system-x86_64.exe`
+   then re-run. The old `target/mkboot(.exe)` lock went away with `cargo xtask image mkboot`,
+   which builds into `.xtask/` and is never deleted by `cargo clean`. There is no separate
+   `jsh` anymore — Just uses the default shell.
 
 7. **AArch64 boot proc page tables** (boot_init.rs): non-leaf links must be `PTE_TABLE` (0b11),
    not `pte_present()` (0b01 = block descriptor). The entry-0 PMD block (exception vectors)

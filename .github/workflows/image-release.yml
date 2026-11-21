@@ -12,7 +12,7 @@
 #
 # These are ELFs because that is what `-kernel` loads - the format is the point,
 # not an implementation detail. A raw disk image or an ISO is a different track
-# (real hardware; `tools/mbr.S` + `stage2.S` + `mkimg.rs`, not wired up) rather
+# (real hardware; `tools/mbr.S` + `stage2.S`, not wired up) rather
 # than a rename of these, and naming one `.img` here would invite `dd` or
 # `-drive file=`, which cannot boot it.
 #

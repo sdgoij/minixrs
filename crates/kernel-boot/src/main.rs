@@ -4,7 +4,7 @@
 //! The `kernel-boot` bin is feature-gated behind `x86` (like the
 //! riscv64/aarch64 bins) so a plain host `cargo build` skips this no_main
 //! kernel image; build it for the minix target via `just build-x86`
-//! (`target/mkboot` passes the `x86` feature) or directly with
+//! (`cargo xtask image mkboot` passes the `x86` feature) or directly with
 //! `cargo build -p kernel-boot --features x86 --target x86_64-pc-minix`.
 
 #![cfg_attr(not(test), no_std)]

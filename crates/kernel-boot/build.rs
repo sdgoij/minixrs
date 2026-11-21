@@ -6,7 +6,7 @@
 //!
 //! This one has no kernel address compiled in and no kernel image in it: it
 //! only keeps a plain `cargo build` of the x86 target bootable with a
-//! separately loaded kernel.bin. `tools/mkboot.rs` rebuilds the same
+//! separately loaded kernel.bin. `cargo xtask image mkboot` rebuilds the same
 //! trampoline with kmain and the kernel embedded, and that is what the
 //! recipes boot.
 //!

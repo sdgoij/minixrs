@@ -77,7 +77,7 @@ just publish-wasm                 # Or: build and stage the demo into docs/ (wha
 The Just recipes orchestrate plain `cargo` invocations; the initramfs CPIO
 and MinixFS root image are assembled by `crates/kernel/build.rs` from the
 built userland/server binaries, and the x86 trampoline/kernel.bin post-link
-is handled by `tools/mkboot.rs`. Assembled images are mirrored per-target
+is handled by `cargo xtask image mkboot`. Assembled images are mirrored per-target
 under `target/images/<triple>/` for host inspection.
 
 `just image [arch]` builds one self-contained, bootable ELF per arch — the

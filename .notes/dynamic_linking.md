@@ -171,7 +171,7 @@ register contract** (it avoids needing a full auxv on the first cut, §6.2), and
 | Target spec | `rust/compiler/.../spec/base/minix.rs` | `dynamic_linking: false`, `relocation_model: Static`, `crt_static_default: true`, `pre_link_args = ["--image-base=0x1000000"]` |
 | Userland link script | `tools/minix-user.ld` | fixed `BASE_ADDRESS = 0x01000000`; `.got`/`.got.plt` folded into `.data`; TLS sections defined |
 | Linker | `tools/lld.py` (rust-lld), `CARGO_TARGET_*_LINKER` in the `Justfile` | GNU-flavoured LLD, no `-shared`/`-pie` use yet |
-| Images | `boot-image/src/manifest.rs` (`BOOT_BINS`, `WASM_MODULES`), `crates/kernel/build.rs`, `MINIXFS_EXTRA`, `target/mkboot`, `target/mkfs` | binaries by cargo bin name; **no entry for a `.so` or a `/libexec` loader** |
+| Images | `boot-image/src/manifest.rs` (`BOOT_BINS`, `WASM_MODULES`), `crates/kernel/build.rs`, `MINIXFS_EXTRA`, `cargo xtask image mkboot|mkfs` | binaries by cargo bin name; **no entry for a `.so` or a `/libexec` loader** |
 | C build | `cargo xtask build c-hello` (clang + `tools/crt0-<arch>.S` + link the `minix-libc` rlib with the fork rustc), `tools/cc-minix.py` | all static; `crt0` calls `_start` |
 
 **The load-bearing conclusion:** the exec substrate (file regions, `MAP_FIXED`, identity

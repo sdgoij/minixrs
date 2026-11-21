@@ -4,12 +4,12 @@
 //! `x.py` installs the tools under names that differ from the ones on `PATH` —
 //! the stage1 sysroot ships LLD as `rust-lld` and copies `llvm-objcopy` in as
 //! `rust-objcopy` — and a CI image has none of them on `PATH` at all. So both
-//! consumers, `build.rs` (the fallback trampoline) and `tools/mkboot.rs` (the
-//! real post-link steps), look in the tree the stage1 compiler lives in first.
+//! consumers, `build.rs` (the fallback trampoline) and `crates/xtask/src/image.rs`
+//! (the real post-link steps), look in the tree the stage1 compiler lives in first.
 //!
 //! Shared by `mod toolchain_tools;` in the build script and
-//! `#[path = "../crates/kernel-boot/toolchain_tools.rs"]` in `mkboot.rs`, which
-//! is why the items are `pub`.
+//! `#[path = "../../kernel-boot/toolchain_tools.rs"]` in `image.rs`, which is why
+//! the items are `pub`.
 //!
 //! rustc's own linker for the minix targets is resolved separately, by
 //! `tools/lld.py`, which the Justfile and the smoke-test scripts use.

@@ -15,7 +15,7 @@
 # (initramfs CPIO + MinixFS) is assembled by `crates/kernel/build.rs`; the *disk*
 # system image is assembled by `boot-image`'s `mkminixfs`, which reads
 # `MINIXFS_EXTRA` / `DYNLINK_BINS` / `MINIXFS_BLOCKS`. x86 post-link work
-# (trampoline + kernel.bin) lives in `tools/mkboot.rs`.
+# (trampoline + kernel.bin) lives in `cargo xtask image mkboot`.
 
 # Path to the rust fork's stage1 rustc (built by `just bootstrap`); used as
 # the RUSTC for userland/server builds so the in-tree minix targets and
@@ -208,19 +208,13 @@ build target="x86":
 # every zone added costs the guest a byte of its 256 MiB, and 8192 runs out of memory for a
 # brk heap at `-m 256M`. A caller with a larger payload still overrides `MINIXFS_BLOCKS`.
 build-x86: userland-x86 coreutils-x86 dynlib-x86
-    rm -f target/mkboot target/mkboot.exe
-    "{{stage1-rustc}}" tools/mkboot.rs --edition 2024 -o target/mkboot
-    MINIXFS_BLOCKS="${MINIXFS_BLOCKS:-5120}" target/mkboot embed_initramfs,embed_minixfs
+    MINIXFS_BLOCKS="${MINIXFS_BLOCKS:-5120}" cargo xtask image mkboot embed_initramfs,embed_minixfs
 
 build-x86-test: userland-x86 coreutils-x86 dynlib-x86
-    rm -f target/mkboot target/mkboot.exe
-    "{{stage1-rustc}}" tools/mkboot.rs --edition 2024 -o target/mkboot
-    target/mkboot embed_initramfs,embed_minixfs,integration-tests kernel-test
+    cargo xtask image mkboot embed_initramfs,embed_minixfs,integration-tests kernel-test
 
 build-x86-boot: userland-x86 coreutils-x86 dynlib-x86
-    rm -f target/mkboot target/mkboot.exe
-    "{{stage1-rustc}}" tools/mkboot.rs --edition 2024 -o target/mkboot
-    target/mkboot embed_initramfs,embed_minixfs,boot-test kernel-boot
+    cargo xtask image mkboot embed_initramfs,embed_minixfs,boot-test kernel-boot
 
 # The boot image: kernel + initramfs only. This is what a disk-root boot needs, so
 # the kernel carries no root filesystem and is not capped by the 16 MiB ramdisk
@@ -228,9 +222,7 @@ build-x86-boot: userland-x86 coreutils-x86 dynlib-x86
 # region at 4 GiB). Output: target/boot-kernel.bin + target/boot-kernel-trampoline.elf,
 # mirrored to target/images/<triple>/minix-x86-boot.elf for the release.
 boot-image-x86: userland-x86 coreutils-x86 dynlib-x86
-    rm -f target/mkboot target/mkboot.exe
-    "{{stage1-rustc}}" tools/mkboot.rs --edition 2024 -o target/mkboot
-    target/mkboot embed_initramfs boot-kernel
+    cargo xtask image mkboot embed_initramfs boot-kernel
     mkdir -p target/images/x86_64-pc-minix
     cp target/boot-kernel-trampoline.elf target/images/x86_64-pc-minix/minix-x86-boot.elf
 
@@ -362,7 +354,7 @@ run-aarch64 memory: boot-image-aarch64 system-image-aarch64
 # The artifact is an ELF, which is what `-kernel` loads; x86 carries the kernel
 # as a segment of its multiboot trampoline ELF, the other arches are the kernel
 # itself. A raw disk image for real hardware would instead be the (unwired)
-# `tools/mbr.S` + `tools/stage2.S` + `tools/mkimg.rs` route.
+# `tools/mbr.S` + `tools/stage2.S` route (not wired up).
 #
 #  Each recipe boots what it produced and drives the userspace smoke scenario into its
 # shell, so a bad artifact fails here rather than in someone's hands. The boot timeout
@@ -1828,50 +1820,33 @@ test-kernel target="x86":
 # Write the root filesystem blob to the per-arch
 # target/images/<triple>/disk.img for the virtio-blk drive (kept separate
 # per arch so one arch's mkfs never clobbers another's disk image).
-# The `rm -f` clears any stale output first: MSVC's link.exe fails LNK1104
-# when the target exe exists and is momentarily locked (antivirus scan / a
-# lingering run).
 mkfs target="x86":
     @just mkfs-{{target}}
 
 mkfs-x86:
-    @test -n "{{stage1-rustc}}" || (echo 'error: stage1 rustc not found — run `just bootstrap` first' >&2 && exit 1)
-    rm -f target/mkfs target/mkfs.exe
-    "{{stage1-rustc}}" tools/mkfs.rs --edition 2021 -o target/mkfs
-    target/mkfs x86_64
+    cargo xtask image mkfs x86
 
 mkfs-riscv64:
-    @test -n "{{stage1-rustc}}" || (echo 'error: stage1 rustc not found — run `just bootstrap` first' >&2 && exit 1)
-    rm -f target/mkfs target/mkfs.exe
-    "{{stage1-rustc}}" tools/mkfs.rs --edition 2021 -o target/mkfs
-    target/mkfs riscv64
+    cargo xtask image mkfs riscv64
 
 mkfs-aarch64:
-    @test -n "{{stage1-rustc}}" || (echo 'error: stage1 rustc not found — run `just bootstrap` first' >&2 && exit 1)
-    rm -f target/mkfs target/mkfs.exe
-    "{{stage1-rustc}}" tools/mkfs.rs --edition 2021 -o target/mkfs
-    target/mkfs aarch64
+    cargo xtask image mkfs aarch64
 
 # Rebuild the C smoke-test binaries (/bin/helloc, /bin/ctest) from tools/hello.c,
 # tools/ctest.c and the arch's tools/crt0-<arch>.S (clang freestanding +
 # minix-libc, linked with the fork rustc). For x86 it then re-embeds them in the
-# initramfs and disk image, which needs `just build-x86` once so target/mkboot
-# exists; the other arches embed through their own `just build-<arch>`
-# (`crates/kernel/build.rs`).
+# initramfs and disk image with `cargo xtask image mkboot`; the other arches
+# embed through their own `just build-<arch>` (`crates/kernel/build.rs`).
 build-c-hello arch="x86":
     #!/bin/sh
     set -eu
     test -n "{{stage1-rustc}}" || { echo 'error: stage1 rustc not found — run `just bootstrap` first' >&2; exit 1; }
     cargo xtask build c-hello {{arch}}
-    # The re-embed is the x86 images' (target/mkboot assembles them, and needs one
-    # `just build-x86` first); the other arches embed through their own
+    # The re-embed is the x86 images'; the other arches embed through their own
     # `just build-<arch>` — crates/kernel/build.rs.
     if [ "{{arch}}" != x86 ]; then exit 0; fi
-    test -x target/mkboot || { echo 'error: target/mkboot missing — run `just build-x86` once' >&2; exit 1; }
-    target/mkboot embed_initramfs,embed_minixfs
-    rm -f target/mkfs target/mkfs.exe
-    "{{stage1-rustc}}" tools/mkfs.rs --edition 2021 -o target/mkfs
-    target/mkfs x86_64
+    cargo xtask image mkboot embed_initramfs,embed_minixfs
+    cargo xtask image mkfs x86
 
 # GNU bash for a minix target, from the upstream commit `tools/build-bash.py` pins:
 # fetched, configured against `tools/c-include` and linked against minix-libc by
@@ -2048,4 +2023,4 @@ publish-wasm:
 # Remove generated assets that must be rebuilt from scratch.
 clean:
     rm -rf target/nested target/images
-    rm -f target/initramfs.cpio target/minixfs.img target/trampoline.elf target/trampoline_.o target/kernel.bin target/mkboot target/mkboot.exe
+    rm -f target/initramfs.cpio target/minixfs.img target/trampoline.elf target/trampoline_.o target/kernel.bin

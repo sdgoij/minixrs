@@ -425,6 +425,22 @@ the `build-*` probe and Wayland clients. `ccarch.py` and `ccflags.py` stay with
 them; `crates/xtask` carries a copy of both tables until the last importer
 moves, which is the bounded duplication section 3.10 describes.
 
+**Phase 2, image tools landed.** `cargo xtask image mkboot|mkfs` replaces
+`tools/mkboot.rs` and `tools/mkfs.rs`: the trampoline and `kernel.bin` were
+byte-identical to the old tool's, `just build-x86`, `just mkfs-x86` and
+`just image x86` pass, and the stage1 compile of the tool (`rustc
+tools/mkboot.rs` on every x86 image recipe) is gone. The superseded ports
+(`mkinitramfs.rs`, `mkminixfs.rs`, `mkimg.rs`) go with them. `fetch-stage1`
+and `verify-stage1` are still the phase's other half.
+
+`cc-minix` and `cc-dso-minix` are **not** ported, and the reason is a host, not
+a language: `build-bash.py` and `build-mesa.py` drive them from inside WSL
+(`build-mesa.py`'s meson cross file names the script through `wsl_path`), where
+a Windows `xtask.exe` cannot run. A Linux `xtask` build in the same tree would
+share `.xtask/` with the Windows one, which cargo cannot do (one artifact dir
+per host, and the alias cannot name a per-host one). They stay Python until a
+per-host wrapper exists; `ccarch.py` and `ccflags.py` stay with them.
+
 ### Phase 0 in detail, because it defines the shape of every later phase
 
 Port the three static checkers first, for four reasons: they are pure file

@@ -144,7 +144,7 @@ target, never through RUSTFLAGS — build scripts must keep the host linker), an
 smoke scripts pass it to rustc as `-C linker=`. Run `python tools/lld.py` to see what
 the current host resolves to.
 
-The post-link tools of the x86 image path (`tools/mkboot.rs`, plus
+The post-link tools of the x86 image path (`cargo xtask image mkboot`, plus
 `crates/kernel-boot/build.rs` for the fallback trampoline) have the same problem with
 `lld`, `nm` and `objcopy`, and resolve them the same way through
 `crates/kernel-boot/toolchain_tools.rs` — the sysroot only has `llvm-nm` (no

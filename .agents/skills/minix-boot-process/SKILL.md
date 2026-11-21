@@ -25,9 +25,9 @@ The ELF32 multiboot trampoline transitions the CPU from 32-bit to 64-bit long mo
 4. Enables PAE (CR4.PAE + CR4.PGE), loads CR3, enables Long Mode (EFER.LME)
 5. Enables paging (CR0.PG | CR0.WP), loads 64-bit GDT
 6. Far-jumps (lret) to 64-bit entry, sets up temporary stack
-7. Jumps to kmain() at address extracted by `tools/mkboot.rs` (x86 post-link)
+7. Jumps to kmain() at address extracted by `cargo xtask image mkboot` (x86 post-link)
 
-Built by `tools/mkboot.rs` (clang, plus lld and nm out of the fork's own build
+Built by `cargo xtask image mkboot` (clang, plus lld and nm out of the fork's own build
 tree — see `crates/kernel-boot/toolchain_tools.rs`) after the kernel ELF links;
 the address comes from nm on the kernel-boot ELF.
 
@@ -137,7 +137,7 @@ unchanged (`.notes/dynamic_linking.md`).
 | `crates/kernel-boot/src/boot_init.rs` | Server loading, page table creation |
 | `crates/kernel-boot/src/boot_test.rs` | In-kernel boot verification tests |
 | `crates/kernel/build.rs` | Boot image assembly (initramfs CPIO + embedded MinixFS, when the embed features are on) |
-| `tools/mkboot.rs` | x86 post-link: kmain extract, trampoline, kernel.bin (stem-suffixed for the boot image) |
+| `crates/xtask/src/image.rs` (`cargo xtask image mkboot`) | x86 post-link: kmain extract, trampoline, kernel.bin (stem-suffixed for the boot image) |
 | `crates/boot-image/` | CPIO + MinixFS builders; `mkminixfs` also builds the disk *system image* (reads `MINIXFS_EXTRA` / `DYNLINK_BINS` / `MINIXFS_BLOCKS`) |
 | `crates/ldso/` | The dynamic loader (`/libexec/ld.so`): maps and relocates `DT_NEEDED` objects after a dynamic `exec` |
 | `tools/minix-raw.ld` | Kernel linker script (link address 0x200000) |

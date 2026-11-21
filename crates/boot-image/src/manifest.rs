@@ -38,7 +38,8 @@ pub const BOOT_BINS: &[(&str, &str)] = &[
     // `/bin/hello` is the std smoke-test binary: it is NOT a `userland`
     // cargo bin. Rebuild it with `cargo xtask build std-hello [target]`
     // (compiles `tools/std-hello.rs` with the rust fork's stage1 compiler
-    // against the fork's std), then re-run `target/mkboot` + `target/mkfs`
+    // against the fork's std), then re-run `cargo xtask image mkboot` and
+    // `cargo xtask image mkfs`
     // to embed it.
     ("/bin/hello", "hello"),
     // `/bin/helloc` is the C smoke-test binary: freestanding C linked

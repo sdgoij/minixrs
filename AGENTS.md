@@ -49,7 +49,7 @@ just image <arch>
 |---|---|
 | Any Rust | steps 1 to 3 above, plus 4 when the change is arch-gated |
 | Kernel, `arch-*`, a HAL constant, a VA layout, IPC, a shared test that names an address | `just test-arches` |
-| Image assembly (`boot-image`, `crates/kernel/build.rs`, `tools/mkboot.rs`, boot config, initramfs or minixfs contents) | `just image <arch>` and `just test-arches` |
+| Image assembly (`boot-image`, `crates/kernel/build.rs`, `crates/xtask/src/image.rs`, boot config, initramfs or minixfs contents) | `just image <arch>` and `just test-arches` |
 | A server or userland path compiled only for minix | `just build-<arch>` and the matching smoke gate; host clippy cannot see the code |
 | Dynamic linking or `ldso` | `just test-dynlink-<arch>`, `cargo test -p ldso` |
 | Mesa, libdrm or the GL/EGL stack | `just test-gltriangle <arch>` (see `mesa-port`) |

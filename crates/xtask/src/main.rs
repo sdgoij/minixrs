@@ -22,6 +22,7 @@ mod build;
 mod cc;
 mod check;
 mod dynamic;
+mod image;
 mod paths;
 mod toolchain;
 
@@ -42,6 +43,7 @@ fn main() -> ExitCode {
     let result = match matches.subcommand() {
         Some(("check", matches)) => run_check(&root, matches, &mut out, &mut err),
         Some(("build", matches)) => run_build(&root, matches),
+        Some(("image", matches)) => run_image(&root, matches).map(|()| true),
         _ => unreachable!("clap requires a subcommand"),
     };
 
@@ -99,6 +101,18 @@ fn run_build(root: &Path, matches: &clap::ArgMatches) -> io::Result<bool> {
 
 fn target(matches: &clap::ArgMatches) -> Option<&str> {
     matches.get_one::<String>("target").map(String::as_str)
+}
+
+fn run_image(root: &Path, matches: &clap::ArgMatches) -> io::Result<()> {
+    match matches.subcommand() {
+        Some(("mkboot", matches)) => image::mkboot(
+            root,
+            matches.get_one::<String>("features").map(String::as_str),
+            matches.get_one::<String>("stem").map(String::as_str),
+        ),
+        Some(("mkfs", matches)) => image::mkfs(root, target(matches)),
+        _ => unreachable!("clap requires an image subcommand"),
+    }
 }
 
 fn command() -> clap::Command {
@@ -180,6 +194,31 @@ fn command() -> clap::Command {
                                 .help("The program's name (default: the source's stem)"),
                         )
                         .arg(target_option("x86")),
+                ),
+        )
+        .subcommand(
+            clap::Command::new("image")
+                .about("Post-link image steps: the x86 trampoline and the raw disk image")
+                .subcommand_required(true)
+                .arg_required_else_help(true)
+                .subcommand(
+                    clap::Command::new("mkboot")
+                        .about("Build kernel-boot, then the trampoline with its kmain address")
+                        .arg(
+                            clap::Arg::new("features")
+                                .value_name("FEATURES")
+                                .help("Comma-joined kernel-boot features (default: embed_initramfs,x86)"),
+                        )
+                        .arg(
+                            clap::Arg::new("stem")
+                                .value_name("STEM")
+                                .help("Output name: <stem>.bin and <stem>-trampoline.elf (default: kernel)"),
+                        ),
+                )
+                .subcommand(
+                    clap::Command::new("mkfs")
+                        .about("Copy the kernel's MinixFS blob to the arch's raw disk image")
+                        .arg(target_arg("x86")),
                 ),
         )
 }

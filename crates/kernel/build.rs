@@ -205,8 +205,8 @@ fn assemble(
 
 /// Actionable fix for a missing boot binary. Most come from the `userland`
 /// crate, but a few are produced by dedicated tooling and fail confusingly
-/// when someone drives the kernel build directly (e.g. `target/mkboot` after
-/// `just bootstrap` wiped the shared target dir).
+/// when someone drives the kernel build directly (e.g. `cargo xtask image mkboot`
+/// after `just bootstrap` wiped the shared target dir).
 fn missing_binary_hint(dest: &str, t: &targets::BuildTarget) -> String {
     // The just recipes are named build-x86/build-riscv64/build-aarch64 but
     // the arch field is the rustc short name ("x86_64").
