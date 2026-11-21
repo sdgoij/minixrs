@@ -1,0 +1,16 @@
+[package]
+name = "host-tools"
+version = "0.1.0"
+description = "Locating the fork's build-tree tools, shared by kernel-boot's build script and the xtask"
+
+[package.edition]
+workspace = true
+
+[package.rust-version]
+workspace = true
+
+[package.license]
+workspace = true
+
+[lints]
+workspace = true

@@ -146,8 +146,8 @@ the current host resolves to.
 
 The post-link tools of the x86 image path (`cargo xtask image mkboot`, plus
 `crates/kernel-boot/build.rs` for the fallback trampoline) have the same problem with
-`lld`, `nm` and `objcopy`, and resolve them the same way through
-`crates/kernel-boot/toolchain_tools.rs` — the sysroot only has `llvm-nm` (no
+`lld`, `nm` and `objcopy`, and resolve them the same way through the
+`host-tools` crate (`crates/host-tools/src/lib.rs`) — the sysroot only has `llvm-nm` (no
 `rust-nm`), so those lookups try both names. Clang is a genuine PATH prerequisite:
 neither the toolchain nor the CI LLVM artifacts ship one.
 

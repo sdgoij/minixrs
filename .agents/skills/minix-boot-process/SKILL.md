@@ -28,7 +28,7 @@ The ELF32 multiboot trampoline transitions the CPU from 32-bit to 64-bit long mo
 7. Jumps to kmain() at address extracted by `cargo xtask image mkboot` (x86 post-link)
 
 Built by `cargo xtask image mkboot` (clang, plus lld and nm out of the fork's own build
-tree — see `crates/kernel-boot/toolchain_tools.rs`) after the kernel ELF links;
+tree — see `crates/host-tools/src/lib.rs`) after the kernel ELF links;
 the address comes from nm on the kernel-boot ELF.
 
 ## Stage 2: kmain() (crates/kernel-boot/src/main.rs)

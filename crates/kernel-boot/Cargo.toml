@@ -41,6 +41,9 @@ arch-common = { path = "../arch-common" }
 kernel = { path = "../kernel" }
 drivers = { path = "../drivers" }
 
+[build-dependencies]
+host-tools = { path = "../host-tools" }
+
 [target.'cfg(target_arch = "x86_64")'.dependencies]
 arch-x86_64 = { path = "../arch-x86_64" }
 

@@ -1,15 +1,16 @@
 //! Toolchain tools for the x86 post-link steps, from the build tree first and
 //! `PATH` only as a fallback.
 //!
-//! `x.py` installs the tools under names that differ from the ones on `PATH` —
+//! `x.py` installs the tools under names that differ from the ones on `PATH`:
 //! the stage1 sysroot ships LLD as `rust-lld` and copies `llvm-objcopy` in as
-//! `rust-objcopy` — and a CI image has none of them on `PATH` at all. So both
-//! consumers, `build.rs` (the fallback trampoline) and `crates/xtask/src/image.rs`
-//! (the real post-link steps), look in the tree the stage1 compiler lives in first.
+//! `rust-objcopy`, and a CI image has none of them on `PATH` at all. So both
+//! consumers, `crates/kernel-boot/build.rs` (the fallback trampoline) and the
+//! xtask's `image` module (the real post-link steps), look in the tree the stage1
+//! compiler lives in first.
 //!
-//! Shared by `mod toolchain_tools;` in the build script and
-//! `#[path = "../../kernel-boot/toolchain_tools.rs"]` in `image.rs`, which is why
-//! the items are `pub`.
+//! This is a crate rather than a `#[path]` include because rust-analyzer refuses
+//! a `#[path]` that leaves the crate directory, so an include in either consumer
+//! made the editor report the module as missing even though the build was fine.
 //!
 //! rustc's own linker for the minix targets is resolved separately, by
 //! `tools/lld.py`, which the Justfile and the smoke-test scripts use.
@@ -22,7 +23,7 @@ pub fn host_triple() -> String {
     let output = Command::new("rustc")
         .arg("-vV")
         .output()
-        .expect("rustc -vV failed — a Rust toolchain has to be on PATH");
+        .expect("rustc -vV failed: a Rust toolchain has to be on PATH");
     let stdout = String::from_utf8_lossy(&output.stdout);
     stdout
         .lines()
@@ -82,4 +83,48 @@ pub fn find_tool(dirs: &[PathBuf], names: &[&str]) -> Option<PathBuf> {
         }
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn temp_dir(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(name);
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn the_first_directory_and_the_first_name_that_exist_win() {
+        let dir = temp_dir("minixrs-host-tools-find");
+        let first = dir.join("first");
+        let second = dir.join("second");
+        std::fs::create_dir_all(&first).unwrap();
+        std::fs::create_dir_all(&second).unwrap();
+        let preferred = first.join(exe("second-name"));
+        std::fs::write(&preferred, b"").unwrap();
+
+        let found = find_tool(&[first, second], &["first-name", "second-name"]);
+        assert_eq!(found, Some(preferred));
+
+        assert_eq!(find_tool(&[], &["no-such-tool-minixrs"]), None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_build_tree_directories_are_tried_in_order() {
+        let dirs = tool_dirs(Path::new("tree"), "host-triple");
+        assert_eq!(dirs.len(), 4);
+        assert!(dirs[0].ends_with("stage1/lib/rustlib/host-triple/bin"));
+        assert!(dirs[1].ends_with("llvm/bin"));
+        assert!(dirs[2].ends_with("lld/bin"));
+        assert!(dirs[3].ends_with("ci-llvm/bin"));
+    }
+
+    #[test]
+    fn the_host_triple_names_the_build_directory() {
+        assert!(host_triple().contains('-'));
+    }
 }

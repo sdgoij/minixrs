@@ -17,9 +17,7 @@
 use std::path::PathBuf;
 use std::process::Command;
 
-mod toolchain_tools;
-
-use toolchain_tools::{find_tool, host_triple, tool_dirs};
+use host_tools::{find_tool, host_triple, tool_dirs};
 
 fn main() {
     let manifest_dir = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap());

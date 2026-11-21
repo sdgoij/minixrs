@@ -15,18 +15,13 @@ use crate::arch::{self, Arch};
 use crate::cc;
 use crate::toolchain;
 
-// The tool lookups the fork's build tree answers: `rust-lld`, `rust-objcopy` and
-// `llvm-nm` live there, and a CI image has none of them on PATH.
-#[path = "../../kernel-boot/toolchain_tools.rs"]
-mod toolchain_tools;
-
 pub fn mkboot(root: &Path, features: Option<&str>, stem: Option<&str>) -> io::Result<()> {
     let stem = stem.unwrap_or("kernel");
     let features = features_of(features);
     println!("Features: {features}");
 
-    let host = toolchain_tools::host_triple();
-    let dirs = toolchain_tools::tool_dirs(root, &host);
+    let host = host_tools::host_triple();
+    let dirs = host_tools::tool_dirs(root, &host);
     let stage1 = toolchain::find_stage1_rustc(root).ok_or_else(toolchain::missing_stage1)?;
     let nm = tool(&dirs, &["rust-nm", "llvm-nm"], "nm")?;
     let objcopy = tool(&dirs, &["rust-objcopy", "llvm-objcopy"], "objcopy")?;
@@ -218,7 +213,7 @@ fn parse_kmain(output: &str) -> Option<String> {
 }
 
 fn tool(dirs: &[PathBuf], names: &[&str], what: &str) -> io::Result<PathBuf> {
-    toolchain_tools::find_tool(dirs, names).ok_or_else(|| {
+    host_tools::find_tool(dirs, names).ok_or_else(|| {
         io::Error::new(
             io::ErrorKind::NotFound,
             format!(

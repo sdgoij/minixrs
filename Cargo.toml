@@ -34,6 +34,9 @@ members = [
     "crates/boot-image",
     "crates/drivers",
     "crates/fs",
+    # Host-side tool lookup shared by kernel-boot's build script and the xtask.
+    # A `std` library for the host: it must not pull in a target crate.
+    "crates/host-tools",
     "crates/kernel",
     "crates/kernel-boot",
     "crates/ldso",

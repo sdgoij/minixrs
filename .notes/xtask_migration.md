@@ -203,7 +203,8 @@ if we decide otherwise.
 `Justfile` L212 runs `"{{stage1-rustc}}" tools/mkboot.rs --edition 2024 -o
 target/mkboot`, and runs it from a recipe that already required a bootstrap.
 Nothing in `mkboot.rs` needs the fork: it is a `std` program with a
-`#[path = "../crates/kernel-boot/toolchain_tools.rs"]` include.
+`#[path = "../crates/kernel-boot/toolchain_tools.rs"]` include (that file is now
+the `host-tools` crate, which the build script and the xtask both depend on).
 
 Moving it into `xtask` (built by the pinned host toolchain, `1.96.0` per
 `rust-toolchain.toml`) removes a stage1 dependency from the image path and
