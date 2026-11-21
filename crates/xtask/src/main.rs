@@ -54,6 +54,7 @@ fn main() -> ExitCode {
     let result = match matches.subcommand() {
         Some(("check", matches)) => run_check(&root, matches, &mut out, &mut err),
         Some(("build", matches)) => run_build(&root, matches),
+        Some(("cc", matches)) => run_cc(&root, matches),
         Some(("image", matches)) => run_image(&root, matches).map(|()| true),
         Some(("fetch-stage1", matches)) => {
             fetch_stage1::run(&root, matches.get_flag("force")).map(|()| true)
@@ -180,6 +181,53 @@ fn run_image(root: &Path, matches: &clap::ArgMatches) -> io::Result<()> {
         Some(("mkfs", matches)) => image::mkfs(root, target(matches)),
         _ => unreachable!("clap requires an image subcommand"),
     }
+}
+
+fn run_cc(root: &Path, matches: &clap::ArgMatches) -> io::Result<bool> {
+    let Some((name, matches)) = matches.subcommand() else {
+        unreachable!("clap requires a cc subcommand")
+    };
+    let words: Vec<String> = matches
+        .get_many::<String>("args")
+        .map(|values| values.cloned().collect())
+        .unwrap_or_default();
+    let dry_run = matches.get_flag("dry-run");
+    let (arch, args) = cc_arch(&words);
+    match name {
+        "minix" => cc::minix::run(root, arch, &args, dry_run),
+        "dso" => cc::dso::run(root, arch, &args, dry_run),
+        _ => unreachable!("clap requires a cc subcommand"),
+    }
+}
+
+/// The optional leading target of a `cc` line: a bare word, so it cannot be
+/// confused with a flag or an input file. With none, the line is the whole line
+/// and the target is the default.
+fn cc_arch(words: &[String]) -> (&'static arch::Arch, Vec<String>) {
+    if let Some(first) = words.first()
+        && let Ok(arch) = arch::resolve(first)
+    {
+        return (arch, words[1..].to_vec());
+    }
+    (arch::DEFAULT, words.to_vec())
+}
+
+fn dry_run_arg() -> clap::Arg {
+    clap::Arg::new("dry-run")
+        .long("dry-run")
+        .action(clap::ArgAction::SetTrue)
+        .help("Print the commands instead of running them")
+}
+
+/// The compiler command line, as the foreign build gives it.
+fn cc_args() -> clap::Arg {
+    clap::Arg::new("args")
+        .value_name("ARG")
+        .required(true)
+        .num_args(1..)
+        .trailing_var_arg(true)
+        .allow_hyphen_values(true)
+        .help("The compiler command line, an optional target first")
 }
 
 fn run_probe(root: &Path, matches: &clap::ArgMatches) -> io::Result<bool> {
@@ -413,6 +461,24 @@ fn command() -> clap::Command {
                                 .help("The program's name (default: the source's stem)"),
                         )
                         .arg(target_option("x86")),
+                ),
+        )
+        .subcommand(
+            clap::Command::new("cc")
+                .about("The `cc` a foreign C build calls: an executable, or a shared object")
+                .subcommand_required(true)
+                .arg_required_else_help(true)
+                .subcommand(
+                    clap::Command::new("minix")
+                        .about("Compile for minix, and link an executable against the static libc")
+                        .arg(dry_run_arg())
+                        .arg(cc_args()),
+                )
+                .subcommand(
+                    clap::Command::new("dso")
+                        .about("Build a shared object, and a program against the port's libc.so")
+                        .arg(dry_run_arg())
+                        .arg(cc_args()),
                 ),
         )
         .subcommand(

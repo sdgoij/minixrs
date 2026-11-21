@@ -8,9 +8,9 @@ host: configure reported `HAVE_TERMIOS_H`, `HAVE_SYS_WAIT_H` and
 `HAVE_UNION_WAIT` for a target that has none of them, and bash then compiled
 paths no real system has. A missing header should be an error, not a guess.
 
-The call sites are the scratch `target/tmp/cc-minix` the bash build uses and
-`tools/cc-minix.py`. `crates/xtask` has its own copy; this one stays until the
-C project builds move. `.notes/c_build.md` has the write-up.
+The call site is `tools/cc-dso-minix.py`. `crates/xtask` has its own copy for
+`cargo xtask cc minix` and `cargo xtask cc dso`; this one stays until the C
+project builds move. `.notes/c_build.md` has the write-up.
 """
 
 from __future__ import annotations

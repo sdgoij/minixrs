@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """A `cc` for C projects that build *shared objects* for minix.
 
-`tools/cc-minix.py` links an executable against the static `minix-libc` rlib,
+`cargo xtask cc minix` links an executable against the static `minix-libc` rlib,
 which is what bash and the smoke binaries want. Mesa and `libdrm` are the other
 shape: their build (meson) compiles many C files with one `cc`, links some of
 them into a `.so` that names `libc.so`, and links a program against that. A
@@ -12,7 +12,7 @@ It is the `cc` half of §6.10 stage 3c-0. The pieces it reuses are the ones ever
 minix C build already shares:
 
   * **compile** — clang for the arch's machine, `-fPIC` (a shared object is
-    position-independent; `tools/cc-minix.py`'s `-fno-pic` is for executables),
+    position-independent; `cargo xtask cc minix`'s `-fno-pic` is for executables),
     with `tools/ccflags.py`'s hermetic include set, so a missing header is an
     error rather than the host's glibc.
   * **link** — LLD directly (`tools/lld.py`), the same `-z norelro` a shared

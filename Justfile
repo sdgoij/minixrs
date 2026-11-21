@@ -186,10 +186,15 @@ coreutils-aarch64:
     # blake3's aarch64 path compiles `blake3_neon.c` unconditionally, while x86 falls
     # back to Rust intrinsics when no `cc` is found and riscv64 has no SIMD path at
     # all — so aarch64 is the one target whose multicall needs a C compiler. It is the
-    # port's own, told the arch (`tools/cc-minix.py`), with an archiver for the object:
+    # port's own, `cargo xtask cc minix aarch64`, with an archiver for the object:
     # `llvm-ar` where it exists (MSYS has no `ar`), binutils' `ar` otherwise (a Linux
     # runner). Both are named bare, so cc-rs resolves them on PATH.
-    AR_aarch64_unknown_minix="$(command -v llvm-ar >/dev/null 2>&1 && echo llvm-ar || echo ar)" CC_aarch64_unknown_minix="python {{ROOT}}/tools/cc-minix.py aarch64" RUSTC="{{stage1-rustc}}" RUSTFLAGS="-C link-arg=-T../tools/minix-user.ld -C link-arg=--no-eh-frame-hdr --cfg getrandom_backend=\"custom\" -C strip=symbols -C opt-level=z" cargo build --manifest-path coreutils/Cargo.toml --release --target aarch64-unknown-minix --no-default-features --features feat_minix
+    #
+    # The wrapper is named by path, not through `cargo run`: cc-rs calls it once per C
+    # file, and a `cargo run` per call would queue behind cargo's lock. The first line
+    # builds it; `cargo xtask --list` prints the command tree, which is discarded.
+    cargo xtask --list >/dev/null
+    AR_aarch64_unknown_minix="$(command -v llvm-ar >/dev/null 2>&1 && echo llvm-ar || echo ar)" CC_aarch64_unknown_minix="{{ROOT}}/.xtask/debug/xtask cc minix aarch64" RUSTC="{{stage1-rustc}}" RUSTFLAGS="-C link-arg=-T../tools/minix-user.ld -C link-arg=--no-eh-frame-hdr --cfg getrandom_backend=\"custom\" -C strip=symbols -C opt-level=z" cargo build --manifest-path coreutils/Cargo.toml --release --target aarch64-unknown-minix --no-default-features --features feat_minix
     cp coreutils/target/aarch64-unknown-minix/release/coreutils target/aarch64-unknown-minix/release/coreutils
 
 # ---------- build ----------
@@ -1888,9 +1893,9 @@ build-c-hello arch="x86":
 
 # GNU bash for a minix target, from the upstream commit `tools/build-bash.py` pins:
 # fetched, configured against `tools/c-include` and linked against minix-libc by
-# `tools/cc-minix.py`, the `cc` a C project's own build needs. That host must be
+# `cargo xtask cc minix`, the `cc` a C project's own build needs. That host must be
 # POSIX (the stage1, the rlib and clang all have to be the same host's), so on
-# Windows the script re-enters WSL by itself — `MINIX_WSL_DISTRO` picks the
+# Windows the script re-enters WSL by itself; `MINIX_WSL_DISTRO` picks the
 # distribution. Artifact: `target/bash/<arch>/bash`; `just test-bash <arch>`
 # boots it. `.notes/c_build.md` has the why of each flag and each trap this build costs.
 #

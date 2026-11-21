@@ -1,8 +1,8 @@
 //! The minix userland C targets, and what a C build has to be told to name one.
 //!
-//! Three drivers need the same answers (`cc-minix`, the smoke binaries, and the
-//! bash build), so the table lives here rather than three times over. What the
-//! answers are is the point: the *minix* triple is what the rustc rlib is built
+//! Three drivers need the same answers (`crate::cc::minix`, the smoke binaries,
+//! and the bash build), so the table lives here rather than three times over.
+//! What the answers are is the point: the *minix* triple is what the rustc rlib is built
 //! for, and the clang *machine* is what the headers and the object code are
 //! compiled for. They are the same machine, one per arch, and the link step is
 //! where the two are made to agree.

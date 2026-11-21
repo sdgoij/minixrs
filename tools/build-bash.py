@@ -14,6 +14,11 @@ it fetches bash at a pinned commit, builds minix-libc with the *same* stage1 the
 link uses, configures bash against the port's headers, links it, and leaves the
 result at `target/bash/<arch>/bash`.
 
+The `cc` those steps call is `cargo xtask cc minix <arch>`: clang against
+`tools/c-include` for the compile, the stage1 rustc with the arch's crt0 and the
+minix-libc rlib for the link. `build/` and the artifact are per arch: two arches
+sharing a build directory would configure and link each other's objects.
+
 `--force` refetches the source and reconfigures (the default reuses both, and
 still rebuilds the libc and relinks, so it is safe to re-run after a libc edit).
 
@@ -114,8 +119,37 @@ def cc_for_build() -> str:
 
 
 def cc_for_target(arch: Arch) -> str:
-    """The `cc` the target build calls: the port's wrapper, told which arch."""
-    return f"python3 {TOOLS / 'cc-minix.py'} {arch.name}"
+    """The `cc` the target build calls: the xtask's own wrapper, told which arch.
+
+    `cargo xtask cc minix` is what this build now names as its `cc`: the C
+    compile is clang against `tools/c-include` and the link is the stage1 rustc
+    with the arch's crt0 and the minix-libc rlib. It is the wrapper the rest of
+    the toolchain drives, so bash and e.g. `just coreutils-aarch64` cannot drift
+    apart.
+
+    Built here rather than assumed, and run as a binary rather than through
+    `cargo run`: the wrapper is on the hot path of a 209-object build, and a
+    `cargo run` per object would serialise the build behind cargo's lock.
+    `.xtask/linux` is this host's copy; a Windows checkout's `.xtask` is a
+    different binary.
+    """
+    return f"{xtask_wrapper()} cc minix {arch.name}"
+
+
+_XTASK = ""
+
+
+def xtask_wrapper() -> str:
+    """The xtask binary built for this host, building it first if it is absent."""
+    global _XTASK
+    if _XTASK:
+        return _XTASK
+    target_dir = ROOT / ".xtask" / "linux"
+    note(f"building the xtask wrapper into {target_dir.relative_to(ROOT)}")
+    if run(["cargo", "build", "--quiet", "-p", "xtask", "--target-dir", str(target_dir)]) != 0:
+        die("building the xtask wrapper failed")
+    _XTASK = str(target_dir / "debug" / "xtask")
+    return _XTASK
 
 
 def note(msg: str) -> None:

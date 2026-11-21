@@ -8,7 +8,7 @@ against the port's C toolchain, log everything — with three differences that c
 from what Mesa is:
 
 * the toolchain is `tools/cc-dso-minix.py`, the `cc` that produces shared
-  objects, not `tools/cc-minix.py`, which links executable images against the
+  objects, not `cargo xtask cc minix`, which links executable images against the
   static rlib;
 * the build system is **meson**, so what is generated is a *cross file* naming
   that `cc` (and its `--cxx` mode), and meson itself is assumed to be on `PATH`

@@ -828,3 +828,22 @@ answer or configure rejects the compiler; the DSO wrapper has to split `-Wl,a,b`
 and honour `-Wl,-soname`; the inner shell must be a login shell; and a Windows
 `cargo clean` must never have to delete a running binary, which is why the Linux
 build gets its own target dir.
+
+W1 landed. `cargo xtask cc minix|dso <arch> <args...>` is the two `cc` wrappers,
+ported from `tools/cc-minix.py` and `tools/cc-dso-minix.py`, and both take
+`--dry-run`. The parity check was three stub executables (clang, rustc, lld) on
+PATH plus `MINIXRS_LLD`/`MINIXRS_STAGE1_RUSTC`, then diffing Python's `+ ...`
+echoes against the Rust side's printed commands on sixteen lines: compile,
+compile-only, link from sources, link from objects, the version probe, a leading
+arch token, C++, `-Wl,` splitting with and without the value as a separate token,
+the linker probe, and the spurious host libraries. It caught one real bug, the
+C++ include order (libc++ then `c-include` then the generated config). Then a
+clean 209-object bash build with `cc minix` produced a binary byte-identical to
+the same build through the Python wrapper, and `just test-bash x86`,
+`just test-interactive-bash x86` and `just coreutils-aarch64` are green. The two
+callers now name the binary by path rather than `cargo run`, because the wrapper
+is called once per object and `cargo` would queue them behind its lock; the
+Justfile's `coreutils-aarch64` builds it with `cargo xtask --list >/dev/null`
+first, and `build-bash.py` builds `.xtask/linux` itself. `tools/cc-minix.py` is
+deleted; `cc-dso-minix.py`, `ccarch.py` and `ccflags.py` stay with the Mesa
+builder until W3.
