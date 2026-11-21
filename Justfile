@@ -130,10 +130,11 @@ fetch-stage1 target="all":
 
 # Consume the published stage1 the way a Linux dev or CI job does: fetch it (into
 # target/stage1-verify), link the smoke binaries for all three minix targets with
-# it, and check each result's ELF machine. Fails on Windows because the published
-# asset is a Linux one; run it in WSL there.
+# it, and check each result's ELF machine. With the published asset that is a
+# Linux run; a stage1 built from source can be verified on the host that built
+# it by naming its directory and its lld (`MINIXRS_STAGE1_DEST`, `MINIXRS_LLD`).
 verify-stage1:
-    python tools/verify-stage1.py
+    cargo xtask verify-stage1
 
 # Userland + server binaries for a target, built into the shared cargo
 # target dir (fast incremental; required before the kernel build, whose

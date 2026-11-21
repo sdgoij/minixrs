@@ -85,7 +85,7 @@ of `run`, `mkfs`, `image`, `gltriangle`, `export`, `desktop`.
 
 1. **Toolchain discovery and pinning.** `stage1.py` (67), `lld.py` (174),
    `pin.py` (38), `bash_pin.py`, `mesa_pin.py`,
-   `verify-stage1.py` (151), `fetch-mesa.py` (186),
+   `fetch-mesa.py` (186),
    `fetch-bash.py` (179), `mirror-bash.py`, `ccarch.py`, `ccflags.py`.
    Mostly path resolution, small files, a few network fetches. The pin modules
    are *imported as modules* by release workflows (section 3.6).
@@ -454,8 +454,16 @@ a `file://` directory, which is how the fetcher was checked here: a fake release
 was fetched, checksum-verified and extracted by both the script and the port,
 with the same tree and the same marker (the script's `Path.write_text` CRLF
 aside), and the already-installed, `--force`, checksum-mismatch and
-missing-entry paths were exercised. `verify-stage1` still drives the published
-toolchain, and now calls `cargo xtask fetch-stage1`.
+missing-entry paths were exercised. `cargo xtask verify-stage1` replaces
+`tools/verify-stage1.py` too, so phase 2 is done: it installs through the
+fetcher, finds the sysroot's own `rust-lld`, and links `tools/std-hello.rs` for
+the three minix targets, checking each ELF's `e_machine`. That smoke file names
+`minix_libc`, which the script never passed, so it had been failing since std's
+backtrace pulled the port's unwind stubs in; the port builds the rlib per
+target with the same toolchain, as `cargo xtask build std-hello` does. It ran
+here against this machine's stage1 with `MINIXRS_STAGE1_DEST` and `MINIXRS_LLD`
+(the override names an lld for a source build, whose LLD is not in the sysroot),
+linking x86-64, RISC-V and AArch64.
 
 **Phase 1, contd.** `cargo xtask build gltriangle|gui` replaced two of the Mesa
 clients. Both artifacts were byte-identical to the Python build's. That slice

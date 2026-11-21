@@ -47,6 +47,19 @@ const MINIX_TARGETS: [&str; 3] = [
 const MARKER: &str = ".minixrs-fetched";
 
 pub fn run(root: &Path, force: bool) -> io::Result<()> {
+    install(root, force, None).map(|_| ())
+}
+
+/// Install into `dest`, or into `MINIXRS_STAGE1_DEST` / `rust/build/<host>` when
+/// it is `None`, and return the installed `stage1` directory.
+///
+/// `verify-stage1` passes its own destination and reuses this, so the two
+/// commands cannot disagree about what an installed toolchain is.
+pub(crate) fn install(
+    root: &Path,
+    force: bool,
+    dest: Option<PathBuf>,
+) -> io::Result<PathBuf> {
     let sha = pinned_sha(root)?;
     let host = toolchain::host_triple().ok_or_else(|| {
         io::Error::new(
@@ -54,9 +67,12 @@ pub fn run(root: &Path, force: bool) -> io::Result<()> {
             "cannot run `rustc -vV` to detect the host triple, which names the release asset",
         )
     })?;
-    let dest = std::env::var_os("MINIXRS_STAGE1_DEST")
-        .filter(|value| !value.is_empty())
-        .map(PathBuf::from)
+    let dest = dest
+        .or_else(|| {
+            std::env::var_os("MINIXRS_STAGE1_DEST")
+                .filter(|value| !value.is_empty())
+                .map(PathBuf::from)
+        })
         .unwrap_or_else(|| root.join("rust").join("build").join(&host));
     let stage1 = dest.join("stage1");
 
@@ -89,7 +105,7 @@ pub fn run(root: &Path, force: bool) -> io::Result<()> {
                 println!("re-run with --force to replace it with the published toolchain");
             }
         }
-        return Ok(());
+        return Ok(stage1);
     }
 
     let asset_name = format!("stage1-{sha}-{host}.tar.xz");
@@ -148,11 +164,11 @@ pub fn run(root: &Path, force: bool) -> io::Result<()> {
         stage1.display(),
         size as f64 / 1e9
     );
-    Ok(())
+    Ok(stage1)
 }
 
 /// The commit the `rust` submodule pins, which is the identity of the toolchain.
-fn pinned_sha(root: &Path) -> io::Result<String> {
+pub(crate) fn pinned_sha(root: &Path) -> io::Result<String> {
     let output = Command::new("git")
         .arg("-C")
         .arg(root.join("rust"))
@@ -174,7 +190,7 @@ fn rustc_in(stage1: &Path) -> Option<PathBuf> {
 }
 
 /// The commit a fetched toolchain was installed for, or `None` when unknown.
-fn recorded_sha(stage1: &Path) -> Option<String> {
+pub(crate) fn recorded_sha(stage1: &Path) -> Option<String> {
     let text = fs::read_to_string(stage1.join(MARKER)).ok()?;
     text.split_whitespace().next().map(str::to_string)
 }
@@ -313,7 +329,7 @@ fn remove_file_if_present(path: &Path) -> io::Result<()> {
     }
 }
 
-fn short(sha: &str) -> &str {
+pub(crate) fn short(sha: &str) -> &str {
     sha.get(..12).unwrap_or(sha)
 }
 

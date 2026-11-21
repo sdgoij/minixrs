@@ -28,6 +28,7 @@ mod paths;
 mod probe;
 mod rust_config;
 mod toolchain;
+mod verify_stage1;
 
 fn main() -> ExitCode {
     let matches = command().get_matches();
@@ -50,6 +51,7 @@ fn main() -> ExitCode {
         Some(("fetch-stage1", matches)) => {
             fetch_stage1::run(&root, matches.get_flag("force")).map(|()| true)
         }
+        Some(("verify-stage1", _)) => verify_stage1::run(&root).map(|()| true),
         Some(("probe", matches)) => run_probe(matches),
         Some(("rust-config", matches)) => {
             let token = matches
@@ -281,6 +283,10 @@ fn command() -> clap::Command {
                         .action(clap::ArgAction::SetTrue)
                         .help("Replace an existing toolchain, even one built from source"),
                 ),
+        )
+        .subcommand(
+            clap::Command::new("verify-stage1")
+                .about("Install the published stage1, then link the probe binaries with it"),
         )
         .subcommand(
             clap::Command::new("probe")
