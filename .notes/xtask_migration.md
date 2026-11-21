@@ -416,14 +416,18 @@ were deleted.
 the two builders `bootstrap` uses, with the arch table (`arch.rs`), the hermetic
 C flags (`cc.rs`) and the toolchain lookup (`toolchain.rs`) as Rust. Then
 `cargo xtask build dynlibc|dynlink|cdyn` replaced the dynamic-linking trio, on
-the shared link core in `dynamic.rs` (`dyn` is a Rust keyword). The four smoke
-binaries and the twelve dynamic artifacts were byte-identical to the Python
-build's before the scripts went, and `crates/kernel/build.rs`'s "build it with
-..." errors name the new commands. Still Python: `cc-minix`, `cc-dso-minix`,
-`build-libcxx`/`libcxx-toolchain`, `build-bash`/`fetch-bash`/`build-mesa`, and
-the `build-*` probe and Wayland clients. `ccarch.py` and `ccflags.py` stay with
-them; `crates/xtask` carries a copy of both tables until the last importer
-moves, which is the bounded duplication section 3.10 describes.
+the shared link core in `dynamic.rs` (`dyn` is a Rust keyword). Then
+`cargo xtask build libcxx|libcxx-toolchain` replaced the C++ runtime build: the
+merged `libstdc++.a` was byte-identical to the Python build's, and the generated
+cross file differs only in its header comment (which named the deleted script).
+The four smoke binaries, the twelve dynamic artifacts and the archive were
+byte-identical to the Python build's before the scripts went, and
+`crates/kernel/build.rs`'s "build it with ..." errors name the new commands.
+Still Python: `cc-minix`, `cc-dso-minix`,
+`build-bash`/`fetch-bash`/`build-mesa`, and the `build-*` probe and Wayland
+clients. `ccarch.py` and `ccflags.py` stay with them; `crates/xtask` carries a
+copy of both tables until the last importer moves, which is the bounded
+duplication section 3.10 describes.
 
 **Phase 2, image tools landed.** `cargo xtask image mkboot|mkfs` replaces
 `tools/mkboot.rs` and `tools/mkfs.rs`: the trampoline and `kernel.bin` were
@@ -433,13 +437,18 @@ tools/mkboot.rs` on every x86 image recipe) is gone. The superseded ports
 (`mkinitramfs.rs`, `mkminixfs.rs`, `mkimg.rs`) go with them. `fetch-stage1`
 and `verify-stage1` are still the phase's other half.
 
-`cc-minix` and `cc-dso-minix` are **not** ported, and the reason is a host, not
-a language: `build-bash.py` and `build-mesa.py` drive them from inside WSL
-(`build-mesa.py`'s meson cross file names the script through `wsl_path`), where
-a Windows `xtask.exe` cannot run. A Linux `xtask` build in the same tree would
-share `.xtask/` with the Windows one, which cargo cannot do (one artifact dir
-per host, and the alias cannot name a per-host one). They stay Python until a
-per-host wrapper exists; `ccarch.py` and `ccflags.py` stay with them.
+`cc-minix` and `cc-dso-minix` are **not** ported, and that is a decision
+rather than a pending item. The reason is a host: `build-bash.py` and
+`build-mesa.py` drive them from inside WSL (`build-mesa.py`'s meson cross file
+names the script through `wsl_path`), where a Windows `xtask.exe` cannot run,
+and a Linux `xtask` build in the same tree would share `.xtask/` with the
+Windows one. Running Rust there needs a per-host dispatch, whose cheapest form
+is a shell shim, and a shim is a worse trade than the Python it replaces: a
+`cc` wrapper pays a process startup per object either way, and the tree would
+grow a second entry point next to `cargo xtask`. These two are also the one
+place the migration's premise does not hold, because the build they serve
+already runs on a POSIX host. They stay Python, with `ccarch.py` and
+`ccflags.py`.
 
 ### Phase 0 in detail, because it defines the shape of every later phase
 

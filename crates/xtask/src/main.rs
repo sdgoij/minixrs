@@ -88,6 +88,10 @@ fn run_build(root: &Path, matches: &clap::ArgMatches) -> io::Result<bool> {
         Some(("std-hello", matches)) => build::std_hello::run(root, target(matches)),
         Some(("dynlibc", matches)) => build::dynlibc::run(root, target(matches)),
         Some(("dynlink", matches)) => build::dynlink::run(root, target(matches)),
+        Some(("libcxx", matches)) => build::libcxx::run(root, target(matches)).map(|()| true),
+        Some(("libcxx-toolchain", matches)) => {
+            build::libcxx::toolchain_command(root, target(matches)).map(|()| true)
+        }
         Some(("cdyn", matches)) => {
             let Some(source) = matches.get_one::<String>("source") else {
                 unreachable!("clap requires a source")
@@ -177,6 +181,16 @@ fn command() -> clap::Command {
                 .subcommand(
                     clap::Command::new("dynlink")
                         .about("The loader gate's objects and programs under target/dynlink")
+                        .arg(target_arg("x86")),
+                )
+                .subcommand(
+                    clap::Command::new("libcxx")
+                        .about("The C++ runtime: libc++ + libc++abi as one libstdc++.a")
+                        .arg(target_arg("x86")),
+                )
+                .subcommand(
+                    clap::Command::new("libcxx-toolchain")
+                        .about("Write target/cxx/toolchain-<machine>.cmake")
                         .arg(target_arg("x86")),
                 )
                 .subcommand(

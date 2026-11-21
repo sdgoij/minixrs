@@ -1936,7 +1936,7 @@ cdyn src arch="x86":
 #
 # Freestanding CMake cross builds (host clang targeting <machine>-unknown-none)
 # against the Minix C headers (tools/c-include), driven by
-# tools/build-libcxx.py, which owns the quirks this recipe used to spell out:
+# `cargo xtask build libcxx`, which owns the quirks this recipe used to spell out:
 #   - both libs need a distinct *_SHARED_OUTPUT_NAME: the never-built shared
 #     target collides with the static archive name on the Generic platform
 #     (ninja "multiple rules generate lib/libc++.a")
@@ -1950,7 +1950,7 @@ cdyn src arch="x86":
 #     CPython beside LLVM, whose python311._pth pins sys.path) cannot import
 #     libcxx's local modules, so tools/libcxx-iwyu.cmd stubs the step
 libcxx arch="x86":
-    python tools/build-libcxx.py {{arch}}
+    cargo xtask build libcxx {{arch}}
 
 # ---------- check ----------
 

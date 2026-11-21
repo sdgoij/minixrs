@@ -113,11 +113,11 @@ pub fn find_lld(root: &Path) -> Option<PathBuf> {
         }
     }
 
-    search_path("lld")
+    find_on_path("lld")
 }
 
 /// `name` on PATH, the way `shutil.which` does it.
-fn search_path(name: &str) -> Option<PathBuf> {
+pub fn find_on_path(name: &str) -> Option<PathBuf> {
     let file = exe(name);
     let path = std::env::var_os("PATH")?;
     std::env::split_paths(&path)

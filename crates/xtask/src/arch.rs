@@ -69,6 +69,22 @@ impl Arch {
         flags.push("-fno-pic".to_string());
         flags
     }
+
+    /// The PIC counterpart of [`Self::base_cflags`], for an object that ends up in
+    /// a shared library.
+    ///
+    /// The red-zone flag and RISC-V's `-march`/`-mabi` are the same, so a compile
+    /// here agrees with the one `cc-dso-minix` does for Mesa. There is no
+    /// `--target=` here: the C++ build names the triple through
+    /// `CMAKE_<LANG>_COMPILER_TARGET` and `cc-dso-minix` through its own argv.
+    pub fn pic_cflags(&self) -> Vec<String> {
+        let mut flags = vec!["-ffreestanding".to_string(), "-fPIC".to_string()];
+        if self.red_zone {
+            flags.push("-mno-red-zone".to_string());
+        }
+        flags.extend(self.extra_cflags.iter().map(|flag| flag.to_string()));
+        flags
+    }
 }
 
 pub static X86_64: Arch = Arch {

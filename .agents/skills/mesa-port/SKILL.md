@@ -1,6 +1,6 @@
 ---
 name: mesa-port
-description: Cross-building Mesa and libdrm for minix — the Wayland §6.10 phase-3 GL stack, its libc++ runtime, the cc-dso-minix DSO wrapper, and the surfaceless-EGL client, on all three arches. Use when running `just build-mesa`, `just libcxx` or `just gltriangle`/`just test-gltriangle`, when a Mesa/libdrm compile or link fails, when changing tools/build-mesa.py, tools/build-libcxx.py or tools/cc-dso-minix.py, or when working on the GL/EGL stack.
+description: Cross-building Mesa and libdrm for minix — the Wayland §6.10 phase-3 GL stack, its libc++ runtime, the cc-dso-minix DSO wrapper, and the surfaceless-EGL client, on all three arches. Use when running `just build-mesa`, `just libcxx` or `just gltriangle`/`just test-gltriangle`, when a Mesa/libdrm compile or link fails, when changing tools/build-mesa.py, the libcxx builder in `crates/xtask` or tools/cc-dso-minix.py, or when working on the GL/EGL stack.
 ---
 
 # Mesa + libdrm for minix
@@ -29,8 +29,8 @@ toolchain. `.notes/wayland.md` §6.10 is the design; these are the recipes and t
   is needed, and only a pin bump (or a `cc-dso-minix.py` change) triggers a
   rebuild — same shape as the stage1/toolchain-release pair.
 - `just libcxx <arch>` — builds libc++/libc++abi as one static `libstdc++.a`
-  (`target/cxx/<arch>/minix-runtime/`), from `tools/build-libcxx.py` and
-  `tools/libcxx-toolchain.py`'s generated cross file. Mesa is C++ (its GLSL
+  (`target/cxx/<arch>/minix-runtime/`), from `cargo xtask build libcxx` and the
+  cross file `cargo xtask build libcxx-toolchain` writes. Mesa is C++ (its GLSL
   compiler), so this is a prerequisite; per-arch, so the runtime matches the DSOs.
   It is linked into the DSOs statically, so it is not a separate released artifact.
 - `tools/cc-dso-minix.py` — the `cc` meson drives: compiles C **and C++**
