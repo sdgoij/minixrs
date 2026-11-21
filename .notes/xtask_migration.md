@@ -715,3 +715,8 @@ the phase.** Three kinds are cheap here and one is not:
 4. **Who owns the phase gate?** Each phase should name one command whose
    output is pasted into the commit, the way `.notes/test_gates.md` records
    its verdicts, so a reviewer can see it ran rather than infer it.
+
+`cargo xtask push-status` replaces `tools/push-status.py`, the last host-portable
+helper; its table matches the script's line for line on this tree. What remains in
+Python is the WSL-bound build pair (`build-bash`, `build-mesa`) with the
+`cc-minix`/`cc-dso-minix` wrappers they drive and the pin shims those read.

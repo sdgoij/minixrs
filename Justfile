@@ -2006,7 +2006,7 @@ check-static:
 # remote-tracking refs first, `--commits` lists the subjects. Exits 1 when something
 # is waiting, which is why the recipe does not turn that into an error line.
 push-status *args:
-    -python tools/push-status.py {{args}}
+    -cargo xtask push-status {{args}}
 
 # Build the wasm system and stage the demo into `docs/`, the directory GitHub Pages serves.
 #

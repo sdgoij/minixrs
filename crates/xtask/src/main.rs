@@ -30,6 +30,7 @@ mod mirror;
 mod paths;
 mod pin;
 mod probe;
+mod push_status;
 mod qmp;
 mod rust_config;
 mod smoke;
@@ -60,6 +61,12 @@ fn main() -> ExitCode {
         Some(("fetch", matches)) => run_fetch(&root, matches),
         Some(("pin", matches)) => pin::run(&root, matches).map(|()| true),
         Some(("mirror", matches)) => mirror::run(&root, matches),
+        Some(("push-status", matches)) => push_status::run(
+            &root,
+            matches.get_flag("fetch"),
+            matches.get_flag("commits"),
+            matches.get_flag("table"),
+        ),
         Some(("verify-stage1", _)) => verify_stage1::run(&root).map(|()| true),
         Some(("probe", matches)) => run_probe(&root, matches),
         Some(("smoke", matches)) => {
@@ -437,6 +444,28 @@ fn command() -> clap::Command {
                                 .default_value("tag")
                                 .help("tag or one of the pinned source fields"),
                         ),
+                ),
+        )
+        .subcommand(
+            clap::Command::new("push-status")
+                .about("List repositories whose commits are not on their remote")
+                .arg(
+                    clap::Arg::new("fetch")
+                        .long("fetch")
+                        .action(clap::ArgAction::SetTrue)
+                        .help("Fetch every repository first"),
+                )
+                .arg(
+                    clap::Arg::new("commits")
+                        .long("commits")
+                        .action(clap::ArgAction::SetTrue)
+                        .help("List the unpushed commits"),
+                )
+                .arg(
+                    clap::Arg::new("table")
+                        .long("table")
+                        .action(clap::ArgAction::SetTrue)
+                        .help("Full table of every repository"),
                 ),
         )
         .subcommand(
