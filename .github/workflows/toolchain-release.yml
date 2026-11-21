@@ -7,7 +7,7 @@
 # `workflow_call` - when the pinned rust commit has no release yet, before
 # anything consumes one. One run is one LLVM build, and the result stays valid
 # until the pinned rust commit changes. The tag *is* that commit, so consumers
-# resolve it exactly - `tools/fetch-stage1.py` derives the same tag from the
+# resolve it exactly - `cargo xtask fetch-stage1` derives the same tag from the
 # commit the `rust` submodule pins, which is why the toolchain can never be
 # stale.
 #

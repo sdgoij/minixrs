@@ -8,7 +8,7 @@ Run it on Linux, or in WSL against a Windows checkout:
 The asset is host-specific, so on Windows or macOS it only reports that nothing
 is published for that host.
 
-Nothing here re-implements the release. `tools/fetch-stage1.py` installs the
+Nothing here re-implements the release. `cargo xtask fetch-stage1` installs the
 toolchain for the commit the `rust` submodule pins - checksum, extraction and its
 own assertions - and this then links `tools/std-hello.rs` for all three minix
 targets with the linker the Justfile resolves (the stage1 sysroot's own
@@ -33,7 +33,6 @@ import subprocess
 import sys
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
-FETCH = ROOT / "tools" / "fetch-stage1.py"
 HELLO = ROOT / "tools" / "std-hello.rs"
 LINKER_SCRIPT = ROOT / "tools" / "minix-user.ld"
 DEFAULT_DEST = ROOT / "target" / "stage1-verify"
@@ -72,10 +71,10 @@ def install(dest: pathlib.Path, sha: str) -> pathlib.Path:
         if stage1.is_dir():
             print(f"== replacing {stage1}: it is not the published toolchain for {sha[:12]}")
 
-    print(f"== installing the stage1 for {sha[:12]} with tools/fetch-stage1.py")
+    print(f"== installing the stage1 for {sha[:12]} with cargo xtask fetch-stage1")
     env = {**os.environ, "MINIXRS_STAGE1_DEST": str(dest)}
-    if subprocess.run([sys.executable, str(FETCH), *force], env=env).returncode != 0:
-        sys.exit(f"error: {FETCH.name} failed - nothing to verify")
+    if subprocess.run(["cargo", "xtask", "fetch-stage1", *force], env=env, cwd=ROOT).returncode != 0:
+        sys.exit("error: cargo xtask fetch-stage1 failed - nothing to verify")
 
     if not (stage1 / "bin").is_dir():
         sys.exit(f"error: {FETCH.name} installed no toolchain at {stage1}")

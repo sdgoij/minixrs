@@ -14,7 +14,7 @@
 # ci-llvm `lld.exe`, which `tools/lld.py` resolves; the stage1 ships no rust-lld.
 # When the checkout's stage1 belongs to another host, point the build at a stage1
 # that matches the linking host, e.g. one fetched with
-# `MINIXRS_STAGE1_DEST=/tmp/stage1 python tools/fetch-stage1.py`:
+# `MINIXRS_STAGE1_DEST=/tmp/stage1 cargo xtask fetch-stage1`:
 #
 #   MINIXRS_RUSTC=/tmp/stage1/bin/rustc \
 #   MINIXRS_WASM_LINKER=/tmp/stage1/lib/rustlib/x86_64-unknown-linux-gnu/bin/rust-lld \

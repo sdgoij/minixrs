@@ -85,7 +85,7 @@ of `run`, `mkfs`, `image`, `gltriangle`, `export`, `desktop`.
 
 1. **Toolchain discovery and pinning.** `stage1.py` (67), `lld.py` (174),
    `pin.py` (38), `bash_pin.py`, `mesa_pin.py`,
-   `verify-stage1.py` (151), `fetch-stage1.py` (218), `fetch-mesa.py` (186),
+   `verify-stage1.py` (151), `fetch-mesa.py` (186),
    `fetch-bash.py` (179), `mirror-bash.py`, `ccarch.py`, `ccflags.py`.
    Mostly path resolution, small files, a few network fetches. The pin modules
    are *imported as modules* by release workflows (section 3.6).
@@ -444,6 +444,18 @@ except for the header line that named the deleted script; the write keeps the
 platform's line endings for the same reason (`Path.write_text` translated `\n`).
 The target list, the `no-std` sections and the Python-style quoting are unit
 tested, and so is the write against a temporary tree.
+
+`cargo xtask fetch-stage1` replaces `tools/fetch-stage1.py`, so `just
+fetch-stage1` and the two wasm CI jobs no longer need Python for it. The
+download is `curl` (a named tool whose absence is a named error) and the
+verification and unpacking are `sha2`, `tar` and `xz2`, which is why those
+three are dependencies of the crate. `MINIXRS_STAGE1_BASE` still takes a URL or
+a `file://` directory, which is how the fetcher was checked here: a fake release
+was fetched, checksum-verified and extracted by both the script and the port,
+with the same tree and the same marker (the script's `Path.write_text` CRLF
+aside), and the already-installed, `--force`, checksum-mismatch and
+missing-entry paths were exercised. `verify-stage1` still drives the published
+toolchain, and now calls `cargo xtask fetch-stage1`.
 
 **Phase 1, contd.** `cargo xtask build gltriangle|gui` replaced two of the Mesa
 clients. Both artifacts were byte-identical to the Python build's. That slice

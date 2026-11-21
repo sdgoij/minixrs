@@ -252,7 +252,7 @@ jobs:
       # removed), and this job builds neither - its artifacts come from the three wasm workspaces
       # and from the host `boot-image` binary, which use the default toolchain.
       - name: Install the prebuilt stage1
-        run: python tools/fetch-stage1.py
+        run: cargo xtask fetch-stage1
 
       # Binaryen is not in the repository (`tools/fork-spike/.gitignore` keeps `.tools/` out), so
       # the path `build.sh` looks for it at is where this has to put it. The npm package carries the
@@ -319,7 +319,7 @@ jobs:
         run: sudo ln -sf /usr/bin/python3 /usr/local/bin/python
 
       - name: Install the prebuilt stage1
-        run: python tools/fetch-stage1.py
+        run: cargo xtask fetch-stage1
 
       - name: Install Binaryen where build.sh looks for it
         run: npm install binaryen --prefix tools/fork-spike/.tools --no-save

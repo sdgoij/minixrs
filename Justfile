@@ -124,7 +124,7 @@ _finish-bootstrap target:
 # A published release can be verified by consuming it: `just verify-stage1`
 # (Linux/WSL only - the asset is host-specific).
 fetch-stage1 target="all":
-    python tools/fetch-stage1.py
+    cargo xtask fetch-stage1
     @just _finish-bootstrap {{target}}
     @echo "prebuilt stage1 ready. Rebuild the images: just build-{{ if target == "all" { "x86" } else { target } }} && just mkfs-{{ if target == "all" { "x86" } else { target } }}; boot with just run-{{ if target == "all" { "x86" } else { target } }} 256M"
 

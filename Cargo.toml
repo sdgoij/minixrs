@@ -74,6 +74,12 @@ clap = { version = "4.6", default-features = false, features = [
 # The static gates are text scanners; `regex-lite` is the one-crate subset, and
 # a lookahead-free rewrite of the only pattern that wanted one.
 regex-lite = "0.1"
+# `fetch-stage1` verifies and unpacks the published toolchain. All three are pure
+# Rust: the transport is `curl`, a named tool like clang or QEMU, because a TLS
+# stack would outweigh everything else this crate links.
+sha2 = "0.11"
+tar = { version = "0.4", default-features = false }
+xz2 = "0.1"
 
 # The host toolchain (rustup) has no minix target, so `target_os = "minix"`
 # would trip `unexpected_cfgs`; the fork's rustc knows the value natively.

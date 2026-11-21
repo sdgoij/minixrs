@@ -22,6 +22,7 @@ mod build;
 mod cc;
 mod check;
 mod dynamic;
+mod fetch_stage1;
 mod image;
 mod paths;
 mod probe;
@@ -46,6 +47,9 @@ fn main() -> ExitCode {
         Some(("check", matches)) => run_check(&root, matches, &mut out, &mut err),
         Some(("build", matches)) => run_build(&root, matches),
         Some(("image", matches)) => run_image(&root, matches).map(|()| true),
+        Some(("fetch-stage1", matches)) => {
+            fetch_stage1::run(&root, matches.get_flag("force")).map(|()| true)
+        }
         Some(("probe", matches)) => run_probe(matches),
         Some(("rust-config", matches)) => {
             let token = matches
@@ -266,6 +270,16 @@ fn command() -> clap::Command {
                     clap::Command::new("mkfs")
                         .about("Copy the kernel's MinixFS blob to the arch's raw disk image")
                         .arg(target_arg("x86")),
+                ),
+        )
+        .subcommand(
+            clap::Command::new("fetch-stage1")
+                .about("Install the prebuilt stage1 toolchain for the pinned rust commit")
+                .arg(
+                    clap::Arg::new("force")
+                        .long("force")
+                        .action(clap::ArgAction::SetTrue)
+                        .help("Replace an existing toolchain, even one built from source"),
                 ),
         )
         .subcommand(

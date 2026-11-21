@@ -75,7 +75,7 @@ Requirements:
 - **A stage1 whose sysroot has the `wasm32-minix` target, and a wasm-capable linker.** On Windows
   that linker is the checkout's ci-llvm `lld.exe`, which `tools/lld.py` resolves (the stage1 ships
   no rust-lld). To use a stage1 from another host, set `MINIXRS_RUSTC` and `MINIXRS_WASM_LINKER`
-  (`MINIXRS_STAGE1_DEST=/tmp/stage1 python tools/fetch-stage1.py`).
+  (`MINIXRS_STAGE1_DEST=/tmp/stage1 cargo xtask fetch-stage1`).
 - **Binaryen's `wasm-opt`** at `tools/fork-spike/.tools/node_modules/binaryen/bin/wasm-opt`
   (`npm install binaryen --prefix tools/fork-spike/.tools --no-save`).
 - **Node** (the harnesses are `.cjs`/ES modules) and `python` on `PATH`.
