@@ -26,6 +26,7 @@ mod fetch;
 mod fetch_stage1;
 mod guest;
 mod image;
+mod mirror;
 mod paths;
 mod pin;
 mod probe;
@@ -58,6 +59,7 @@ fn main() -> ExitCode {
         }
         Some(("fetch", matches)) => run_fetch(&root, matches),
         Some(("pin", matches)) => pin::run(&root, matches).map(|()| true),
+        Some(("mirror", matches)) => mirror::run(&root, matches),
         Some(("verify-stage1", _)) => verify_stage1::run(&root).map(|()| true),
         Some(("probe", matches)) => run_probe(&root, matches),
         Some(("smoke", matches)) => {
@@ -434,6 +436,22 @@ fn command() -> clap::Command {
                                 ])
                                 .default_value("tag")
                                 .help("tag or one of the pinned source fields"),
+                        ),
+                ),
+        )
+        .subcommand(
+            clap::Command::new("mirror")
+                .about("Create or refresh a third-party mirror the build clones from")
+                .subcommand_required(true)
+                .arg_required_else_help(true)
+                .subcommand(
+                    clap::Command::new("bash")
+                        .about("Refresh sdgoij/bash from savannah and push it")
+                        .arg(
+                            clap::Arg::new("check")
+                                .long("check")
+                                .action(clap::ArgAction::SetTrue)
+                                .help("Only verify the pinned commit is present"),
                         ),
                 ),
         )

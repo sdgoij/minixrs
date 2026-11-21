@@ -1870,12 +1870,12 @@ fetch-bash arch="x86" *args:
     cargo xtask fetch bash {{arch}} {{args}}
 
 # Create or refresh the `sdgoij/bash` GitHub mirror and push it, so the build never
-# clones savannah (it is slow and times out) — `tools/mirror-bash.py` takes the
+# clones savannah (it is slow and times out) — `cargo xtask mirror bash` takes the
 # objects from upstream, verifies the pinned commit (`tools/bash_pin.py`) is present,
 # and pushes. Needs an empty `sdgoij/bash` in the org and a key that can push to it.
 # `just mirror-bash --check` only verifies the pin, without pushing.
 mirror-bash *args:
-    python tools/mirror-bash.py {{args}}
+    cargo xtask mirror bash {{args}}
 
 # Fetch and configure Mesa + libdrm for a target (§6.10 stage 3c-0): pinned sources
 # under `target/`, a meson cross file naming `tools/cc-dso-minix.py`, and

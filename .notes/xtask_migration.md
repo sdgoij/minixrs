@@ -494,8 +494,14 @@ WSL both read, so there is one source of truth; `cargo xtask pin bash|mesa`
 derives the release tag from it, and the Python pin modules are thin readers that
 keep the workflows' interface unchanged. Both fetchers were exercised end to end
 against a `file://` release, including the idempotent path and the marker.
-`mirror-bash`, `build-bash` and `build-mesa` stay Python for now: they drive the
-WSL-only `cc` wrappers.
+`build-bash` and `build-mesa` stay Python for now: they drive the WSL-only `cc`
+wrappers.
+
+`cargo xtask mirror bash` replaces `tools/mirror-bash.py`: it clones or refreshes
+the bare mirror from the pinned upstream, verifies the pinned commit is present,
+and pushes unless `--check` was asked for. It was exercised end to end against a
+local bare upstream and push target, which is what the retry and verification
+paths need.
 
 **Phase 5, started.** `cargo xtask probe read-hist` replaces
 `tools/virtio_read_hist.py`, the first of the CI gate probes, and
