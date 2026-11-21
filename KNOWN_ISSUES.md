@@ -152,6 +152,22 @@ are arch-specific, `[env]` is tooling/platform, not kernel.
     needs (a second VFS thread, or VFS answering the ioctl itself as it does for the socket ones)
     is a decision for whoever first needs a file-backed block device.
 
+82. **A directory stops growing at one zone, and the create that needs the next one reports
+    ENOENT (found 2026-11-21).** MFS extends a directory with `new_block`
+    (`crates/fs/src/mfs/write.rs`) when `search_dir(ENTER)` finds no free slot
+    (`crates/fs/src/mfs/path.rs`). With a 4 KiB block, 64 entries fill the directory's first
+    zone; the 65th create returns ENOENT rather than creating the entry. The errno is a
+    *stale* one: `new_block` has two paths that return null without setting `err_code` (a
+    `read_map` that answers NO_BLOCK after the `write_map`, and a null
+    `lmfs_get_block_ino`), and `search_dir` then returns whatever `err_code` the previous
+    lookup left, which for a create is ENOENT. The FS is not out of space: `df` reported
+    6136 of 20480 1K-blocks free when the create failed.
+    Reproducer: in a guest, `coreutils touch f1 ... f60` in a fresh directory; the creates
+    stop being accepted at the 65th entry and every later one says "No such file or
+    directory". This is why the session file is `/tmp/utmpx` and not `/var/run/utmpx`: one
+    extra entry in the image's root directory moved
+    `tools/smoke/coreutils-minix.tsv` onto the boundary and failed its 187th step.
+
 ---
 
 ## RISC-V (`[riscv]`)
@@ -282,9 +298,13 @@ from resolving, is under `# Resolved issues`.
    test client moved from slot 21 to 24.
 
    What `/proc` still does not carry is a feature omission, not this wiring defect: `kinfo`,
-   `meminfo`, `loadavg`, `cpuinfo`, `dmap` and the binary per-pid files each need a source this
-   port does not have. `.notes/procfs.md` records what each one needs and why a placeholder is
-   not an option; they can land file by file as those sources arrive.
+   `meminfo`, `cpuinfo`, `dmap` and the binary per-pid files each need a source this port does
+   not have. `.notes/procfs.md` records what each one needs and why a placeholder is not an
+   option; they can land file by file as those sources arrive. `loadavg` left that list on
+   2026-11-21: the kernel's load history was already maintained (`crate::glo::LOADINFO`,
+   `clock::load_update`) and now answers `GETINFO`'s `GET_LOADINFO`, so
+   `procfs_getloadavg` computes C's three averages and `/proc/loadavg` renders them;
+   `getloadavg` in the C library reads that file.
 
 8. **~~Threads (THREADS.md open workstreams)~~: the API surface landed; one defect remains
    (2026-11-17).** The entry was stale. `thread_local!` works: the minix std PAL allocates a

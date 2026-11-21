@@ -35,6 +35,7 @@ mod c_sys;
 mod c_termios;
 mod c_time;
 mod c_unwind;
+mod c_utmpx;
 mod c_wchar;
 
 /// The `panic` lang item for the shared-object build (`libc.so`).

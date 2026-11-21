@@ -5716,6 +5716,26 @@ pub unsafe fn do_getinfo_handler(caller: *mut Proc, msg: &mut [u8; MESSAGE_SIZE]
                 }
                 OK
             }
+            arch_common::com::GET_LOADINFO => {
+                // The load-average history `load_update` maintains, for procfs's
+                // `loadavg` and the C library's `getloadavg`. Same copy shape as
+                // GET_MACHINE: the caller's buffer must hold one `LoadInfo`.
+                let loadinfo = crate::glo::LOADINFO.get().cast::<u8>();
+                let loadinfo_size = core::mem::size_of::<arch_common::types::LoadInfo>();
+                if val_len > 0 && loadinfo_size > val_len as usize {
+                    return crate::ipc::E2BIG;
+                }
+                let r = kernel_to_proc(
+                    loadinfo,
+                    (*caller).p_nr,
+                    val_ptr,
+                    core::cmp::min(loadinfo_size, val_len.max(0) as usize),
+                );
+                if r != 0 {
+                    return r;
+                }
+                OK
+            }
             arch_common::com::GET_HZ => {
                 let hz = crate::glo::SYSTEM_HZ.load(core::sync::atomic::Ordering::Relaxed);
                 let src_slice = core::slice::from_raw_parts(

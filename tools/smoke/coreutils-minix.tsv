@@ -393,3 +393,19 @@ coreutils cat tabin | sh > tablog	1000
 # cycle starts at the first, so the direction is part of what this pins.
 coreutils printf 'prin\t\t CYCLE-OK > /dev/console && echo > /dev/console\n\004' > tabcyc && coreutils echo CYCFILE-OK	CYCFILE-OK
 coreutils cat tabcyc | sh > tablog2	CYCLE-OK
+# `df`: the image has no mount table, so the minix arm reports the fixed mounts and
+# `statvfs` supplies the numbers. The root line is what a plain `df` shows; the
+# pseudo-filesystems have zero blocks and stay out of it.
+coreutils df /	rootfs[[:space:]]+[0-9]+[[:space:]]+[0-9]+[[:space:]]+[0-9]+[[:space:]]+[0-9]+%[[:space:]]+/
+coreutils df	rootfs[[:space:]]+[0-9]+[[:space:]]+[0-9]+[[:space:]]+[0-9]+[[:space:]]+[0-9]+%[[:space:]]+/
+
+# The session file: init records the boot and the console session in
+# /tmp/utmpx (`minix_std::utmpx::DEFAULT_FILE`) before it execs the shell, and
+# the shell retires its entry on exit. `users`, `who` and `pinky` read that file,
+# so a record that is missing or whose fields are in the wrong place shows here as
+# an empty listing. `uptime` reads /proc/uptime and /proc/loadavg (the kernel's
+# load history), and counts the live sessions in the same file.
+coreutils users	root
+coreutils who	root[[:space:]]+tty[[:space:]]+.*
+coreutils pinky	root[[:space:]]+root[[:space:]]+[?]tty[[:space:]]+.*
+coreutils uptime	.*[[:space:]]1 user,[[:space:]]+load average: [0-9]+\.[0-9]{2}, [0-9]+\.[0-9]{2}, [0-9]+\.[0-9]{2}

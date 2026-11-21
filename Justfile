@@ -1693,17 +1693,17 @@ test-procfs-x86 boot-timeout="40": build-x86
     cp target/trampoline.elf target/images/x86_64-pc-minix/minix-x86.elf
     @just _assert-qemu-version qemu-system-x86_64
     FEED_SCENARIO=tools/smoke/procfs.tsv cargo xtask smoke target/test-procfs-x86.log {{boot-timeout}} qemu-system-x86_64 -nographic -m 256M -no-reboot -vga none -device bochs-display,id=fb0 -kernel target/images/x86_64-pc-minix/minix-x86.elf -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0 -device virtio-tablet-pci,display=fb0
-    @echo "procfs: /proc is mounted, serves hz and uptime, and lists its entries once each (x86_64)"
+    @echo "procfs: /proc is mounted, serves hz, uptime and loadavg, and lists its entries once each (x86_64)"
 
 test-procfs-riscv64 boot-timeout="60": build-riscv64
     @just _assert-qemu-version qemu-system-riscv64
     FEED_SCENARIO=tools/smoke/procfs.tsv cargo xtask smoke target/test-procfs-riscv64.log {{boot-timeout}} qemu-system-riscv64 -machine virt -m 256M -nographic -global virtio-mmio.force-legacy=off -netdev user,id=net0 -device virtio-net-device,netdev=net0 -device virtio-gpu-device -device virtio-keyboard-device -kernel target/riscv64gc-unknown-minix/release/kernel-boot-riscv64
-    @echo "procfs: /proc is mounted, serves hz and uptime, and lists its entries once each (riscv64)"
+    @echo "procfs: /proc is mounted, serves hz, uptime and loadavg, and lists its entries once each (riscv64)"
 
 test-procfs-aarch64 boot-timeout="60": build-aarch64
     @just _assert-qemu-version qemu-system-aarch64
     FEED_SCENARIO=tools/smoke/procfs.tsv cargo xtask smoke target/test-procfs-aarch64.log {{boot-timeout}} qemu-system-aarch64 -machine virt -cpu cortex-a57 -m 256M -nographic -no-reboot -global virtio-mmio.force-legacy=off -netdev user,id=net0 -device virtio-net-device,netdev=net0 -device virtio-gpu-device -device virtio-keyboard-device -kernel target/aarch64-unknown-minix/release/kernel-boot-aarch64
-    @echo "procfs: /proc is mounted, serves hz and uptime, and lists its entries once each (aarch64)"
+    @echo "procfs: /proc is mounted, serves hz, uptime and loadavg, and lists its entries once each (aarch64)"
 
 test-arches:
     @just test-qemu x86

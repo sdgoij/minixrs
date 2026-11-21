@@ -53,7 +53,29 @@ fn is_builtin_cmd(cmd: &str) -> bool {
 // Public entry point — replaces the old inline `sh` in lib.rs
 // ---------------------------------------------------------------------------
 
-pub fn sh(_args: &[&str]) -> i32 {
+pub fn sh(args: &[&str]) -> i32 {
+    // init recorded this process as the console session (`record_session` in
+    // `lib.rs`), and the pid survives both execs, so this is the entry it owns.
+    #[cfg(all(target_os = "minix", not(target_arch = "wasm32")))]
+    {
+        let pid = minix_rt::getpid();
+        let status = sh_loop(args);
+        // A missing session file (an image built before init wrote one) is not
+        // worth a line; anything else means the file is there and wrong.
+        match minix_std::utmpx::retire_record(minix_std::utmpx::DEFAULT_FILE, pid) {
+            Ok(()) => {}
+            Err(e) if e.0 == 2 => {}
+            Err(_) => write_err(b"sh: cannot update the session file\n"),
+        }
+        status
+    }
+    #[cfg(not(all(target_os = "minix", not(target_arch = "wasm32"))))]
+    {
+        sh_loop(args)
+    }
+}
+
+fn sh_loop(_args: &[&str]) -> i32 {
     #[cfg(not(target_os = "minix"))]
     {
         write_out(b"sh: stub (no MINIX syscall ABI on host)\n");

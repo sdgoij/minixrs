@@ -22,6 +22,7 @@ pub mod sha256;
 pub mod termios;
 pub mod time;
 pub mod uds;
+pub mod utmpx;
 pub mod vmem;
 pub mod wserver;
 

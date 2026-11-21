@@ -57,12 +57,14 @@ indexed range walked by index, skipping an index with no inode, then the ordinar
 once, so a second listing does not repeat `status`.
 
 The root's other C files are **not in the tree**. They used to print constants (`"0"`,
-`"0 0 0 0 0"`), and a constant a reader cannot tell from data is worse than an absent file:
+`"0 0 0 0 0"`), and a constant a reader cannot tell from data is worse than an absent file.
+(`loadavg` left this list on 2026-11-21: `do_getinfo_handler` answers `GET_LOADINFO` from
+`glo::LOADINFO`, which `clock::load_update` had been maintaining all along, and
+`procfs_getloadavg` now does C's three-window arithmetic.)
 
 | C file | What it needs |
 |---|---|
 | `kinfo` | `sys_getkinfo`'s `nr_procs`/`nr_tasks`; this port's `KInfo` is `{boottime, loadinfo, reserved[14]}` with neither field |
-| `loadavg` | `GET_LOADINFO` is a defined constant with no arm in `do_getinfo_handler` |
 | `meminfo` | `vm_info_stats` (`VMIW_STATS`); VM owns the numbers and no request lets a server ask |
 | `dmap` | `getsysinfo(VFS, SI_DMAP_TAB)`, which exists in `vfs/misc.rs`: only a call |
 | `cpuinfo` | `GET_CPUINFO` has no arm, and `cpuinfo.rs`'s `print_cpu` prints "GenuineIntel" for vendor 0 |

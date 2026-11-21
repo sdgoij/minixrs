@@ -773,6 +773,9 @@ impl MinixErr {
     /// EAGAIN error constant. `MinixErr` stores positive errno values, so this
     /// is `-EAGAIN`'s stored form.
     pub const EAGAIN: MinixErr = MinixErr(11);
+
+    /// EIO error constant: an I/O failure the caller cannot retry.
+    pub const EIO: MinixErr = MinixErr(5);
 }
 
 // Tests

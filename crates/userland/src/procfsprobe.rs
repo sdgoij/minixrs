@@ -1,4 +1,5 @@
-//! `/bin/procfsprobe` — reads the two files procfs serves from the kernel clock.
+//! `/bin/procfsprobe` — reads the files procfs serves from the kernel clock and the
+//! kernel's load history.
 //!
 //! `KNOWN_ISSUES.md` item 7 wired the procfs server: a boot process of its own, an
 //! initramfs entry, and a mount at `/proc` in VFS. Nothing else in the tree opens a
@@ -8,12 +9,13 @@
 //!
 //! The fields are the things a mount has to get right and the ones it must refuse:
 //! `hz` is `/proc/hz`, a positive decimal from `SYS_TIMES`; `uptime` is
-//! `/proc/uptime`, `<seconds>.<hundredths>`; `dir` is `/proc` itself, which has to
-//! resolve to a directory; `list` is the root listing, which must name every entry
-//! exactly once; and `gone` is a path under `/proc` that is not there, so the mount
-//! answers from its own tree instead of silently falling back to MFS.
+//! `/proc/uptime`, `<seconds>.<hundredths>`; `load` is `/proc/loadavg`, three
+//! `%ld.%02ld` averages from `GETINFO`'s `GET_LOADINFO`; `dir` is `/proc` itself,
+//! which has to resolve to a directory; `list` is the root listing, which must name
+//! every entry exactly once; and `gone` is a path under `/proc` that is not there, so
+//! the mount answers from its own tree instead of silently falling back to MFS.
 
-use crate::{Decimal, DIRENT_NAME_OFF, append, write_err, write_out};
+use crate::{DIRENT_NAME_OFF, Decimal, append, write_err, write_out};
 use minix_std::fs::O_RDONLY;
 
 /// The largest output either root file produces today is a handful of digits.
@@ -57,6 +59,33 @@ fn is_uptime(bytes: &[u8]) -> bool {
     }
 }
 
+/// One `%ld.%02ld` load figure: digits, a dot, exactly two digits.
+fn is_load_figure(field: &[u8]) -> bool {
+    let mut parts = field.split(|&b| b == b'.');
+    match (parts.next(), parts.next(), parts.next()) {
+        (Some(whole), Some(hundredths), None) => {
+            !whole.is_empty()
+                && hundredths.len() == 2
+                && whole.iter().all(u8::is_ascii_digit)
+                && hundredths.iter().all(u8::is_ascii_digit)
+        }
+        _ => false,
+    }
+}
+
+/// Three load figures separated by single spaces, as C's `root_loadavg` prints them.
+fn is_loadavg(bytes: &[u8]) -> bool {
+    let body = match bytes {
+        [rest @ .., b'\n'] => rest,
+        rest => rest,
+    };
+    let mut fields = body.split(|&b| b == b' ');
+    let first = fields.next().is_some_and(is_load_figure);
+    let second = fields.next().is_some_and(is_load_figure);
+    let third = fields.next().is_some_and(is_load_figure);
+    first && second && third && fields.next().is_none()
+}
+
 /// A PID directory's name as a number, or `None` when the name is not all digits.
 fn parse_pid(name: &[u8]) -> Option<i32> {
     if name.is_empty() || name.len() > 9 || !name.iter().all(u8::is_ascii_digit) {
@@ -69,8 +98,8 @@ fn parse_pid(name: &[u8]) -> Option<i32> {
     Some(v)
 }
 
-/// What one listing of `/proc`'s root has to look like: `hz`, `uptime`, and one
-/// directory per live process, each exactly once.
+/// What one listing of `/proc`'s root has to look like: `hz`, `uptime`, `loadavg`, and
+/// one directory per live process, each exactly once.
 ///
 /// The failure this catches is a listing that repeats an ordinary entry once per
 /// indexed slot (the `indexed` range read as ordinary children) or never yields the
@@ -79,6 +108,7 @@ fn parse_pid(name: &[u8]) -> Option<i32> {
 struct Listing {
     hz: u32,
     uptime: u32,
+    loadavg: u32,
     pids: usize,
     pid_values: [i32; 64],
     unexpected: u32,
@@ -89,6 +119,7 @@ impl Listing {
         Self {
             hz: 0,
             uptime: 0,
+            loadavg: 0,
             pids: 0,
             pid_values: [0; 64],
             unexpected: 0,
@@ -100,6 +131,7 @@ impl Listing {
             b"." | b".." => {}
             b"hz" => self.hz += 1,
             b"uptime" => self.uptime += 1,
+            b"loadavg" => self.loadavg += 1,
             _ => match parse_pid(name) {
                 Some(pid) if self.pids < self.pid_values.len() => {
                     if self.pid_values[..self.pids].contains(&pid) {
@@ -117,7 +149,11 @@ impl Listing {
 
     fn good(&self) -> bool {
         // At least one PID directory: the probe's own process is alive while it runs.
-        self.hz == 1 && self.uptime == 1 && self.pids >= 1 && self.unexpected == 0
+        self.hz == 1
+            && self.uptime == 1
+            && self.loadavg == 1
+            && self.pids >= 1
+            && self.unexpected == 0
     }
 }
 
@@ -198,6 +234,7 @@ fn verdict(line: &mut [u8], at: &mut usize, name: &[u8], good: bool) {
 pub fn procfsprobe(_args: &[&str]) -> i32 {
     let hz = read_and(b"/proc/hz", |b| parse_decimal(b).is_some_and(|v| v > 0));
     let uptime = read_and(b"/proc/uptime", is_uptime);
+    let load = read_and(b"/proc/loadavg", is_loadavg);
 
     // `/proc` itself resolves through the mount, so its mode is the mount point's.
     let dir = match minix_std::fs::stat_bytes(b"/proc") {
@@ -231,13 +268,15 @@ pub fn procfsprobe(_args: &[&str]) -> i32 {
     append(&mut line, &mut at, b" ");
     verdict(&mut line, &mut at, b"uptime", uptime);
     append(&mut line, &mut at, b" ");
+    verdict(&mut line, &mut at, b"load", load);
+    append(&mut line, &mut at, b" ");
     verdict(&mut line, &mut at, b"dir", dir);
     append(&mut line, &mut at, b" ");
     verdict(&mut line, &mut at, b"list", list);
     append(&mut line, &mut at, b" gone=err 2\n");
     write_out(&line[..at]);
 
-    if hz && uptime && dir && list {
+    if hz && uptime && load && dir && list {
         0
     } else {
         1
@@ -283,7 +322,7 @@ mod tests {
     #[test]
     fn a_listing_with_one_of_everything_is_good() {
         let mut l = Listing::new();
-        for name in [&b"."[..], b"..", b"hz", b"uptime", b"1", b"42"] {
+        for name in [&b"."[..], b"..", b"hz", b"uptime", b"loadavg", b"1", b"42"] {
             l.add(name);
         }
         assert!(l.good());
@@ -308,9 +347,19 @@ mod tests {
 
         // A listing with no PID directory at all never enumerated the indexed children.
         let mut l = Listing::new();
-        for name in [&b"hz"[..], b"uptime"] {
+        for name in [&b"hz"[..], b"uptime", b"loadavg"] {
             l.add(name);
         }
         assert!(!l.good());
+    }
+
+    #[test]
+    fn loadavg_is_three_padded_figures() {
+        assert!(is_loadavg(b"0.00 0.00 0.00\n"));
+        assert!(is_loadavg(b"1.04 12.50 100.00"));
+        assert!(!is_loadavg(b"0.0 0.00 0.00\n"), "hundredths are two digits");
+        assert!(!is_loadavg(b"0.00 0.00\n"), "three figures");
+        assert!(!is_loadavg(b"0.00  0.00 0.00\n"), "single spaces");
+        assert!(!is_loadavg(b"\n"));
     }
 }

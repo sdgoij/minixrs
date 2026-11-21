@@ -3575,6 +3575,46 @@ unsafe fn exec_one(path: &core::ffi::CStr) -> i64 {
     }
 }
 
+/// Record this boot and the console session in the session file
+/// (`minix_std::utmpx::DEFAULT_FILE`, `/tmp/utmpx`).
+///
+/// `who`, `users`, `pinky` and `uptime` read that file, and init is the process
+/// that stays the session's leader: it execs `/bin/rc`, which execs the shell, so
+/// the pid written here is the shell's too, and the shell retires the entry when
+/// it exits. A write that fails is reported and the boot continues; the session
+/// file is bookkeeping, not something to stop a shell over.
+///
+/// The line is `tty` because that is what this port's `ttyname()` answers for
+/// every terminal it has (`crates/minix-libc/src/c_sys.rs`), which is also what
+/// makes `who am i` line its record up with the caller's terminal.
+#[cfg(all(target_os = "minix", not(target_arch = "wasm32")))]
+fn record_session(pid: i32) {
+    use minix_std::utmpx;
+
+    let (sec, usec) = match minix_std::time::clock_gettime(minix_std::time::CLOCK_REALTIME) {
+        Ok(ts) => (ts.tv_sec, ts.tv_nsec / 1000),
+        Err(_) => (0, 0),
+    };
+
+    let mut passwd = [0u8; 2048];
+    let user: &[u8] = match unsafe { minix_std::passwd::read_passwd(&mut passwd) } {
+        Ok(n) => minix_std::process::getuid()
+            .ok()
+            .and_then(|(uid, _)| minix_std::passwd::find_passwd_uid(&passwd[..n], uid as u32))
+            .map_or(b"unknown" as &[u8], |e| e.name),
+        Err(_) => b"unknown",
+    };
+
+    let boot = utmpx::Utmpx::new(utmpx::BOOT_TIME, 0, b"", b"").at(sec, usec);
+    let session = utmpx::Utmpx::new(utmpx::USER_PROCESS, pid, user, b"tty").at(sec, usec);
+    for rec in [&boot, &session] {
+        if utmpx::put_record(utmpx::DEFAULT_FILE, rec).is_err() {
+            write_err(b"init: cannot write the session file\n");
+            return;
+        }
+    }
+}
+
 pub fn init(_args: &[&str]) -> i32 {
     // Print boot banner
     write_out(b"init: booting MINIX/Rust\n");
@@ -3627,6 +3667,9 @@ pub fn init(_args: &[&str]) -> i32 {
             core::hint::spin_loop();
         }
     }
+
+    #[cfg(all(target_os = "minix", not(target_arch = "wasm32")))]
+    record_session(pid);
 
     // The session starts with `/bin/rc`, which runs whatever `/etc/rc` names
     // and then becomes the shell. An image without it (a root filesystem from an

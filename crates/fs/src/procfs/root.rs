@@ -1,14 +1,15 @@
 //! ProcFS root directory file definitions — adapted from `minix/fs/procfs/root.c`
 //!
 //! Only the files whose content this port can produce truthfully are listed. C's `root_files`
-//! also has `loadavg`, `meminfo`, `dmap`, `ipcvecs` and `mounts`; each needs a source this port
-//! does not have yet, and a placeholder line would be a lie a reader cannot tell from data, so
-//! they stay out of the tree until their source exists (`KNOWN_ISSUES.md` item 7 records what
-//! each one needs).
+//! also has `meminfo`, `dmap`, `ipcvecs` and `mounts`; each needs a source this port does not
+//! have yet, and a placeholder line would be a lie a reader cannot tell from data, so they stay
+//! out of the tree until their source exists (`KNOWN_ISSUES.md` item 7 records what each one
+//! needs). `loadavg` came in with the kernel's `GET_LOADINFO` reply.
 
 use crate::procfs::buf::buf_write_fmt;
 use crate::procfs::consts::*;
-use crate::procfs::types::{File, FileData};
+use crate::procfs::misc::{load_hundredths, procfs_getloadavg};
+use crate::procfs::types::{File, FileData, Load};
 
 /// Static files in the ProcFS root directory.
 ///
@@ -23,6 +24,11 @@ pub static ROOT_FILES: &[File] = &[
         name: "uptime",
         mode: REG_ALL_MODE,
         data: FileData::Static(root_uptime),
+    },
+    File {
+        name: "loadavg",
+        mode: REG_ALL_MODE,
+        data: FileData::Static(root_loadavg),
     },
     // Sentinel
     File {
@@ -106,6 +112,24 @@ fn root_uptime() {
     }
 }
 
+/// Print the three load averages, as C's `%ld.%02ld %ld.%02ld %ld.%02ld\n`
+/// does. Nothing is printed when the kernel does not answer, which is what C's
+/// `if (procfs_getloadavg(loads, 3) != 3) return;` leaves behind.
+fn root_loadavg() {
+    let hz = match clock() {
+        Some((_, hz, _)) => hz,
+        None => return,
+    };
+    let mut loads = [Load::default(); 3];
+    if procfs_getloadavg(&mut loads, hz as u32) != 3 {
+        return;
+    }
+    let (a, b) = load_hundredths(&loads[0]);
+    let (c, d) = load_hundredths(&loads[1]);
+    let (e, f) = load_hundredths(&loads[2]);
+    buf_write_fmt(format_args!("{a}.{b:02} {c}.{d:02} {e}.{f:02}\n"));
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -136,7 +160,7 @@ mod tests {
     fn root_files_lists_only_implemented_files() {
         // Every entry but the sentinel must name a file whose content this port can produce; a
         // stub whose output is a constant masquerades as data, so the list stays short on purpose.
-        let names: [&str; 2] = ["hz", "uptime"];
+        let names: [&str; 3] = ["hz", "uptime", "loadavg"];
         for (i, name) in names.iter().enumerate() {
             assert_eq!(ROOT_FILES[i].name, *name);
         }

@@ -62,6 +62,9 @@ void *bsearch(const void *key, const void *base, size_t nmemb, size_t size,
 char *getenv(const char *name);
 int setenv(const char *name, const char *value, int overwrite);
 int unsetenv(const char *name);
+/* BSD getloadavg: the 1, 5 and 15 minute load averages, read from /proc/loadavg.
+ * Answers how many values were stored (at most 3), or -1 with errno set. */
+int getloadavg(double *loadavg, int nelem);
 int system(const char *command);
 char *realpath(const char *path, char *resolved);
 char *mktemp(char *tmpl);

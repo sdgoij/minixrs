@@ -588,6 +588,62 @@ pub unsafe extern "C" fn sysconf(name: c_int) -> c_long {
     }
 }
 
+/// BSD `getloadavg()`: the 1, 5 and 15 minute load averages.
+///
+/// The kernel keeps the history and procfs renders it (`/proc/loadavg`,
+/// `crates/fs/src/procfs/misc.rs`), so this reads that file rather than
+/// repeating the arithmetic. `nelem` is capped at 3; the return is how many
+/// values were filled, or -1 with `errno` set when the file cannot be read or
+/// does not parse.
+#[cfg(target_os = "minix")]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn getloadavg(loadavg: *mut core::ffi::c_double, nelem: c_int) -> c_int {
+    if loadavg.is_null() || nelem <= 0 {
+        return crate::fail(EINVAL);
+    }
+    let want = core::cmp::min(nelem, 3) as usize;
+    let mut buf = [0u8; 128];
+    let mut total = 0usize;
+    let fd = match unsafe { minix_std::fs::open(b"/proc/loadavg", minix_std::fs::O_RDONLY, 0) } {
+        Ok(fd) => fd,
+        Err(e) => return crate::fail(e.0),
+    };
+    loop {
+        match unsafe { minix_std::fs::read(fd, &mut buf[total..]) } {
+            Ok(n) if n > 0 => {
+                total += n as usize;
+                if total >= buf.len() {
+                    break;
+                }
+            }
+            Ok(_) => break,
+            Err(e) => {
+                let _ = minix_std::fs::close(fd);
+                return crate::fail(e.0);
+            }
+        }
+    }
+    let _ = minix_std::fs::close(fd);
+    let text = core::str::from_utf8(&buf[..total]).unwrap_or("");
+    let mut filled = 0usize;
+    for field in text.split_ascii_whitespace() {
+        if filled == want {
+            break;
+        }
+        match field.parse::<f64>() {
+            Ok(v) => {
+                unsafe { *loadavg.add(filled) = v };
+                filled += 1;
+            }
+            Err(_) => break,
+        }
+    }
+    if filled == 0 {
+        return crate::fail(EIO);
+    }
+    filled as c_int
+}
+
 /// Device control (`ioctl(2)`).
 ///
 /// The request number is the NetBSD/Linux-style encoding (direction, size and
@@ -2282,9 +2338,11 @@ pub unsafe extern "C" fn getpwnam(name: *const c_char) -> *mut Passwd {
 
 /// C `getlogin(3)`: the name the controlling terminal logged in with.
 ///
-/// The port has no utmp, so this is the real user's `/etc/passwd` name, which
-/// is what `getpwuid(getuid())` reports. A missing entry answers null, which
-/// callers such as `id` treat as "unknown".
+/// The port's session file (`crates/minix-std/src/utmpx.rs`) records one console
+/// session, and this answers the real user's `/etc/passwd` name, which is the
+/// session's name on this single-user image and what `getpwuid(getuid())`
+/// reports. A missing entry answers null, which callers such as `id` treat as
+/// "unknown".
 #[cfg(target_os = "minix")]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn getlogin() -> *mut c_char {
