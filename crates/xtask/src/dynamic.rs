@@ -21,7 +21,7 @@
 
 use std::fs;
 use std::io;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use crate::arch::Arch;
@@ -78,6 +78,15 @@ pub struct Program<'a> {
     pub lld: &'a Path,
     pub libc_dir: &'a Path,
     pub scratch: &'a Path,
+    /// The stub's base name (default: the source's stem), which is also the crate
+    /// name rustc derives for it.
+    pub stub: Option<&'a str>,
+    /// Extra compile flags: a header tree, a feature define.
+    pub extra_cflags: &'a [String],
+    /// Extra `-L` directories for the link.
+    pub extra_link_dirs: &'a [PathBuf],
+    /// Extra `-l:` names for the link, in order.
+    pub extra_libs: &'a [String],
 }
 
 pub fn link_program(program: &Program<'_>) -> io::Result<bool> {
@@ -91,10 +100,12 @@ pub fn link_program(program: &Program<'_>) -> io::Result<bool> {
         .file_stem()
         .and_then(|stem| stem.to_str())
         .unwrap_or("program");
+    let stub_stem = program.stub.unwrap_or(stem);
 
     let mut cflags = program.arch.base_cflags();
     cflags.extend(["-fno-builtin", "-O2", "-c"].map(String::from));
     cflags.extend(cc::compile_flags(program.root)?);
+    cflags.extend(program.extra_cflags.iter().cloned());
 
     let crt0 = program.scratch.join("crt0.o");
     let object = program.scratch.join(format!("{stem}.o"));
@@ -114,7 +125,7 @@ pub fn link_program(program: &Program<'_>) -> io::Result<bool> {
         }
     }
 
-    let stub = program.scratch.join(format!("{stem}_stub.rs"));
+    let stub = program.scratch.join(format!("{stub_stem}_stub.rs"));
     fs::write(&stub, STUB)?;
 
     let mut link = Command::new(program.rustc);
@@ -138,18 +149,25 @@ pub fn link_program(program: &Program<'_>) -> io::Result<bool> {
     .arg("-C")
     .arg(format!("link-arg={}", object.display()))
     .arg("-C")
-    .arg(format!("link-arg=-L{}", program.libc_dir.display()))
-    .arg("-C")
-    .arg("link-arg=-Bdynamic")
-    .arg("-C")
-    .arg("link-arg=--allow-shlib-undefined")
-    .arg("-C")
-    .arg(format!("link-arg=-l:{LIBC}"))
-    .arg("-C")
-    .arg(format!("link-arg=--dynamic-linker={INTERP}"))
-    .arg("-o")
-    .arg(program.out)
-    .arg(&stub);
+    .arg(format!("link-arg=-L{}", program.libc_dir.display()));
+    for directory in program.extra_link_dirs {
+        link.arg("-C")
+            .arg(format!("link-arg=-L{}", directory.display()));
+    }
+    link.arg("-C")
+        .arg("link-arg=-Bdynamic")
+        .arg("-C")
+        .arg("link-arg=--allow-shlib-undefined")
+        .arg("-C")
+        .arg(format!("link-arg=-l:{LIBC}"));
+    for library in program.extra_libs {
+        link.arg("-C").arg(format!("link-arg={library}"));
+    }
+    link.arg("-C")
+        .arg(format!("link-arg=--dynamic-linker={INTERP}"))
+        .arg("-o")
+        .arg(program.out)
+        .arg(&stub);
     if !cc::run(&mut link)? {
         return Ok(false);
     }

@@ -65,6 +65,10 @@ pub fn run(
         lld: &lld,
         libc_dir: &libc_dir,
         scratch: &work,
+        stub: None,
+        extra_cflags: &[],
+        extra_link_dirs: &[],
+        extra_libs: &[],
     })? {
         return Ok(false);
     }

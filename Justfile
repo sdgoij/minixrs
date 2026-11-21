@@ -1006,19 +1006,19 @@ gltriangle arch="x86":
 gltriangle-x86: dynlib-x86
     python tools/build-mesa.py x86 --stage
     @test -f target/mesa/x86/lib/libEGL.so.1 || (echo 'gltriangle: no Mesa DSOs — run `just build-mesa x86 --build` first' >&2; exit 1)
-    python tools/build-gltest.py x86
+    cargo xtask build gltriangle x86
     @echo "gltriangle: /bin/gltriangle built and the Mesa DSOs staged (x86_64)"
 
 gltriangle-riscv64: dynlib-riscv64
     python tools/build-mesa.py riscv64 --stage
     @test -f target/mesa/riscv64/lib/libEGL.so.1 || (echo 'gltriangle: no Mesa DSOs — run `just build-mesa riscv64 --build` first' >&2; exit 1)
-    python tools/build-gltest.py riscv64
+    cargo xtask build gltriangle riscv64
     @echo "gltriangle: /bin/gltriangle built and the Mesa DSOs staged (riscv64)"
 
 gltriangle-aarch64: dynlib-aarch64
     python tools/build-mesa.py aarch64 --stage
     @test -f target/mesa/aarch64/lib/libEGL.so.1 || (echo 'gltriangle: no Mesa DSOs — run `just build-mesa aarch64 --build` first' >&2; exit 1)
-    python tools/build-gltest.py aarch64
+    cargo xtask build gltriangle aarch64
     @echo "gltriangle: /bin/gltriangle built and the Mesa DSOs staged (aarch64)"
 
 # The §6.10 stage 3c-2 gate: boot the split pair with /bin/gltriangle and the seven
@@ -1087,7 +1087,7 @@ test-wlgl-x86 boot-timeout="60": wlgl-x86 boot-image-x86
 gui-x86: userland-x86 dynlib-x86
     python tools/build-mesa.py x86 --stage
     @test -f target/mesa/x86/lib/libEGL.so.1 || (echo 'gui: no Mesa DSOs — run `just build-mesa x86 --build` first' >&2; exit 1)
-    python tools/build-gui.py x86
+    cargo xtask build gui x86
     @echo "gui: /bin/gui built and the Mesa DSOs staged (x86_64)"
 
 # The M1 gate: the in-house renderer draws a quad and a line of text into a wl_shm pool,

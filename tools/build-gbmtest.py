@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Build the GBM create/export probe (§6.10 3d-b-3) against Mesa's DSOs.
 
-The same shape `tools/build-gltest.py` builds — a normal dynamic minix executable,
+The same shape `cargo xtask build gltriangle` builds — a normal dynamic minix executable,
 non-PIC, `PT_INTERP` = the loader — with two differences: the client links
 `libgbm` and `libdrm` instead of EGL/GLES, and it includes the GBM and libdrm
 headers, which come from the Mesa and libdrm *source checkouts* (`just

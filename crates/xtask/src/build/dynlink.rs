@@ -238,6 +238,10 @@ fn build(root: &Path, arch: &Arch, rustc: &Path, lld: &Path) -> io::Result<bool>
         lld,
         libc_dir: &release,
         scratch: &work,
+        stub: None,
+        extra_cflags: &[],
+        extra_link_dirs: &[],
+        extra_libs: &[],
     })
 }
 

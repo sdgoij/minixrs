@@ -437,6 +437,17 @@ tools/mkboot.rs` on every x86 image recipe) is gone. The superseded ports
 (`mkinitramfs.rs`, `mkminixfs.rs`, `mkimg.rs`) go with them. `fetch-stage1`
 and `verify-stage1` are still the phase's other half.
 
+**Phase 1, contd.** `cargo xtask build gltriangle|gui` replaced two of the Mesa
+clients. Both artifacts were byte-identical to the Python build's. That slice
+also exposed a mistake worth recording: `tools/cdyn.py` was deleted in the
+dynamic-linking commit while **eight** still-Python builders imported it, and
+none of the gates noticed because they do not build those clients. It is
+restored, and it stays until the last of the six remaining importers moves
+(`build-gbmtest`, `build-wlgl`, `build-wldmabufgl`, `build-wlcompose`,
+`build-composeprobe`, `build-eglprobe`). The rule in section 3.10 is the one
+that was missed: delete what nothing imports, and check that with `grep`, not
+with the test suite.
+
 `cc-minix` and `cc-dso-minix` are **not** ported, and that is a decision
 rather than a pending item. The reason is a host: `build-bash.py` and
 `build-mesa.py` drive them from inside WSL (`build-mesa.py`'s meson cross file

@@ -9,6 +9,7 @@ pub mod cdyn;
 pub mod dynlibc;
 pub mod dynlink;
 pub mod libcxx;
+pub mod mesa;
 pub mod std_hello;
 
 use std::fs;

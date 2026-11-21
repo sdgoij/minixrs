@@ -37,7 +37,7 @@ toolchain. `.notes/wayland.md` §6.10 is the design; these are the recipes and t
   (`--cxx`) to `-fPIC` objects and links minix **shared objects** against
   `libc.so`. It is the piece that grows a feature every time Mesa asks for one.
 - `just gltriangle <arch>` — builds the surfaceless-EGL GLES2 triangle client
-  (`tools/gl_triangle.c`, `tools/build-gltest.py`) and stages the DSOs.
+  (`tools/gl_triangle.c`, `cargo xtask build gltriangle`) and stages the DSOs.
 - `just wlgl-x86` — `tools/build-wlgl.py` builds `/bin/wlgl`, the 3d-a client that
   presents a GL surface through the in-house Wayland compositor: `wlclient`'s
   protocol half plus `tools/wlgl_render.c` for the GL half. It is the tree's first

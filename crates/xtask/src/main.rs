@@ -92,6 +92,8 @@ fn run_build(root: &Path, matches: &clap::ArgMatches) -> io::Result<bool> {
         Some(("libcxx-toolchain", matches)) => {
             build::libcxx::toolchain_command(root, target(matches)).map(|()| true)
         }
+        Some(("gltriangle", matches)) => build::mesa::gltriangle(root, target(matches)),
+        Some(("gui", matches)) => build::mesa::gui(root, target(matches)),
         Some(("cdyn", matches)) => {
             let Some(source) = matches.get_one::<String>("source") else {
                 unreachable!("clap requires a source")
@@ -191,6 +193,16 @@ fn command() -> clap::Command {
                 .subcommand(
                     clap::Command::new("libcxx-toolchain")
                         .about("Write target/cxx/toolchain-<machine>.cmake")
+                        .arg(target_arg("x86")),
+                )
+                .subcommand(
+                    clap::Command::new("gltriangle")
+                        .about("The surfaceless-EGL GLES2 client against Mesa's DSOs")
+                        .arg(target_arg("x86")),
+                )
+                .subcommand(
+                    clap::Command::new("gui")
+                        .about("The in-house renderer client, linked against Mesa's DSOs")
                         .arg(target_arg("x86")),
                 )
                 .subcommand(
