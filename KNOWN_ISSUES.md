@@ -152,28 +152,6 @@ are arch-specific, `[env]` is tooling/platform, not kernel.
     needs (a second VFS thread, or VFS answering the ioctl itself as it does for the socket ones)
     is a decision for whoever first needs a file-backed block device.
 
-81. **Two output-sized Wayland surfaces drop a client, so `test-wlfocus-x86` and
-    `test-wloverlap-x86` fail (found 2026-11-21).** Both gates boot x86 with the
-    session's panel already connected, and the client under test opens two
-    connections and maps a full-output surface on each. The guest prints
-    `<client>: a connection dropped` before any `ready` line, reported by
-    `wait_peers` in `crates/userland/src/wlclient.rs` (the message says `wlx2` for
-    `wloverlap` too). `just test-wlx-x86` (one full-output surface) and
-    `just test-wlpointer-x86` (a full-output surface plus a 64x64 one) pass, so one
-    output-sized surface per connection works and two do not. The Python probes and
-    their xtask ports fail identically, so the client is unchanged. A `hangdump`
-    right after the drop shows `/sbin/wlserver` alive and blocked in `receive`
-    (`rts=0x40`), and the client's peer socket is gone, so a connection was closed
-    rather than the server killed or an event mis-decoded. The server closes a
-    client's socket only when its own read ends or when it refuses a ninth
-    connection (`MAX_CLIENTS` is 8, and only the panel and the test's two are
-    open), so the close is not yet explained. The scan-out present path
-    (`FBIO_SCANOUT_SRC`, `.notes/wayland.md` §6.10 3d-b-1) is the first suspect,
-    because it acts on a full-output commit. Next: an LLDB session on `wlserver`
-    (see the `bare-metal-debug` skill), not added prints.
-    (`crates/servers/src/wlserver.rs` `pump`, `crates/userland/src/wlclient.rs`
-    `wait_peers`)
-
 ---
 
 ## RISC-V (`[riscv]`)
@@ -359,6 +337,34 @@ from resolving, is under `# Resolved issues`.
     `snapshot`/`after_report` for a oneshot and a level interest.
     (`crates/servers/src/vfs/epoll.rs`, `crates/servers/src/vfs/select.rs`,
     `crates/userland/src/lib.rs`, `crates/minix-std/src/fs.rs`)
+
+81. **~~Two output-sized Wayland surfaces drop a client~~: FIXED (2026-11-21).** The
+    scene composer copied every committed surface into a renderer texture before drawing
+    it, so one full-output window cost a pool-sized 3 MiB heap allocation and two cost
+    6 MiB in a single frame. The x86 guest has roughly 25 MB free once `fb`'s 128 MB
+    `GEM_ARENA` and the image are resident (`.notes/memory_budget.md`), and a two-window
+    scene exhausted it: the copies are the only allocation that scales with the number and
+    size of surfaces, and at `-m 512M` the same run passed. Nothing was printed when it
+    failed, so the mechanism is inferred from that pass and from the fix, which makes 256M
+    pass again; what is measured is that the server died. That is why `test-wlfocus-x86`
+    and `test-wloverlap-x86` failed while `test-wlx-x86` and `test-wlpointer-x86`, which
+    need one full-output surface, passed.
+
+    Two readings in the original entry were wrong, and they are recorded here so the next
+    session does not repeat them: `hangdump`'s `rts=0x40` is `RTS_P_STOP`, a signalled
+    process, not `RTS_RECEIVING` (0x8); and the server's fds *were* gone, which a
+    `connect` after the drop showed as `ECONNREFUSED` (111) on the dead listener.
+
+    Composing now blits each entry straight from its mapped pool, the way the
+    single-surface path always did, so a frame allocates nothing (`compose_scene` in
+    `crates/servers/src/wlserver.rs`). `just test-wloverlap-x86` and
+    `just test-wlfocus-x86` pass at 256M, and `test-wlx-x86` and `test-wlpointer-x86`
+    still do. The gate also says what it saw now: `wait_peers` names the step and peer a
+    drop happened on, `read_peer` distinguishes end-of-file from a failed read, and
+    `connect` reports its errno, all in `crates/userland/src/wlclient.rs`. One more thing
+    moved with it: a uds read that cannot move bytes answers `EAGAIN`, which is the
+    driver's documented contract, so neither `pump` nor the client treats it as a closed
+    connection any more.
 
 1. **~~VM block cache is a stub~~ — FIXED (2026-11-01).** The entry was stale: `do_mapcache` maps the
    cached blocks into the caller, `do_setcache` registers caller-owned pages with their own

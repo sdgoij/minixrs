@@ -685,20 +685,20 @@ mod imp {
     /// buffer is not blitted on its own, the scene is redrawn in order, so the
     /// window above it is painted again over the part that overlaps.
     ///
-    /// Only `wl_shm` surfaces: a dma-buf needs the render node and belongs to the
-    /// GPU helper, so a scene holding one falls back. `false` when the scene has
-    /// fewer than two surfaces or anything fails.
+    /// Each entry is blitted straight from its mapped pool, the way the single-surface
+    /// path below does. Copying a surface into a renderer texture first costs a
+    /// pool-sized heap allocation per window, and two output-sized ones ask for six
+    /// MiB the x86 guest has not got once `fb`'s `GEM_ARENA` and the two pools are
+    /// resident: the allocation failed and took the server with it, which is why
+    /// `test-wloverlap-x86` dropped a client (`KNOWN_ISSUES` 81).
+    ///
+    /// Only `wl_shm` surfaces: a dma-buf needs the render node and belongs to the GPU
+    /// helper, so a scene holding one falls back. `false` when the scene has fewer
+    /// than two surfaces or a blit fails.
     fn compose_scene(fb: *mut u8, scene: &Scene) -> bool {
         if scene.len() < 2 || scene.iter().any(|e| e.dmabuf) {
             return false;
         }
-
-        let output = render::Rect::new(0, 0, XRES as i32, YRES as i32);
-        let pixels = unsafe { core::slice::from_raw_parts_mut(fb.cast::<u32>(), XRES * YRES) };
-        let Ok(mut software) = render::Software::new(output, XRES, pixels) else {
-            return false;
-        };
-        let mut pass = render::Pass::new(output);
 
         for e in scene.iter() {
             if e.width <= 0 || e.height <= 0 || e.stride < e.width.saturating_mul(4) || e.size == 0
@@ -719,28 +719,29 @@ mod imp {
                 return false;
             }
             let bytes = unsafe { core::slice::from_raw_parts(src, e.size) };
-            let texture = software.create_texture_from_bytes(
-                e.width as u32,
-                e.height as u32,
-                e.stride as usize,
-                e.offset.max(0) as usize,
-                bytes,
-            );
-            let _ = unsafe { vmem::munmap(src, e.size) };
-            let Ok(texture) = texture else {
-                return false;
+            let buf = shm::Buffer {
+                offset: e.offset,
+                width: e.width,
+                height: e.height,
+                stride: e.stride,
+                format: e.format,
+                pool_size: e.size as i32,
             };
-            pass.add(render::Element::Texture {
-                rect: render::Rect::new(e.x, e.y, e.width, e.height),
-                source: render::Rect::new(0, 0, e.width, e.height),
-                texture,
-                color: render::Color::WHITE,
-                opaque: true,
-            });
+            let dst = Destination {
+                x: e.x,
+                y: e.y,
+                width: XRES as i32,
+                height: YRES as i32,
+            };
+            let ok = shm::blit(bytes, &buf, dst, |x, y, px| put_px(fb, x, y, px)).is_ok();
+            let _ = unsafe { vmem::munmap(src, e.size) };
+            if !ok {
+                return false;
+            }
         }
 
         let _ = fb_scanout(0, 0);
-        software.render(&pass).is_ok()
+        true
     }
 
     /// Composite a commit onto the display and present it.
@@ -1267,6 +1268,10 @@ mod imp {
         let n = match uds::recv(c.conn, &mut c.chunk) {
             Ok(0) => return false,
             Ok(n) => n as usize,
+            // The uds driver never blocks: with nothing queued its read answers
+            // `EAGAIN`, so a readiness another reader has already drained is not a
+            // closed connection. Treating it as one closed a live client's socket.
+            Err(e) if e.0 == -minix_std::EAGAIN => return true,
             Err(_) => return false,
         };
         if c.inbuf.push(&c.chunk[..n]).is_err() {

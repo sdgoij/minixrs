@@ -89,16 +89,24 @@ fn fill(conn: i32, inbuf: &mut MessageBuffer, chunk: &mut [u8; 512], timeout_ms:
 /// Connect to the server, retrying while it is still coming up.
 fn connect() -> Result<i32, i32> {
     let fd = uds::socket().map_err(|_| fail(4, b"wlclient: socket failed\n"))?;
+    let mut last = 0i32;
     for _ in 0..100_000 {
-        if uds::connect(fd, SOCK_PATH).is_ok() {
-            return Ok(fd);
+        match uds::connect(fd, SOCK_PATH) {
+            Ok(()) => return Ok(fd),
+            Err(e) => last = e.0,
         }
         for _ in 0..2000 {
             core::hint::spin_loop();
         }
     }
     let _ = uds::close_fd(fd);
-    Err(fail(5, b"wlclient: connect failed\n"))
+    let mut line = [0u8; 48];
+    let mut at = 0usize;
+    push(&mut line, &mut at, b"wlclient: connect failed (errno ");
+    push_dec(&mut line, &mut at, last as u32);
+    push(&mut line, &mut at, b")\n");
+    write_err(&line[..at]);
+    Err(5)
 }
 
 /// The registry names of the globals this client may bind.
@@ -612,8 +620,8 @@ fn print_hex(v: u32) {
     write_err(&out);
 }
 
-/// Print a `u32` in decimal.
-fn put_dec(mut n: u32) {
+/// Format a `u32` in decimal into the tail of a buffer, and return the digits.
+fn dec(mut n: u32) -> ([u8; 10], usize) {
     let mut buf = [0u8; 10];
     let mut i = buf.len();
     loop {
@@ -624,6 +632,12 @@ fn put_dec(mut n: u32) {
             break;
         }
     }
+    (buf, i)
+}
+
+/// Print a `u32` in decimal.
+fn put_dec(n: u32) {
+    let (buf, i) = dec(n);
     write_out(&buf[i..]);
 }
 
@@ -933,30 +947,81 @@ fn peer_map_window(p: &mut Peer) -> Result<(), i32> {
     Ok(())
 }
 
-/// Read every complete message available on one peer and count it. `false` when the
-/// connection ended.
-fn read_peer(p: &mut Peer) -> bool {
+/// Why a peer stopped being pumpable.
+///
+/// The distinction is the whole point of a gate's failure: `End` means the server
+/// closed the connection, `Read` means the read itself failed with that errno, and
+/// `Frame` means the bytes that arrived were not a decodable message. A read that
+/// answers `EAGAIN` is none of these; nothing was queued for it, and the caller goes
+/// back to its poll.
+#[derive(Clone, Copy)]
+enum Dropped {
+    /// `read` answered end-of-input.
+    End,
+    /// `read` failed with this errno.
+    Read(i32),
+    /// What arrived could not be framed, parsed or decoded.
+    Frame,
+}
+
+impl Dropped {
+    /// Append the reason to a line being assembled, without a terminator.
+    fn push_into(self, buf: &mut [u8], at: &mut usize) {
+        match self {
+            Dropped::End => push(buf, at, b"EOF"),
+            Dropped::Read(e) => {
+                push(buf, at, b"errno ");
+                push_dec(buf, at, e as u32);
+            }
+            Dropped::Frame => push(buf, at, b"bad frame"),
+        }
+    }
+}
+
+/// Append `s` to an assembled line, stopping when the buffer is full.
+fn push(buf: &mut [u8], at: &mut usize, s: &[u8]) {
+    for &b in s {
+        if *at == buf.len() {
+            return;
+        }
+        buf[*at] = b;
+        *at += 1;
+    }
+}
+
+/// Append a `u32` in decimal to an assembled line.
+fn push_dec(buf: &mut [u8], at: &mut usize, n: u32) {
+    let (digits, from) = dec(n);
+    push(buf, at, &digits[from..]);
+}
+
+/// Read every complete message available on one peer and count it.
+fn read_peer(p: &mut Peer) -> Result<(), Dropped> {
     let n = match uds::recv(p.conn, &mut p.chunk) {
-        Ok(n) if n > 0 => n as usize,
-        _ => return false,
+        Ok(0) => return Err(Dropped::End),
+        Ok(n) => n as usize,
+        // The uds driver never blocks, so an empty queue is `EAGAIN`, not a failed
+        // connection: the poll that woke us was for a peer another read had drained.
+        Err(e) if e.0 == -minix_std::EAGAIN => return Ok(()),
+        Err(e) => return Err(Dropped::Read(e.0)),
     };
     if p.inbuf.push(&p.chunk[..n]).is_err() {
-        return false;
+        return Err(Dropped::Frame);
     }
     loop {
         let msg = match p.inbuf.next() {
             Ok(Some(m)) => m,
             Ok(None) => break,
-            Err(_) => return false,
+            Err(_) => return Err(Dropped::Frame),
         };
         let h = match Header::parse(msg) {
             Ok(h) => h,
-            Err(_) => return false,
+            Err(_) => return Err(Dropped::Frame),
         };
         let mut args = [Arg::Uint(0); MAX_ARGS];
         let (kind, argc) = match p.client.decode(msg, &mut args) {
             Ok((_, k, n)) => (k, n),
-            Err(_) => return false,
+            Err(_) => return Err(Dropped::Frame),
         };
         let a0 = args[0].as_uint();
         let i0 = args[0].as_int();
@@ -989,12 +1054,12 @@ fn read_peer(p: &mut Peer) -> bool {
             _ => {}
         }
     }
-    true
+    Ok(())
 }
 
-/// Drain whichever peer is readable. A poll timeout is not a failure; a dropped
-/// connection is.
-fn pump_peers(peers: &mut [Peer; 2], ms: i32) -> bool {
+/// Drain whichever peer is readable. A poll timeout is not a failure; a peer that
+/// could not be read is.
+fn pump_peers(peers: &mut [Peer; 2], ms: i32) -> Result<(), (usize, Dropped)> {
     let mut pf = [
         PollFd {
             fd: peers[0].conn,
@@ -1009,28 +1074,43 @@ fn pump_peers(peers: &mut [Peer; 2], ms: i32) -> bool {
     ];
     match fs::poll(&mut pf, ms) {
         Ok(n) if n > 0 => {}
-        _ => return true,
+        _ => return Ok(()),
     }
     for i in 0..2 {
-        if pf[i].revents & POLLIN != 0 && !read_peer(&mut peers[i]) {
-            return false;
+        if pf[i].revents & POLLIN != 0 {
+            read_peer(&mut peers[i]).map_err(|why| (i, why))?;
         }
     }
-    true
+    Ok(())
 }
 
 /// Drain both peers until `done` holds, for up to `tries` polls of 10 ms.
+///
+/// `step` names what the wait is for, so a gate failure says where the drop was seen
+/// and not only that there was one. The line is assembled and written once: the
+/// console's write buffer is 64 bytes, and back-to-back small writes lose the tail.
 fn wait_peers(
     peers: &mut [Peer; 2],
     tries: i32,
+    step: &[u8],
     done: impl Fn(&[Peer; 2]) -> bool,
 ) -> Result<(), i32> {
     for _ in 0..tries {
         if done(&*peers) {
             return Ok(());
         }
-        if !pump_peers(peers, 10) {
-            return Err(fail(70, b"wlx2: a connection dropped\n"));
+        if let Err((which, why)) = pump_peers(peers, 10) {
+            let mut line = [0u8; 64];
+            let mut at = 0usize;
+            push(&mut line, &mut at, b"wlx2: peer ");
+            push_dec(&mut line, &mut at, which as u32);
+            push(&mut line, &mut at, b" dropped waiting for ");
+            push(&mut line, &mut at, step);
+            push(&mut line, &mut at, b" (");
+            why.push_into(&mut line, &mut at);
+            push(&mut line, &mut at, b")\n");
+            write_err(&line[..at]);
+            return Err(70);
         }
     }
     if done(&*peers) {
@@ -1136,7 +1216,7 @@ fn run_focus() -> Result<(), i32> {
 
     // The second window appeared last, so it must hold the focus and the first must
     // have been told it lost it.
-    wait_peers(&mut peers, 400, |p| {
+    wait_peers(&mut peers, 400, b"configure", |p| {
         p[0].configure.is_some() && p[1].configure.is_some() && p[0].leaves >= 1 && p[1].enters >= 1
     })?;
 
@@ -1144,17 +1224,19 @@ fn run_focus() -> Result<(), i32> {
     for i in 0..2 {
         let before = peers[i].callbacks;
         peer_ack(&mut peers[i])?;
-        wait_peers(&mut peers, 400, |p| p[i].callbacks > before)?;
+        wait_peers(&mut peers, 400, b"a callback", |p| p[i].callbacks > before)?;
         peer_map_buffer(&mut peers[i])?;
     }
-    wait_peers(&mut peers, 400, |p| {
+    wait_peers(&mut peers, 400, b"the releases", |p| {
         p[0].releases >= 1 && p[1].releases >= 1
     })?;
     write_out(b"wlx2: ready\n");
 
     // The host injects a key: it must reach the focused connection, the second.
     let (a0, b0) = (peers[0].keys, peers[1].keys);
-    wait_peers(&mut peers, 800, |p| p[0].keys + p[1].keys > a0 + b0)?;
+    wait_peers(&mut peers, 800, b"the first key", |p| {
+        p[0].keys + p[1].keys > a0 + b0
+    })?;
     if peers[0].keys != a0 {
         return Err(fail(81, b"wlx2: the key reached the unfocused client\n"));
     }
@@ -1167,12 +1249,16 @@ fn run_focus() -> Result<(), i32> {
 
     // Another window on the first connection must take the focus back.
     peer_map_window(&mut peers[0])?;
-    wait_peers(&mut peers, 400, |p| p[0].enters >= 2 && p[1].leaves >= 1)?;
+    wait_peers(&mut peers, 400, b"focus back on A", |p| {
+        p[0].enters >= 2 && p[1].leaves >= 1
+    })?;
     write_out(b"wlx2: focus A\n");
 
     // And the second key must follow the focus.
     let (a1, b1) = (peers[0].keys, peers[1].keys);
-    wait_peers(&mut peers, 800, |p| p[0].keys + p[1].keys > a1 + b1)?;
+    wait_peers(&mut peers, 800, b"the second key", |p| {
+        p[0].keys + p[1].keys > a1 + b1
+    })?;
     if peers[1].keys != b1 {
         return Err(fail(83, b"wlx2: the second key stayed unfocused\n"));
     }
@@ -1210,7 +1296,7 @@ fn run_overlap() -> Result<(), i32> {
     peers[0].color = OVERLAP_RED;
     peers[1].color = OVERLAP_BLUE;
 
-    wait_peers(&mut peers, 400, |p| {
+    wait_peers(&mut peers, 400, b"configure", |p| {
         p[0].configure.is_some()
             && p[0].size.is_some()
             && p[1].configure.is_some()
@@ -1221,10 +1307,10 @@ fn run_overlap() -> Result<(), i32> {
     for i in 0..2 {
         let before = peers[i].callbacks;
         peer_ack(&mut peers[i])?;
-        wait_peers(&mut peers, 400, |p| p[i].callbacks > before)?;
+        wait_peers(&mut peers, 400, b"a callback", |p| p[i].callbacks > before)?;
         peer_map_buffer(&mut peers[i])?;
     }
-    wait_peers(&mut peers, 400, |p| {
+    wait_peers(&mut peers, 400, b"the releases", |p| {
         p[0].releases >= 1 && p[1].releases >= 1
     })?;
 
@@ -1235,7 +1321,9 @@ fn run_overlap() -> Result<(), i32> {
     // buffer over the one above it; the scene must keep B in front.
     let before = peers[0].releases;
     peer_map_buffer(&mut peers[0])?;
-    wait_peers(&mut peers, 400, |p| p[0].releases > before)?;
+    wait_peers(&mut peers, 400, b"the recommit", |p| {
+        p[0].releases > before
+    })?;
 
     check_overlap(
         OVERLAP_BLUE,
@@ -1457,7 +1545,7 @@ fn run_pointer() -> Result<(), i32> {
     peers[0].color = POINTER_A;
     peers[1].color = POINTER_B;
 
-    wait_peers(&mut peers, 400, |p| {
+    wait_peers(&mut peers, 400, b"configure", |p| {
         p[0].configure.is_some()
             && p[0].size.is_some()
             && p[1].configure.is_some()
@@ -1467,7 +1555,7 @@ fn run_pointer() -> Result<(), i32> {
     for i in 0..2 {
         let before = peers[i].callbacks;
         peer_ack(&mut peers[i])?;
-        wait_peers(&mut peers, 400, |p| p[i].callbacks > before)?;
+        wait_peers(&mut peers, 400, b"a callback", |p| p[i].callbacks > before)?;
     }
 
     // A full-output window at the bottom, a 64x64 one at the top. Both start at
@@ -1475,7 +1563,7 @@ fn run_pointer() -> Result<(), i32> {
     // only two different extents.
     peer_present(&mut peers[0], FB_WIDTH as i32, FB_HEIGHT as i32)?;
     peer_present(&mut peers[1], POINTER_W, POINTER_H)?;
-    wait_peers(&mut peers, 400, |p| {
+    wait_peers(&mut peers, 400, b"the releases", |p| {
         p[0].releases >= 1 && p[1].releases >= 1
     })?;
     write_out(b"wlpointer: ready\n");
@@ -1484,7 +1572,9 @@ fn run_pointer() -> Result<(), i32> {
     // into the small one and then back out before the key, so the key must land on
     // the big window; the server reports both focus changes on the serial console.
     let (a0, b0) = (peers[0].keys, peers[1].keys);
-    wait_peers(&mut peers, 800, |p| p[0].keys + p[1].keys > a0 + b0)?;
+    wait_peers(&mut peers, 800, b"the key", |p| {
+        p[0].keys + p[1].keys > a0 + b0
+    })?;
     if peers[1].keys != b0 {
         return Err(fail(120, b"wlpointer: the key stayed on the top window\n"));
     }

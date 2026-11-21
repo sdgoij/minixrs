@@ -495,11 +495,14 @@ to be classified). Both gates pass with the port, and `probe read-hist` moved to
 `cargo xtask probe wlpointer` replaces `tools/wlpointer_probe.py` and
 `cargo xtask probe wlfocus` replaces `tools/wlfocus_probe.py`, adding an absolute
 pointer move to `qmp.rs` and a transcript read to `guest.rs`. `wlpointer` passes
-with the port. `wlfocus` does not, and neither does its script: both drop a
-connection before the client is ready, as does `test-wloverlap-x86`, while a
+with the port. `wlfocus` did not, and neither did its script: both dropped a
+connection before the client was ready, as did `test-wloverlap-x86`, while a
 single full-output surface (`test-wlx-x86`) and a 64x64 second window
-(`test-wlpointer-x86`) pass. That is a tree bug recorded as `KNOWN_ISSUES` 81, not
-a port difference; the port matches the script's transcript exactly.
+(`test-wlpointer-x86`) passed. That was a tree bug, recorded as `KNOWN_ISSUES` 81
+and the port matched the script's transcript exactly: the scene composer copied
+each surface into a heap texture, and two output-sized copies exhausted the x86
+guest. Composing now blits straight from the mapped pool, and both ported gates
+pass (see the resolved item).
 
 `cc-minix` and `cc-dso-minix` are **not** ported, and that is a decision
 rather than a pending item. The reason is a host: `build-bash.py` and
