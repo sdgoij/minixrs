@@ -29,6 +29,7 @@ mod paths;
 mod probe;
 mod qmp;
 mod rust_config;
+mod smoke;
 mod toolchain;
 mod verify_stage1;
 
@@ -55,6 +56,20 @@ fn main() -> ExitCode {
         }
         Some(("verify-stage1", _)) => verify_stage1::run(&root).map(|()| true),
         Some(("probe", matches)) => run_probe(&root, matches),
+        Some(("smoke", matches)) => {
+            let log = matches
+                .get_one::<String>("log")
+                .expect("clap requires the log");
+            let seconds = *matches
+                .get_one::<u64>("seconds")
+                .expect("clap requires the seconds");
+            smoke::run(
+                &root,
+                Path::new(log),
+                seconds,
+                &mut probe::command_from(&trailing_words(matches)),
+            )
+        }
         Some(("rust-config", matches)) => {
             let token = matches
                 .get_one::<String>("target")
@@ -158,13 +173,13 @@ fn run_probe(root: &Path, matches: &clap::ArgMatches) -> io::Result<bool> {
                 .expect("clap defaults the dynclib"),
         ),
         Some(("wldemo", _)) => probe::wldemo::run(root),
-        Some(("wldmabuf", matches)) => probe::wldmabuf::run(root, &probe_words(matches)),
-        Some(("wldmabufgl", matches)) => probe::wldmabufgl::run(root, &probe_words(matches)),
-        Some(("wlfull", matches)) => probe::wlfull::run(root, &probe_words(matches)),
+        Some(("wldmabuf", matches)) => probe::wldmabuf::run(root, &trailing_words(matches)),
+        Some(("wldmabufgl", matches)) => probe::wldmabufgl::run(root, &trailing_words(matches)),
+        Some(("wlfull", matches)) => probe::wlfull::run(root, &trailing_words(matches)),
         Some(("wlmotion", _)) => probe::wlmotion::run(root),
         Some(("wlpanel", _)) => probe::wlpanel::run(root),
-        Some(("wlcompose", matches)) => probe::wlcompose::run(root, &probe_words(matches)),
-        Some(("wlscene", matches)) => probe::wlscene::run(root, &probe_words(matches)),
+        Some(("wlcompose", matches)) => probe::wlcompose::run(root, &trailing_words(matches)),
+        Some(("wlscene", matches)) => probe::wlscene::run(root, &trailing_words(matches)),
         Some(("wlkey", _)) => probe::wlkey::run(root),
         Some(("wlfocus", _)) => probe::wlfocus::run(root),
         Some(("wlpointer", _)) => probe::wlpointer::run(root),
@@ -172,8 +187,8 @@ fn run_probe(root: &Path, matches: &clap::ArgMatches) -> io::Result<bool> {
     }
 }
 
-/// The trailing QEMU words a recipe passed after `--`.
-fn probe_words(matches: &clap::ArgMatches) -> Vec<String> {
+/// The trailing words a recipe passed after `--`.
+fn trailing_words(matches: &clap::ArgMatches) -> Vec<String> {
     matches
         .get_many::<String>("qemu")
         .map(|values| values.cloned().collect())
@@ -182,7 +197,7 @@ fn probe_words(matches: &clap::ArgMatches) -> Vec<String> {
 
 /// A gate that boots the image with a QEMU line the recipe owns, because the
 /// devices and the disk image differ per arch and per gate.
-fn guest_command_arg() -> clap::Arg {
+fn trailing_command_arg() -> clap::Arg {
     clap::Arg::new("qemu")
         .value_name("QEMU")
         .required(true)
@@ -333,6 +348,24 @@ fn command() -> clap::Command {
                 .about("Install the published stage1, then link the probe binaries with it"),
         )
         .subcommand(
+            clap::Command::new("smoke")
+                .about("Drive a booted guest through a .tsv smoke scenario")
+                .arg(
+                    clap::Arg::new("log")
+                        .value_name("LOG")
+                        .required(true)
+                        .help("Where to write the guest's console"),
+                )
+                .arg(
+                    clap::Arg::new("seconds")
+                        .value_name("SECONDS")
+                        .required(true)
+                        .value_parser(clap::value_parser!(u64))
+                        .help("How long the guest may run"),
+                )
+                .arg(trailing_command_arg()),
+        )
+        .subcommand(
             clap::Command::new("probe")
                 .about("Gate probes over a running guest and the data it produced")
                 .subcommand_required(true)
@@ -389,17 +422,17 @@ fn command() -> clap::Command {
                 .subcommand(
                     clap::Command::new("wldmabuf")
                         .about("A render-node object handed over as a linux-dmabuf buffer and scanned out")
-                        .arg(guest_command_arg()),
+                        .arg(trailing_command_arg()),
                 )
                 .subcommand(
                     clap::Command::new("wldmabufgl")
                         .about("A GL client whose render target is the linux-dmabuf buffer scanned out")
-                        .arg(guest_command_arg()),
+                        .arg(trailing_command_arg()),
                 )
                 .subcommand(
                     clap::Command::new("wlfull")
                         .about("A whole-output wl_shm frame presented by re-pointing the scanout")
-                        .arg(guest_command_arg()),
+                        .arg(trailing_command_arg()),
                 )
                 .subcommand(
                     clap::Command::new("wlmotion")
@@ -412,12 +445,12 @@ fn command() -> clap::Command {
                 .subcommand(
                     clap::Command::new("wlcompose")
                         .about("Two GL surfaces composed on the render node by a helper in another process")
-                        .arg(guest_command_arg()),
+                        .arg(trailing_command_arg()),
                 )
                 .subcommand(
                     clap::Command::new("wlscene")
                         .about("Two dma-buf surfaces composed on the GPU and scanned out")
-                        .arg(guest_command_arg()),
+                        .arg(trailing_command_arg()),
                 )
                 .subcommand(
                     clap::Command::new("wlkey")

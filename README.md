@@ -317,7 +317,7 @@ See `.agents/skills/` for domain deep-dives:
 - **One scenario, four targets:** `tools/smoke/scenario.tsv` is the userspace smoke
   test — a program exec'd from the image, a file written, that file read back — and all
   four targets read that one file. `just image [arch]` builds the shipped ELF and types
-  the steps into the shell that comes up, through `tools/smoke/feed.sh`; `run.js` drives
+  the steps into the shell that comes up, through `cargo xtask smoke`; `run.js` drives
   the same steps in the wasm engine. `arch-tests` runs it on every PR, so an image whose
   shell cannot run a command has to fail the build rather than a download.
 - **Dynamic linking:** `just test-dynlink-{x86,riscv64,aarch64}` boots an image and drives

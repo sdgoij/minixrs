@@ -2,7 +2,7 @@
 # line of text with the in-house renderer, presents the frame through
 # /sbin/wlserver, and reads it back from /dev/fb. `gui.md` milestone M1's gate.
 #
-#   FEED_SCENARIO=tools/smoke/gui.tsv sh tools/smoke/feed.sh <log> <timeout> <qemu command…>
+#   FEED_SCENARIO=tools/smoke/gui.tsv cargo xtask smoke <log> <timeout> <qemu command…>
 #
 # The client, the Mesa DSOs and their dependencies are injected into the disk
 # image by the recipe, and the guest gets no GL device, so Mesa takes softpipe:

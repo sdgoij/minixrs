@@ -267,17 +267,17 @@ system-image-aarch64: boot-image-aarch64
 # `image-<arch>` is booted the same way). The dependency builds both images first.
 test-system-image-x86 boot-timeout="40": system-image-x86
     @just _assert-qemu-version qemu-system-x86_64
-    sh tools/smoke/feed.sh target/test-system-image-x86.log {{boot-timeout}} qemu-system-x86_64 -nographic -m 256M -no-reboot -vga none -device bochs-display,id=fb0 -kernel target/images/x86_64-pc-minix/minix-x86-boot.elf -drive if=none,id=disk0,file=target/images/x86_64-pc-minix/disk.img,format=raw,cache=writethrough -device virtio-blk-pci,disable-legacy=on,drive=disk0 -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0 -device virtio-tablet-pci,display=fb0
+    cargo xtask smoke target/test-system-image-x86.log {{boot-timeout}} qemu-system-x86_64 -nographic -m 256M -no-reboot -vga none -device bochs-display,id=fb0 -kernel target/images/x86_64-pc-minix/minix-x86-boot.elf -drive if=none,id=disk0,file=target/images/x86_64-pc-minix/disk.img,format=raw,cache=writethrough -device virtio-blk-pci,disable-legacy=on,drive=disk0 -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0 -device virtio-tablet-pci,display=fb0
     @just _assert-qemu-log target/test-system-image-x86.log "wserver: ready"
 
 test-system-image-riscv64 boot-timeout="60": system-image-riscv64
     @just _assert-qemu-version qemu-system-riscv64
-    sh tools/smoke/feed.sh target/test-system-image-riscv64.log {{boot-timeout}} qemu-system-riscv64 -machine virt -m 256M -nographic -global virtio-mmio.force-legacy=off -drive if=none,id=disk0,file=target/images/riscv64gc-unknown-minix/disk.img,format=raw,cache=writethrough -device virtio-blk-device,drive=disk0 -netdev user,id=net0 -device virtio-net-device,netdev=net0 -device virtio-gpu-device -device virtio-keyboard-device -kernel target/images/riscv64gc-unknown-minix/minix-riscv64-boot.elf
+    cargo xtask smoke target/test-system-image-riscv64.log {{boot-timeout}} qemu-system-riscv64 -machine virt -m 256M -nographic -global virtio-mmio.force-legacy=off -drive if=none,id=disk0,file=target/images/riscv64gc-unknown-minix/disk.img,format=raw,cache=writethrough -device virtio-blk-device,drive=disk0 -netdev user,id=net0 -device virtio-net-device,netdev=net0 -device virtio-gpu-device -device virtio-keyboard-device -kernel target/images/riscv64gc-unknown-minix/minix-riscv64-boot.elf
     @just _assert-qemu-log target/test-system-image-riscv64.log "wserver: ready"
 
 test-system-image-aarch64 boot-timeout="60": system-image-aarch64
     @just _assert-qemu-version qemu-system-aarch64
-    sh tools/smoke/feed.sh target/test-system-image-aarch64.log {{boot-timeout}} qemu-system-aarch64 -machine virt -cpu cortex-a57 -m 256M -nographic -no-reboot -global virtio-mmio.force-legacy=off -drive if=none,id=disk0,file=target/images/aarch64-unknown-minix/disk.img,format=raw,cache=writethrough -device virtio-blk-device,drive=disk0 -netdev user,id=net0 -device virtio-net-device,netdev=net0 -device virtio-gpu-device -device virtio-keyboard-device -kernel target/images/aarch64-unknown-minix/minix-aarch64-boot.elf
+    cargo xtask smoke target/test-system-image-aarch64.log {{boot-timeout}} qemu-system-aarch64 -machine virt -cpu cortex-a57 -m 256M -nographic -no-reboot -global virtio-mmio.force-legacy=off -drive if=none,id=disk0,file=target/images/aarch64-unknown-minix/disk.img,format=raw,cache=writethrough -device virtio-blk-device,drive=disk0 -netdev user,id=net0 -device virtio-net-device,netdev=net0 -device virtio-gpu-device -device virtio-keyboard-device -kernel target/images/aarch64-unknown-minix/minix-aarch64-boot.elf
     @just _assert-qemu-log target/test-system-image-aarch64.log "wserver: ready"
 
 # The `/dev/fb` `mmap` path: a userland `mmap` of the framebuffer must alias the device's
@@ -293,17 +293,17 @@ test-fbmmap arch="x86" boot-timeout="40":
 
 test-fbmmap-x86 boot-timeout="40": system-image-x86
     @just _assert-qemu-version qemu-system-x86_64
-    FEED_SCENARIO=tools/smoke/fbmmap.tsv sh tools/smoke/feed.sh target/test-fbmmap-x86.log {{boot-timeout}} qemu-system-x86_64 -nographic -m 256M -no-reboot -vga none -device bochs-display,id=fb0 -kernel target/images/x86_64-pc-minix/minix-x86-boot.elf -drive if=none,id=disk0,file=target/images/x86_64-pc-minix/disk.img,format=raw,cache=writethrough -device virtio-blk-pci,disable-legacy=on,drive=disk0 -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0 -device virtio-tablet-pci,display=fb0
+    FEED_SCENARIO=tools/smoke/fbmmap.tsv cargo xtask smoke target/test-fbmmap-x86.log {{boot-timeout}} qemu-system-x86_64 -nographic -m 256M -no-reboot -vga none -device bochs-display,id=fb0 -kernel target/images/x86_64-pc-minix/minix-x86-boot.elf -drive if=none,id=disk0,file=target/images/x86_64-pc-minix/disk.img,format=raw,cache=writethrough -device virtio-blk-pci,disable-legacy=on,drive=disk0 -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0 -device virtio-tablet-pci,display=fb0
     @echo "fbmmap: a userland mmap of /dev/fb aliases the live framebuffer (x86_64)"
 
 test-fbmmap-riscv64 boot-timeout="60": system-image-riscv64
     @just _assert-qemu-version qemu-system-riscv64
-    FEED_SCENARIO=tools/smoke/fbmmap.tsv sh tools/smoke/feed.sh target/test-fbmmap-riscv64.log {{boot-timeout}} qemu-system-riscv64 -machine virt -m 256M -nographic -global virtio-mmio.force-legacy=off -drive if=none,id=disk0,file=target/images/riscv64gc-unknown-minix/disk.img,format=raw,cache=writethrough -device virtio-blk-device,drive=disk0 -netdev user,id=net0 -device virtio-net-device,netdev=net0 -device virtio-gpu-device -device virtio-keyboard-device -kernel target/images/riscv64gc-unknown-minix/minix-riscv64-boot.elf
+    FEED_SCENARIO=tools/smoke/fbmmap.tsv cargo xtask smoke target/test-fbmmap-riscv64.log {{boot-timeout}} qemu-system-riscv64 -machine virt -m 256M -nographic -global virtio-mmio.force-legacy=off -drive if=none,id=disk0,file=target/images/riscv64gc-unknown-minix/disk.img,format=raw,cache=writethrough -device virtio-blk-device,drive=disk0 -netdev user,id=net0 -device virtio-net-device,netdev=net0 -device virtio-gpu-device -device virtio-keyboard-device -kernel target/images/riscv64gc-unknown-minix/minix-riscv64-boot.elf
     @echo "fbmmap: a userland mmap of /dev/fb aliases the live framebuffer (riscv64)"
 
 test-fbmmap-aarch64 boot-timeout="60": system-image-aarch64
     @just _assert-qemu-version qemu-system-aarch64
-    FEED_SCENARIO=tools/smoke/fbmmap.tsv sh tools/smoke/feed.sh target/test-fbmmap-aarch64.log {{boot-timeout}} qemu-system-aarch64 -machine virt -cpu cortex-a57 -m 256M -nographic -no-reboot -global virtio-mmio.force-legacy=off -drive if=none,id=disk0,file=target/images/aarch64-unknown-minix/disk.img,format=raw,cache=writethrough -device virtio-blk-device,drive=disk0 -netdev user,id=net0 -device virtio-net-device,netdev=net0 -device virtio-gpu-device -device virtio-keyboard-device -kernel target/images/aarch64-unknown-minix/minix-aarch64-boot.elf
+    FEED_SCENARIO=tools/smoke/fbmmap.tsv cargo xtask smoke target/test-fbmmap-aarch64.log {{boot-timeout}} qemu-system-aarch64 -machine virt -cpu cortex-a57 -m 256M -nographic -no-reboot -global virtio-mmio.force-legacy=off -drive if=none,id=disk0,file=target/images/aarch64-unknown-minix/disk.img,format=raw,cache=writethrough -device virtio-blk-device,drive=disk0 -netdev user,id=net0 -device virtio-net-device,netdev=net0 -device virtio-gpu-device -device virtio-keyboard-device -kernel target/images/aarch64-unknown-minix/minix-aarch64-boot.elf
     @echo "fbmmap: a userland mmap of /dev/fb aliases the live framebuffer (aarch64)"
 
 # Interactive bash: readline polls the console instead of blocking on a line read,
@@ -391,7 +391,7 @@ image-x86 boot-timeout="15": build-x86
     mkdir -p target/images/x86_64-pc-minix
     cp target/trampoline.elf target/images/x86_64-pc-minix/minix-x86.elf
     @just _assert-qemu-version qemu-system-x86_64
-    sh tools/smoke/feed.sh target/image-x86.log {{boot-timeout}} qemu-system-x86_64 -nographic -m 256M -no-reboot -vga none -device bochs-display,id=fb0 -kernel target/images/x86_64-pc-minix/minix-x86.elf -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0 -device virtio-tablet-pci,display=fb0
+    cargo xtask smoke target/image-x86.log {{boot-timeout}} qemu-system-x86_64 -nographic -m 256M -no-reboot -vga none -device bochs-display,id=fb0 -kernel target/images/x86_64-pc-minix/minix-x86.elf -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0 -device virtio-tablet-pci,display=fb0
     @just _assert-qemu-log target/image-x86.log "wserver: ready"
     @just _assert-qemu-log target/image-x86.log "fb: gpu3d none"
     @echo "done: target/images/x86_64-pc-minix/minix-x86.elf — qemu-system-x86_64 -nographic -m 256M -kernel <it>"
@@ -425,7 +425,7 @@ image-x86 boot-timeout="15": build-x86
 #
 # A GL device needs a GL display backend, so this recipe cannot use -nographic:
 # `-display egl-headless -serial stdio` keeps the console on stdio, which is what
-# feed.sh drives.
+# the smoke driver drives.
 #
 # Four things had to be true for that line to appear, each found by a bisecting boot,
 # and each worth checking first when this goes red again:
@@ -484,7 +484,7 @@ test-gpu3d-nogl-x86 boot-timeout="20": build-x86
     mkdir -p target/images/x86_64-pc-minix
     cp target/trampoline.elf target/images/x86_64-pc-minix/minix-x86.elf
     @just _assert-qemu-version qemu-system-x86_64
-    FEED_SCENARIO=tools/smoke/drminfo.tsv sh tools/smoke/feed.sh target/test-gpu3d-nogl-x86.log {{boot-timeout}} qemu-system-x86_64 -nographic -m 256M -no-reboot -vga none -device bochs-display,id=fb0 -kernel target/images/x86_64-pc-minix/minix-x86.elf -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0 -device virtio-tablet-pci,display=fb0 -device virtio-gpu-pci
+    FEED_SCENARIO=tools/smoke/drminfo.tsv cargo xtask smoke target/test-gpu3d-nogl-x86.log {{boot-timeout}} qemu-system-x86_64 -nographic -m 256M -no-reboot -vga none -device bochs-display,id=fb0 -kernel target/images/x86_64-pc-minix/minix-x86.elf -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0 -device virtio-tablet-pci,display=fb0 -device virtio-gpu-pci
     @just _assert-qemu-log target/test-gpu3d-nogl-x86.log "fb: gpu3d device, no VIRTIO_GPU_F_VIRGL"
     @echo "gpu3d: a device the host gave no GL to was reported as no 3D by the fb server and by a client opening its render node (x86_64)"
 
@@ -497,7 +497,7 @@ test-drmmap-x86 boot-timeout="20": build-x86
     mkdir -p target/images/x86_64-pc-minix
     cp target/trampoline.elf target/images/x86_64-pc-minix/minix-x86.elf
     @just _assert-qemu-version qemu-system-x86_64
-    FEED_SCENARIO=tools/smoke/drmmap.tsv sh tools/smoke/feed.sh target/test-drmmap-x86.log {{boot-timeout}} qemu-system-x86_64 -nographic -m 256M -no-reboot -vga none -device bochs-display,id=fb0 -kernel target/images/x86_64-pc-minix/minix-x86.elf -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0 -device virtio-tablet-pci,display=fb0 -device virtio-gpu-pci
+    FEED_SCENARIO=tools/smoke/drmmap.tsv cargo xtask smoke target/test-drmmap-x86.log {{boot-timeout}} qemu-system-x86_64 -nographic -m 256M -no-reboot -vga none -device bochs-display,id=fb0 -kernel target/images/x86_64-pc-minix/minix-x86.elf -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0 -device virtio-tablet-pci,display=fb0 -device virtio-gpu-pci
     @just _assert-qemu-log target/test-drmmap-x86.log "fb: gpu3d device, no VIRTIO_GPU_F_VIRGL"
     @echo "drmmap: a client created a render node memory object, mapped it twice, found one set of frames, saw a second object be other memory, and closed it (x86_64)"
 
@@ -511,7 +511,7 @@ test-drmprime-x86 boot-timeout="20": build-x86
     mkdir -p target/images/x86_64-pc-minix
     cp target/trampoline.elf target/images/x86_64-pc-minix/minix-x86.elf
     @just _assert-qemu-version qemu-system-x86_64
-    FEED_SCENARIO=tools/smoke/drmprime.tsv sh tools/smoke/feed.sh target/test-drmprime-x86.log {{boot-timeout}} qemu-system-x86_64 -nographic -m 256M -no-reboot -vga none -device bochs-display,id=fb0 -kernel target/images/x86_64-pc-minix/minix-x86.elf -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0 -device virtio-tablet-pci,display=fb0 -device virtio-gpu-pci
+    FEED_SCENARIO=tools/smoke/drmprime.tsv cargo xtask smoke target/test-drmprime-x86.log {{boot-timeout}} qemu-system-x86_64 -nographic -m 256M -no-reboot -vga none -device bochs-display,id=fb0 -kernel target/images/x86_64-pc-minix/minix-x86.elf -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0 -device virtio-tablet-pci,display=fb0 -device virtio-gpu-pci
     @just _assert-qemu-log target/test-drmprime-x86.log "fb: gpu3d device, no VIRTIO_GPU_F_VIRGL"
     @echo "drmprime: a client exported a render node object to a dma-buf descriptor and imported it back, and the bytes survived (x86_64)"
 
@@ -523,7 +523,7 @@ test-readlink-x86 boot-timeout="20": build-x86
     mkdir -p target/images/x86_64-pc-minix
     cp target/trampoline.elf target/images/x86_64-pc-minix/minix-x86.elf
     @just _assert-qemu-version qemu-system-x86_64
-    FEED_SCENARIO=tools/smoke/readlink.tsv sh tools/smoke/feed.sh target/test-readlink-x86.log {{boot-timeout}} qemu-system-x86_64 -nographic -m 256M -no-reboot -vga none -device bochs-display,id=fb0 -kernel target/images/x86_64-pc-minix/minix-x86.elf -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0 -device virtio-tablet-pci,display=fb0
+    FEED_SCENARIO=tools/smoke/readlink.tsv cargo xtask smoke target/test-readlink-x86.log {{boot-timeout}} qemu-system-x86_64 -nographic -m 256M -no-reboot -vga none -device bochs-display,id=fb0 -kernel target/images/x86_64-pc-minix/minix-x86.elf -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0 -device virtio-tablet-pci,display=fb0
     @echo "readlink: a client read the target of the symlink the image ships, and the refusals a read has to give (x86_64)"
 
 # `symlink(2)`, the write half of the readlink gate: a link MFS creates at run time, read
@@ -534,7 +534,7 @@ test-symlink-x86 boot-timeout="20": build-x86
     mkdir -p target/images/x86_64-pc-minix
     cp target/trampoline.elf target/images/x86_64-pc-minix/minix-x86.elf
     @just _assert-qemu-version qemu-system-x86_64
-    FEED_SCENARIO=tools/smoke/symlink.tsv sh tools/smoke/feed.sh target/test-symlink-x86.log {{boot-timeout}} qemu-system-x86_64 -nographic -m 256M -no-reboot -vga none -device bochs-display,id=fb0 -kernel target/images/x86_64-pc-minix/minix-x86.elf -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0 -device virtio-tablet-pci,display=fb0
+    FEED_SCENARIO=tools/smoke/symlink.tsv cargo xtask smoke target/test-symlink-x86.log {{boot-timeout}} qemu-system-x86_64 -nographic -m 256M -no-reboot -vga none -device bochs-display,id=fb0 -kernel target/images/x86_64-pc-minix/minix-x86.elf -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0 -device virtio-tablet-pci,display=fb0
     @echo "symlink: a client created a link in /tmp, read its target back through the grant, and got the three refusals (x86_64)"
 
 # `link(2)` and `rename(2)`, the acceptance test for KNOWN_ISSUES.md item 37 - green since that
@@ -549,12 +549,12 @@ test-link-x86 boot-timeout="20": build-x86
     mkdir -p target/images/x86_64-pc-minix
     cp target/trampoline.elf target/images/x86_64-pc-minix/minix-x86.elf
     @just _assert-qemu-version qemu-system-x86_64
-    FEED_SCENARIO=tools/smoke/link.tsv sh tools/smoke/feed.sh target/test-link-x86.log {{boot-timeout}} qemu-system-x86_64 -nographic -m 256M -no-reboot -vga none -device bochs-display,id=fb0 -kernel target/images/x86_64-pc-minix/minix-x86.elf -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0 -device virtio-tablet-pci,display=fb0
+    FEED_SCENARIO=tools/smoke/link.tsv cargo xtask smoke target/test-link-x86.log {{boot-timeout}} qemu-system-x86_64 -nographic -m 256M -no-reboot -vga none -device bochs-display,id=fb0 -kernel target/images/x86_64-pc-minix/minix-x86.elf -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0 -device virtio-tablet-pci,display=fb0
     @echo "link: a hard link and a rename carried their names (x86_64)"
 
 # The render node's client on the GL device, which is the one gate that types into a guest with a
 # GL display backend: host GL drops serial bytes mid-line, so this recipe sets `FEED_PACE` and
-# `feed.sh` writes the step a byte at a time and refuses to believe it until the guest has echoed
+# the smoke driver writes the step a byte at a time and refuses to believe it until the guest has echoed
 # the whole line (`tools/smoke/drmgl.tsv` has the measurements and the rest of the reason).
 #
 # `blob=on` because the blob feature is only available on this host's GL device, and the two
@@ -564,7 +564,7 @@ test-drmgl-x86 boot-timeout="40": build-x86
     mkdir -p target/images/x86_64-pc-minix
     cp target/trampoline.elf target/images/x86_64-pc-minix/minix-x86.elf
     @just _assert-qemu-version qemu-system-x86_64
-    FEED_PACE=0.02 FEED_SCENARIO=tools/smoke/drmgl.tsv sh tools/smoke/feed.sh target/test-drmgl-x86.log {{boot-timeout}} qemu-system-x86_64 -display egl-headless -serial stdio -m 256M -no-reboot -vga none -device bochs-display,id=fb0 -kernel target/images/x86_64-pc-minix/minix-x86.elf -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0 -device virtio-tablet-pci,display=fb0 -device virtio-gpu-gl-pci,blob=on
+    FEED_PACE=0.02 FEED_SCENARIO=tools/smoke/drmgl.tsv cargo xtask smoke target/test-drmgl-x86.log {{boot-timeout}} qemu-system-x86_64 -display egl-headless -serial stdio -m 256M -no-reboot -vga none -device bochs-display,id=fb0 -kernel target/images/x86_64-pc-minix/minix-x86.elf -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0 -device virtio-tablet-pci,display=fb0 -device virtio-gpu-gl-pci,blob=on
     @just _assert-qemu-log target/test-drmgl-x86.log "wserver: ready"
     @just _assert-qemu-log target/test-drmgl-x86.log "wlserver: ready"
     @just _assert-qemu-log target/test-drmgl-x86.log "capsets 2 blob 1"
@@ -585,7 +585,7 @@ test-coreutils-wedge boot-timeout="20": build-x86
     mkdir -p target/images/x86_64-pc-minix
     cp target/trampoline.elf target/images/x86_64-pc-minix/minix-x86.elf
     @just _assert-qemu-version qemu-system-x86_64
-    FEED_SCENARIO=tools/smoke/coreutils-wedge.tsv sh tools/smoke/feed.sh target/test-coreutils-wedge.log {{boot-timeout}} qemu-system-x86_64 -nographic -m 256M -no-reboot -vga none -device bochs-display,id=fb0 -kernel target/images/x86_64-pc-minix/minix-x86.elf -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0 -device virtio-tablet-pci,display=fb0
+    FEED_SCENARIO=tools/smoke/coreutils-wedge.tsv cargo xtask smoke target/test-coreutils-wedge.log {{boot-timeout}} qemu-system-x86_64 -nographic -m 256M -no-reboot -vga none -device bochs-display,id=fb0 -kernel target/images/x86_64-pc-minix/minix-x86.elf -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0 -device virtio-tablet-pci,display=fb0
     @echo "coreutils-wedge: no child was left wedged"
 
 # The aarch64 half of the coreutils gate: the multicall is embedded on aarch64 now, and
@@ -593,7 +593,7 @@ test-coreutils-wedge boot-timeout="20": build-x86
 # dropped the caller's SIMD registers (KNOWN_ISSUES aarch64 #9).
 test-coreutils-wedge-aarch64 boot-timeout="30": build-aarch64
     @just _assert-qemu-version qemu-system-aarch64
-    FEED_SCENARIO=tools/smoke/coreutils-wedge.tsv sh tools/smoke/feed.sh target/test-coreutils-wedge-aarch64.log {{boot-timeout}} qemu-system-aarch64 -machine virt -cpu cortex-a57 -m 256M -nographic -no-reboot -global virtio-mmio.force-legacy=off -netdev user,id=net0 -device virtio-net-device,netdev=net0 -device virtio-gpu-device -device virtio-keyboard-device -kernel target/aarch64-unknown-minix/release/kernel-boot-aarch64
+    FEED_SCENARIO=tools/smoke/coreutils-wedge.tsv cargo xtask smoke target/test-coreutils-wedge-aarch64.log {{boot-timeout}} qemu-system-aarch64 -machine virt -cpu cortex-a57 -m 256M -nographic -no-reboot -global virtio-mmio.force-legacy=off -netdev user,id=net0 -device virtio-net-device,netdev=net0 -device virtio-gpu-device -device virtio-keyboard-device -kernel target/aarch64-unknown-minix/release/kernel-boot-aarch64
     @echo "coreutils-wedge: no child was left wedged (aarch64)"
 
 # The applets that were excluded from `feat_minix` for platform reasons, on every arch:
@@ -623,19 +623,19 @@ test-coreutils-minix-x86: build-x86
     mkdir -p target/images/x86_64-pc-minix
     cp target/trampoline.elf target/images/x86_64-pc-minix/minix-x86.elf
     @just _assert-qemu-version qemu-system-x86_64
-    FEED_PACE=0.003 FEED_SCENARIO=tools/smoke/coreutils-minix.tsv sh tools/smoke/feed.sh target/test-coreutils-minix-x86.log 300 qemu-system-x86_64 -nographic -m 512M -no-reboot -vga none -device bochs-display,id=fb0 -kernel target/images/x86_64-pc-minix/minix-x86.elf -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0 -device virtio-tablet-pci,display=fb0
+    FEED_PACE=0.003 FEED_SCENARIO=tools/smoke/coreutils-minix.tsv cargo xtask smoke target/test-coreutils-minix-x86.log 300 qemu-system-x86_64 -nographic -m 512M -no-reboot -vga none -device bochs-display,id=fb0 -kernel target/images/x86_64-pc-minix/minix-x86.elf -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0 -device virtio-tablet-pci,display=fb0
     @if grep -qE "^(touch|env|ln|chgrp|chown|groups|id|logname|whoami|install|mkfifo|chroot|coreutils|ls|dir|vdir|cp|mv|expr|link|hostid|nice|date|dd|tty|dircolors|csplit|du|kill|uname|arch|nproc|hostname|timeout|more):|^(RM-STILL-THERE|RMR-STILL-THERE|CHMOD-X-BAD|CHMOD-ENOENT-BAD|INSTALL-M-BAD)$" target/test-coreutils-minix-x86.log; then echo "!! a tool reported an error:"; grep -nE "^(touch|env|ln|chgrp|chown|groups|id|logname|whoami|install|mkfifo|chroot|coreutils|ls|dir|vdir|cp|mv|expr|link|hostid|nice|date|dd|tty|dircolors|csplit|du|kill|uname|arch|nproc|hostname|timeout|more):|^(RM-STILL-THERE|RMR-STILL-THERE|CHMOD-X-BAD|CHMOD-ENOENT-BAD|INSTALL-M-BAD)$" target/test-coreutils-minix-x86.log; exit 1; fi
     @echo "coreutils-minix: the core scenario and ls, cp, mv, expr, link, hostid, nice, date, dd, tty, dircolors, csplit, du, uname, arch, nproc, hostname, timeout, nohup, more and kill ran (x86_64)"
 
 test-coreutils-minix-riscv64: build-riscv64
     @just _assert-qemu-version qemu-system-riscv64
-    FEED_PACE=0.003 FEED_SCENARIO=tools/smoke/coreutils-minix.tsv sh tools/smoke/feed.sh target/test-coreutils-minix-riscv64.log 480 qemu-system-riscv64 -machine virt -m 512M -nographic -global virtio-mmio.force-legacy=off -netdev user,id=net0 -device virtio-net-device,netdev=net0 -device virtio-gpu-device -device virtio-keyboard-device -kernel target/riscv64gc-unknown-minix/release/kernel-boot-riscv64
+    FEED_PACE=0.003 FEED_SCENARIO=tools/smoke/coreutils-minix.tsv cargo xtask smoke target/test-coreutils-minix-riscv64.log 480 qemu-system-riscv64 -machine virt -m 512M -nographic -global virtio-mmio.force-legacy=off -netdev user,id=net0 -device virtio-net-device,netdev=net0 -device virtio-gpu-device -device virtio-keyboard-device -kernel target/riscv64gc-unknown-minix/release/kernel-boot-riscv64
     @if grep -qE "^(touch|env|ln|chgrp|chown|groups|id|logname|whoami|install|mkfifo|chroot|coreutils|ls|dir|vdir|cp|mv|expr|link|hostid|nice|date|dd|tty|dircolors|csplit|du|kill|uname|arch|nproc|hostname|timeout|more):|^(RM-STILL-THERE|RMR-STILL-THERE|CHMOD-X-BAD|CHMOD-ENOENT-BAD|INSTALL-M-BAD)$" target/test-coreutils-minix-riscv64.log; then echo "!! a tool reported an error:"; grep -nE "^(touch|env|ln|chgrp|chown|groups|id|logname|whoami|install|mkfifo|chroot|coreutils|ls|dir|vdir|cp|mv|expr|link|hostid|nice|date|dd|tty|dircolors|csplit|du|kill|uname|arch|nproc|hostname|timeout|more):|^(RM-STILL-THERE|RMR-STILL-THERE|CHMOD-X-BAD|CHMOD-ENOENT-BAD|INSTALL-M-BAD)$" target/test-coreutils-minix-riscv64.log; exit 1; fi
     @echo "coreutils-minix: the core scenario and ls, cp, mv, expr, link, hostid, nice, date, dd, tty, dircolors, csplit, du, uname, arch, nproc, hostname, timeout, nohup, more and kill ran (riscv64)"
 
 test-coreutils-minix-aarch64: build-aarch64
     @just _assert-qemu-version qemu-system-aarch64
-    FEED_PACE=0.003 FEED_SCENARIO=tools/smoke/coreutils-minix.tsv sh tools/smoke/feed.sh target/test-coreutils-minix-aarch64.log 480 qemu-system-aarch64 -machine virt -cpu cortex-a57 -m 512M -nographic -no-reboot -global virtio-mmio.force-legacy=off -netdev user,id=net0 -device virtio-net-device,netdev=net0 -device virtio-gpu-device -device virtio-keyboard-device -kernel target/aarch64-unknown-minix/release/kernel-boot-aarch64
+    FEED_PACE=0.003 FEED_SCENARIO=tools/smoke/coreutils-minix.tsv cargo xtask smoke target/test-coreutils-minix-aarch64.log 480 qemu-system-aarch64 -machine virt -cpu cortex-a57 -m 512M -nographic -no-reboot -global virtio-mmio.force-legacy=off -netdev user,id=net0 -device virtio-net-device,netdev=net0 -device virtio-gpu-device -device virtio-keyboard-device -kernel target/aarch64-unknown-minix/release/kernel-boot-aarch64
     @if grep -qE "^(touch|env|ln|chgrp|chown|groups|id|logname|whoami|install|mkfifo|chroot|coreutils|ls|dir|vdir|cp|mv|expr|link|hostid|nice|date|dd|tty|dircolors|csplit|du|kill|uname|arch|nproc|hostname|timeout|more):|^(RM-STILL-THERE|RMR-STILL-THERE|CHMOD-X-BAD|CHMOD-ENOENT-BAD|INSTALL-M-BAD)$" target/test-coreutils-minix-aarch64.log; then echo "!! a tool reported an error:"; grep -nE "^(touch|env|ln|chgrp|chown|groups|id|logname|whoami|install|mkfifo|chroot|coreutils|ls|dir|vdir|cp|mv|expr|link|hostid|nice|date|dd|tty|dircolors|csplit|du|kill|uname|arch|nproc|hostname|timeout|more):|^(RM-STILL-THERE|RMR-STILL-THERE|CHMOD-X-BAD|CHMOD-ENOENT-BAD|INSTALL-M-BAD)$" target/test-coreutils-minix-aarch64.log; exit 1; fi
     @echo "coreutils-minix: the core scenario and ls, cp, mv, expr, link, hostid, nice, date, dd, tty, dircolors, csplit, du, uname, arch, nproc, hostname, timeout, nohup, more and kill ran (aarch64)"
 
@@ -655,17 +655,17 @@ test-fileread-x86 boot-timeout="40": build-x86
     mkdir -p target/images/x86_64-pc-minix
     cp target/trampoline.elf target/images/x86_64-pc-minix/minix-x86.elf
     @just _assert-qemu-version qemu-system-x86_64
-    FEED_SCENARIO=tools/smoke/fileread.tsv sh tools/smoke/feed.sh target/test-fileread-x86.log {{boot-timeout}} qemu-system-x86_64 -nographic -m 256M -no-reboot -vga none -device bochs-display,id=fb0 -kernel target/images/x86_64-pc-minix/minix-x86.elf -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0 -device virtio-tablet-pci,display=fb0
+    FEED_SCENARIO=tools/smoke/fileread.tsv cargo xtask smoke target/test-fileread-x86.log {{boot-timeout}} qemu-system-x86_64 -nographic -m 256M -no-reboot -vga none -device bochs-display,id=fb0 -kernel target/images/x86_64-pc-minix/minix-x86.elf -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0 -device virtio-tablet-pci,display=fb0
     @echo "fileread: a runtime-written file's indirect blocks read back (x86_64)"
 
 test-fileread-riscv64 boot-timeout="120": build-riscv64
     @just _assert-qemu-version qemu-system-riscv64
-    FEED_PACE=0.003 FEED_SCENARIO=tools/smoke/fileread.tsv sh tools/smoke/feed.sh target/test-fileread-riscv64.log {{boot-timeout}} qemu-system-riscv64 -machine virt -m 256M -nographic -global virtio-mmio.force-legacy=off -netdev user,id=net0 -device virtio-net-device,netdev=net0 -device virtio-gpu-device -device virtio-keyboard-device -kernel target/riscv64gc-unknown-minix/release/kernel-boot-riscv64
+    FEED_PACE=0.003 FEED_SCENARIO=tools/smoke/fileread.tsv cargo xtask smoke target/test-fileread-riscv64.log {{boot-timeout}} qemu-system-riscv64 -machine virt -m 256M -nographic -global virtio-mmio.force-legacy=off -netdev user,id=net0 -device virtio-net-device,netdev=net0 -device virtio-gpu-device -device virtio-keyboard-device -kernel target/riscv64gc-unknown-minix/release/kernel-boot-riscv64
     @echo "fileread: a runtime-written file's indirect blocks read back (riscv64)"
 
 test-fileread-aarch64 boot-timeout="120": build-aarch64
     @just _assert-qemu-version qemu-system-aarch64
-    FEED_PACE=0.003 FEED_SCENARIO=tools/smoke/fileread.tsv sh tools/smoke/feed.sh target/test-fileread-aarch64.log {{boot-timeout}} qemu-system-aarch64 -machine virt -cpu cortex-a57 -m 256M -nographic -no-reboot -global virtio-mmio.force-legacy=off -netdev user,id=net0 -device virtio-net-device,netdev=net0 -device virtio-gpu-device -device virtio-keyboard-device -kernel target/aarch64-unknown-minix/release/kernel-boot-aarch64
+    FEED_PACE=0.003 FEED_SCENARIO=tools/smoke/fileread.tsv cargo xtask smoke target/test-fileread-aarch64.log {{boot-timeout}} qemu-system-aarch64 -machine virt -cpu cortex-a57 -m 256M -nographic -no-reboot -global virtio-mmio.force-legacy=off -netdev user,id=net0 -device virtio-net-device,netdev=net0 -device virtio-gpu-device -device virtio-keyboard-device -kernel target/aarch64-unknown-minix/release/kernel-boot-aarch64
     @echo "fileread: a runtime-written file's indirect blocks read back (aarch64)"
 
 # The shared anonymous mapping gate: VM allocates the frames at map time, so a
@@ -674,7 +674,7 @@ test-mmapanon-x86 boot-timeout="20": build-x86
     mkdir -p target/images/x86_64-pc-minix
     cp target/trampoline.elf target/images/x86_64-pc-minix/minix-x86.elf
     @just _assert-qemu-version qemu-system-x86_64
-    FEED_SCENARIO=tools/smoke/mmapanon.tsv sh tools/smoke/feed.sh target/test-mmapanon-x86.log {{boot-timeout}} qemu-system-x86_64 -nographic -m 256M -no-reboot -vga none -device bochs-display,id=fb0 -kernel target/images/x86_64-pc-minix/minix-x86.elf -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0 -device virtio-tablet-pci,display=fb0
+    FEED_SCENARIO=tools/smoke/mmapanon.tsv cargo xtask smoke target/test-mmapanon-x86.log {{boot-timeout}} qemu-system-x86_64 -nographic -m 256M -no-reboot -vga none -device bochs-display,id=fb0 -kernel target/images/x86_64-pc-minix/minix-x86.elf -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0 -device virtio-tablet-pci,display=fb0
     @echo "mmapanon: MAP_SHARED|MAP_ANONYMOUS is shared across fork (x86_64)"
 
 # The MAP_SHARED *file* gate: the store's visibility to other mappers is one half and
@@ -693,17 +693,17 @@ test-writeback arch="x86" boot-timeout="40":
 
 test-writeback-x86 boot-timeout="40": system-image-x86
     @just _assert-qemu-version qemu-system-x86_64
-    FEED_PACE=0.003 FEED_SCENARIO=tools/smoke/writeback.tsv sh tools/smoke/feed.sh target/test-writeback-x86.log {{boot-timeout}} qemu-system-x86_64 -nographic -m 256M -no-reboot -vga none -device bochs-display,id=fb0 -kernel target/images/x86_64-pc-minix/minix-x86-boot.elf -drive if=none,id=disk0,file=target/images/x86_64-pc-minix/disk.img,format=raw,cache=writethrough -device virtio-blk-pci,disable-legacy=on,drive=disk0 -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0 -device virtio-tablet-pci,display=fb0
+    FEED_PACE=0.003 FEED_SCENARIO=tools/smoke/writeback.tsv cargo xtask smoke target/test-writeback-x86.log {{boot-timeout}} qemu-system-x86_64 -nographic -m 256M -no-reboot -vga none -device bochs-display,id=fb0 -kernel target/images/x86_64-pc-minix/minix-x86-boot.elf -drive if=none,id=disk0,file=target/images/x86_64-pc-minix/disk.img,format=raw,cache=writethrough -device virtio-blk-pci,disable-legacy=on,drive=disk0 -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0 -device virtio-tablet-pci,display=fb0
     @echo "writeback: a MAP_SHARED file store reached the file (x86_64)"
 
 test-writeback-riscv64 boot-timeout="60": system-image-riscv64
     @just _assert-qemu-version qemu-system-riscv64
-    FEED_PACE=0.003 FEED_SCENARIO=tools/smoke/writeback.tsv sh tools/smoke/feed.sh target/test-writeback-riscv64.log {{boot-timeout}} qemu-system-riscv64 -machine virt -m 256M -nographic -global virtio-mmio.force-legacy=off -drive if=none,id=disk0,file=target/images/riscv64gc-unknown-minix/disk.img,format=raw,cache=writethrough -device virtio-blk-device,drive=disk0 -netdev user,id=net0 -device virtio-net-device,netdev=net0 -device virtio-gpu-device -device virtio-keyboard-device -kernel target/images/riscv64gc-unknown-minix/minix-riscv64-boot.elf
+    FEED_PACE=0.003 FEED_SCENARIO=tools/smoke/writeback.tsv cargo xtask smoke target/test-writeback-riscv64.log {{boot-timeout}} qemu-system-riscv64 -machine virt -m 256M -nographic -global virtio-mmio.force-legacy=off -drive if=none,id=disk0,file=target/images/riscv64gc-unknown-minix/disk.img,format=raw,cache=writethrough -device virtio-blk-device,drive=disk0 -netdev user,id=net0 -device virtio-net-device,netdev=net0 -device virtio-gpu-device -device virtio-keyboard-device -kernel target/images/riscv64gc-unknown-minix/minix-riscv64-boot.elf
     @echo "writeback: a MAP_SHARED file store reached the file (riscv64)"
 
 test-writeback-aarch64 boot-timeout="60": system-image-aarch64
     @just _assert-qemu-version qemu-system-aarch64
-    FEED_PACE=0.003 FEED_SCENARIO=tools/smoke/writeback.tsv sh tools/smoke/feed.sh target/test-writeback-aarch64.log {{boot-timeout}} qemu-system-aarch64 -machine virt -cpu cortex-a57 -m 256M -nographic -no-reboot -global virtio-mmio.force-legacy=off -drive if=none,id=disk0,file=target/images/aarch64-unknown-minix/disk.img,format=raw,cache=writethrough -device virtio-blk-device,drive=disk0 -netdev user,id=net0 -device virtio-net-device,netdev=net0 -device virtio-gpu-device -device virtio-keyboard-device -kernel target/images/aarch64-unknown-minix/minix-aarch64-boot.elf
+    FEED_PACE=0.003 FEED_SCENARIO=tools/smoke/writeback.tsv cargo xtask smoke target/test-writeback-aarch64.log {{boot-timeout}} qemu-system-aarch64 -machine virt -cpu cortex-a57 -m 256M -nographic -no-reboot -global virtio-mmio.force-legacy=off -drive if=none,id=disk0,file=target/images/aarch64-unknown-minix/disk.img,format=raw,cache=writethrough -device virtio-blk-device,drive=disk0 -netdev user,id=net0 -device virtio-net-device,netdev=net0 -device virtio-gpu-device -device virtio-keyboard-device -kernel target/images/aarch64-unknown-minix/minix-aarch64-boot.elf
     @echo "writeback: a MAP_SHARED file store reached the file (aarch64)"
 
 # Long paths must resolve. KNOWN_ISSUES.md item 19: a pathname of 24 bytes or more
@@ -718,7 +718,7 @@ test-long-path boot-timeout="30": build-x86
     mkdir -p target/images/x86_64-pc-minix
     cp target/trampoline.elf target/images/x86_64-pc-minix/minix-x86.elf
     @just _assert-qemu-version qemu-system-x86_64
-    FEED_SCENARIO=tools/smoke/long-path.tsv sh tools/smoke/feed.sh target/test-long-path.log {{boot-timeout}} qemu-system-x86_64 -nographic -m 256M -no-reboot -vga none -device bochs-display,id=fb0 -kernel target/images/x86_64-pc-minix/minix-x86.elf -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0 -device virtio-tablet-pci,display=fb0
+    FEED_SCENARIO=tools/smoke/long-path.tsv cargo xtask smoke target/test-long-path.log {{boot-timeout}} qemu-system-x86_64 -nographic -m 256M -no-reboot -vga none -device bochs-display,id=fb0 -kernel target/images/x86_64-pc-minix/minix-x86.elf -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0 -device virtio-tablet-pci,display=fb0
     @echo "long-path: every length resolved"
 
 # A 240-byte command line. The tty has four console lines and every one used to drain the one
@@ -734,7 +734,7 @@ test-long-path boot-timeout="30": build-x86
 # one go and its 16-byte receive FIFO overflows before the guest drains it, losing the middle of the
 # line and the newline with it (measured 2026-11-16: the gate failed about one run in two on x86_64
 # and riscv64, the echo stopping mid-line, with the same tree that passes the rest of the time).
-# That is `tools/smoke/feed.sh`'s transport limitation, not the line discipline: `type_step` writes
+# That is `cargo xtask smoke`'s transport limitation, not the line discipline: `type_step` writes
 # a byte at a time and refuses to go on unless the whole command came back, so what this gate
 # measures stays the guest's behaviour.
 #
@@ -748,17 +748,17 @@ test-burst-x86 boot-timeout="30": build-x86
     mkdir -p target/images/x86_64-pc-minix
     cp target/trampoline.elf target/images/x86_64-pc-minix/minix-x86.elf
     @just _assert-qemu-version qemu-system-x86_64
-    FEED_PACE=0.003 FEED_SCENARIO=tools/smoke/burst.tsv sh tools/smoke/feed.sh target/test-burst.log {{boot-timeout}} qemu-system-x86_64 -nographic -m 256M -no-reboot -vga none -device bochs-display,id=fb0 -kernel target/images/x86_64-pc-minix/minix-x86.elf -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0 -device virtio-tablet-pci,display=fb0
+    FEED_PACE=0.003 FEED_SCENARIO=tools/smoke/burst.tsv cargo xtask smoke target/test-burst.log {{boot-timeout}} qemu-system-x86_64 -nographic -m 256M -no-reboot -vga none -device bochs-display,id=fb0 -kernel target/images/x86_64-pc-minix/minix-x86.elf -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0 -device virtio-tablet-pci,display=fb0
     @echo "burst: every long line reached the shell and ran (x86_64)"
 
 test-burst-riscv64 boot-timeout="60": build-riscv64
     @just _assert-qemu-version qemu-system-riscv64
-    FEED_PACE=0.003 FEED_SCENARIO=tools/smoke/burst.tsv sh tools/smoke/feed.sh target/test-burst-riscv64.log {{boot-timeout}} qemu-system-riscv64 -machine virt -m 256M -nographic -global virtio-mmio.force-legacy=off -netdev user,id=net0 -device virtio-net-device,netdev=net0 -device virtio-gpu-device -device virtio-keyboard-device -kernel target/riscv64gc-unknown-minix/release/kernel-boot-riscv64
+    FEED_PACE=0.003 FEED_SCENARIO=tools/smoke/burst.tsv cargo xtask smoke target/test-burst-riscv64.log {{boot-timeout}} qemu-system-riscv64 -machine virt -m 256M -nographic -global virtio-mmio.force-legacy=off -netdev user,id=net0 -device virtio-net-device,netdev=net0 -device virtio-gpu-device -device virtio-keyboard-device -kernel target/riscv64gc-unknown-minix/release/kernel-boot-riscv64
     @echo "burst: every long line reached the shell and ran (riscv64)"
 
 test-burst-aarch64 boot-timeout="60": build-aarch64
     @just _assert-qemu-version qemu-system-aarch64
-    FEED_PACE=0.003 FEED_SCENARIO=tools/smoke/burst.tsv sh tools/smoke/feed.sh target/test-burst-aarch64.log {{boot-timeout}} qemu-system-aarch64 -machine virt -cpu cortex-a57 -m 256M -nographic -no-reboot -global virtio-mmio.force-legacy=off -netdev user,id=net0 -device virtio-net-device,netdev=net0 -device virtio-gpu-device -device virtio-keyboard-device -kernel target/aarch64-unknown-minix/release/kernel-boot-aarch64
+    FEED_PACE=0.003 FEED_SCENARIO=tools/smoke/burst.tsv cargo xtask smoke target/test-burst-aarch64.log {{boot-timeout}} qemu-system-aarch64 -machine virt -cpu cortex-a57 -m 256M -nographic -no-reboot -global virtio-mmio.force-legacy=off -netdev user,id=net0 -device virtio-net-device,netdev=net0 -device virtio-gpu-device -device virtio-keyboard-device -kernel target/aarch64-unknown-minix/release/kernel-boot-aarch64
     @echo "burst: every long line reached the shell and ran (aarch64)"
 
 # The tty read timer (MIN/TIME). `ttytimeout` switches the console to raw mode with VMIN=0 and
@@ -773,17 +773,17 @@ test-ttytimeout-x86 boot-timeout="30": build-x86
     mkdir -p target/images/x86_64-pc-minix
     cp target/trampoline.elf target/images/x86_64-pc-minix/minix-x86.elf
     @just _assert-qemu-version qemu-system-x86_64
-    FEED_SCENARIO=tools/smoke/ttytimeout.tsv sh tools/smoke/feed.sh target/test-ttytimeout.log {{boot-timeout}} qemu-system-x86_64 -nographic -m 256M -no-reboot -vga none -device bochs-display,id=fb0 -kernel target/images/x86_64-pc-minix/minix-x86.elf -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0 -device virtio-tablet-pci,display=fb0
+    FEED_SCENARIO=tools/smoke/ttytimeout.tsv cargo xtask smoke target/test-ttytimeout.log {{boot-timeout}} qemu-system-x86_64 -nographic -m 256M -no-reboot -vga none -device bochs-display,id=fb0 -kernel target/images/x86_64-pc-minix/minix-x86.elf -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0 -device virtio-tablet-pci,display=fb0
     @echo "ttytimeout: a MIN/TIME read returned after its deadline (x86_64)"
 
 test-ttytimeout-riscv64 boot-timeout="60": build-riscv64
     @just _assert-qemu-version qemu-system-riscv64
-    FEED_SCENARIO=tools/smoke/ttytimeout.tsv sh tools/smoke/feed.sh target/test-ttytimeout-riscv64.log {{boot-timeout}} qemu-system-riscv64 -machine virt -m 256M -nographic -global virtio-mmio.force-legacy=off -netdev user,id=net0 -device virtio-net-device,netdev=net0 -device virtio-gpu-device -device virtio-keyboard-device -kernel target/riscv64gc-unknown-minix/release/kernel-boot-riscv64
+    FEED_SCENARIO=tools/smoke/ttytimeout.tsv cargo xtask smoke target/test-ttytimeout-riscv64.log {{boot-timeout}} qemu-system-riscv64 -machine virt -m 256M -nographic -global virtio-mmio.force-legacy=off -netdev user,id=net0 -device virtio-net-device,netdev=net0 -device virtio-gpu-device -device virtio-keyboard-device -kernel target/riscv64gc-unknown-minix/release/kernel-boot-riscv64
     @echo "ttytimeout: a MIN/TIME read returned after its deadline (riscv64)"
 
 test-ttytimeout-aarch64 boot-timeout="60": build-aarch64
     @just _assert-qemu-version qemu-system-aarch64
-    FEED_SCENARIO=tools/smoke/ttytimeout.tsv sh tools/smoke/feed.sh target/test-ttytimeout-aarch64.log {{boot-timeout}} qemu-system-aarch64 -machine virt -cpu cortex-a57 -m 256M -nographic -no-reboot -global virtio-mmio.force-legacy=off -netdev user,id=net0 -device virtio-net-device,netdev=net0 -device virtio-gpu-device -device virtio-keyboard-device -kernel target/aarch64-unknown-minix/release/kernel-boot-aarch64
+    FEED_SCENARIO=tools/smoke/ttytimeout.tsv cargo xtask smoke target/test-ttytimeout-aarch64.log {{boot-timeout}} qemu-system-aarch64 -machine virt -cpu cortex-a57 -m 256M -nographic -no-reboot -global virtio-mmio.force-legacy=off -netdev user,id=net0 -device virtio-net-device,netdev=net0 -device virtio-gpu-device -device virtio-keyboard-device -kernel target/aarch64-unknown-minix/release/kernel-boot-aarch64
     @echo "ttytimeout: a MIN/TIME read returned after its deadline (aarch64)"
 
 # Blocking pipe reads and writes (KNOWN_ISSUES.md 32): `tools/smoke/pipeblock.tsv`. A read of
@@ -796,17 +796,17 @@ test-pipeblock-x86 boot-timeout="30": build-x86
     mkdir -p target/images/x86_64-pc-minix
     cp target/trampoline.elf target/images/x86_64-pc-minix/minix-x86.elf
     @just _assert-qemu-version qemu-system-x86_64
-    FEED_SCENARIO=tools/smoke/pipeblock.tsv sh tools/smoke/feed.sh target/test-pipeblock-x86.log {{boot-timeout}} qemu-system-x86_64 -nographic -m 256M -no-reboot -vga none -device bochs-display,id=fb0 -kernel target/images/x86_64-pc-minix/minix-x86.elf -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0 -device virtio-tablet-pci,display=fb0
+    FEED_SCENARIO=tools/smoke/pipeblock.tsv cargo xtask smoke target/test-pipeblock-x86.log {{boot-timeout}} qemu-system-x86_64 -nographic -m 256M -no-reboot -vga none -device bochs-display,id=fb0 -kernel target/images/x86_64-pc-minix/minix-x86.elf -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0 -device virtio-tablet-pci,display=fb0
     @echo "pipeblock: a pipe read waited for its writer (x86_64)"
 
 test-pipeblock-riscv64 boot-timeout="40": build-riscv64
     @just _assert-qemu-version qemu-system-riscv64
-    FEED_SCENARIO=tools/smoke/pipeblock.tsv sh tools/smoke/feed.sh target/test-pipeblock-riscv64.log {{boot-timeout}} qemu-system-riscv64 -machine virt -m 256M -nographic -global virtio-mmio.force-legacy=off -netdev user,id=net0 -device virtio-net-device,netdev=net0 -device virtio-gpu-device -device virtio-keyboard-device -kernel target/riscv64gc-unknown-minix/release/kernel-boot-riscv64
+    FEED_SCENARIO=tools/smoke/pipeblock.tsv cargo xtask smoke target/test-pipeblock-riscv64.log {{boot-timeout}} qemu-system-riscv64 -machine virt -m 256M -nographic -global virtio-mmio.force-legacy=off -netdev user,id=net0 -device virtio-net-device,netdev=net0 -device virtio-gpu-device -device virtio-keyboard-device -kernel target/riscv64gc-unknown-minix/release/kernel-boot-riscv64
     @echo "pipeblock: a pipe read waited for its writer (riscv64)"
 
 test-pipeblock-aarch64 boot-timeout="40": build-aarch64
     @just _assert-qemu-version qemu-system-aarch64
-    FEED_SCENARIO=tools/smoke/pipeblock.tsv sh tools/smoke/feed.sh target/test-pipeblock-aarch64.log {{boot-timeout}} qemu-system-aarch64 -machine virt -cpu cortex-a57 -m 256M -nographic -no-reboot -global virtio-mmio.force-legacy=off -netdev user,id=net0 -device virtio-net-device,netdev=net0 -device virtio-gpu-device -device virtio-keyboard-device -kernel target/aarch64-unknown-minix/release/kernel-boot-aarch64
+    FEED_SCENARIO=tools/smoke/pipeblock.tsv cargo xtask smoke target/test-pipeblock-aarch64.log {{boot-timeout}} qemu-system-aarch64 -machine virt -cpu cortex-a57 -m 256M -nographic -no-reboot -global virtio-mmio.force-legacy=off -netdev user,id=net0 -device virtio-net-device,netdev=net0 -device virtio-gpu-device -device virtio-keyboard-device -kernel target/aarch64-unknown-minix/release/kernel-boot-aarch64
     @echo "pipeblock: a pipe read waited for its writer (aarch64)"
 
 # Kernel threads (KNOWN_ISSUES.md 8): `tools/smoke/threads.tsv`. `threadtest` spawns four
@@ -821,17 +821,17 @@ test-threads-x86 boot-timeout="30": build-x86
     mkdir -p target/images/x86_64-pc-minix
     cp target/trampoline.elf target/images/x86_64-pc-minix/minix-x86.elf
     @just _assert-qemu-version qemu-system-x86_64
-    FEED_SCENARIO=tools/smoke/threads.tsv sh tools/smoke/feed.sh target/test-threads-x86.log {{boot-timeout}} qemu-system-x86_64 -nographic -m 256M -no-reboot -vga none -device bochs-display,id=fb0 -kernel target/images/x86_64-pc-minix/minix-x86.elf -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0 -device virtio-tablet-pci,display=fb0
+    FEED_SCENARIO=tools/smoke/threads.tsv cargo xtask smoke target/test-threads-x86.log {{boot-timeout}} qemu-system-x86_64 -nographic -m 256M -no-reboot -vga none -device bochs-display,id=fb0 -kernel target/images/x86_64-pc-minix/minix-x86.elf -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0 -device virtio-tablet-pci,display=fb0
     @echo "threads: four kernel threads shared the process and were joined (x86_64)"
 
 test-threads-riscv64 boot-timeout="40": build-riscv64
     @just _assert-qemu-version qemu-system-riscv64
-    FEED_SCENARIO=tools/smoke/threads.tsv sh tools/smoke/feed.sh target/test-threads-riscv64.log {{boot-timeout}} qemu-system-riscv64 -machine virt -m 256M -nographic -global virtio-mmio.force-legacy=off -netdev user,id=net0 -device virtio-net-device,netdev=net0 -device virtio-gpu-device -device virtio-keyboard-device -kernel target/riscv64gc-unknown-minix/release/kernel-boot-riscv64
+    FEED_SCENARIO=tools/smoke/threads.tsv cargo xtask smoke target/test-threads-riscv64.log {{boot-timeout}} qemu-system-riscv64 -machine virt -m 256M -nographic -global virtio-mmio.force-legacy=off -netdev user,id=net0 -device virtio-net-device,netdev=net0 -device virtio-gpu-device -device virtio-keyboard-device -kernel target/riscv64gc-unknown-minix/release/kernel-boot-riscv64
     @echo "threads: four kernel threads shared the process and were joined (riscv64)"
 
 test-threads-aarch64 boot-timeout="40": build-aarch64
     @just _assert-qemu-version qemu-system-aarch64
-    FEED_SCENARIO=tools/smoke/threads.tsv sh tools/smoke/feed.sh target/test-threads-aarch64.log {{boot-timeout}} qemu-system-aarch64 -machine virt -cpu cortex-a57 -m 256M -nographic -no-reboot -global virtio-mmio.force-legacy=off -netdev user,id=net0 -device virtio-net-device,netdev=net0 -device virtio-gpu-device -device virtio-keyboard-device -kernel target/aarch64-unknown-minix/release/kernel-boot-aarch64
+    FEED_SCENARIO=tools/smoke/threads.tsv cargo xtask smoke target/test-threads-aarch64.log {{boot-timeout}} qemu-system-aarch64 -machine virt -cpu cortex-a57 -m 256M -nographic -no-reboot -global virtio-mmio.force-legacy=off -netdev user,id=net0 -device virtio-net-device,netdev=net0 -device virtio-gpu-device -device virtio-keyboard-device -kernel target/aarch64-unknown-minix/release/kernel-boot-aarch64
     @echo "threads: four kernel threads shared the process and were joined (aarch64)"
 
 # The per-command read cost of a large binary. The scenario runs two invocations of the multicall,
@@ -851,7 +851,7 @@ test-read-cost-x86 boot-timeout="40": build-x86
     cp target/trampoline.elf target/images/x86_64-pc-minix/minix-x86.elf
     @just _assert-qemu-version qemu-system-x86_64
     rm -f target/test-read-cost.trace
-    FEED_PACE=0.003 FEED_SCENARIO=tools/smoke/read-cost.tsv sh tools/smoke/feed.sh target/test-read-cost.log {{boot-timeout}} qemu-system-x86_64 -nographic -monitor none -m 256M -no-reboot -vga none -device bochs-display,id=fb0 -kernel target/images/x86_64-pc-minix/minix-x86.elf -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0 -device virtio-tablet-pci,display=fb0 -drive if=none,id=disk0,file=target/images/x86_64-pc-minix/disk.img,format=raw,cache=writethrough -device virtio-blk-pci,disable-legacy=on,drive=disk0 -trace enable=virtio_blk_handle_read -D target/test-read-cost.trace
+    FEED_PACE=0.003 FEED_SCENARIO=tools/smoke/read-cost.tsv cargo xtask smoke target/test-read-cost.log {{boot-timeout}} qemu-system-x86_64 -nographic -monitor none -m 256M -no-reboot -vga none -device bochs-display,id=fb0 -kernel target/images/x86_64-pc-minix/minix-x86.elf -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0 -device virtio-tablet-pci,display=fb0 -drive if=none,id=disk0,file=target/images/x86_64-pc-minix/disk.img,format=raw,cache=writethrough -device virtio-blk-pci,disable-legacy=on,drive=disk0 -trace enable=virtio_blk_handle_read -D target/test-read-cost.trace
     cargo xtask probe read-hist target/test-read-cost.trace --max=1200
     @echo "read-cost: per-command read cost within the ceiling"
 
@@ -873,7 +873,7 @@ test-bash-x86 boot-timeout="40":
     mkdir -p target/images/x86_64-pc-minix
     cp target/trampoline.elf target/images/x86_64-pc-minix/minix-x86.elf
     @just _assert-qemu-version qemu-system-x86_64
-    FEED_SCENARIO=tools/smoke/bash.tsv sh tools/smoke/feed.sh target/test-bash-x86.log {{boot-timeout}} qemu-system-x86_64 -nographic -m 256M -no-reboot -vga none -device bochs-display,id=fb0 -kernel target/images/x86_64-pc-minix/minix-x86.elf -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0 -device virtio-tablet-pci,display=fb0
+    FEED_SCENARIO=tools/smoke/bash.tsv cargo xtask smoke target/test-bash-x86.log {{boot-timeout}} qemu-system-x86_64 -nographic -m 256M -no-reboot -vga none -device bochs-display,id=fb0 -kernel target/images/x86_64-pc-minix/minix-x86.elf -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0 -device virtio-tablet-pci,display=fb0
     @echo "bash: every step of tools/smoke/bash.tsv answered (x86_64)"
 
 # The shell does not fit the 16 MiB default here either; riscv64 boots fine at 8192, the
@@ -882,13 +882,13 @@ test-bash-x86 boot-timeout="40":
 test-bash-riscv64 boot-timeout="60":
     MINIXFS_EXTRA='/bin/bash=target/bash/riscv64/bash' MINIXFS_BLOCKS=8192 just build-riscv64
     @just _assert-qemu-version qemu-system-riscv64
-    FEED_SCENARIO=tools/smoke/bash.tsv sh tools/smoke/feed.sh target/test-bash-riscv64.log {{boot-timeout}} qemu-system-riscv64 -machine virt -m 256M -nographic -global virtio-mmio.force-legacy=off -netdev user,id=net0 -device virtio-net-device,netdev=net0 -device virtio-gpu-device -device virtio-keyboard-device -kernel target/riscv64gc-unknown-minix/release/kernel-boot-riscv64
+    FEED_SCENARIO=tools/smoke/bash.tsv cargo xtask smoke target/test-bash-riscv64.log {{boot-timeout}} qemu-system-riscv64 -machine virt -m 256M -nographic -global virtio-mmio.force-legacy=off -netdev user,id=net0 -device virtio-net-device,netdev=net0 -device virtio-gpu-device -device virtio-keyboard-device -kernel target/riscv64gc-unknown-minix/release/kernel-boot-riscv64
     @echo "bash: every step of tools/smoke/bash.tsv answered (riscv64)"
 
 test-bash-aarch64 boot-timeout="60":
     MINIXFS_EXTRA='/bin/bash=target/bash/aarch64/bash' just build-aarch64
     @just _assert-qemu-version qemu-system-aarch64
-    FEED_SCENARIO=tools/smoke/bash.tsv sh tools/smoke/feed.sh target/test-bash-aarch64.log {{boot-timeout}} qemu-system-aarch64 -machine virt -cpu cortex-a57 -m 256M -nographic -no-reboot -global virtio-mmio.force-legacy=off -netdev user,id=net0 -device virtio-net-device,netdev=net0 -device virtio-gpu-device -device virtio-keyboard-device -kernel target/aarch64-unknown-minix/release/kernel-boot-aarch64
+    FEED_SCENARIO=tools/smoke/bash.tsv cargo xtask smoke target/test-bash-aarch64.log {{boot-timeout}} qemu-system-aarch64 -machine virt -cpu cortex-a57 -m 256M -nographic -no-reboot -global virtio-mmio.force-legacy=off -netdev user,id=net0 -device virtio-net-device,netdev=net0 -device virtio-gpu-device -device virtio-keyboard-device -kernel target/aarch64-unknown-minix/release/kernel-boot-aarch64
     @echo "bash: every step of tools/smoke/bash.tsv answered (aarch64)"
 
 # Boot the dynamic-linking artifacts and drive `tools/smoke/dyn.tsv` at them.
@@ -928,7 +928,7 @@ test-dynlink-x86 boot-timeout="40": dynlink-x86
     mkdir -p target/images/x86_64-pc-minix
     cp target/trampoline.elf target/images/x86_64-pc-minix/minix-x86.elf
     @just _assert-qemu-version qemu-system-x86_64
-    FEED_SCENARIO=tools/smoke/dyn.tsv sh tools/smoke/feed.sh target/test-dynlink-x86.log {{boot-timeout}} qemu-system-x86_64 -nographic -m 256M -no-reboot -vga none -device bochs-display,id=fb0 -kernel target/images/x86_64-pc-minix/minix-x86.elf -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0 -device virtio-tablet-pci,display=fb0
+    FEED_SCENARIO=tools/smoke/dyn.tsv cargo xtask smoke target/test-dynlink-x86.log {{boot-timeout}} qemu-system-x86_64 -nographic -m 256M -no-reboot -vga none -device bochs-display,id=fb0 -kernel target/images/x86_64-pc-minix/minix-x86.elf -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0 -device virtio-tablet-pci,display=fb0
     @echo "dynlink: /bin/dynhello printed what only the shared objects contain, before and after a fork and an exec, and /bin/dynclib ran against libc.so (x86_64)"
 
 # The same artifacts for riscv64. `cargo xtask build dynlink` and
@@ -952,7 +952,7 @@ test-dynlink-riscv64 boot-timeout="60": dynlink-riscv64
     @if grep -q 'No such file or directory' target/riscv64gc-unknown-minix/release/dynclib; then echo "!! /bin/dynclib contains the error message - it cannot have come from libc.so" >&2; exit 1; fi
     @if grep -q 'dynopen-text' target/dynlink/riscv64/dynopen; then echo "!! /bin/dynopen contains the object's text - the line cannot have come from libdlopen.so" >&2; exit 1; fi
     @just _assert-qemu-version qemu-system-riscv64
-    FEED_SCENARIO=tools/smoke/dyn.tsv sh tools/smoke/feed.sh target/test-dynlink-riscv64.log {{boot-timeout}} qemu-system-riscv64 -machine virt -m 256M -nographic -global virtio-mmio.force-legacy=off -netdev user,id=net0 -device virtio-net-device,netdev=net0 -device virtio-gpu-device -device virtio-keyboard-device -kernel target/riscv64gc-unknown-minix/release/kernel-boot-riscv64
+    FEED_SCENARIO=tools/smoke/dyn.tsv cargo xtask smoke target/test-dynlink-riscv64.log {{boot-timeout}} qemu-system-riscv64 -machine virt -m 256M -nographic -global virtio-mmio.force-legacy=off -netdev user,id=net0 -device virtio-net-device,netdev=net0 -device virtio-gpu-device -device virtio-keyboard-device -kernel target/riscv64gc-unknown-minix/release/kernel-boot-riscv64
     @echo "dynlink: /bin/dynhello printed what only the shared objects contain, before and after a fork and an exec, and /bin/dynclib ran against libc.so (riscv64)"
 
 dynlib-aarch64:
@@ -969,7 +969,7 @@ test-dynlink-aarch64 boot-timeout="60": dynlink-aarch64
     @if grep -q 'No such file or directory' target/aarch64-unknown-minix/release/dynclib; then echo "!! /bin/dynclib contains the error message - it cannot have come from libc.so" >&2; exit 1; fi
     @if grep -q 'dynopen-text' target/dynlink/aarch64/dynopen; then echo "!! /bin/dynopen contains the object's text - the line cannot have come from libdlopen.so" >&2; exit 1; fi
     @just _assert-qemu-version qemu-system-aarch64
-    FEED_SCENARIO=tools/smoke/dyn.tsv sh tools/smoke/feed.sh target/test-dynlink-aarch64.log {{boot-timeout}} qemu-system-aarch64 -machine virt -cpu cortex-a57 -m 256M -nographic -no-reboot -global virtio-mmio.force-legacy=off -netdev user,id=net0 -device virtio-net-device,netdev=net0 -device virtio-gpu-device -device virtio-keyboard-device -kernel target/aarch64-unknown-minix/release/kernel-boot-aarch64
+    FEED_SCENARIO=tools/smoke/dyn.tsv cargo xtask smoke target/test-dynlink-aarch64.log {{boot-timeout}} qemu-system-aarch64 -machine virt -cpu cortex-a57 -m 256M -nographic -no-reboot -global virtio-mmio.force-legacy=off -netdev user,id=net0 -device virtio-net-device,netdev=net0 -device virtio-gpu-device -device virtio-keyboard-device -kernel target/aarch64-unknown-minix/release/kernel-boot-aarch64
     @echo "dynlink: /bin/dynhello printed what only the shared objects contain, before and after a fork and an exec, and /bin/dynclib ran against libc.so (aarch64)"
 
 # The gate on `just cdyn` — the recipe a user is told to use for a program of their own.
@@ -990,7 +990,7 @@ test-cdyn-x86 boot-timeout="40": dynlib-x86
     mkdir -p target/images/x86_64-pc-minix
     cp target/trampoline.elf target/images/x86_64-pc-minix/minix-x86.elf
     @just _assert-qemu-version qemu-system-x86_64
-    FEED_SCENARIO=tools/smoke/cdyn.tsv sh tools/smoke/feed.sh target/test-cdyn-x86.log {{boot-timeout}} qemu-system-x86_64 -nographic -m 256M -no-reboot -vga none -device bochs-display,id=fb0 -kernel target/images/x86_64-pc-minix/minix-x86.elf -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0 -device virtio-tablet-pci,display=fb0
+    FEED_SCENARIO=tools/smoke/cdyn.tsv cargo xtask smoke target/test-cdyn-x86.log {{boot-timeout}} qemu-system-x86_64 -nographic -m 256M -no-reboot -vga none -device bochs-display,id=fb0 -kernel target/images/x86_64-pc-minix/minix-x86.elf -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0 -device virtio-tablet-pci,display=fb0
     @echo "cdyn: a program built by the recipe ran against the shipped libc.so (x86_64)"
 
 # gltriangle: build the surfaceless-EGL GLES2 triangle client and stage the Mesa
@@ -1036,7 +1036,7 @@ test-gltriangle-x86 boot-timeout="180": gltriangle-x86 boot-image-x86
     @just _assert-qemu-version qemu-system-x86_64
     M=target/mesa/x86; E="/lib/libdrm.so.2=$M/lib/libdrm.so.2;/lib/libEGL.so.1=$M/lib/libEGL.so.1;/lib/libgbm.so.1=$M/lib/libgbm.so.1;/lib/libexpat.so.1=$M/lib/libexpat.so.1;/lib/libgallium-25.3.6.so=$M/lib/libgallium-25.3.6.so;/lib/libGLESv2.so.2=$M/lib/libGLESv2.so.2;/lib/libz.so.1=$M/lib/libz.so.1;/lib/swrast_dri.so=$M/lib/swrast_dri.so;/bin/gltriangle=$M/bin/gltriangle"; MINIXFS_EXTRA="$E" MINIXFS_BLOCKS=16384 cargo run -q -p boot-image --bin mkminixfs --release -- x86_64
     @just mkfs-x86
-    FEED_SCENARIO=tools/smoke/gltriangle.tsv sh tools/smoke/feed.sh target/test-gltriangle-x86.log {{boot-timeout}} qemu-system-x86_64 -nographic -m 512M -no-reboot -vga none -device bochs-display,id=fb0 -kernel target/images/x86_64-pc-minix/minix-x86-boot.elf -drive if=none,id=disk0,file=target/images/x86_64-pc-minix/disk.img,format=raw,cache=writethrough -device virtio-blk-pci,disable-legacy=on,drive=disk0 -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0 -device virtio-tablet-pci,display=fb0
+    FEED_SCENARIO=tools/smoke/gltriangle.tsv cargo xtask smoke target/test-gltriangle-x86.log {{boot-timeout}} qemu-system-x86_64 -nographic -m 512M -no-reboot -vga none -device bochs-display,id=fb0 -kernel target/images/x86_64-pc-minix/minix-x86-boot.elf -drive if=none,id=disk0,file=target/images/x86_64-pc-minix/disk.img,format=raw,cache=writethrough -device virtio-blk-pci,disable-legacy=on,drive=disk0 -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0 -device virtio-tablet-pci,display=fb0
     @echo "gltriangle: the GLES2 triangle rendered through surfaceless EGL on softpipe (x86_64)"
 
 # The 3c-3 gate: the *same* client as 3c-2, differing only in the device Mesa is
@@ -1052,7 +1052,7 @@ test-gltriangle-virgl-x86 boot-timeout="180": gltriangle-x86 boot-image-x86
     @just _assert-qemu-version qemu-system-x86_64
     M=target/mesa/x86; E="/lib/libdrm.so.2=$M/lib/libdrm.so.2;/lib/libEGL.so.1=$M/lib/libEGL.so.1;/lib/libgbm.so.1=$M/lib/libgbm.so.1;/lib/libexpat.so.1=$M/lib/libexpat.so.1;/lib/libgallium-25.3.6.so=$M/lib/libgallium-25.3.6.so;/lib/libGLESv2.so.2=$M/lib/libGLESv2.so.2;/lib/libz.so.1=$M/lib/libz.so.1;/bin/gltriangle=$M/bin/gltriangle"; MINIXFS_EXTRA="$E" MINIXFS_BLOCKS=16384 cargo run -q -p boot-image --bin mkminixfs --release -- x86_64
     @just mkfs-x86
-    FEED_PACE=0.02 FEED_SCENARIO=tools/smoke/gltriangle.tsv sh tools/smoke/feed.sh target/test-gltriangle-virgl-x86.log {{boot-timeout}} qemu-system-x86_64 -display egl-headless -serial stdio -m 512M -no-reboot -vga none -device bochs-display,id=fb0 -kernel target/images/x86_64-pc-minix/minix-x86-boot.elf -drive if=none,id=disk0,file=target/images/x86_64-pc-minix/disk.img,format=raw,cache=writethrough -device virtio-blk-pci,disable-legacy=on,drive=disk0 -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0 -device virtio-tablet-pci,display=fb0 -device virtio-gpu-gl-pci,blob=on
+    FEED_PACE=0.02 FEED_SCENARIO=tools/smoke/gltriangle.tsv cargo xtask smoke target/test-gltriangle-virgl-x86.log {{boot-timeout}} qemu-system-x86_64 -display egl-headless -serial stdio -m 512M -no-reboot -vga none -device bochs-display,id=fb0 -kernel target/images/x86_64-pc-minix/minix-x86-boot.elf -drive if=none,id=disk0,file=target/images/x86_64-pc-minix/disk.img,format=raw,cache=writethrough -device virtio-blk-pci,disable-legacy=on,drive=disk0 -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0 -device virtio-tablet-pci,display=fb0 -device virtio-gpu-gl-pci,blob=on
     @just _assert-qemu-log target/test-gltriangle-virgl-x86.log "gltriangle: pass"
     @just _assert-qemu-log target/test-gltriangle-virgl-x86.log "gltriangle: GL_RENDERER=virgl"
     @echo "gltriangle-virgl: the GLES2 triangle rendered through surfaceless EGL on the render node, via virgl (x86_64)"
@@ -1077,7 +1077,7 @@ test-wlgl-x86 boot-timeout="60": wlgl-x86 boot-image-x86
     @just _assert-qemu-version qemu-system-x86_64
     M=target/mesa/x86; E="/lib/libdrm.so.2=$M/lib/libdrm.so.2;/lib/libEGL.so.1=$M/lib/libEGL.so.1;/lib/libgbm.so.1=$M/lib/libgbm.so.1;/lib/libexpat.so.1=$M/lib/libexpat.so.1;/lib/libgallium-25.3.6.so=$M/lib/libgallium-25.3.6.so;/lib/libGLESv2.so.2=$M/lib/libGLESv2.so.2;/lib/libz.so.1=$M/lib/libz.so.1;/bin/wlgl=$M/bin/wlgl"; MINIXFS_EXTRA="$E" MINIXFS_BLOCKS=16384 cargo run -q -p boot-image --bin mkminixfs --release -- x86_64
     @just mkfs-x86
-    FEED_PACE=0.02 FEED_SCENARIO=tools/smoke/wlgl.tsv sh tools/smoke/feed.sh target/test-wlgl-x86.log {{boot-timeout}} qemu-system-x86_64 -display egl-headless -serial stdio -m 512M -no-reboot -vga none -device bochs-display,id=fb0 -kernel target/images/x86_64-pc-minix/minix-x86-boot.elf -drive if=none,id=disk0,file=target/images/x86_64-pc-minix/disk.img,format=raw,cache=writethrough -device virtio-blk-pci,disable-legacy=on,drive=disk0 -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0 -device virtio-tablet-pci,display=fb0 -device virtio-gpu-gl-pci,blob=on
+    FEED_PACE=0.02 FEED_SCENARIO=tools/smoke/wlgl.tsv cargo xtask smoke target/test-wlgl-x86.log {{boot-timeout}} qemu-system-x86_64 -display egl-headless -serial stdio -m 512M -no-reboot -vga none -device bochs-display,id=fb0 -kernel target/images/x86_64-pc-minix/minix-x86-boot.elf -drive if=none,id=disk0,file=target/images/x86_64-pc-minix/disk.img,format=raw,cache=writethrough -device virtio-blk-pci,disable-legacy=on,drive=disk0 -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0 -device virtio-tablet-pci,display=fb0 -device virtio-gpu-gl-pci,blob=on
     @just _assert-qemu-log target/test-wlgl-x86.log "wlgl: GL_RENDERER=virgl"
     @just _assert-qemu-log target/test-wlgl-x86.log "wlgl: PASS"
     @echo "wlgl: a GL surface rendered on the render node, committed through the compositor, and read back from /dev/fb (x86_64)"
@@ -1098,7 +1098,7 @@ test-gui-x86 boot-timeout="120": gui-x86 boot-image-x86
     @just _assert-qemu-version qemu-system-x86_64
     M=target/mesa/x86; E="/lib/libdrm.so.2=$M/lib/libdrm.so.2;/lib/libEGL.so.1=$M/lib/libEGL.so.1;/lib/libgbm.so.1=$M/lib/libgbm.so.1;/lib/libexpat.so.1=$M/lib/libexpat.so.1;/lib/libgallium-25.3.6.so=$M/lib/libgallium-25.3.6.so;/lib/libGLESv2.so.2=$M/lib/libGLESv2.so.2;/lib/libz.so.1=$M/lib/libz.so.1;/lib/swrast_dri.so=$M/lib/swrast_dri.so;/bin/gui=$M/bin/gui"; MINIXFS_EXTRA="$E" MINIXFS_BLOCKS=16384 cargo run -q -p boot-image --bin mkminixfs --release -- x86_64
     @just mkfs-x86
-    FEED_SCENARIO=tools/smoke/gui.tsv sh tools/smoke/feed.sh target/test-gui-x86.log {{boot-timeout}} qemu-system-x86_64 -nographic -m 512M -no-reboot -vga none -device bochs-display,id=fb0 -kernel target/images/x86_64-pc-minix/minix-x86-boot.elf -drive if=none,id=disk0,file=target/images/x86_64-pc-minix/disk.img,format=raw,cache=writethrough -device virtio-blk-pci,disable-legacy=on,drive=disk0 -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0 -device virtio-tablet-pci,display=fb0
+    FEED_SCENARIO=tools/smoke/gui.tsv cargo xtask smoke target/test-gui-x86.log {{boot-timeout}} qemu-system-x86_64 -nographic -m 512M -no-reboot -vga none -device bochs-display,id=fb0 -kernel target/images/x86_64-pc-minix/minix-x86-boot.elf -drive if=none,id=disk0,file=target/images/x86_64-pc-minix/disk.img,format=raw,cache=writethrough -device virtio-blk-pci,disable-legacy=on,drive=disk0 -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0 -device virtio-tablet-pci,display=fb0
     @just _assert-qemu-log target/test-gui-x86.log "gui: PASS"
     @echo "gui: a quad and a line of text from the in-house renderer, presented through the compositor, and read back from /dev/fb (x86_64)"
 
@@ -1120,7 +1120,7 @@ test-gbmtest-x86 boot-timeout="120": gbmtest-x86 boot-image-x86
     @just _assert-qemu-version qemu-system-x86_64
     M=target/mesa/x86; E="/lib/libdrm.so.2=$M/lib/libdrm.so.2;/lib/libgbm.so.1=$M/lib/libgbm.so.1;/lib/libexpat.so.1=$M/lib/libexpat.so.1;/lib/libgallium-25.3.6.so=$M/lib/libgallium-25.3.6.so;/lib/libz.so.1=$M/lib/libz.so.1;/lib/dri_gbm.so=$M/lib/dri_gbm.so;/bin/gbmtest=$M/bin/gbmtest"; MINIXFS_EXTRA="$E" MINIXFS_BLOCKS=16384 cargo run -q -p boot-image --bin mkminixfs --release -- x86_64
     @just mkfs-x86
-    FEED_PACE=0.02 FEED_SCENARIO=tools/smoke/gbmtest.tsv sh tools/smoke/feed.sh target/test-gbmtest-x86.log {{boot-timeout}} qemu-system-x86_64 -display egl-headless -serial stdio -m 512M -no-reboot -vga none -device bochs-display,id=fb0 -kernel target/images/x86_64-pc-minix/minix-x86-boot.elf -drive if=none,id=disk0,file=target/images/x86_64-pc-minix/disk.img,format=raw,cache=writethrough -device virtio-blk-pci,disable-legacy=on,drive=disk0 -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0 -device virtio-tablet-pci,display=fb0 -device virtio-gpu-gl-pci,blob=on
+    FEED_PACE=0.02 FEED_SCENARIO=tools/smoke/gbmtest.tsv cargo xtask smoke target/test-gbmtest-x86.log {{boot-timeout}} qemu-system-x86_64 -display egl-headless -serial stdio -m 512M -no-reboot -vga none -device bochs-display,id=fb0 -kernel target/images/x86_64-pc-minix/minix-x86-boot.elf -drive if=none,id=disk0,file=target/images/x86_64-pc-minix/disk.img,format=raw,cache=writethrough -device virtio-blk-pci,disable-legacy=on,drive=disk0 -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0 -device virtio-tablet-pci,display=fb0 -device virtio-gpu-gl-pci,blob=on
     @just _assert-qemu-log target/test-gbmtest-x86.log "gbmtest: dev=1 bo=1 w=64 h=64 import=0"
     @echo "gbmtest: a GBM buffer object created on the render node exported to a dma-buf and imported back (x86_64)"
 
@@ -1229,14 +1229,14 @@ test-gltriangle-riscv64 boot-timeout="180": gltriangle-riscv64 boot-image-riscv6
     @just _assert-qemu-version qemu-system-riscv64
     M=target/mesa/riscv64; E="/lib/libdrm.so.2=$M/lib/libdrm.so.2;/lib/libEGL.so.1=$M/lib/libEGL.so.1;/lib/libgbm.so.1=$M/lib/libgbm.so.1;/lib/libexpat.so.1=$M/lib/libexpat.so.1;/lib/libgallium-25.3.6.so=$M/lib/libgallium-25.3.6.so;/lib/libGLESv2.so.2=$M/lib/libGLESv2.so.2;/lib/libz.so.1=$M/lib/libz.so.1;/lib/swrast_dri.so=$M/lib/swrast_dri.so;/bin/gltriangle=$M/bin/gltriangle"; MINIXFS_EXTRA="$E" MINIXFS_BLOCKS=16384 cargo run -q -p boot-image --bin mkminixfs --release -- riscv64
     @just mkfs-riscv64
-    FEED_SCENARIO=tools/smoke/gltriangle.tsv sh tools/smoke/feed.sh target/test-gltriangle-riscv64.log {{boot-timeout}} qemu-system-riscv64 -machine virt -m 512M -nographic -global virtio-mmio.force-legacy=off -drive if=none,id=disk0,file=target/images/riscv64gc-unknown-minix/disk.img,format=raw,cache=writethrough -device virtio-blk-device,drive=disk0 -netdev user,id=net0 -device virtio-net-device,netdev=net0 -device virtio-gpu-device -device virtio-keyboard-device -kernel target/images/riscv64gc-unknown-minix/minix-riscv64-boot.elf
+    FEED_SCENARIO=tools/smoke/gltriangle.tsv cargo xtask smoke target/test-gltriangle-riscv64.log {{boot-timeout}} qemu-system-riscv64 -machine virt -m 512M -nographic -global virtio-mmio.force-legacy=off -drive if=none,id=disk0,file=target/images/riscv64gc-unknown-minix/disk.img,format=raw,cache=writethrough -device virtio-blk-device,drive=disk0 -netdev user,id=net0 -device virtio-net-device,netdev=net0 -device virtio-gpu-device -device virtio-keyboard-device -kernel target/images/riscv64gc-unknown-minix/minix-riscv64-boot.elf
     @echo "gltriangle: the GLES2 triangle rendered through surfaceless EGL on softpipe (riscv64)"
 
 test-gltriangle-aarch64 boot-timeout="180": gltriangle-aarch64 boot-image-aarch64
     @just _assert-qemu-version qemu-system-aarch64
     M=target/mesa/aarch64; E="/lib/libdrm.so.2=$M/lib/libdrm.so.2;/lib/libEGL.so.1=$M/lib/libEGL.so.1;/lib/libgbm.so.1=$M/lib/libgbm.so.1;/lib/libexpat.so.1=$M/lib/libexpat.so.1;/lib/libgallium-25.3.6.so=$M/lib/libgallium-25.3.6.so;/lib/libGLESv2.so.2=$M/lib/libGLESv2.so.2;/lib/libz.so.1=$M/lib/libz.so.1;/lib/swrast_dri.so=$M/lib/swrast_dri.so;/bin/gltriangle=$M/bin/gltriangle"; MINIXFS_EXTRA="$E" MINIXFS_BLOCKS=16384 cargo run -q -p boot-image --bin mkminixfs --release -- aarch64
     @just mkfs-aarch64
-    FEED_SCENARIO=tools/smoke/gltriangle.tsv sh tools/smoke/feed.sh target/test-gltriangle-aarch64.log {{boot-timeout}} qemu-system-aarch64 -machine virt -cpu cortex-a57 -m 512M -nographic -no-reboot -global virtio-mmio.force-legacy=off -drive if=none,id=disk0,file=target/images/aarch64-unknown-minix/disk.img,format=raw,cache=writethrough -device virtio-blk-device,drive=disk0 -netdev user,id=net0 -device virtio-net-device,netdev=net0 -device virtio-gpu-device -device virtio-keyboard-device -kernel target/images/aarch64-unknown-minix/minix-aarch64-boot.elf
+    FEED_SCENARIO=tools/smoke/gltriangle.tsv cargo xtask smoke target/test-gltriangle-aarch64.log {{boot-timeout}} qemu-system-aarch64 -machine virt -cpu cortex-a57 -m 512M -nographic -no-reboot -global virtio-mmio.force-legacy=off -drive if=none,id=disk0,file=target/images/aarch64-unknown-minix/disk.img,format=raw,cache=writethrough -device virtio-blk-device,drive=disk0 -netdev user,id=net0 -device virtio-net-device,netdev=net0 -device virtio-gpu-device -device virtio-keyboard-device -kernel target/images/aarch64-unknown-minix/minix-aarch64-boot.elf
     @echo "gltriangle: the GLES2 triangle rendered through surfaceless EGL on softpipe (aarch64)"
 
 # UNIX-domain sockets: /bin/udstest round-trips a socketpair and a
@@ -1247,14 +1247,14 @@ test-uds-x86 boot-timeout="40": build-x86
     mkdir -p target/images/x86_64-pc-minix
     cp target/trampoline.elf target/images/x86_64-pc-minix/minix-x86.elf
     @just _assert-qemu-version qemu-system-x86_64
-    FEED_SCENARIO=tools/smoke/uds.tsv sh tools/smoke/feed.sh target/test-uds-x86.log {{boot-timeout}} qemu-system-x86_64 -nographic -m 256M -no-reboot -vga none -device bochs-display,id=fb0 -kernel target/images/x86_64-pc-minix/minix-x86.elf -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0 -device virtio-tablet-pci,display=fb0
+    FEED_SCENARIO=tools/smoke/uds.tsv cargo xtask smoke target/test-uds-x86.log {{boot-timeout}} qemu-system-x86_64 -nographic -m 256M -no-reboot -vga none -device bochs-display,id=fb0 -kernel target/images/x86_64-pc-minix/minix-x86.elf -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0 -device virtio-tablet-pci,display=fb0
     @echo "uds: socketpair, bind/listen/connect/accept and SCM_RIGHTS/SCM_CREDS passing (x86_64)"
 
 test-memfd-x86 boot-timeout="40": build-x86
     mkdir -p target/images/x86_64-pc-minix
     cp target/trampoline.elf target/images/x86_64-pc-minix/minix-x86.elf
     @just _assert-qemu-version qemu-system-x86_64
-    FEED_SCENARIO=tools/smoke/memfd.tsv sh tools/smoke/feed.sh target/test-memfd-x86.log {{boot-timeout}} qemu-system-x86_64 -nographic -m 256M -no-reboot -vga none -device bochs-display,id=fb0 -kernel target/images/x86_64-pc-minix/minix-x86.elf -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0 -device virtio-tablet-pci,display=fb0
+    FEED_SCENARIO=tools/smoke/memfd.tsv cargo xtask smoke target/test-memfd-x86.log {{boot-timeout}} qemu-system-x86_64 -nographic -m 256M -no-reboot -vga none -device bochs-display,id=fb0 -kernel target/images/x86_64-pc-minix/minix-x86.elf -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0 -device virtio-tablet-pci,display=fb0
     @echo "memfd: one object mapped twice and across a fork, read/write agreeing (x86_64)"
 
 # The terminal path's readiness: /bin/ptytest opens a pty master, forks a slave,
@@ -1266,7 +1266,7 @@ test-pty-x86 boot-timeout="40": build-x86
     mkdir -p target/images/x86_64-pc-minix
     cp target/trampoline.elf target/images/x86_64-pc-minix/minix-x86.elf
     @just _assert-qemu-version qemu-system-x86_64
-    FEED_SCENARIO=tools/smoke/pty.tsv sh tools/smoke/feed.sh target/test-pty-x86.log {{boot-timeout}} qemu-system-x86_64 -nographic -m 256M -no-reboot -vga none -device bochs-display,id=fb0 -kernel target/images/x86_64-pc-minix/minix-x86.elf -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0 -device virtio-tablet-pci,display=fb0
+    FEED_SCENARIO=tools/smoke/pty.tsv cargo xtask smoke target/test-pty-x86.log {{boot-timeout}} qemu-system-x86_64 -nographic -m 256M -no-reboot -vga none -device bochs-display,id=fb0 -kernel target/images/x86_64-pc-minix/minix-x86.elf -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0 -device virtio-tablet-pci,display=fb0
     @echo "pty: a poll on a pty master is woken by the slave's write (x86_64)"
 
 # Readiness primitives: /bin/seltest drives select(2) and poll(2) over pipes and
@@ -1276,7 +1276,7 @@ test-select-x86 boot-timeout="40": build-x86
     mkdir -p target/images/x86_64-pc-minix
     cp target/trampoline.elf target/images/x86_64-pc-minix/minix-x86.elf
     @just _assert-qemu-version qemu-system-x86_64
-    FEED_SCENARIO=tools/smoke/select.tsv sh tools/smoke/feed.sh target/test-select-x86.log {{boot-timeout}} qemu-system-x86_64 -nographic -m 256M -no-reboot -vga none -device bochs-display,id=fb0 -kernel target/images/x86_64-pc-minix/minix-x86.elf -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0 -device virtio-tablet-pci,display=fb0
+    FEED_SCENARIO=tools/smoke/select.tsv cargo xtask smoke target/test-select-x86.log {{boot-timeout}} qemu-system-x86_64 -nographic -m 256M -no-reboot -vga none -device bochs-display,id=fb0 -kernel target/images/x86_64-pc-minix/minix-x86.elf -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0 -device virtio-tablet-pci,display=fb0
     @echo "select/poll: pipe readiness and real timeouts (x86_64)"
 
 # eventfd: /bin/eventfdtest exercises the counter semantics and a cross-process
@@ -1285,7 +1285,7 @@ test-eventfd-x86 boot-timeout="40": build-x86
     mkdir -p target/images/x86_64-pc-minix
     cp target/trampoline.elf target/images/x86_64-pc-minix/minix-x86.elf
     @just _assert-qemu-version qemu-system-x86_64
-    FEED_SCENARIO=tools/smoke/eventfd.tsv sh tools/smoke/feed.sh target/test-eventfd-x86.log {{boot-timeout}} qemu-system-x86_64 -nographic -m 256M -no-reboot -vga none -device bochs-display,id=fb0 -kernel target/images/x86_64-pc-minix/minix-x86.elf -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0 -device virtio-tablet-pci,display=fb0
+    FEED_SCENARIO=tools/smoke/eventfd.tsv cargo xtask smoke target/test-eventfd-x86.log {{boot-timeout}} qemu-system-x86_64 -nographic -m 256M -no-reboot -vga none -device bochs-display,id=fb0 -kernel target/images/x86_64-pc-minix/minix-x86.elf -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0 -device virtio-tablet-pci,display=fb0
     @echo "eventfd: counter semantics and a cross-process wake (x86_64)"
 
 # timerfd: /bin/timerfdtest drives one-shot, periodic and absolute timers (and a
@@ -1294,7 +1294,7 @@ test-timerfd-x86 boot-timeout="40": build-x86
     mkdir -p target/images/x86_64-pc-minix
     cp target/trampoline.elf target/images/x86_64-pc-minix/minix-x86.elf
     @just _assert-qemu-version qemu-system-x86_64
-    FEED_SCENARIO=tools/smoke/timerfd.tsv sh tools/smoke/feed.sh target/test-timerfd-x86.log {{boot-timeout}} qemu-system-x86_64 -nographic -m 256M -no-reboot -vga none -device bochs-display,id=fb0 -kernel target/images/x86_64-pc-minix/minix-x86.elf -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0 -device virtio-tablet-pci,display=fb0
+    FEED_SCENARIO=tools/smoke/timerfd.tsv cargo xtask smoke target/test-timerfd-x86.log {{boot-timeout}} qemu-system-x86_64 -nographic -m 256M -no-reboot -vga none -device bochs-display,id=fb0 -kernel target/images/x86_64-pc-minix/minix-x86.elf -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0 -device virtio-tablet-pci,display=fb0
     @echo "timerfd: one-shot, periodic, absolute and disarmed timers (x86_64)"
 
 # epoll: /bin/epolltest drives a persistent interest set — add/modify/remove,
@@ -1304,7 +1304,7 @@ test-epoll-x86 boot-timeout="40": build-x86
     mkdir -p target/images/x86_64-pc-minix
     cp target/trampoline.elf target/images/x86_64-pc-minix/minix-x86.elf
     @just _assert-qemu-version qemu-system-x86_64
-    FEED_SCENARIO=tools/smoke/epoll.tsv sh tools/smoke/feed.sh target/test-epoll-x86.log {{boot-timeout}} qemu-system-x86_64 -nographic -m 256M -no-reboot -vga none -device bochs-display,id=fb0 -kernel target/images/x86_64-pc-minix/minix-x86.elf -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0 -device virtio-tablet-pci,display=fb0
+    FEED_SCENARIO=tools/smoke/epoll.tsv cargo xtask smoke target/test-epoll-x86.log {{boot-timeout}} qemu-system-x86_64 -nographic -m 256M -no-reboot -vga none -device bochs-display,id=fb0 -kernel target/images/x86_64-pc-minix/minix-x86.elf -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0 -device virtio-tablet-pci,display=fb0
     @echo "epoll: persistent interest set, level-triggered readiness, cross-process wake (x86_64)"
 
 # wayland: /bin/waylandtest drives the Phase 1a protocol handshake (registry and
@@ -1314,7 +1314,7 @@ test-wayland-x86 boot-timeout="40": build-x86
     mkdir -p target/images/x86_64-pc-minix
     cp target/trampoline.elf target/images/x86_64-pc-minix/minix-x86.elf
     @just _assert-qemu-version qemu-system-x86_64
-    FEED_SCENARIO=tools/smoke/wayland.tsv sh tools/smoke/feed.sh target/test-wayland-x86.log {{boot-timeout}} qemu-system-x86_64 -nographic -m 256M -no-reboot -vga none -device bochs-display,id=fb0 -kernel target/images/x86_64-pc-minix/minix-x86.elf -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0 -device virtio-tablet-pci,display=fb0
+    FEED_SCENARIO=tools/smoke/wayland.tsv cargo xtask smoke target/test-wayland-x86.log {{boot-timeout}} qemu-system-x86_64 -nographic -m 256M -no-reboot -vga none -device bochs-display,id=fb0 -kernel target/images/x86_64-pc-minix/minix-x86.elf -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0 -device virtio-tablet-pci,display=fb0
     @echo "wayland: registry + sync handshake over /dev/uds (x86_64)"
 
 # wlshm: `diag wlclient` drives the Phase 1b wl_shm present path — it draws into a
@@ -1325,7 +1325,7 @@ test-wlshm-x86 boot-timeout="40": build-x86
     mkdir -p target/images/x86_64-pc-minix
     cp target/trampoline.elf target/images/x86_64-pc-minix/minix-x86.elf
     @just _assert-qemu-version qemu-system-x86_64
-    FEED_SCENARIO=tools/smoke/wlshm.tsv sh tools/smoke/feed.sh target/test-wlshm-x86.log {{boot-timeout}} qemu-system-x86_64 -nographic -m 256M -no-reboot -vga none -device bochs-display,id=fb0 -kernel target/images/x86_64-pc-minix/minix-x86.elf -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0 -device virtio-tablet-pci,display=fb0
+    FEED_SCENARIO=tools/smoke/wlshm.tsv cargo xtask smoke target/test-wlshm-x86.log {{boot-timeout}} qemu-system-x86_64 -nographic -m 256M -no-reboot -vga none -device bochs-display,id=fb0 -kernel target/images/x86_64-pc-minix/minix-x86.elf -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0 -device virtio-tablet-pci,display=fb0
     @echo "wlshm: wl_shm buffer committed and presented to /dev/fb (x86_64)"
 
 # wloverlap: the scene z-order gate. Two connections, two output-sized windows, and a
@@ -1334,7 +1334,7 @@ test-wloverlap-x86 boot-timeout="60": build-x86
     mkdir -p target/images/x86_64-pc-minix
     cp target/trampoline.elf target/images/x86_64-pc-minix/minix-x86.elf
     @just _assert-qemu-version qemu-system-x86_64
-    FEED_SCENARIO=tools/smoke/wloverlap.tsv sh tools/smoke/feed.sh target/test-wloverlap-x86.log {{boot-timeout}} qemu-system-x86_64 -nographic -m 256M -no-reboot -vga none -device bochs-display,id=fb0 -kernel target/images/x86_64-pc-minix/minix-x86.elf -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0 -device virtio-tablet-pci,display=fb0
+    FEED_SCENARIO=tools/smoke/wloverlap.tsv cargo xtask smoke target/test-wloverlap-x86.log {{boot-timeout}} qemu-system-x86_64 -nographic -m 256M -no-reboot -vga none -device bochs-display,id=fb0 -kernel target/images/x86_64-pc-minix/minix-x86.elf -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0 -device virtio-tablet-pci,display=fb0
     @just _assert-qemu-log target/test-wloverlap-x86.log "wloverlap: PASS"
     @echo "wloverlap: the lower window's commit left the window above it intact (x86_64)"
 
@@ -1359,7 +1359,7 @@ test-wlx-x86 boot-timeout="40": build-x86
     mkdir -p target/images/x86_64-pc-minix
     cp target/trampoline.elf target/images/x86_64-pc-minix/minix-x86.elf
     @just _assert-qemu-version qemu-system-x86_64
-    FEED_SCENARIO=tools/smoke/wlx.tsv sh tools/smoke/feed.sh target/test-wlx-x86.log {{boot-timeout}} qemu-system-x86_64 -nographic -m 256M -no-reboot -vga none -device bochs-display,id=fb0 -kernel target/images/x86_64-pc-minix/minix-x86.elf -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0 -device virtio-tablet-pci,display=fb0
+    FEED_SCENARIO=tools/smoke/wlx.tsv cargo xtask smoke target/test-wlx-x86.log {{boot-timeout}} qemu-system-x86_64 -nographic -m 256M -no-reboot -vga none -device bochs-display,id=fb0 -kernel target/images/x86_64-pc-minix/minix-x86.elf -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0 -device virtio-tablet-pci,display=fb0
     @echo "wlx: xdg_shell toplevel configured, acked and presented (x86_64)"
 
 
@@ -1434,7 +1434,7 @@ test-wlxd-x86 boot-timeout="40": build-x86
     mkdir -p target/images/x86_64-pc-minix
     cp target/trampoline.elf target/images/x86_64-pc-minix/minix-x86.elf
     @just _assert-qemu-version qemu-system-x86_64
-    FEED_SCENARIO=tools/smoke/wlxd.tsv sh tools/smoke/feed.sh target/test-wlxd-x86.log {{boot-timeout}} qemu-system-x86_64 -nographic -m 256M -no-reboot -vga none -device bochs-display,id=fb0 -kernel target/images/x86_64-pc-minix/minix-x86.elf -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0 -device virtio-tablet-pci,display=fb0
+    FEED_SCENARIO=tools/smoke/wlxd.tsv cargo xtask smoke target/test-wlxd-x86.log {{boot-timeout}} qemu-system-x86_64 -nographic -m 256M -no-reboot -vga none -device bochs-display,id=fb0 -kernel target/images/x86_64-pc-minix/minix-x86.elf -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0 -device virtio-tablet-pci,display=fb0
     @echo "wlxd: damage and the pointer's cursor (x86_64)"
 
 
@@ -1446,7 +1446,7 @@ test-wlxe-x86 boot-timeout="40": build-x86
     mkdir -p target/images/x86_64-pc-minix
     cp target/trampoline.elf target/images/x86_64-pc-minix/minix-x86.elf
     @just _assert-qemu-version qemu-system-x86_64
-    FEED_SCENARIO=tools/smoke/wlxe.tsv sh tools/smoke/feed.sh target/test-wlxe-x86.log {{boot-timeout}} qemu-system-x86_64 -nographic -m 256M -no-reboot -vga none -device bochs-display,id=fb0 -kernel target/images/x86_64-pc-minix/minix-x86.elf -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0 -device virtio-tablet-pci,display=fb0
+    FEED_SCENARIO=tools/smoke/wlxe.tsv cargo xtask smoke target/test-wlxe-x86.log {{boot-timeout}} qemu-system-x86_64 -nographic -m 256M -no-reboot -vga none -device bochs-display,id=fb0 -kernel target/images/x86_64-pc-minix/minix-x86.elf -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0 -device virtio-tablet-pci,display=fb0
     @echo "wlxe: layer-shell panel, xdg_popup and client-side decoration (x86_64)"
 # Measure whether two processes that map one object through the loader share its
 # physical frames — Phase 5 of .notes/dynamic_linking.md. `cargo xtask probe dso-share` boots
@@ -1482,7 +1482,7 @@ image-riscv64 boot-timeout="15":
     mkdir -p target/images/riscv64gc-unknown-minix
     cp target/riscv64gc-unknown-minix/release/kernel-boot-riscv64 target/images/riscv64gc-unknown-minix/minix-riscv64.elf
     @just _assert-qemu-version qemu-system-riscv64
-    sh tools/smoke/feed.sh target/image-riscv64.log {{boot-timeout}} qemu-system-riscv64 -machine virt -m 256M -nographic -global virtio-mmio.force-legacy=off -netdev user,id=net0 -device virtio-net-device,netdev=net0 -device virtio-gpu-device -device virtio-keyboard-device -kernel target/images/riscv64gc-unknown-minix/minix-riscv64.elf
+    cargo xtask smoke target/image-riscv64.log {{boot-timeout}} qemu-system-riscv64 -machine virt -m 256M -nographic -global virtio-mmio.force-legacy=off -netdev user,id=net0 -device virtio-net-device,netdev=net0 -device virtio-gpu-device -device virtio-keyboard-device -kernel target/images/riscv64gc-unknown-minix/minix-riscv64.elf
     @just _assert-qemu-log target/image-riscv64.log "wserver: ready"
     @echo "done: target/images/riscv64gc-unknown-minix/minix-riscv64.elf — qemu-system-riscv64 -machine virt -m 256M -nographic -kernel <it>"
 
@@ -1490,7 +1490,7 @@ image-aarch64 boot-timeout="15": build-aarch64
     mkdir -p target/images/aarch64-unknown-minix
     cp target/aarch64-unknown-minix/release/kernel-boot-aarch64 target/images/aarch64-unknown-minix/minix-aarch64.elf
     @just _assert-qemu-version qemu-system-aarch64
-    sh tools/smoke/feed.sh target/image-aarch64.log {{boot-timeout}} qemu-system-aarch64 -machine virt -cpu cortex-a57 -m 256M -nographic -no-reboot -global virtio-mmio.force-legacy=off -netdev user,id=net0 -device virtio-net-device,netdev=net0 -device virtio-gpu-device -device virtio-keyboard-device -kernel target/images/aarch64-unknown-minix/minix-aarch64.elf
+    cargo xtask smoke target/image-aarch64.log {{boot-timeout}} qemu-system-aarch64 -machine virt -cpu cortex-a57 -m 256M -nographic -no-reboot -global virtio-mmio.force-legacy=off -netdev user,id=net0 -device virtio-net-device,netdev=net0 -device virtio-gpu-device -device virtio-keyboard-device -kernel target/images/aarch64-unknown-minix/minix-aarch64.elf
     @just _assert-qemu-log target/image-aarch64.log "wserver: ready"
     @echo "done: target/images/aarch64-unknown-minix/minix-aarch64.elf — qemu-system-aarch64 -machine virt -m 256M -nographic -kernel <it>"
 
@@ -1650,17 +1650,17 @@ test-procfs-x86 boot-timeout="40": build-x86
     mkdir -p target/images/x86_64-pc-minix
     cp target/trampoline.elf target/images/x86_64-pc-minix/minix-x86.elf
     @just _assert-qemu-version qemu-system-x86_64
-    FEED_SCENARIO=tools/smoke/procfs.tsv sh tools/smoke/feed.sh target/test-procfs-x86.log {{boot-timeout}} qemu-system-x86_64 -nographic -m 256M -no-reboot -vga none -device bochs-display,id=fb0 -kernel target/images/x86_64-pc-minix/minix-x86.elf -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0 -device virtio-tablet-pci,display=fb0
+    FEED_SCENARIO=tools/smoke/procfs.tsv cargo xtask smoke target/test-procfs-x86.log {{boot-timeout}} qemu-system-x86_64 -nographic -m 256M -no-reboot -vga none -device bochs-display,id=fb0 -kernel target/images/x86_64-pc-minix/minix-x86.elf -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0 -device virtio-tablet-pci,display=fb0
     @echo "procfs: /proc is mounted, serves hz and uptime, and lists its entries once each (x86_64)"
 
 test-procfs-riscv64 boot-timeout="60": build-riscv64
     @just _assert-qemu-version qemu-system-riscv64
-    FEED_SCENARIO=tools/smoke/procfs.tsv sh tools/smoke/feed.sh target/test-procfs-riscv64.log {{boot-timeout}} qemu-system-riscv64 -machine virt -m 256M -nographic -global virtio-mmio.force-legacy=off -netdev user,id=net0 -device virtio-net-device,netdev=net0 -device virtio-gpu-device -device virtio-keyboard-device -kernel target/riscv64gc-unknown-minix/release/kernel-boot-riscv64
+    FEED_SCENARIO=tools/smoke/procfs.tsv cargo xtask smoke target/test-procfs-riscv64.log {{boot-timeout}} qemu-system-riscv64 -machine virt -m 256M -nographic -global virtio-mmio.force-legacy=off -netdev user,id=net0 -device virtio-net-device,netdev=net0 -device virtio-gpu-device -device virtio-keyboard-device -kernel target/riscv64gc-unknown-minix/release/kernel-boot-riscv64
     @echo "procfs: /proc is mounted, serves hz and uptime, and lists its entries once each (riscv64)"
 
 test-procfs-aarch64 boot-timeout="60": build-aarch64
     @just _assert-qemu-version qemu-system-aarch64
-    FEED_SCENARIO=tools/smoke/procfs.tsv sh tools/smoke/feed.sh target/test-procfs-aarch64.log {{boot-timeout}} qemu-system-aarch64 -machine virt -cpu cortex-a57 -m 256M -nographic -no-reboot -global virtio-mmio.force-legacy=off -netdev user,id=net0 -device virtio-net-device,netdev=net0 -device virtio-gpu-device -device virtio-keyboard-device -kernel target/aarch64-unknown-minix/release/kernel-boot-aarch64
+    FEED_SCENARIO=tools/smoke/procfs.tsv cargo xtask smoke target/test-procfs-aarch64.log {{boot-timeout}} qemu-system-aarch64 -machine virt -cpu cortex-a57 -m 256M -nographic -no-reboot -global virtio-mmio.force-legacy=off -netdev user,id=net0 -device virtio-net-device,netdev=net0 -device virtio-gpu-device -device virtio-keyboard-device -kernel target/aarch64-unknown-minix/release/kernel-boot-aarch64
     @echo "procfs: /proc is mounted, serves hz and uptime, and lists its entries once each (aarch64)"
 
 test-arches:
@@ -1739,34 +1739,34 @@ test-winprobe-x86 boot-timeout="40": build-x86
     mkdir -p target/images/x86_64-pc-minix
     cp target/trampoline.elf target/images/x86_64-pc-minix/minix-x86.elf
     @just _assert-qemu-version qemu-system-x86_64
-    FEED_SCENARIO=tools/smoke/winprobe.tsv sh tools/smoke/feed.sh target/test-winprobe-x86.log {{boot-timeout}} qemu-system-x86_64 -nographic -m 256M -no-reboot -vga none -device bochs-display,id=fb0 -kernel target/images/x86_64-pc-minix/minix-x86.elf -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0 -device virtio-tablet-pci,display=fb0
+    FEED_SCENARIO=tools/smoke/winprobe.tsv cargo xtask smoke target/test-winprobe-x86.log {{boot-timeout}} qemu-system-x86_64 -nographic -m 256M -no-reboot -vga none -device bochs-display,id=fb0 -kernel target/images/x86_64-pc-minix/minix-x86.elf -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0 -device virtio-tablet-pci,display=fb0
     @echo "winprobe: no user VA outside a region is reachable (x86_64)"
 
 test-winprobe-riscv64 boot-timeout="60": build-riscv64
     @just _assert-qemu-version qemu-system-riscv64
-    FEED_SCENARIO=tools/smoke/winprobe.tsv sh tools/smoke/feed.sh target/test-winprobe-riscv64.log {{boot-timeout}} qemu-system-riscv64 -machine virt -m 256M -nographic -global virtio-mmio.force-legacy=off -netdev user,id=net0 -device virtio-net-device,netdev=net0 -device virtio-gpu-device -device virtio-keyboard-device -kernel target/riscv64gc-unknown-minix/release/kernel-boot-riscv64
+    FEED_SCENARIO=tools/smoke/winprobe.tsv cargo xtask smoke target/test-winprobe-riscv64.log {{boot-timeout}} qemu-system-riscv64 -machine virt -m 256M -nographic -global virtio-mmio.force-legacy=off -netdev user,id=net0 -device virtio-net-device,netdev=net0 -device virtio-gpu-device -device virtio-keyboard-device -kernel target/riscv64gc-unknown-minix/release/kernel-boot-riscv64
     @echo "winprobe: no user VA outside a region is reachable (riscv64)"
 
 test-winprobe-aarch64 boot-timeout="60": build-aarch64
     @just _assert-qemu-version qemu-system-aarch64
-    FEED_SCENARIO=tools/smoke/winprobe.tsv sh tools/smoke/feed.sh target/test-winprobe-aarch64.log {{boot-timeout}} qemu-system-aarch64 -machine virt -cpu cortex-a57 -m 256M -nographic -no-reboot -global virtio-mmio.force-legacy=off -netdev user,id=net0 -device virtio-net-device,netdev=net0 -device virtio-gpu-device -device virtio-keyboard-device -kernel target/aarch64-unknown-minix/release/kernel-boot-aarch64
+    FEED_SCENARIO=tools/smoke/winprobe.tsv cargo xtask smoke target/test-winprobe-aarch64.log {{boot-timeout}} qemu-system-aarch64 -machine virt -cpu cortex-a57 -m 256M -nographic -no-reboot -global virtio-mmio.force-legacy=off -netdev user,id=net0 -device virtio-net-device,netdev=net0 -device virtio-gpu-device -device virtio-keyboard-device -kernel target/aarch64-unknown-minix/release/kernel-boot-aarch64
     @echo "winprobe: no user VA outside a region is reachable (aarch64)"
 
 test-fork-x86 boot-timeout="40": build-x86
     mkdir -p target/images/x86_64-pc-minix
     cp target/trampoline.elf target/images/x86_64-pc-minix/minix-x86.elf
     @just _assert-qemu-version qemu-system-x86_64
-    FEED_SCENARIO=tools/smoke/fork.tsv sh tools/smoke/feed.sh target/test-fork-x86.log {{boot-timeout}} qemu-system-x86_64 -nographic -m 256M -no-reboot -vga none -device bochs-display,id=fb0 -kernel target/images/x86_64-pc-minix/minix-x86.elf -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0 -device virtio-tablet-pci,display=fb0
+    FEED_SCENARIO=tools/smoke/fork.tsv cargo xtask smoke target/test-fork-x86.log {{boot-timeout}} qemu-system-x86_64 -nographic -m 256M -no-reboot -vga none -device bochs-display,id=fb0 -kernel target/images/x86_64-pc-minix/minix-x86.elf -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0 -device virtio-tablet-pci,display=fb0
     @echo "fork: both directions of the copy held (x86_64)"
 
 test-fork-riscv64 boot-timeout="60": build-riscv64
     @just _assert-qemu-version qemu-system-riscv64
-    FEED_SCENARIO=tools/smoke/fork.tsv sh tools/smoke/feed.sh target/test-fork-riscv64.log {{boot-timeout}} qemu-system-riscv64 -machine virt -m 256M -nographic -global virtio-mmio.force-legacy=off -netdev user,id=net0 -device virtio-net-device,netdev=net0 -device virtio-gpu-device -device virtio-keyboard-device -kernel target/riscv64gc-unknown-minix/release/kernel-boot-riscv64
+    FEED_SCENARIO=tools/smoke/fork.tsv cargo xtask smoke target/test-fork-riscv64.log {{boot-timeout}} qemu-system-riscv64 -machine virt -m 256M -nographic -global virtio-mmio.force-legacy=off -netdev user,id=net0 -device virtio-net-device,netdev=net0 -device virtio-gpu-device -device virtio-keyboard-device -kernel target/riscv64gc-unknown-minix/release/kernel-boot-riscv64
     @echo "fork: both directions of the copy held (riscv64)"
 
 test-fork-aarch64 boot-timeout="60": build-aarch64
     @just _assert-qemu-version qemu-system-aarch64
-    FEED_SCENARIO=tools/smoke/fork.tsv sh tools/smoke/feed.sh target/test-fork-aarch64.log {{boot-timeout}} qemu-system-aarch64 -machine virt -cpu cortex-a57 -m 256M -nographic -no-reboot -global virtio-mmio.force-legacy=off -netdev user,id=net0 -device virtio-net-device,netdev=net0 -device virtio-gpu-device -device virtio-keyboard-device -kernel target/aarch64-unknown-minix/release/kernel-boot-aarch64
+    FEED_SCENARIO=tools/smoke/fork.tsv cargo xtask smoke target/test-fork-aarch64.log {{boot-timeout}} qemu-system-aarch64 -machine virt -cpu cortex-a57 -m 256M -nographic -no-reboot -global virtio-mmio.force-legacy=off -netdev user,id=net0 -device virtio-net-device,netdev=net0 -device virtio-gpu-device -device virtio-keyboard-device -kernel target/aarch64-unknown-minix/release/kernel-boot-aarch64
     @echo "fork: both directions of the copy held (aarch64)"
 
 # `waitid` decoding, per arch: `tools/smoke/waitid.tsv` runs `/bin/waittest`, which forks a
@@ -1782,17 +1782,17 @@ test-waitid-x86 boot-timeout="40": build-x86
     mkdir -p target/images/x86_64-pc-minix
     cp target/trampoline.elf target/images/x86_64-pc-minix/minix-x86.elf
     @just _assert-qemu-version qemu-system-x86_64
-    FEED_SCENARIO=tools/smoke/waitid.tsv sh tools/smoke/feed.sh target/test-waitid-x86.log {{boot-timeout}} qemu-system-x86_64 -nographic -m 256M -no-reboot -vga none -device bochs-display,id=fb0 -kernel target/images/x86_64-pc-minix/minix-x86.elf -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0 -device virtio-tablet-pci,display=fb0
+    FEED_SCENARIO=tools/smoke/waitid.tsv cargo xtask smoke target/test-waitid-x86.log {{boot-timeout}} qemu-system-x86_64 -nographic -m 256M -no-reboot -vga none -device bochs-display,id=fb0 -kernel target/images/x86_64-pc-minix/minix-x86.elf -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0 -device virtio-tablet-pci,display=fb0
     @echo "waitid: status decoded, P_ALL named the child, unsupported states refused (x86_64)"
 
 test-waitid-riscv64 boot-timeout="60": build-riscv64
     @just _assert-qemu-version qemu-system-riscv64
-    FEED_SCENARIO=tools/smoke/waitid.tsv sh tools/smoke/feed.sh target/test-waitid-riscv64.log {{boot-timeout}} qemu-system-riscv64 -machine virt -m 256M -nographic -global virtio-mmio.force-legacy=off -netdev user,id=net0 -device virtio-net-device,netdev=net0 -device virtio-gpu-device -device virtio-keyboard-device -kernel target/riscv64gc-unknown-minix/release/kernel-boot-riscv64
+    FEED_SCENARIO=tools/smoke/waitid.tsv cargo xtask smoke target/test-waitid-riscv64.log {{boot-timeout}} qemu-system-riscv64 -machine virt -m 256M -nographic -global virtio-mmio.force-legacy=off -netdev user,id=net0 -device virtio-net-device,netdev=net0 -device virtio-gpu-device -device virtio-keyboard-device -kernel target/riscv64gc-unknown-minix/release/kernel-boot-riscv64
     @echo "waitid: status decoded, P_ALL named the child, unsupported states refused (riscv64)"
 
 test-waitid-aarch64 boot-timeout="60": build-aarch64
     @just _assert-qemu-version qemu-system-aarch64
-    FEED_SCENARIO=tools/smoke/waitid.tsv sh tools/smoke/feed.sh target/test-waitid-aarch64.log {{boot-timeout}} qemu-system-aarch64 -machine virt -cpu cortex-a57 -m 256M -nographic -no-reboot -global virtio-mmio.force-legacy=off -netdev user,id=net0 -device virtio-net-device,netdev=net0 -device virtio-gpu-device -device virtio-keyboard-device -kernel target/aarch64-unknown-minix/release/kernel-boot-aarch64
+    FEED_SCENARIO=tools/smoke/waitid.tsv cargo xtask smoke target/test-waitid-aarch64.log {{boot-timeout}} qemu-system-aarch64 -machine virt -cpu cortex-a57 -m 256M -nographic -no-reboot -global virtio-mmio.force-legacy=off -netdev user,id=net0 -device virtio-net-device,netdev=net0 -device virtio-gpu-device -device virtio-keyboard-device -kernel target/aarch64-unknown-minix/release/kernel-boot-aarch64
     @echo "waitid: status decoded, P_ALL named the child, unsupported states refused (aarch64)"
 
 # The C libc ABI, x86 only: `cargo xtask build c-hello` builds `/bin/cabi` for x86_64
@@ -1806,7 +1806,7 @@ test-cabi-x86 boot-timeout="40": (build-c-hello "x86") build-x86
     mkdir -p target/images/x86_64-pc-minix
     cp target/trampoline.elf target/images/x86_64-pc-minix/minix-x86.elf
     @just _assert-qemu-version qemu-system-x86_64
-    FEED_SCENARIO=tools/smoke/cabi.tsv sh tools/smoke/feed.sh target/test-cabi-x86.log {{boot-timeout}} qemu-system-x86_64 -nographic -m 256M -no-reboot -vga none -device bochs-display,id=fb0 -kernel target/images/x86_64-pc-minix/minix-x86.elf -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0 -device virtio-tablet-pci,display=fb0
+    FEED_SCENARIO=tools/smoke/cabi.tsv cargo xtask smoke target/test-cabi-x86.log {{boot-timeout}} qemu-system-x86_64 -nographic -m 256M -no-reboot -vga none -device bochs-display,id=fb0 -kernel target/images/x86_64-pc-minix/minix-x86.elf -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0 -device virtio-tablet-pci,display=fb0
     @echo "cabi: the C socket, pipe2, group and mmap ABIs held (x86_64)"
 
 test target="x86":

@@ -1,7 +1,7 @@
 # The `just test-eventfd-x86` scenario: the eventfd readiness primitive, driven
 # by `/bin/eventfdtest`.
 #
-#   FEED_SCENARIO=tools/smoke/eventfd.tsv sh tools/smoke/feed.sh <log> <seconds> <qemu command…>
+#   FEED_SCENARIO=tools/smoke/eventfd.tsv cargo xtask smoke <log> <seconds> <qemu command…>
 #
 # One step per line, as `tools/smoke/scenario.tsv` documents: the command, a tab, and the
 # whole line its output must produce.

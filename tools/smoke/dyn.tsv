@@ -1,6 +1,6 @@
 # The dynamic-linking scenario.
 #
-#   FEED_SCENARIO=tools/smoke/dyn.tsv sh tools/smoke/feed.sh <log> <seconds> <qemu command…>
+#   FEED_SCENARIO=tools/smoke/dyn.tsv cargo xtask smoke <log> <seconds> <qemu command…>
 #
 # Driven by `just test-dynlink-x86`, which boots a standard image (`just build-x86`) with
 # the loader's own test objects injected (`DYNLINK_BINS`): the loader, `/lib/libc.so` and

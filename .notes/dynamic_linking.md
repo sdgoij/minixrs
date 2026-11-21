@@ -1145,7 +1145,7 @@ Three layers, matching `minix-testing`:
    (`arch-common`/`servers` have precedent: `test_vfs_pm_messages`).
 3. **QEMU gates** — `just test-dynlink-x86` (and `-riscv64`/`-aarch64`, both green since
    Phase 7), built
-   on `tools/smoke/feed.sh` + a `tools/smoke/dyn.tsv`, asserting on the serial log. The
+   on `cargo xtask smoke` + a `tools/smoke/dyn.tsv`, asserting on the serial log. The
    negative assertion (§7 Phase 0 gate: the string is not in the main binary) is what
    makes the gate meaningful rather than a print that would pass either way.
 4. **QEMU measurement, not a serial-log gate** — `cargo xtask probe dso-share` (recipes

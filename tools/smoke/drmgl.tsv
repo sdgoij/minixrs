@@ -2,10 +2,10 @@
 # enable GL on (`.notes/wayland.md` §6.10, stages 3b-4 and on).
 #
 # This is the first gate that types into a guest whose display backend is GL, and that is what
-# `FEED_PACE` in `feed.sh` is for. Every other scenario sends each step as one write, which is
+# `FEED_PACE` in the smoke driver is for. Every other scenario sends each step as one write, which is
 # what this guest's console keeps — but a GL display makes the emulator drop serial bytes
 # mid-line (measured: `/bin/echo gpu3d-ok` arrived as `/bin/echo gpu3d` and ran, as a shorter
-# command), so this one paces the bytes and makes `feed.sh` check the guest's echo of the whole
+# command), so this one paces the bytes and makes the smoke driver check the guest's echo of the whole
 # line before it believes the step. The measurement that pair rests on: the same 30-byte command
 # arrives intact a byte at a time, and truncated sometimes in one write.
 #
@@ -40,7 +40,7 @@
 # and a node that kept it after the first client exited would answer the second run's first
 # call with `EEXIST` — `init=err 17` — and its second with the same. Only `init=ok` again
 # says the close released it. A repeated expectation is only safe because every step's
-# expectations are anchored to what the guest printed *after* that step was sent; `feed.sh`
+# expectations are anchored to what the guest printed *after* that step was sent; the smoke driver
 # says where, and this pair of steps is what that anchoring is for.
 #
 # The fourth step is the object in motion: `diag drmexec` creates one, fills its pages with a

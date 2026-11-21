@@ -127,7 +127,7 @@ check(
 // -------------------------------------------------------------- the shared smoke scenario
 //
 // The same steps, in the same order, that `just image-<arch>` types into the three QEMU guests
-// (`tools/smoke/scenario.tsv`, driven there by `tools/smoke/feed.sh`): a command the shell cannot
+// (`tools/smoke/scenario.tsv`, driven there by `cargo xtask smoke`): a command the shell cannot
 // answer itself, a file written through its redirection, and that file read back through a second
 // open. Expressed once and driven here as well, so all four targets are asked the same question.
 //
@@ -149,11 +149,11 @@ check(
   `${scenario.length} steps from tools/smoke/scenario.tsv`
 );
 
-/// The console holds a line equal to `expected` — the whole line, as `feed.sh` requires of the three
+/// The console holds a line equal to `expected` — the whole line, as the smoke driver requires of the three
 /// arch runs, because the guest echoes what it is typed.
 const answered = (expected) => terminal.lines.includes(expected.trim());
 
-/// A step with nothing to print is evidenced by its own echo, which is what `feed.sh` looks for: the
+/// A step with nothing to print is evidenced by its own echo, which is what the smoke driver looks for: the
 /// command on a line of its own, after the prompt.
 const echoed = (command) => terminal.lines.some((l) => l.trim() === `# ${command}`);
 

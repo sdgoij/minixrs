@@ -1,7 +1,7 @@
 # The `just test-pty-x86` scenario: readiness on the terminal path, driven by
 # `/bin/ptytest`.
 #
-#   FEED_SCENARIO=tools/smoke/pty.tsv sh tools/smoke/feed.sh <log> <seconds> <qemu command…>
+#   FEED_SCENARIO=tools/smoke/pty.tsv cargo xtask smoke <log> <seconds> <qemu command…>
 #
 # One step per line, as `tools/smoke/scenario.tsv` documents: the command, a tab, and the
 # whole line its output must produce.

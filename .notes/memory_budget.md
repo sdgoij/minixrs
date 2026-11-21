@@ -68,7 +68,7 @@ retirement: `sys_exit_handler` and `clear_endpoint` for the main slot, and
 
 ## Reproduce
 
-`sh tools/smoke/feed.sh <log> <seconds> <qemu line>` with
+`cargo xtask smoke <log> <seconds> <qemu line>` with
 `FEED_SCENARIO=tools/smoke/coreutils-minix.tsv`, and `hangdump` inserted every ten
 steps, produced the table above. The boot free is the first `hangdump` in a fresh
 boot. To see the `fb` image size, run `llvm-nm -S --size-sort` on the arch's `fb`

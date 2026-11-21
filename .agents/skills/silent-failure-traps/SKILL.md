@@ -15,7 +15,7 @@ reasoned about; the fix recorded is what the code does now.
 - **Input written before the shell is reading the console is dropped, not buffered.** Measured on the
   shipped x86 image: `printf '/bin/echo alive\n' | qemu …` prints nothing, while the same bytes after a
   delay print the command, its output and the next prompt. Wait for the prompt, then send one step at a
-  time and wait for that step's answer (`tools/smoke/feed.sh`).
+  time and wait for that step's answer (`cargo xtask smoke`).
 - **A path that MSYS emulates is not readable by a native binary.** `mkfifo` under git-bash produces a
   FIFO that MSYS programs (`cat`) read fine and that the QEMU there — a native `PE32+ executable`,
   check with `file "$(command -v qemu-system-x86_64)"` — reads nothing from. The symptom is not an
@@ -108,7 +108,7 @@ typed byte — came from the guest's own tty server, and looked identical from t
 ## A gate nobody has seen fail is a gate nobody knows works
 
 Before believing a new gate, break the thing it claims to check and watch it fail *by name*. The
-step-naming path in `tools/smoke/feed.sh` was verified exactly that way: with an expectation the guest
+step-naming path in `cargo xtask smoke` was verified exactly that way: with an expectation the guest
 could never print, the recipe exits 1 and reports the step, its command and what it expected.
 
 Then check what the *guest* was doing at the moment of failure — the process list, the state it is
@@ -152,7 +152,7 @@ working shell).
 
 | What | Where |
 |------|-------|
-| Host-side driver that gets all of the above right | `tools/smoke/feed.sh`, `tools/smoke/scenario.tsv` |
+| Host-side driver that gets all of the above right | `cargo xtask smoke`, `tools/smoke/scenario.tsv` |
 | Host-side driver whose input pace is arch-specific, and which reads guest memory over QMP | `cargo xtask probe dso-share` |
 | Host-side driver that reaches an interactive bash (readline's poll path) | `tools/smoke/interactive_bash.py` |
 | The same scenario inside the wasm engine | `tools/wasm-browser/run.js` |

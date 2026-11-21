@@ -1,7 +1,7 @@
 # The `just test-fbmmap-<arch>` scenario: a userland `mmap` of `/dev/fb` must alias the
 # live framebuffer, not some other physical range.
 #
-#   FEED_SCENARIO=tools/smoke/fbmmap.tsv sh tools/smoke/feed.sh <log> <seconds> <qemu command…>
+#   FEED_SCENARIO=tools/smoke/fbmmap.tsv cargo xtask smoke <log> <seconds> <qemu command…>
 #
 # Every compositor present path — `wserver`, `/sbin/wlserver`, and the clients that read
 # the frame back — depends on this. `/bin/fbmmap paint` mmaps `/dev/fb` `MAP_SHARED`,

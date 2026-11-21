@@ -1,6 +1,6 @@
 # The userspace smoke scenario — what a user would call working, in one place.
 #
-#   sh tools/smoke/feed.sh <log> <seconds> <qemu command…>      (the three arches)
+#   cargo xtask smoke <log> <seconds> <qemu command…>      (the three arches)
 #   node tools/wasm-browser/run.js                               (wasm)
 #
 # One step per line: the command, a tab, and the line its output must produce. An empty expectation

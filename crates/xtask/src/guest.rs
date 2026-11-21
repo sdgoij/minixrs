@@ -4,7 +4,9 @@
 //! transcript, and polled a shared byte buffer. This is that, with the child
 //! killed on drop so an error path cannot leave an emulator behind.
 
+use std::fs::File;
 use std::io::{self, Read, Write};
+use std::path::Path;
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread;
@@ -19,30 +21,12 @@ pub struct Guest {
 impl Guest {
     /// Spawn `command`, which has to write the guest's serial console to stdout.
     pub fn spawn(command: &mut Command) -> io::Result<Guest> {
-        let mut child = command
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .map_err(|error| {
-                io::Error::new(
-                    error.kind(),
-                    format!(
-                        "cannot run {}: {error} (is QEMU installed?)",
-                        command.get_program().to_string_lossy()
-                    ),
-                )
-            })?;
+        spawn_inner(command, None)
+    }
 
-        let out = Arc::new(Mutex::new(Vec::new()));
-        if let Some(stdout) = child.stdout.take() {
-            pump(stdout, Arc::clone(&out));
-        }
-        if let Some(stderr) = child.stderr.take() {
-            pump(stderr, Arc::clone(&out));
-        }
-        let stdin = child.stdin.take();
-        Ok(Guest { child, stdin, out })
+    /// Spawn `command` and copy the console to `log` as it arrives.
+    pub fn spawn_tee(command: &mut Command, log: &Path) -> io::Result<Guest> {
+        spawn_inner(command, Some(log))
     }
 
     /// Wait until `wanted` appears in the console, or `timeout` passes.
@@ -111,10 +95,28 @@ impl Guest {
             .rposition(|window| window == needle)
     }
 
+    /// Write `data` to the guest's console in one write.
+    pub fn send_raw(&mut self, data: &[u8]) -> io::Result<()> {
+        let stdin = self
+            .stdin
+            .as_mut()
+            .ok_or_else(|| io::Error::other("the guest has no stdin"))?;
+        stdin.write_all(data)?;
+        stdin.flush()
+    }
+
+    /// Write `text` and a newline to the guest's console in one write.
+    pub fn send_line(&mut self, text: &str) -> io::Result<()> {
+        let mut line = Vec::with_capacity(text.len() + 1);
+        line.extend_from_slice(text.as_bytes());
+        line.push(b'\n');
+        self.send_raw(&line)
+    }
+
     /// Write `text` to the guest's console a byte at a time.
     ///
     /// A GL display drops serial bytes written in one burst, so the probes that
-    /// type into such a guest pace every byte, as `feed.sh`'s `FEED_PACE` does.
+    /// type into such a guest pace every byte, as the smoke driver's `FEED_PACE` does.
     pub fn send_paced(&mut self, text: &str, per_byte: Duration) -> io::Result<()> {
         for byte in text.bytes().chain(std::iter::once(b'\n')) {
             let stdin = self
@@ -174,13 +176,60 @@ fn lock(out: &Mutex<Vec<u8>>) -> MutexGuard<'_, Vec<u8>> {
     out.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
-fn pump(mut reader: impl Read + Send + 'static, out: Arc<Mutex<Vec<u8>>>) {
+/// Spawn a guest, optionally copying its console to a log file as it arrives.
+fn spawn_inner(command: &mut Command, log: Option<&Path>) -> io::Result<Guest> {
+    // The log is created before the child, so a bad path is named without leaving
+    // an emulator behind.
+    let log = match log {
+        Some(path) => Some(Arc::new(Mutex::new(File::create(path)?))),
+        None => None,
+    };
+    let mut child = command
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|error| {
+            io::Error::new(
+                error.kind(),
+                format!(
+                    "cannot run {}: {error} (is QEMU installed?)",
+                    command.get_program().to_string_lossy()
+                ),
+            )
+        })?;
+
+    let out = Arc::new(Mutex::new(Vec::new()));
+    if let Some(stdout) = child.stdout.take() {
+        pump(stdout, Arc::clone(&out), log.clone());
+    }
+    if let Some(stderr) = child.stderr.take() {
+        pump(stderr, Arc::clone(&out), log);
+    }
+    let stdin = child.stdin.take();
+    Ok(Guest { child, stdin, out })
+}
+
+fn pump(
+    mut reader: impl Read + Send + 'static,
+    out: Arc<Mutex<Vec<u8>>>,
+    log: Option<Arc<Mutex<File>>>,
+) {
     thread::spawn(move || {
         let mut buffer = [0u8; 65536];
         loop {
             match reader.read(&mut buffer) {
                 Ok(0) => break,
-                Ok(read) => lock(&out).extend_from_slice(&buffer[..read]),
+                Ok(read) => {
+                    lock(&out).extend_from_slice(&buffer[..read]);
+                    if let Some(log) = &log
+                        && let Ok(mut file) = log.lock()
+                    {
+                        // The transcript above is the verdict; the file is for the
+                        // caller's own assertions, so a write error is not fatal.
+                        let _ = file.write_all(&buffer[..read]);
+                    }
+                }
                 Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
                 Err(_) => break,
             }

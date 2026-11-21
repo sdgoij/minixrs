@@ -1,7 +1,7 @@
 # The `just test-memfd-x86` scenario: the anonymous shared-memory object, driven
 # by `/bin/memfdtest`.
 #
-#   FEED_SCENARIO=tools/smoke/memfd.tsv sh tools/smoke/feed.sh <log> <seconds> <qemu command…>
+#   FEED_SCENARIO=tools/smoke/memfd.tsv cargo xtask smoke <log> <seconds> <qemu command…>
 #
 # One step per line, as `tools/smoke/scenario.tsv` documents: the command, a tab, and the
 # whole line its output must produce.

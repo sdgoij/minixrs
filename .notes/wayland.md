@@ -969,7 +969,7 @@ continues.
   `-nographic`.** `-nographic` means `-display none`, and realizing a GL device
   against it fails with *"The display backend does not have OpenGL support
   enabled"*. The recipe names a GL backend instead, `-display egl-headless -serial
-  stdio` keeps the serial console on stdio, which is what `tools/smoke/feed.sh`
+  stdio` keeps the serial console on stdio, which is what `cargo xtask smoke`
   drives. Checked on the dev host: this QEMU lists `egl-headless`, and
   `virtio-gpu-gl-pci` realizes against it.
 - **QEMU 11 has no `virgl=` property.** The older `-device

@@ -1,6 +1,6 @@
 # The bash scenario — what the port's largest C consumer has to answer.
 #
-#   FEED_SCENARIO=tools/smoke/bash.tsv sh tools/smoke/feed.sh <log> <seconds> <qemu command…>
+#   FEED_SCENARIO=tools/smoke/bash.tsv cargo xtask smoke <log> <seconds> <qemu command…>
 #
 # Driven by `just test-bash`, which builds bash from the pinned upstream commit
 # (`tools/build-bash.py`) and injects it as /bin/bash, because it is deliberately not a BOOT_BINS

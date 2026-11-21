@@ -150,7 +150,7 @@ regression test; nobody re-runs it after every edit. See `minix-testing`.
   is covered everywhere. A per-target scenario (`dyn.tsv`, `fbmmap.tsv`,
   `cdyn.tsv`) exists only because that target lacks the facility, not because it
   was easier to write a second file.
-- `tools/smoke/feed.sh` drives a guest, and its expectations are part of the
+- `cargo xtask smoke` drives a guest, and its expectations are part of the
   scenario. Input sent before the prompt is dropped, `read` eats a trailing tab,
   and a pipeline's left side can swallow an `exit 1`. `silent-failure-traps` is
   the detail.

@@ -2,7 +2,7 @@
 # /bin/gltriangle draws a GLES2 triangle through surfaceless EGL and checks the
 # readback — .notes/wayland.md §6.10 stages 3c-2 and 3c-3.
 #
-#   FEED_SCENARIO=tools/smoke/gltriangle.tsv sh tools/smoke/feed.sh <log> <seconds> <qemu command…>
+#   FEED_SCENARIO=tools/smoke/gltriangle.tsv cargo xtask smoke <log> <seconds> <qemu command…>
 #
 # The client, the Mesa DSOs and their dependencies are injected into the disk
 # image by the recipe. The program sets EGL_PLATFORM / LIBGL_DRIVERS_PATH itself

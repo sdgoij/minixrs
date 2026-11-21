@@ -131,7 +131,7 @@ coreutils groups root	root : root
 # `id USER` appends the groups `getgrouplist` finds, so the `wheel` membership
 # shows up as `10(wheel)`. `-un` exercises `getlogin` (the port has no utmp, so
 # it is the real user's passwd name). The expectations escape `(` and `)`
-# because `feed.sh` matches an expectation as an ERE.
+# because the smoke driver matches an expectation as an ERE.
 coreutils id	uid=0\(root\) gid=0\(root\) groups=0\(root\)
 coreutils id -u	0
 coreutils id -un	root

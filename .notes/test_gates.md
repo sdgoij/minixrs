@@ -127,7 +127,7 @@ was reset. That is the class, which is what a gate is for; the line is what a di
 
 **Step 2 — keep an assertion on the shipped artifact.** *Defence in depth; catches cause (e), which
 Step 1 cannot.* **Done.**
-`just image-<arch>` boots the artifact it built and has `tools/smoke/feed.sh` type
+`just image-<arch>` boots the artifact it built and has `cargo xtask smoke` type
 `tools/smoke/scenario.tsv` into the shell that comes up: `/bin/echo` (a program exec'd from the
 image), `/bin/echo <text> > smoke.txt` (a file written), `/bin/cat smoke.txt` (that file read back).
 A step must answer on a whole line of its own — the guest echoes what it is typed, so only real
@@ -217,7 +217,7 @@ nightly with `rust-src`, installs Binaryen where `build.sh` looks for it, builds
 toolchain, no artifact and no submodule at all. Both are in `release`'s `needs`, so a red wasm run
 stops a publish like any other gate. **Done**, and the shared scenario is `tools/smoke/scenario.tsv`:
 a command, a tab, and the whole line its output must produce, one step per line. All four targets read
-that one file — `tools/smoke/feed.sh` types it into the three QEMU guests, `run.js` drives it in the
+that one file — `cargo xtask smoke` types it into the three QEMU guests, `run.js` drives it in the
 wasm engine — and the checks around it differ only where the targets do: on wasm, `run.js` also reads
 the kernel's own account of the first step (the shell's fork, the child's exec of the image's
 module), which a console cannot show.

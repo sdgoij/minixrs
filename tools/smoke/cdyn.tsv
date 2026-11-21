@@ -1,7 +1,7 @@
 # The `just cdyn` scenario: a program the *user* built with the recipe, linked against the
 # shared C library, run in a standard image.
 #
-#   FEED_SCENARIO=tools/smoke/cdyn.tsv sh tools/smoke/feed.sh <log> <seconds> <qemu command…>
+#   FEED_SCENARIO=tools/smoke/cdyn.tsv cargo xtask smoke <log> <seconds> <qemu command…>
 #
 # Driven by `just test-cdyn-x86`, which is the only gate that goes through the recipe's own
 # interface rather than `tools/build-dynlink.py` and `tools/build-dynlibc.py`: it runs

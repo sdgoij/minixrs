@@ -17,7 +17,7 @@ const PACE: Duration = Duration::from_millis(20);
 /// Type `command` until the guest echoes the whole of it, up to `tries` times.
 ///
 /// A line the guest never echoed whole is typed again; one it echoed is not.
-/// The console is paced at [`PACE`], which is `tools/smoke/feed.sh`'s measured
+/// The console is paced at [`PACE`], which is `cargo xtask smoke`'s measured
 /// value for a guest that mangles bursts.
 pub fn type_line(guest: &mut Guest, command: &str, tries: u32) -> bool {
     let want = command.as_bytes();
@@ -63,7 +63,7 @@ pub fn run_line(guest: &mut Guest, command: &str, timeout: Duration) -> bool {
 /// echoed and did not pass is the client's own failure.
 ///
 /// The echo check reads from one anchor taken before the first attempt, as
-/// `tools/smoke/feed.sh` does, so a send that arrives late still counts and is
+/// `cargo xtask smoke` does, so a send that arrives late still counts and is
 /// not typed twice. What is anchored per attempt is the prompt: the shell prints
 /// it before the bytes, so a prompt seen before this attempt was typed says
 /// nothing about where this one has got to.

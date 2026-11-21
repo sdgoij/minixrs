@@ -3,7 +3,7 @@
 
     python tools/smoke/interactive_bash.py <log> <seconds> -- <qemu command…>
 
-`tools/smoke/feed.sh` types into the minix shell and waits for its `#` prompt, so it
+cargo xtask smoke types into the minix shell and waits for its `#` prompt, so it
 cannot reach an interactive bash (whose `bash-5.3#` prompt replaces it, and whose
 readline polls the terminal instead of blocking on a line read). This driver waits
 for each prompt and proves the part a `bash -c` scenario cannot: that readline's own
