@@ -456,6 +456,13 @@ restored, and it stays until the last of the six remaining importers moves
 that was missed: delete what nothing imports, and check that with `grep`, not
 with the test suite.
 
+**Phase 5, started.** `cargo xtask probe read-hist` replaces
+`tools/virtio_read_hist.py`, the first of the CI gate probes, and
+`just test-read-cost-x86` calls it. Its output and its `--max` verdict match the
+script's on a recorded 1159-request trace, exit status included; only the stdout
+line endings differ, because Rust's `println!` does not translate `\n` the way
+Python's text-mode stdout does on Windows.
+
 `cc-minix` and `cc-dso-minix` are **not** ported, and that is a decision
 rather than a pending item. The reason is a host: `build-bash.py` and
 `build-mesa.py` drive them from inside WSL (`build-mesa.py`'s meson cross file

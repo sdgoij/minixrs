@@ -24,6 +24,7 @@ mod check;
 mod dynamic;
 mod image;
 mod paths;
+mod probe;
 mod rust_config;
 mod toolchain;
 
@@ -45,6 +46,7 @@ fn main() -> ExitCode {
         Some(("check", matches)) => run_check(&root, matches, &mut out, &mut err),
         Some(("build", matches)) => run_build(&root, matches),
         Some(("image", matches)) => run_image(&root, matches).map(|()| true),
+        Some(("probe", matches)) => run_probe(matches),
         Some(("rust-config", matches)) => {
             let token = matches
                 .get_one::<String>("target")
@@ -125,6 +127,18 @@ fn run_image(root: &Path, matches: &clap::ArgMatches) -> io::Result<()> {
         ),
         Some(("mkfs", matches)) => image::mkfs(root, target(matches)),
         _ => unreachable!("clap requires an image subcommand"),
+    }
+}
+
+fn run_probe(matches: &clap::ArgMatches) -> io::Result<bool> {
+    match matches.subcommand() {
+        Some(("read-hist", matches)) => {
+            let trace = matches
+                .get_one::<String>("trace")
+                .expect("clap requires the trace");
+            probe::read_hist(Path::new(trace), matches.get_one::<u64>("max").copied())
+        }
+        _ => unreachable!("clap requires a probe subcommand"),
     }
 }
 
@@ -252,6 +266,29 @@ fn command() -> clap::Command {
                     clap::Command::new("mkfs")
                         .about("Copy the kernel's MinixFS blob to the arch's raw disk image")
                         .arg(target_arg("x86")),
+                ),
+        )
+        .subcommand(
+            clap::Command::new("probe")
+                .about("Gate probes over data a guest produced")
+                .subcommand_required(true)
+                .arg_required_else_help(true)
+                .subcommand(
+                    clap::Command::new("read-hist")
+                        .about("Summarise a virtio_blk_handle_read trace, failing above --max")
+                        .arg(
+                            clap::Arg::new("trace")
+                                .value_name("TRACE")
+                                .required(true)
+                                .help("The trace file QEMU wrote"),
+                        )
+                        .arg(
+                            clap::Arg::new("max")
+                                .long("max")
+                                .value_name("REQUESTS")
+                                .value_parser(clap::value_parser!(u64))
+                                .help("Fail when the request count is above this ceiling"),
+                        ),
                 ),
         )
         .subcommand(

@@ -405,7 +405,7 @@ completions via QEMU `-trace`):
   pre-faults eagerly, §5), so the remaining per-command cost belongs to `KNOWN_ISSUES.md` #5,
   not to the cache. Measurement caveat: the trace backend perturbs
   the stdio console enough that a traced run must check the command's own output before
-  trusting the counts. `tools/virtio_read_hist.py` prints the count, byte total and
+  trusting the counts. `cargo xtask probe read-hist` prints the count, byte total and
   size histogram of a `-trace enable=virtio_blk_handle_read -D <file>` log.
 
 Region-stability stress — **resolved**: the 100× loop used to degrade and

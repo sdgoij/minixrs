@@ -52,7 +52,7 @@ are arch-specific, `[env]` is tooling/platform, not kernel.
    and dropping it needs either this item's attribution work or a *pre-copy touch*: the copier asks
    VM to make a user source range present before the kernel copies out of it, so VM fills the page
    through the owner's FDIO path instead of faulting in kernel mode. The touch is the smaller of
-   the two, and both should be judged by the same trace (`tools/virtio_read_hist.py`).
+   the two, and both should be judged by the same trace (`cargo xtask probe read-hist`).
 
    *Why the pre-copy touch is not small either (found while starting it, 2026-11-09).* A
    synchronous "make this range present" call from VFS cannot work: VM fills a file page by asking

@@ -851,7 +851,7 @@ test-read-cost-x86 boot-timeout="40": build-x86
     @just _assert-qemu-version qemu-system-x86_64
     rm -f target/test-read-cost.trace
     FEED_PACE=0.003 FEED_SCENARIO=tools/smoke/read-cost.tsv sh tools/smoke/feed.sh target/test-read-cost.log {{boot-timeout}} qemu-system-x86_64 -nographic -monitor none -m 256M -no-reboot -vga none -device bochs-display,id=fb0 -kernel target/images/x86_64-pc-minix/minix-x86.elf -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0 -device virtio-tablet-pci,display=fb0 -drive if=none,id=disk0,file=target/images/x86_64-pc-minix/disk.img,format=raw,cache=writethrough -device virtio-blk-pci,disable-legacy=on,drive=disk0 -trace enable=virtio_blk_handle_read -D target/test-read-cost.trace
-    python tools/virtio_read_hist.py target/test-read-cost.trace --max=1200
+    cargo xtask probe read-hist target/test-read-cost.trace --max=1200
     @echo "read-cost: per-command read cost within the ceiling"
 
 # Boot the bash that `build-bash` produced and drive `tools/smoke/bash.tsv` at
