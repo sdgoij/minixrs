@@ -893,3 +893,21 @@ importer left, so the release workflows now call `cargo xtask pin bash|mesa`
 What is left in `tools/*.py` is `stage1.py` and `lld.py`, the two lookups the
 Justfile needs at parse time before a toolchain exists (section 3.2). That is the
 endpoint the plan recorded.
+
+The first CI run after W4 went red in the two `*-pin` jobs, which is worth
+recording because it is a constraint on what `cargo xtask` can be used for. Those
+jobs check the repository out with `submodules: false` and only decide whether a
+release has to be built; `cargo xtask pin` cannot run there, because cargo has to
+resolve the whole workspace first and `minix-rt` depends on `compiler_builtins` by
+path inside the `rust` submodule. The three Python shims that W4 deleted had
+exactly this property (they read `tools/pins.ini` and ran `git rev-parse`), so
+they were doing something cargo cannot do in that job, not merely being
+un-ported.
+
+The fix is one POSIX `sh` script rather than three Python modules: `tools/pin.sh`
+prints the same fields `cargo xtask pin` does, from `tools/pins.ini` and the `rust`
+gitlink, and needs neither cargo nor the submodule. The tag format now lives in
+two languages, `pin.rs` and `pin.sh`, and both say so. A host test cannot compare
+them, because `sh` is not on a Windows runner's PATH; the two were diffed by hand
+on the pin commit (`bash-b46081660216-rea7d9eb9077a`,
+`mesa-06f9e28304d5-a8e5e10a873f-rea7d9eb9077a-cgbm`).

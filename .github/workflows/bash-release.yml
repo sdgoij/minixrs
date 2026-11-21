@@ -76,7 +76,7 @@ jobs:
         id: package
         run: |
           set -euo pipefail
-          pin="$(cargo xtask pin bash)"
+          pin="$(tools/pin.sh bash)"
           asset="${pin}-${{ matrix.arch }}.tar.xz"
           binary="target/bash/${{ matrix.arch }}/bash"
           test -f "${binary}" || { echo "!! no built bash at ${binary}"; exit 1; }
@@ -105,7 +105,7 @@ jobs:
 
       - name: Resolve the pin
         id: pin
-        run: echo "tag=$(cargo xtask pin bash)" >> "$GITHUB_OUTPUT"
+        run: echo "tag=$(tools/pin.sh bash)" >> "$GITHUB_OUTPUT"
 
       - uses: actions/download-artifact@v8
         with:
@@ -120,8 +120,8 @@ jobs:
         run: |
           set -euo pipefail
           tag='${{ steps.pin.outputs.tag }}'
-          describe="$(cargo xtask pin bash describe)"
-          commit="$(cargo xtask pin bash commit)"
+          describe="$(tools/pin.sh bash describe)"
+          commit="$(tools/pin.sh bash commit)"
           shopt -s nullglob
           assets=(bash-*.tar.xz)
           test "${#assets[@]}" -eq 3 || {

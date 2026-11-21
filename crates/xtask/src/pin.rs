@@ -1,10 +1,15 @@
 //! The pinned third-party sources and the release tag an artifact is identified by.
 //!
-//! The values live in `tools/pins.ini`, which the Python builders that still run
-//! under WSL read too, so there is one source of truth. The release tag includes
-//! the `rust` gitlink (`git rev-parse HEAD:rust`): a fork bump can change the
-//! target ABI, so an artifact built before it must not be handed out for the new
-//! one. That is what makes a fork bump rebuild rather than ship a stale binary.
+//! The values live in `tools/pins.ini`, and the release tag includes the `rust`
+//! gitlink (`git rev-parse HEAD:rust`): a fork bump can change the target ABI, so an
+//! artifact built before it must not be handed out for the new one. That is what
+//! makes a fork bump rebuild rather than ship a stale binary.
+//!
+//! `tools/pin.sh` prints the same fields for the CI jobs that only decide whether a
+//! release has to be built. Those jobs check out with `submodules: false`, and
+//! cargo cannot resolve this workspace without the `rust` submodule (`minix-rt`
+//! depends on `compiler_builtins` by path inside it), so this command cannot run
+//! there. The tag format is written in two places; change both.
 
 use std::collections::BTreeMap;
 use std::fs;

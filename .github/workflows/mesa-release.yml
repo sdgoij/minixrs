@@ -117,7 +117,7 @@ jobs:
         id: package
         run: |
           set -euo pipefail
-          pin="$(cargo xtask pin mesa)"
+          pin="$(tools/pin.sh mesa)"
           asset="${pin}-${{ matrix.arch }}.tar.xz"
           stage="target/mesa/${{ matrix.arch }}"
           test -f "${stage}/lib/libEGL.so.1" || { echo "!! no staged DSOs at ${stage}/lib"; exit 1; }
@@ -156,7 +156,7 @@ jobs:
 
       - name: Resolve the pin
         id: pin
-        run: echo "tag=$(cargo xtask pin mesa)" >> "$GITHUB_OUTPUT"
+        run: echo "tag=$(tools/pin.sh mesa)" >> "$GITHUB_OUTPUT"
 
       - uses: actions/download-artifact@v8
         with:
@@ -171,10 +171,10 @@ jobs:
         run: |
           set -euo pipefail
           tag='${{ steps.pin.outputs.tag }}'
-          mesa_tag="$(cargo xtask pin mesa mesa-tag)"
-          mesa_commit="$(cargo xtask pin mesa mesa-commit)"
-          drm_tag="$(cargo xtask pin mesa drm-tag)"
-          drm_commit="$(cargo xtask pin mesa drm-commit)"
+          mesa_tag="$(tools/pin.sh mesa mesa-tag)"
+          mesa_commit="$(tools/pin.sh mesa mesa-commit)"
+          drm_tag="$(tools/pin.sh mesa drm-tag)"
+          drm_commit="$(tools/pin.sh mesa drm-commit)"
           shopt -s nullglob
           assets=(mesa-*.tar.xz)
           test "${#assets[@]}" -eq 3 || {

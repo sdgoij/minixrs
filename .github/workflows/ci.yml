@@ -600,7 +600,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          pin="$(cargo xtask pin bash)"
+          pin="$(tools/pin.sh bash)"
           echo "pin=${pin}" >> "$GITHUB_OUTPUT"
 
           published=false
@@ -737,7 +737,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          pin="$(cargo xtask pin mesa)"
+          pin="$(tools/pin.sh mesa)"
           echo "pin=${pin}" >> "$GITHUB_OUTPUT"
 
           published=false
