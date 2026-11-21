@@ -2,7 +2,7 @@
 """Phase 1c/2a gate: a host key reaches a Wayland client, and the client gets its keymap.
 
 Boots x86 with a QMP socket and the bochs display, waits for `/sbin/wlserver`, then
-runs `/bin/wlkey` — which binds `wl_seat`'s keyboard, resolves the `keymap` event's
+runs `diag wlkey` — which binds `wl_seat`'s keyboard, resolves the `keymap` event's
 fd and checks its bytes (Phase 2a), commits a surface so the server sends `enter`,
 and prints each key it receives — and injects `a` with QMP `input-send-event`.
 
@@ -115,7 +115,7 @@ def main():
     q = socket.create_connection(("127.0.0.1", QMP_PORT), timeout=5)
     qmp_cmd(q, {"execute": "qmp_capabilities"})
 
-    send_paced("/bin/wlkey")
+    send_paced("/bin/diag wlkey")
     if not wait_for(lambda: b"wlkey: keymap 64757 ok" in out, 30):
         print("[1] wlkey keymap 64757 ok (Phase 2a): FAIL", flush=True)
         ok = False

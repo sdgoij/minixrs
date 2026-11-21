@@ -24,4 +24,4 @@
 # A `mmap` of an offset belonging to no object is covered by the same field: the token is what
 # names memory here, and a closed object's token stops naming any.
 
-/bin/drmmap	drmmap: h=1 res=1 size=16384 alias=16384 apart=16384 close=err 2
+/bin/diag drmmap	drmmap: h=1 res=1 size=16384 alias=16384 apart=16384 close=err 2

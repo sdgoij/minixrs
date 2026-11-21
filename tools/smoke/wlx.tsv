@@ -12,4 +12,4 @@
 # frame must reach `/dev/fb`. It prints the line below only if all of that happened; a
 # configure that never arrives, an unaccepted ack, or a missing frame each stop it first.
 
-/bin/wlx	wlx: PASS
+/bin/diag wlx	wlx: PASS

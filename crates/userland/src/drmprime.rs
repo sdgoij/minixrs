@@ -1,4 +1,4 @@
-//! `/bin/drmprime` — a render node's object exported to a descriptor and imported back
+//! `diag drmprime` — a render node's object exported to a descriptor and imported back
 //! (`.notes/wayland.md` §6.10, stage 3d-b-2).
 //!
 //! PRIME is the handoff that makes a node's object shareable: `HANDLE_TO_FD` turns a GEM
@@ -11,7 +11,7 @@
 //! import of a descriptor that is not a dma-buf — and a third closes the loop: once the
 //! object is closed its exported descriptor is refused rather than re-aimed at a reused slot.
 //!
-//! Like `/bin/drmmap` it declares the ABI itself — request numbers and argument structs
+//! Like `diag drmmap` it declares the ABI itself — request numbers and argument structs
 //! written out the way a C client writes them — so that its agreement with the server is
 //! evidence rather than a tautology.
 
@@ -56,7 +56,7 @@ const DMABUF_MAJOR: u64 = 25;
 const SIZE: usize = 64 * 64 * 4;
 const FORMAT_B8G8R8X8: u32 = 2;
 const TARGET_TEXTURE_2D: u32 = 2;
-/// `VIRGL_BIND_RENDER_TARGET | VIRGL_BIND_SAMPLER_VIEW`, the bind `/bin/drmmap` uses.
+/// `VIRGL_BIND_RENDER_TARGET | VIRGL_BIND_SAMPLER_VIEW`, the bind `diag drmmap` uses.
 const BIND_TEXTURE: u32 = (1 << 1) | (1 << 3);
 
 /// `struct drm_get_cap`.
@@ -416,7 +416,7 @@ mod tests {
     }
 
     /// The argument structs against the sizes their request numbers carry — the same check
-    /// `drm.rs` makes on its own side and `/bin/drmmap` makes for its three. A struct that
+    /// `drm.rs` makes on its own side and `diag drmmap` makes for its three. A struct that
     /// grew or lost a field would make every request a number the node does not serve.
     #[test]
     fn the_argument_structs_are_the_sizes_their_numbers_carry() {

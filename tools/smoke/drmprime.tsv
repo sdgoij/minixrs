@@ -25,4 +25,4 @@
 #   stale_errno=2    `ENOENT` for importing the descriptor after `GEM_CLOSE`: the token names a
 #                    slot that no longer holds an object, refused rather than re-aimed
 
-/bin/drmprime	drmprime: cap=3 h=1 size=16384 alias=16384 same=1 kind=32768 major=25 export_errno=2 import_errno=22 stale_errno=2
+/bin/diag drmprime	drmprime: cap=3 h=1 size=16384 alias=16384 same=1 kind=32768 major=25 export_errno=2 import_errno=22 stale_errno=2

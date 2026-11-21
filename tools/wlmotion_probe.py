@@ -2,7 +2,7 @@
 """M3 gate: the pointer is interpolated across a tick, not jumped.
 
 Boots x86 with a QMP socket and the bochs display, waits for `/sbin/wlserver`,
-runs `/bin/wlmotion` — which maps one output-sized window, so its first commit
+runs `diag wlmotion` — which maps one output-sized window, so its first commit
 takes the focus and the pointer's events — and then moves the absolute pointer
 with QMP `input-send-event`.
 
@@ -120,7 +120,7 @@ def main():
     q = socket.create_connection(("127.0.0.1", QMP_PORT), timeout=5)
     qmp_cmd(q, {"execute": "qmp_capabilities"})
 
-    send_paced("/bin/wlmotion")
+    send_paced("/bin/diag wlmotion")
 
     def step(n, name, pred, timeout=40):
         nonlocal ok

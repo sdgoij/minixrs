@@ -1,7 +1,7 @@
 //! The client side of the protocol: an object table, request constructors over
 //! the wire `Writer`, and event decoding.
 //!
-//! Pure — it builds and parses bytes; the caller owns the socket. `/bin/wlclient`
+//! Pure — it builds and parses bytes; the caller owns the socket. `diag wlclient`
 //! and the host tests share it, so the protocol the server answers is exercised
 //! by a client that speaks only the published interfaces.
 

@@ -1,4 +1,4 @@
-//! `/bin/drmblob` — the render node's blob objects (`.notes/wayland.md` §6.10, stage 3b-4).
+//! `diag drmblob` — the render node's blob objects (`.notes/wayland.md` §6.10, stage 3b-4).
 //!
 //! A blob is a create whose request names the *kind* of memory it wants rather than a 2D shape,
 //! and it is the one create that carries its own backing: the pages travel inside the command, so
@@ -13,8 +13,8 @@
 //! from the `EINVAL` a request this ABI cannot read gets, and this client prints both so the two
 //! are told apart.
 //!
-//! That the blob's memory really is the object's is `/bin/drmmap`'s claim about a mapping and
-//! `/bin/drmexec`'s about a transfer, not this one's: what is here is the request surface — the
+//! That the blob's memory really is the object's is `diag drmmap`'s claim about a mapping and
+//! `diag drmexec`'s about a transfer, not this one's: what is here is the request surface — the
 //! kind that comes back, the mapping a guest blob has and a host one could not, and each rule the
 //! node enforces before it would have to reach the host.
 
@@ -292,7 +292,7 @@ pub fn drmblob(_args: &[&str]) -> i32 {
     cross.blob_flags = BLOB_FLAG_USE_MAPPABLE | BLOB_FLAG_USE_CROSS_DEVICE;
     let cross = refused(fd, &mut cross);
 
-    // Closing takes the handle away, which is the same claim `/bin/drmmap` makes about an ordinary
+    // Closing takes the handle away, which is the same claim `diag drmmap` makes about an ordinary
     // object — and it is what keeps this client from spending a slot of the node's table.
     let closed = close(fd, handle).map(|()| 0);
     let gone = match info(fd, handle) {

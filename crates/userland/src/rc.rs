@@ -246,7 +246,7 @@ mod tests {
     #[test]
     fn comments_and_blank_lines_are_skipped_by_the_trimmed_line() {
         assert_eq!(trim(b"   "), b"");
-        assert_eq!(trim(b"  /bin/wlpanel  "), b"/bin/wlpanel");
+        assert_eq!(trim(b"  /bin/diag  "), b"/bin/diag");
         assert_eq!(trim(b"# a note")[0], b'#');
     }
 

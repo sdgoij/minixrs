@@ -23,6 +23,11 @@ wayland = { path = "../wayland" }
 # Binary targets — these are #![no_std] / #![no_main] embedded MINIX
 # binaries that cannot run as host-native tests. Tests live in the lib target.
 [[bin]]
+name = "diag"
+path = "src/bin/diag.rs"
+test = false
+
+[[bin]]
 name = "cat"
 path = "src/bin/cat.rs"
 test = false
@@ -35,36 +40,6 @@ test = false
 [[bin]]
 name = "cp"
 path = "src/bin/cp.rs"
-test = false
-
-[[bin]]
-name = "drminfo"
-path = "src/bin/drminfo.rs"
-test = false
-
-[[bin]]
-name = "drmmap"
-path = "src/bin/drmmap.rs"
-test = false
-
-[[bin]]
-name = "drmprime"
-path = "src/bin/drmprime.rs"
-test = false
-
-[[bin]]
-name = "drmctx"
-path = "src/bin/drmctx.rs"
-test = false
-
-[[bin]]
-name = "drmexec"
-path = "src/bin/drmexec.rs"
-test = false
-
-[[bin]]
-name = "drmblob"
-path = "src/bin/drmblob.rs"
 test = false
 
 [[bin]]
@@ -373,67 +348,22 @@ test = false
 # wlclient is the Wayland Phase 1b `wl_shm` client: it draws into a memfd pool,
 # passes the fd to /sbin/wlserver, commits a surface, and reads the frame back
 # from /dev/fb. Driven by `just test-wlshm-x86`.
-[[bin]]
-name = "wlclient"
-path = "src/bin/wlclient.rs"
-test = false
-
 # wlkey is the Wayland Phase 1c input client: it binds wl_seat's keyboard,
 # commits a surface so the server sends `enter`, and prints each key it receives.
 # Driven by `tools/wlkey_probe.py`.
-[[bin]]
-name = "wlkey"
-path = "src/bin/wlkey.rs"
-test = false
-
 # The Phase 2 gate clients are, like wlclient and wlkey, `#![no_main]` binaries
 # whose `main` is the entry point even when compiled for `cargo test`. They need
 # /dev/fb and /sbin/wlserver, so `test = false` keeps the host suite from trying
 # to run them as if they were test harnesses.
-[[bin]]
-name = "wlx"
-path = "src/bin/wlx.rs"
-test = false
-
-[[bin]]
-name = "wlx2"
-path = "src/bin/wlx2.rs"
-test = false
-
 # wloverlap is the scene z-order gate: two connections, two windows, and a
 # recommit by the lower one that must not paint over the upper one.
-[[bin]]
-name = "wloverlap"
-path = "src/bin/wloverlap.rs"
-test = false
-
 # wlmotion is the pointer-interpolation gate: one window, an absolute move from
 # the host, and a stream of motion events that ends where the device landed.
-[[bin]]
-name = "wlmotion"
-path = "src/bin/wlmotion.rs"
-test = false
-
 # wlpointer is the pointer-follows-focus gate: a full-output window under a small
 # one, and keys that must follow the pointer between them.
-[[bin]]
-name = "wlpointer"
-path = "src/bin/wlpointer.rs"
-test = false
-
 # wldemo is the widget gate: one window with a text field, a list and a button,
 # driven by the keyboard, drawn by the software backend.
-[[bin]]
-name = "wldemo"
-path = "src/bin/wldemo.rs"
-test = false
-
 # wlpanel is the session panel: a layer-shell surface with a launcher button.
-[[bin]]
-name = "wlpanel"
-path = "src/bin/wlpanel.rs"
-test = false
-
 # rc is what init execs: it runs /etc/rc's commands and then becomes the shell.
 [[bin]]
 name = "rc"
@@ -447,32 +377,12 @@ name = "session"
 path = "src/bin/session.rs"
 test = false
 
-[[bin]]
-name = "wlxd"
-path = "src/bin/wlxd.rs"
-test = false
-
-[[bin]]
-name = "wlxe"
-path = "src/bin/wlxe.rs"
-test = false
-
 # wldmabuf is the 3d-b-4c linux-dmabuf client: a full-output object on the render node,
 # exported to a dma-buf and committed as a `zwp_linux_dmabuf_v1` buffer for the compositor
 # to scan out. Driven by `just test-wldmabuf-x86`.
-[[bin]]
-name = "wldmabuf"
-path = "src/bin/wldmabuf.rs"
-test = false
-
 # wlscene is the 3d-b-5c two-surface linux-dmabuf client: a full-output background and a smaller
 # overlay committed on one connection, so the compositor's scene holds two surfaces to compose on
 # the GPU. Driven by `just test-wlscene-x86`.
-[[bin]]
-name = "wlscene"
-path = "src/bin/wlscene.rs"
-test = false
-
 # procfsprobe reads `/proc/hz` and `/proc/uptime` through the mount VFS makes. Driven by
 # `just test-procfs-<arch>`.
 [[bin]]

@@ -27,7 +27,7 @@ import threading
 import time
 
 QMP_PORT = 4475
-# The output and the panel's strip at its right edge (see `/bin/wlpanel`).
+# The output and the panel's strip at its right edge (see `diag wlpanel`).
 OUT_W = 1024
 PANEL_W = 200
 

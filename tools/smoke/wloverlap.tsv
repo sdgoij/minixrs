@@ -7,4 +7,4 @@
 # and the frame must stay blue. The client reads the composited frame back from
 # /dev/fb and prints the line below only if it does.
 
-/bin/wloverlap	wloverlap: PASS
+/bin/diag wloverlap	wloverlap: PASS

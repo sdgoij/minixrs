@@ -149,56 +149,17 @@ pub const BOOT_BINS: &[(&str, &str)] = &[
     // `/bin/waylandtest` is the Wayland Phase 1a smoke test: the protocol
     // handshake (registry + sync) over `/dev/uds`.
     ("/bin/waylandtest", "waylandtest"),
-    // `/bin/wlclient` is the Wayland Phase 1b `wl_shm` client: it draws into a
-    // memfd pool, commits a surface to /sbin/wlserver, and reads the frame back
-    // from /dev/fb.
-    ("/bin/wlclient", "wlclient"),
-    // `/bin/wlkey` is the Wayland Phase 1c input client: it binds wl_seat's
-    // keyboard, commits a surface so the server sends `enter`, and prints each key
-    // it receives.
-    ("/bin/wlkey", "wlkey"),
-    // `/bin/wlx` is the Wayland Phase 2b `xdg_shell` client: it maps an
-    // `xdg_toplevel`, acks the configure, and presents a frame of the configured
-    // size through `/sbin/wlserver`.
-    ("/bin/wlx", "wlx"),
-    // `/bin/wlx2` is the Wayland Phase 2c focus client: two connections, each with a
-    // window, so the server has to keep per-surface focus and hand it over.
-    ("/bin/wlx2", "wlx2"),
-    // `/bin/wloverlap` is the scene z-order client: two connections, two windows, and a
-    // recommit by the lower one that must leave the upper one intact.
-    ("/bin/wloverlap", "wloverlap"),
-    // `/bin/wlmotion` is the pointer-interpolation client: one window and a count of the
-    // motion events an absolute move from the host produces.
-    ("/bin/wlmotion", "wlmotion"),
-    // `/bin/wlpointer` is the pointer-follows-focus client: a full-output window under a
-    // 64x64 one, and the keys that move with the pointer between them.
-    ("/bin/wlpointer", "wlpointer"),
-    // `/bin/wldemo` is the widget client: a text field, a list and a button in one
-    // window, driven by the keyboard and drawn by the software backend.
-    ("/bin/wldemo", "wldemo"),
-    // `/bin/wlpanel` is the session panel: a layer surface across the top of the
-    // output with a launcher button.
-    ("/bin/wlpanel", "wlpanel"),
+    // `/bin/diag` is the diagnostic multicall: every Wayland and DRM probe in
+    // `crates/userland`, dispatched on its first argument (`diag wlpanel`,
+    // `diag drmprime`). They are gates' clients, not applications, and as separate
+    // ELFs each carried its own static copy of the same crate code: the thirteen
+    // `wl_*` and six `drm_*` probes together were about 1 MiB of every image.
+    ("/bin/diag", "diag"),
     // `/bin/rc` runs `/etc/rc` and then becomes the shell: what init execs.
     ("/bin/rc", "rc"),
     // `/bin/session` is the session manager: the list that runs once the shell's
     // prompt is out.
     ("/bin/session", "session"),
-    // `/bin/wlxd` is the Wayland Phase 2d damage and cursor client: it damages part
-    // of a frame and checks the rest survives, then gives the pointer an image.
-    ("/bin/wlxd", "wlxd"),
-    // `/bin/wlxe` is the Wayland Phase 2e panel, popup and decoration client: it
-    // maps a layer-shell panel and an xdg_popup over a window, and checks both are
-    // composited where they asked and no wider.
-    ("/bin/wlxe", "wlxe"),
-    // `/bin/wldmabuf` is the 3d-b-4c linux-dmabuf client: a full-output object on the render
-    // node, exported to a dma-buf and committed as a `zwp_linux_dmabuf_v1` buffer, which the
-    // compositor scans out. Driven by `just test-wldmabuf-x86`.
-    ("/bin/wldmabuf", "wldmabuf"),
-    // `/bin/wlscene` is the 3d-b-5c two-surface linux-dmabuf client: a full-output background and
-    // a smaller overlay on one connection, so the compositor's scene holds two surfaces and asks
-    // the GPU-composition helper to draw them into one frame. Driven by `just test-wlscene-x86`.
-    ("/bin/wlscene", "wlscene"),
     // `/bin/wterm` is the terminal window client (M3): a pty with /bin/sh
     // on the slave, its output rendered (VT subset) into a wserver window.
     ("/bin/wterm", "wterm"),
@@ -239,26 +200,6 @@ pub const BOOT_BINS: &[(&str, &str)] = &[
     // the in-house compositor that speaks the wire protocol over `/run/wayland-0`
     // and presents `wl_shm` buffers to `/dev/fb`.
     ("/sbin/wlserver", "wlserver"),
-    // `/bin/drminfo` opens the DRM render node (`/dev/dri/renderD128`) and reports what it
-    // says it is (`.notes/wayland.md` §6.10, stage 3b). It is also a second, independent
-    // statement of the render node's ABI — see the module's own comment.
-    ("/bin/drminfo", "drminfo"),
-    // `/bin/drmmap` makes a render node memory object, maps it, and proves the mapping is
-    // that object's memory (§6.10, stage 3b-3).
-    ("/bin/drmmap", "drmmap"),
-    // `/bin/drmprime` exports a render node object to a dma-buf descriptor, checks the
-    // descriptor with `fstat`, imports it back to the object's handle, and reads the bytes
-    // through it — the node's PRIME handoff (§6.10, stage 3d-b-2).
-    ("/bin/drmprime", "drmprime"),
-    // `/bin/drmctx` makes the render node's rendering context, which is what a command buffer
-    // and a transfer through one hang off (§6.10, stage 3b-4).
-    ("/bin/drmctx", "drmctx"),
-    // `/bin/drmexec` moves an object's contents through a transfer, submits a command that
-    // rewrites one row, and transfers the result back (§6.10, stage 3b-4).
-    ("/bin/drmexec", "drmexec"),
-    // `/bin/drmblob` makes a blob object, reads its kind back, and asks for every kind and flag
-    // this node cannot serve (§6.10, stage 3b-4).
-    ("/bin/drmblob", "drmblob"),
     // `/bin/readlinktest` reads the target of the symlink the image ships, and the refusals a
     // read has to give. A symlink is the shape `/sys` is made of, and reading one is what moves a
     // filesystem server's bytes into a user process.
@@ -390,7 +331,7 @@ pub const SESSION: &[u8] = b"# /etc/session: what the session manager starts.
 #
 # The panel is a strip anchored to the output's top-right, so the origin stays
 # free for the windows drawn there.
-/bin/wlpanel
+/bin/diag wlpanel
 ";
 
 /// Root-filesystem data files baked into the minixfs image: destination

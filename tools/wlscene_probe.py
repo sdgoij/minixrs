@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """The 3d-b-5 gate: two dma-buf surfaces composed on the GPU by a helper process and presented.
 
-`/bin/wlscene` commits **two** render-node objects as `zwp_linux_dmabuf_v1` buffers on one
+`diag wlscene` commits **two** render-node objects as `zwp_linux_dmabuf_v1` buffers on one
 connection — a full-output red background and a 128x128 green overlay at the output's origin.
 `/sbin/wlserver` keeps them in its scene (3d-b-5c); once there is more than one surface it asks
 `/bin/wlcompose serve` — a separate, stateless Mesa process on the same render node — to draw them
@@ -158,7 +158,7 @@ def main():
     if not type_line("/bin/wlcompose serve &"):
         die("could not type /bin/wlcompose serve & — the console dropped bytes")
     time.sleep(1.5)
-    if not type_line("/bin/wlscene"):
+    if not type_line("/bin/diag wlscene"):
         die("could not type /bin/wlscene — the console dropped bytes")
 
     if not wait_for(lambda: b"wlscene: PASS" in out, 150):

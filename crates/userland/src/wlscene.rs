@@ -1,4 +1,4 @@
-//! `/bin/wlscene` — the two-surface `zwp_linux_dmabuf_v1` client (`.notes/wayland.md` §6.10,
+//! `diag wlscene` — the two-surface `zwp_linux_dmabuf_v1` client (`.notes/wayland.md` §6.10,
 //! stage 3d-b-5c/5d).
 //!
 //! One connection commits **two** objects on the render node as `linux-dmabuf` buffers: a
@@ -8,10 +8,10 @@
 //! (`FBIO_SCANOUT_SRC`). The gate reads the display from the host (a QMP screendump) and the
 //! compositor's `wlserver: composed N surfaces` line.
 //!
-//! The two objects are made and filled the way `/bin/wldmabuf` makes its single one — a render
+//! The two objects are made and filled the way `diag wldmabuf` makes its single one — a render
 //! node object, mapped and written, then exported to a dma-buf descriptor
-//! (`PRIME_HANDLE_TO_FD`) and handed over as a `zwp_linux_dmabuf_v1` buffer. Like `/bin/drmprime`
-//! and `/bin/wldmabuf` it declares the DRM ABI itself rather than importing the driver's, so its
+//! (`PRIME_HANDLE_TO_FD`) and handed over as a `zwp_linux_dmabuf_v1` buffer. Like `diag drmprime`
+//! and `diag wldmabuf` it declares the DRM ABI itself rather than importing the driver's, so its
 //! agreement with the node is evidence and not a tautology.
 
 use minix_std::fs::{self, PollFd};
@@ -39,7 +39,7 @@ const OVERLAY: u32 = 128;
 /// `DRM_FORMAT_XRGB8888` the linux-dmabuf buffer is created with.
 const FORMAT_B8G8R8X8: u32 = 2;
 const TARGET_TEXTURE_2D: u32 = 2;
-/// `VIRGL_BIND_RENDER_TARGET | VIRGL_BIND_SAMPLER_VIEW`, what `/bin/wldmabuf` uses.
+/// `VIRGL_BIND_RENDER_TARGET | VIRGL_BIND_SAMPLER_VIEW`, what `diag wldmabuf` uses.
 const BIND_TEXTURE: u32 = (1 << 1) | (1 << 3);
 
 /// The two fills, as the memory holds them: B8G8R8X8 little-endian, bytes B,G,R,X.
@@ -528,7 +528,7 @@ mod tests {
     use core::mem::size_of;
 
     /// The argument structs against the sizes their request numbers carry — the same check
-    /// `/bin/drmprime` and `/bin/wldmabuf` make. A struct that grew or lost a field would make
+    /// `diag drmprime` and `diag wldmabuf` make. A struct that grew or lost a field would make
     /// every request a number the node does not serve.
     const fn arg_size(request: u32) -> u32 {
         (request >> 16) & 0x3fff

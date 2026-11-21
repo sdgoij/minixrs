@@ -48,7 +48,7 @@ const FRAME_LEN: usize = (WIDTH as usize) * (HEIGHT as usize) * 4;
 const MAX_SURFACES: usize = 8;
 
 /// `VIRTIO_GPU_FORMAT_B8G8R8X8` and `VIRTIO_GPU_FORMAT_TEXTURE_2D` — the frame object's format and
-/// target; `VIRGL_BIND_RENDER_TARGET | VIRGL_BIND_SAMPLER_VIEW`, the binds `/bin/drmprime` uses.
+/// target; `VIRGL_BIND_RENDER_TARGET | VIRGL_BIND_SAMPLER_VIEW`, the binds `diag drmprime` uses.
 const FORMAT_B8G8R8X8: u32 = 2;
 const TARGET_TEXTURE_2D: u32 = 2;
 const BIND_TEXTURE: u32 = (1 << 1) | (1 << 3);

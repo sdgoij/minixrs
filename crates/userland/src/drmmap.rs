@@ -1,4 +1,4 @@
-//! `/bin/drmmap` — a render node's memory object, mapped into a client (`.notes/wayland.md` §6.10,
+//! `diag drmmap` — a render node's memory object, mapped into a client (`.notes/wayland.md` §6.10,
 //! stage 3b-3).
 //!
 //! What this is here to prove is *aliasing*, and that is not something one mapping can say:
@@ -7,7 +7,7 @@
 //! not — those two claims together are the evidence, and the object's length, the offset that
 //! names it, and a `GEM_CLOSE` that takes the name away are what surround them.
 //!
-//! Like `/bin/drminfo` it declares the ABI itself — request numbers and argument structs
+//! Like `diag drminfo` it declares the ABI itself — request numbers and argument structs
 //! written out the way a C client writes them — so that its agreement with the server is
 //! evidence rather than a tautology.
 

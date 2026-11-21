@@ -13,4 +13,4 @@
 # holds; a whole-frame recomposite or a missing cursor stops it with a different line,
 # which the gate reports as a stopped scenario.
 
-/bin/wlxd	wlxd: PASS
+/bin/diag wlxd	wlxd: PASS

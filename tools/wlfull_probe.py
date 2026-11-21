@@ -11,7 +11,7 @@ and the serial log must carry the fb server's `fb: scanout src` line proving the
 The QEMU line uses `virtio-gpu-pci` as the display, with no `bochs-display`: the re-point is a
 virtio-gpu capability, so the output device has to *be* the virtio-gpu one (D11).
 
-The session starts `/bin/wlpanel` before anything is typed, and a panel is a second surface:
+The session starts `diag wlpanel` before anything is typed, and a panel is a second surface:
 with two in the scene the server composes the frame into its own buffer instead of handing the
 client's buffer to the scanout, which is the path this gate exists to measure. So the probe
 ends the panel first, by the pid its ready line reports (moving a pointer onto it would need a
@@ -28,7 +28,7 @@ import time
 SCREEN = "target/wlfull.ppm"
 
 # The client runs at the output's own size: whole-output, so the server can scan the pool out.
-CMD = "/bin/wlclient full"
+CMD = "/bin/diag wlclient full"
 
 lock = threading.Lock()
 out = bytearray()

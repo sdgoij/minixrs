@@ -55,10 +55,10 @@
 # never ran leaves `row=0 rest=16352`, and the step printed exactly that before the node was
 # made to put the object in the context's table ahead of the transfer that first names it.
 
-/bin/drminfo	drminfo: virtio_gpu 3d=1 err 0 blob=1 err 0 ctx=1 err 0 host=0 err 0 mask=3 err 0 caps=ok
-/bin/drmctx	drmctx: init=ok again=err 17
-/bin/drmctx	drmctx: init=ok again=err 17
-/bin/drmexec	drmexec: h=1 up=ok exec=ok wait=ok down=ok row=32 rest=16352 close=ok
+/bin/diag drminfo	drminfo: virtio_gpu 3d=1 err 0 blob=1 err 0 ctx=1 err 0 host=0 err 0 mask=3 err 0 caps=ok
+/bin/diag drmctx	drmctx: init=ok again=err 17
+/bin/diag drmctx	drmctx: init=ok again=err 17
+/bin/diag drmexec	drmexec: h=1 up=ok exec=ok wait=ok down=ok row=32 rest=16352 close=ok
 #
 # The fifth step is the blob request surface: `/bin/drmblob` makes a blob whose memory is the
 # guest's, reads its kind back out of `RESOURCE_INFO` - a field that read 0 for every object
@@ -72,4 +72,4 @@
 # apart. On this device `GETPARAM` reports `blob 1`, and the no-GL gate's step is the other
 # half - the same client, refused at its first request because that device has the feature
 # off.
-/bin/drmblob	drmblob: create=ok mem=1 size=16384 map=ok host3d=err 38 hostguest=err 38 mem0=err 22 blobid=err 22 cmdsize=err 22 flags=err 22 cross=err 22 close=ok gone=err 2
+/bin/diag drmblob	drmblob: create=ok mem=1 size=16384 map=ok host3d=err 38 hostguest=err 38 mem0=err 22 blobid=err 22 cmdsize=err 22 flags=err 22 cross=err 22 close=ok gone=err 2

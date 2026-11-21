@@ -1,4 +1,4 @@
-//! `/bin/wldmabuf` — a render-node object handed to the compositor as a `linux-dmabuf`
+//! `diag wldmabuf` — a render-node object handed to the compositor as a `linux-dmabuf`
 //! `wl_buffer` and scanned out (`.notes/wayland.md` §6.10, stage 3d-b-4c).
 //!
 //! It makes a full-output (1024×768 B8G8R8X8) object on the render node, fills it with a known
@@ -13,7 +13,7 @@
 //! virtio-gpu, and the render node has to be that same device (D11), which is why the gate
 //! runs `-device virtio-gpu-pci` with no `bochs-display`.
 //!
-//! Like `/bin/drmprime` it declares the DRM ABI itself rather than importing the driver's, so
+//! Like `diag drmprime` it declares the DRM ABI itself rather than importing the driver's, so
 //! its agreement with the node is evidence and not a tautology.
 
 use minix_std::fs::{self, PollFd};
@@ -38,7 +38,7 @@ const SIZE: usize = (WIDTH as usize) * (HEIGHT as usize) * 4;
 /// `DRM_FORMAT_XRGB8888` the linux-dmabuf buffer is created with.
 const FORMAT_B8G8R8X8: u32 = 2;
 const TARGET_TEXTURE_2D: u32 = 2;
-/// `VIRGL_BIND_RENDER_TARGET | VIRGL_BIND_SAMPLER_VIEW`, what `/bin/drmprime` uses.
+/// `VIRGL_BIND_RENDER_TARGET | VIRGL_BIND_SAMPLER_VIEW`, what `diag drmprime` uses.
 const BIND_TEXTURE: u32 = (1 << 1) | (1 << 3);
 
 /// Green, as the memory holds it: B8G8R8X8 little-endian, bytes B,G,R,X = 00,FF,00,00.
@@ -417,7 +417,7 @@ mod tests {
     use core::mem::size_of;
 
     /// The argument structs against the sizes their request numbers carry — the same check
-    /// `/bin/drmprime` makes. A struct that grew or lost a field would make every request a
+    /// `diag drmprime` makes. A struct that grew or lost a field would make every request a
     /// number the node does not serve.
     const fn arg_size(request: u32) -> u32 {
         (request >> 16) & 0x3fff

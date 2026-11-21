@@ -2,7 +2,7 @@
 """M3 gate: the focus follows the window under the pointer.
 
 Boots x86 with a QMP socket and the bochs display, waits for `/sbin/wlserver`,
-runs `/bin/wlpointer` — two connections, a full-output window below and a 64x64
+runs `diag wlpointer` — two connections, a full-output window below and a 64x64
 window above it, both at the origin — and moves the absolute pointer.
 
 Near the top-left the pointer is over both, so the small window on top must take
@@ -159,7 +159,7 @@ def main():
     q = socket.create_connection(("127.0.0.1", QMP_PORT), timeout=5)
     qmp_cmd(q, {"execute": "qmp_capabilities"})
 
-    send_paced("/bin/wlpointer")
+    send_paced("/bin/diag wlpointer")
 
     def step(n, name, pred, timeout=40):
         nonlocal ok

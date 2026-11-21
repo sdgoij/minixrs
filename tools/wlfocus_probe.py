@@ -2,7 +2,7 @@
 """Phase 2c gate: two Wayland clients, one focus, and the keys that follow it.
 
 Boots x86 with a QMP socket and the bochs display, waits for `/sbin/wlserver`, then
-runs `/bin/wlx2` — which opens *two* connections, maps a window on each, and prints
+runs `diag wlx2` — which opens *two* connections, maps a window on each, and prints
 where the focus went — and injects keys with QMP `input-send-event`.
 
 The second window appears last, so it must take the focus: the first connection is told
@@ -114,7 +114,7 @@ def main():
     q = socket.create_connection(("127.0.0.1", QMP_PORT), timeout=5)
     qmp_cmd(q, {"execute": "qmp_capabilities"})
 
-    send_paced("/bin/wlx2")
+    send_paced("/bin/diag wlx2")
 
     def step(n, name, pred, timeout=40):
         nonlocal ok

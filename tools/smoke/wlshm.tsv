@@ -12,4 +12,4 @@
 # line below only if the frame reached `/dev/fb`; a missing reply hangs the read loop, which
 # the gate reports as a stopped scenario.
 
-/bin/wlclient	wlclient: PASS
+/bin/diag wlclient	wlclient: PASS

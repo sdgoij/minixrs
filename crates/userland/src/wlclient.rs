@@ -1,4 +1,4 @@
-//! `wl_shm` client — `/bin/wlclient`.
+//! `wl_shm` client — `diag wlclient`.
 //!
 //! The Phase 1b gate's client: connects to `/bin/wlserver` over `/run/wayland-0`,
 //! binds `wl_compositor` and `wl_shm`, draws into a `memfd` pool, passes the pool
@@ -48,7 +48,7 @@ fn fail(code: i32, msg: &[u8]) -> i32 {
     code
 }
 
-/// `fail`, with the client's name in front of the message: both `/bin/wlclient`
+/// `fail`, with the client's name in front of the message: both `diag wlclient`
 /// and `/bin/wlgl` drive the same present flow, and a gate failure has to say
 /// which of them broke.
 fn failt(tag: &[u8], code: i32, msg: &[u8]) -> i32 {
@@ -276,7 +276,7 @@ fn await_release(
 }
 
 /// The `wl_shm` present flow, with the pool's contents and the read-back check
-/// supplied by the caller: `/bin/wlclient` paints a magenta square, `/bin/wlgl`
+/// supplied by the caller: `diag wlclient` paints a magenta square, `/bin/wlgl`
 /// renders with GL, and both commit through the server and check `/dev/fb`.
 fn present(
     tag: &[u8],
@@ -389,7 +389,7 @@ fn run() -> Result<(), i32> {
     present(b"wlclient: ", WIDTH, HEIGHT, paint_square, check_square)
 }
 
-/// The whole-output client (`/bin/wlclient full`): a pool the size of the output, so the server
+/// The whole-output client (`diag wlclient full`): a pool the size of the output, so the server
 /// can scan it out instead of blitting it (§6.10, 3d-b). There is nothing to read back — the frame
 /// *is* the pool now — so the display is checked from the host, not here.
 fn run_full() -> Result<(), i32> {
@@ -725,7 +725,7 @@ fn check_keymap(fd: i32, size: u32) -> Result<(), i32> {
     Ok(())
 }
 
-/// `/bin/wlkey`: bind `wl_seat`'s keyboard, commit a surface so it is entered, and
+/// `diag wlkey`: bind `wl_seat`'s keyboard, commit a surface so it is entered, and
 /// print each key the server sends. The Phase 1c gate's client.
 ///
 /// It exits on the first key pressed, so the shell that ran it gets its prompt back
@@ -1113,7 +1113,7 @@ fn peer_present(p: &mut Peer, w: i32, h: i32) -> Result<(), i32> {
     Ok(())
 }
 
-/// `/bin/wlx2`: the Phase 2c gate's client — two connections, one focus.
+/// `diag wlx2`: the Phase 2c gate's client — two connections, one focus.
 ///
 /// It maps a window on each; the second's appearance must take the focus, saying
 /// `leave` to the first and `enter` to the second, and each connection must then be
@@ -1185,7 +1185,7 @@ fn run_focus() -> Result<(), i32> {
     Ok(())
 }
 
-/// `/bin/wloverlap`: two connections, two windows, one z-order.
+/// `diag wloverlap`: two connections, two windows, one z-order.
 ///
 /// The server configures every toplevel to the output size and places every
 /// surface at the origin, so the scene order *is* the overlap. The second
@@ -1277,7 +1277,7 @@ fn check_overlap(wanted: u32, message: &[u8]) -> Result<(), i32> {
     Ok(())
 }
 
-/// `/bin/wlmotion`: the pointer-interpolation gate.
+/// `diag wlmotion`: the pointer-interpolation gate.
 ///
 /// One output-sized window, so the first commit gives the connection the focus
 /// and the pointer's events. The host then moves the absolute pointer across the
@@ -1431,7 +1431,7 @@ fn run_motion() -> Result<(), i32> {
     Ok(())
 }
 
-/// `/bin/wlpointer`: the pointer-follows-focus gate.
+/// `diag wlpointer`: the pointer-follows-focus gate.
 ///
 /// Two connections: a full-output window below and a 64x64 window above it, both
 /// at the origin. The pointer is inside the small one near the top-left and over
@@ -1570,7 +1570,7 @@ fn await_configure(
     Ok((serial.unwrap_or(0), w, h))
 }
 
-/// `/bin/wlx`: the Phase 2b `xdg_shell` client.
+/// `diag wlx`: the Phase 2b `xdg_shell` client.
 ///
 /// It binds `xdg_wm_base`, maps an `xdg_toplevel`, waits for the `configure` the
 /// initial commit earns, acks it, draws a full frame at the configured size, and
@@ -1769,7 +1769,7 @@ fn fill_pool(pool: *mut u8, pixels: i32, color: u32) {
     }
 }
 
-/// `/bin/wlxd`: the Phase 2d gate's client — damage and the pointer's cursor.
+/// `diag wlxd`: the Phase 2d gate's client — damage and the pointer's cursor.
 ///
 /// It draws a full red frame, then a blue buffer damaged only in a small rectangle:
 /// red must remain everywhere else, which is what proves the compositor recomposited
@@ -1928,7 +1928,7 @@ fn run_damage() -> Result<(), i32> {
     Ok(())
 }
 
-/// `/bin/wlxe`: the Phase 2e gate's client — panels, popups and decorations.
+/// `diag wlxe`: the Phase 2e gate's client — panels, popups and decorations.
 ///
 /// It maps an opaque window, then a `zwlr_layer_shell_v1` panel 200x32 and an
 /// `xdg_popup` 8x8 over it, and requires each to be composited where the layer
@@ -2544,14 +2544,14 @@ fn run_dmabuf_gl() -> Result<(), i32> {
     Ok(())
 }
 
-/// `/bin/wldemo` above is the real client; a host build only has to compile the
+/// `diag wldemo` above is the real client; a host build only has to compile the
 /// binary, and the demo needs the minix device and socket layer.
 #[cfg(not(target_os = "minix"))]
 pub fn wl_demo(_args: &[&str]) -> i32 {
     1
 }
 
-/// `/bin/wldemo`: the widget demo (`gui.md` milestone M4).
+/// `diag wldemo`: the widget demo (`gui.md` milestone M4).
 ///
 /// One window with a text field, a list and a button, drawn by the software
 /// backend and committed through the compositor. Every key that changes the form
@@ -2887,14 +2887,14 @@ fn run_demo() -> Result<(), i32> {
     }
 }
 
-/// `/bin/wlpanel` above is the real client; a host build only has to compile the
+/// `diag wlpanel` above is the real client; a host build only has to compile the
 /// binary.
 #[cfg(not(target_os = "minix"))]
 pub fn wl_panel(_args: &[&str]) -> i32 {
     1
 }
 
-/// `/bin/wlpanel`: the session panel (`gui.md` milestone M5).
+/// `diag wlpanel`: the session panel (`gui.md` milestone M5).
 ///
 /// A `zwlr_layer_shell_v1` surface anchored to the top-left of the output, one
 /// row tall, drawn with the widget layer. Its button is the launcher: a click
@@ -2934,10 +2934,15 @@ fn launch_app() -> Result<(), i32> {
     let pid = unsafe { process::fork() }.map_err(|_| fail(164, b"wlpanel: fork failed\n"))?;
     if pid == 0 {
         // The fork's stage1 compiler has no C-string literals, so argv[0] is
-        // built from a NUL-terminated byte string.
+        // built from a NUL-terminated byte string. The launcher runs the demo
+        // through the diagnostic multicall.
         #[allow(clippy::manual_c_str_literals)]
-        let argv = [b"/bin/wldemo\0".as_ptr(), core::ptr::null()];
-        let _ = process::exec(b"/bin/wldemo", &argv, &[]);
+        let argv = [
+            b"/bin/diag\0".as_ptr(),
+            b"wldemo\0".as_ptr(),
+            core::ptr::null(),
+        ];
+        let _ = process::exec(b"/bin/diag", &argv, &[]);
         process::exit(127);
     }
     Ok(())

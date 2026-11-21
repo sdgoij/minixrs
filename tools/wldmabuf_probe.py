@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """The 3d-b-4c gate: a linux-dmabuf client's render-node object scanned out with no copy.
 
-`/bin/wldmabuf` makes a full-output (1024x768 B8G8R8X8) object on the render node, fills it
+`diag wldmabuf` makes a full-output (1024x768 B8G8R8X8) object on the render node, fills it
 green, exports it to a dma-buf, and commits it as a `zwp_linux_dmabuf_v1` buffer. `/sbin/wlserver`
 imports the object on the same device and hands its frames to the fb server
 (`FBIO_SCANOUT_SRC`), so the scanout *is* the client's object and the compositor copies
@@ -126,7 +126,7 @@ def main():
         qemu.kill()
         sys.exit(1)
 
-    send_paced("/bin/wldmabuf")
+    send_paced("/bin/diag wldmabuf")
     if not wait_for(lambda: b"wldmabuf: PASS" in out, 60):
         with lock:
             print("wldmabuf did not reach PASS; tail:\n%s"

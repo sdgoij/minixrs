@@ -24,23 +24,27 @@ pub mod fbfont;
 /// The session's first steps before the shell, from `/etc/rc` — `/bin/rc`.
 pub mod rc;
 
-/// The `wl_shm` client gate — `/bin/wlclient` (`.notes/wayland.md` Phase 1b).
+/// The `wl_shm` client gate — `diag wlclient` (`.notes/wayland.md` Phase 1b).
 pub mod wlclient;
 
-/// The DRM render node's client — `/bin/drminfo` (`.notes/wayland.md` §6.10, stage 3b).
+/// The diagnostic multicall — `/bin/diag`: every Wayland and DRM probe behind one
+/// binary, dispatched on its first argument.
+pub mod diag;
+
+/// The DRM render node's client — `diag drminfo` (`.notes/wayland.md` §6.10, stage 3b).
 pub mod drminfo;
 
-/// The DRM render node's memory objects, mapped by a client — `/bin/drmmap` (§6.10, 3b-3).
+/// The DRM render node's memory objects, mapped by a client — `diag drmmap` (§6.10, 3b-3).
 pub mod drmmap;
 
-/// The DRM render node's PRIME handoff — `/bin/drmprime` (§6.10, 3d-b-2).
+/// The DRM render node's PRIME handoff — `diag drmprime` (§6.10, 3d-b-2).
 pub mod drmprime;
 
-/// The linux-dmabuf client — `/bin/wldmabuf` (§6.10, 3d-b-4c): a full-output object on the
+/// The linux-dmabuf client — `diag wldmabuf` (§6.10, 3d-b-4c): a full-output object on the
 /// render node, exported to a dma-buf and committed as a `zwp_linux_dmabuf_v1` buffer.
 pub mod wldmabuf;
 
-/// The two-surface linux-dmabuf client — `/bin/wlscene` (§6.10, 3d-b-5c): a background and an
+/// The two-surface linux-dmabuf client — `diag wlscene` (§6.10, 3d-b-5c): a background and an
 /// overlay committed on one connection, so the compositor's scene has two surfaces to compose.
 pub mod wlscene;
 
@@ -48,13 +52,13 @@ pub mod wlscene;
 /// several dma-buf surfaces on the render node and reads the frame back once.
 pub mod wlcompose;
 
-/// The DRM render node's rendering context — `/bin/drmctx` (§6.10, 3b-4).
+/// The DRM render node's rendering context — `diag drmctx` (§6.10, 3b-4).
 pub mod drmctx;
 
-/// The DRM render node's transfers, submit and wait — `/bin/drmexec` (§6.10, 3b-4).
+/// The DRM render node's transfers, submit and wait — `diag drmexec` (§6.10, 3b-4).
 pub mod drmexec;
 
-/// The DRM render node's blob objects — `/bin/drmblob` (§6.10, 3b-4).
+/// The DRM render node's blob objects — `diag drmblob` (§6.10, 3b-4).
 pub mod drmblob;
 
 /// The `readlink(2)` smoke test — `/bin/readlinktest` (a symlink is what `/sys` is made of).

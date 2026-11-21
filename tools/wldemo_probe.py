@@ -2,7 +2,7 @@
 """M4 gate: a window of widgets, driven by the keyboard.
 
 Boots x86 with a QMP socket and the bochs display, waits for `/sbin/wlserver`,
-runs `/bin/wldemo` — a text field above a list above a button, drawn by the
+runs `diag wldemo` — a text field above a list above a button, drawn by the
 software backend — and types into it.
 
 The client prints its state after every change, so the probe asserts the
@@ -115,7 +115,7 @@ def main():
     q = socket.create_connection(("127.0.0.1", QMP_PORT), timeout=5)
     qmp_cmd(q, {"execute": "qmp_capabilities"})
 
-    send_paced("/bin/wldemo")
+    send_paced("/bin/diag wldemo")
 
     def step(n, name, pred, timeout=40):
         nonlocal ok
