@@ -387,3 +387,9 @@ wc -l /etc/group	[0-9]+[[:space:]]+/etc/group
 # Without the cache, `numf` stays `numf1000`, which is not a command, and no `1000` appears.
 coreutils printf 'numf\t1000 > /dev/console\n\004' > tabin && coreutils echo TABIN-OK	TABIN-OK
 coreutils cat tabin | sh > tablog	1000
+# Menu completion and cycling: two Tabs. The first lists the matches for `prin` and selects
+# `printenv`; the second cycles to `printf`, which writes the marker. The list and the inner
+# prompt go to tablog2, so the console sees only the marker. Both applets are sorted, and the
+# cycle starts at the first, so the direction is part of what this pins.
+coreutils printf 'prin\t\t CYCLE-OK > /dev/console && echo > /dev/console\n\004' > tabcyc && coreutils echo CYCFILE-OK	CYCFILE-OK
+coreutils cat tabcyc | sh > tablog2	CYCLE-OK

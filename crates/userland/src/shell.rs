@@ -49,16 +49,6 @@ fn is_builtin_cmd(cmd: &str) -> bool {
     BUILTINS.contains(&cmd)
 }
 
-/// True if `name` is a command the prompt runs itself. Completion uses it to skip the `/bin`
-/// copy of a builtin, which would otherwise be offered twice.
-#[cfg(target_os = "minix")]
-fn is_shell_command(name: &[u8]) -> bool {
-    BUILTINS
-        .iter()
-        .chain(INTERNAL_COMMANDS.iter())
-        .any(|cmd| cmd.as_bytes() == name)
-}
-
 // ---------------------------------------------------------------------------
 // Public entry point — replaces the old inline `sh` in lib.rs
 // ---------------------------------------------------------------------------
@@ -407,53 +397,163 @@ fn at_command_position(line: &[u8], start: usize) -> bool {
     matches!(line[i - 1], b'|' | b'&' | b';')
 }
 
-/// The length of the longest common prefix of `a` and `b`.
+/// How many names a completion menu holds. The command set is under 200; the rest is room for
+/// a directory with more entries than the prompt will usefully show.
 #[cfg(any(target_os = "minix", test))]
-fn common_prefix_len(a: &[u8], b: &[u8]) -> usize {
-    a.iter().zip(b).take_while(|(a, b)| a == b).count()
+const MENU_MAX: usize = 256;
+/// Bytes the menu's names are packed into (a MinixFS name is at most 60 bytes).
+#[cfg(any(target_os = "minix", test))]
+const MENU_BYTES: usize = 8 * 1024;
+/// Room for the rendered list: every name, a space between them, one newline per row, and the
+/// overflow marker.
+#[cfg(target_os = "minix")]
+const MENU_RENDER_MAX: usize = MENU_BYTES + 2 * MENU_MAX + 16;
+
+#[cfg(any(target_os = "minix", test))]
+fn menu_name(arena: &[u8], span: (usize, usize)) -> &[u8] {
+    &arena[span.0..span.0 + span.1]
 }
 
-/// What a completion scan found: the match count, the longest common prefix of every match, and
-/// the first match, which is the whole answer when exactly one was found.
+/// The candidates the prompt is cycling through, and the span of the line the current one
+/// occupies.
 #[cfg(any(target_os = "minix", test))]
-struct Matches {
+struct Menu {
+    #[cfg(target_os = "minix")]
+    active: bool,
+    #[cfg(target_os = "minix")]
+    start: usize,
+    #[cfg(target_os = "minix")]
+    end: usize,
+    #[cfg(target_os = "minix")]
+    current: usize,
     count: usize,
-    prefix: [u8; EDIT_MAX],
-    prefix_len: usize,
-    first: [u8; EDIT_MAX],
-    first_len: usize,
+    used: usize,
+    overflow: bool,
+    arena: [u8; MENU_BYTES],
+    spans: [(usize, usize); MENU_MAX],
 }
 
 #[cfg(any(target_os = "minix", test))]
-impl Matches {
+impl Menu {
     fn new() -> Self {
         Self {
+            #[cfg(target_os = "minix")]
+            active: false,
+            #[cfg(target_os = "minix")]
+            start: 0,
+            #[cfg(target_os = "minix")]
+            end: 0,
+            #[cfg(target_os = "minix")]
+            current: 0,
             count: 0,
-            prefix: [0; EDIT_MAX],
-            prefix_len: 0,
-            first: [0; EDIT_MAX],
-            first_len: 0,
+            used: 0,
+            overflow: false,
+            arena: [0; MENU_BYTES],
+            spans: [(0, 0); MENU_MAX],
         }
     }
 
+    /// Start a new set of candidates. `offer` fills it, then `sort` orders it.
+    #[cfg(target_os = "minix")]
+    fn clear(&mut self) {
+        self.active = false;
+        self.count = 0;
+        self.used = 0;
+        self.overflow = false;
+    }
+
+    /// Add `name` unless an equal one is already there. The first spelling wins, so the scan's
+    /// source order does not matter for a duplicate.
     fn offer(&mut self, name: &[u8]) {
-        let n = name.len().min(EDIT_MAX);
-        if self.count == 0 {
-            self.prefix[..n].copy_from_slice(&name[..n]);
-            self.prefix_len = n;
-            self.first[..n].copy_from_slice(&name[..n]);
-            self.first_len = n;
-        } else {
-            self.prefix_len = common_prefix_len(&self.prefix[..self.prefix_len], &name[..n]);
+        if name.is_empty() {
+            return;
         }
+        if self.count == MENU_MAX || self.used + name.len() > MENU_BYTES {
+            self.overflow = true;
+            return;
+        }
+        let duplicate = self.spans[..self.count]
+            .iter()
+            .any(|&span| menu_name(&self.arena, span) == name);
+        if duplicate {
+            return;
+        }
+        let off = self.used;
+        self.arena[off..off + name.len()].copy_from_slice(name);
+        self.spans[self.count] = (off, name.len());
+        self.used += name.len();
         self.count += 1;
+    }
+
+    /// Sort bytewise: the list and the cycle both use this order.
+    fn sort(&mut self) {
+        let arena = &self.arena;
+        self.spans[..self.count]
+            .sort_unstable_by(|a, b| menu_name(arena, *a).cmp(menu_name(arena, *b)));
+    }
+
+    fn name(&self, index: usize) -> &[u8] {
+        menu_name(&self.arena, self.spans[index])
+    }
+
+    /// Lay the names out for the screen: space-separated, wrapped at `SCR_COLS`, with `...`
+    /// when the menu overflowed. Returns the number of bytes written into `out`.
+    fn render(&self, out: &mut [u8]) -> usize {
+        let mut n = 0usize;
+        let mut col = 0usize;
+        for i in 0..self.count {
+            let name = self.name(i);
+            if col > 0 && col + name.len() + 1 > SCR_COLS {
+                n = menu_put(out, n, b"\n");
+                col = 0;
+            }
+            n = menu_put(out, n, name);
+            col += name.len();
+            if i + 1 < self.count {
+                n = menu_put(out, n, b" ");
+                col += 1;
+            }
+        }
+        if self.overflow {
+            if col > 0 {
+                if col + 4 > SCR_COLS {
+                    n = menu_put(out, n, b"\n");
+                    col = 0;
+                } else {
+                    n = menu_put(out, n, b" ");
+                    col += 1;
+                }
+            }
+            n = menu_put(out, n, b"...");
+            col += 3;
+        }
+        if col > 0 {
+            n = menu_put(out, n, b"\n");
+        }
+        n
+    }
+
+    /// Clear the prompt's row and print the list on it. The caller redraws the prompt and line
+    /// below the list afterwards.
+    #[cfg(target_os = "minix")]
+    fn print(&self) {
+        let spaces = [b' '; SCR_COLS - 1];
+        tty_write(b"\r");
+        tty_write(&spaces);
+        tty_write(b"\r");
+        let mut out = [0u8; MENU_RENDER_MAX];
+        let n = self.render(&mut out);
+        tty_write(&out[..n]);
     }
 }
 
-/// True when `name` is one of the newline-separated applet names in `applets`.
+/// Append `bytes` at `n`, stopping at the buffer's end.
 #[cfg(any(target_os = "minix", test))]
-fn applet_cached(applets: &[u8], name: &[u8]) -> bool {
-    !name.is_empty() && applets.split(|&b| b == b'\n').any(|applet| applet == name)
+fn menu_put(out: &mut [u8], n: usize, bytes: &[u8]) -> usize {
+    let room = out.len() - n;
+    let copy = bytes.len().min(room);
+    out[n..n + copy].copy_from_slice(&bytes[..copy]);
+    n + copy
 }
 
 /// The byte that follows a unique path completion: `/` when it names a directory, a space when
@@ -589,6 +689,8 @@ struct Editor {
     draft: [u8; EDIT_MAX],
     draft_len: usize,
     #[cfg(target_os = "minix")]
+    menu: Menu,
+    #[cfg(target_os = "minix")]
     applets: AppletCache,
 }
 
@@ -606,6 +708,8 @@ impl Editor {
             draft: [0; EDIT_MAX],
             draft_len: 0,
             #[cfg(target_os = "minix")]
+            menu: Menu::new(),
+            #[cfg(target_os = "minix")]
             applets: AppletCache::new(),
         }
     }
@@ -617,33 +721,52 @@ impl Editor {
         self.cur = n;
     }
 
-    /// Insert what `matches` adds after the `base_len` bytes already typed, then the suffix when
-    /// one candidate matched and the word ends the line. Returns false when nothing was added,
-    /// which is the caller's cue to beep.
+    /// Replace `line[start..end]` with `text`, leaving the cursor after it. Returns false when
+    /// the result does not fit.
     #[cfg(any(target_os = "minix", test))]
-    fn apply_completion(
+    fn set_span(&mut self, start: usize, end: usize, text: &[u8]) -> bool {
+        if start > end || end > self.len {
+            return false;
+        }
+        let old = end - start;
+        let new_len = self.len - old + text.len();
+        if new_len > EDIT_MAX {
+            return false;
+        }
+        if text.len() > old {
+            let grow = text.len() - old;
+            for i in (end..self.len).rev() {
+                self.line[i + grow] = self.line[i];
+            }
+        } else {
+            let shrink = old - text.len();
+            for i in end..self.len {
+                self.line[i - shrink] = self.line[i];
+            }
+        }
+        self.line[start..start + text.len()].copy_from_slice(text);
+        self.len = new_len;
+        self.cur = start + text.len();
+        true
+    }
+
+    /// Insert the rest of the single candidate after the `base_len` bytes already typed, then
+    /// the suffix when the word ends the line. Returns false when nothing was added.
+    #[cfg(any(target_os = "minix", test))]
+    fn apply_unique(
         &mut self,
         word_end: usize,
         base_len: usize,
-        matches: &Matches,
+        name: &[u8],
         suffix: Option<u8>,
     ) -> bool {
-        let candidate = match matches.count {
-            0 => return false,
-            1 => &matches.first[..matches.first_len],
-            _ => &matches.prefix[..matches.prefix_len],
-        };
-        if base_len > candidate.len() {
+        if base_len > name.len() {
             return false;
         }
-        let extra = &candidate[base_len..];
+        let extra = &name[base_len..];
         // A space or slash joins the completed word to what follows, so it only goes on when
         // the word is the last thing on the line.
-        let suffix = if matches.count == 1 && self.len == word_end {
-            suffix
-        } else {
-            None
-        };
+        let suffix = if self.len == word_end { suffix } else { None };
         let add = extra.len() + if suffix.is_some() { 1 } else { 0 };
         if add == 0 || self.len + add > EDIT_MAX {
             return false;
@@ -660,11 +783,42 @@ impl Editor {
         true
     }
 
+    /// Advance the active menu to the next candidate, wrapping, and replace the current one.
+    #[cfg(target_os = "minix")]
+    fn cycle_menu(&mut self) {
+        if self.menu.count == 0 {
+            self.menu.active = false;
+            return;
+        }
+        let next = (self.menu.current + 1) % self.menu.count;
+        let n = self.menu.name(next).len();
+        let mut name = [0u8; EDIT_MAX];
+        if n > name.len() {
+            self.menu.active = false;
+            tty_write(b"\x07");
+            return;
+        }
+        name[..n].copy_from_slice(self.menu.name(next));
+        if !self.set_span(self.menu.start, self.menu.end, &name[..n]) {
+            self.menu.active = false;
+            tty_write(b"\x07");
+            return;
+        }
+        self.menu.current = next;
+        self.menu.end = self.menu.start + n;
+        self.redraw_line();
+    }
+
     /// Complete the word at the cursor: command names at a command position, directory entries
     /// anywhere else. One match is completed and followed by a space (or `/` for a directory);
-    /// several complete to their longest common prefix. A beep means there was nothing to add.
+    /// several are listed and the first replaces the word, and each further Tab cycles to the
+    /// next. A beep means there was nothing to offer.
     #[cfg(target_os = "minix")]
     fn complete(&mut self) {
+        if self.menu.active {
+            self.cycle_menu();
+            return;
+        }
         let command = {
             let line = &self.line[..self.len];
             let (start, end) = word_at(line, self.cur);
@@ -673,52 +827,48 @@ impl Editor {
         if command {
             self.applets.ensure();
         }
-        let (word_end, base_len, matches, suffix) = {
+        self.menu.clear();
+        let (span_start, word_end, base_len, suffix) = {
             let line = &self.line[..self.len];
             let (start, end) = word_at(line, self.cur);
             let word = &line[start..end];
+            let menu = &mut self.menu;
             if command {
-                let mut matches = Matches::new();
                 for cmd in BUILTINS.iter().chain(INTERNAL_COMMANDS.iter()) {
                     let name = cmd.as_bytes();
                     if name.starts_with(word) {
-                        matches.offer(name);
+                        menu.offer(name);
                     }
                 }
                 let applets = &self.applets.names[..self.applets.len];
                 for applet in applets.split(|&b| b == b'\n') {
-                    if !applet.is_empty() && !is_shell_command(applet) && applet.starts_with(word) {
-                        matches.offer(applet);
+                    if !applet.is_empty() && applet.starts_with(word) {
+                        menu.offer(applet);
                     }
                 }
                 for dir in [&b"/bin"[..], &b"/sbin"[..]] {
                     if let Ok(fd) = unsafe { minix_std::fs::open(dir, 0, 0) } {
                         for_each_dir_entry(fd, |name| {
-                            if name != b"."
-                                && name != b".."
-                                && !is_shell_command(name)
-                                && !applet_cached(applets, name)
-                                && name.starts_with(word)
-                            {
-                                matches.offer(name);
+                            if name != b"." && name != b".." && name.starts_with(word) {
+                                menu.offer(name);
                             }
                         });
                         let _ = minix_std::fs::close(fd);
                     }
                 }
-                (end, word.len(), matches, Some(b' '))
+                menu.sort();
+                (start, end, word.len(), Some(b' '))
             } else {
                 let slash = word.iter().rposition(|&b| b == b'/');
                 let (dir, base) = match slash {
                     Some(i) => (&word[..=i], &word[i + 1..]),
                     None => (&b"."[..], word),
                 };
-                let mut matches = Matches::new();
                 if let Ok(fd) = unsafe { minix_std::fs::open(dir, 0, 0) } {
                     for_each_dir_entry(fd, |name| {
                         if name == b"." || name == b".." {
                             if base.starts_with(b".") && name.starts_with(base) {
-                                matches.offer(name);
+                                menu.offer(name);
                             }
                             return;
                         }
@@ -726,21 +876,51 @@ impl Editor {
                             return;
                         }
                         if name.starts_with(base) {
-                            matches.offer(name);
+                            menu.offer(name);
                         }
                     });
                     let _ = minix_std::fs::close(fd);
                 }
-                let suffix = if matches.count == 1 {
-                    Some(directory_suffix(dir, &matches.first[..matches.first_len]))
+                menu.sort();
+                let suffix = if menu.count == 1 {
+                    Some(directory_suffix(dir, menu.name(0)))
                 } else {
                     None
                 };
-                (end, base.len(), matches, suffix)
+                let dir_len = slash.map(|i| i + 1).unwrap_or(0);
+                (start + dir_len, end, base.len(), suffix)
             }
         };
-        if matches.count == 0 || !self.apply_completion(word_end, base_len, &matches, suffix) {
-            tty_write(b"\x07");
+        match self.menu.count {
+            0 => {
+                self.menu.active = false;
+                tty_write(b"\x07");
+            }
+            1 => {
+                let n = self.menu.name(0).len();
+                let mut name = [0u8; EDIT_MAX];
+                name[..n].copy_from_slice(self.menu.name(0));
+                if !self.apply_unique(word_end, base_len, &name[..n], suffix) {
+                    tty_write(b"\x07");
+                }
+            }
+            _ => {
+                let n = self.menu.name(0).len();
+                let mut name = [0u8; EDIT_MAX];
+                name[..n].copy_from_slice(self.menu.name(0));
+                self.menu.active = true;
+                self.menu.start = span_start;
+                self.menu.end = word_end;
+                self.menu.current = 0;
+                if !self.set_span(span_start, word_end, &name[..n]) {
+                    self.menu.active = false;
+                    tty_write(b"\x07");
+                    return;
+                }
+                self.menu.end = span_start + n;
+                self.menu.print();
+                self.redraw_line();
+            }
         }
     }
 
@@ -1000,6 +1180,7 @@ fn read_line(ed: &mut Editor, buf: &mut [u8]) -> usize {
     ed.len = 0;
     ed.cur = 0;
     ed.hist_pos = 0;
+    ed.menu.clear();
     // ESC sequence state: 0 none, 1 saw ESC, 2 saw ESC[.
     let mut esc = 0u8;
     loop {
@@ -1017,6 +1198,10 @@ fn read_line(ed: &mut Editor, buf: &mut [u8]) -> usize {
             break;
         }
         let ch = b[0];
+        // Any key other than Tab ends a menu cycle; the next Tab starts a new completion.
+        if ch != 0x09 {
+            ed.menu.active = false;
+        }
         // Another writer may have taken the line since the prompt was drawn (the session's
         // programs do, once at boot): the prompt has been pushed up and the cursor sits on a
         // blank line, so reprint it with what has been typed before acting on this byte.
@@ -2175,12 +2360,13 @@ mod tests {
         assert!(!should_try_multicall("", ENOENT));
     }
 
-    fn matches_of(names: &[&str]) -> Matches {
-        let mut matches = Matches::new();
+    fn menu_of(names: &[&str]) -> Menu {
+        let mut menu = Menu::new();
         for name in names {
-            matches.offer(name.as_bytes());
+            menu.offer(name.as_bytes());
         }
-        matches
+        menu.sort();
+        menu
     }
 
     #[test]
@@ -2203,31 +2389,53 @@ mod tests {
     }
 
     #[test]
-    fn candidates_complete_to_their_longest_common_prefix() {
-        assert_eq!(common_prefix_len(b"file1", b"file2"), 4);
-        assert_eq!(common_prefix_len(b"fi", b"file"), 2);
-        assert_eq!(common_prefix_len(b"", b"x"), 0);
-        let two = matches_of(&["file1", "file2"]);
-        assert_eq!(two.count, 2);
-        assert_eq!(&two.prefix[..two.prefix_len], &b"file"[..]);
-        let one = matches_of(&["echo"]);
-        assert_eq!(one.count, 1);
-        assert_eq!(&one.first[..one.first_len], &b"echo"[..]);
+    fn a_menu_dedupes_and_sorts_names() {
+        let menu = menu_of(&["wc", "cat", "wc", "printf"]);
+        assert_eq!(menu.count, 3);
+        assert_eq!(menu.name(0), &b"cat"[..]);
+        assert_eq!(menu.name(1), &b"printf"[..]);
+        assert_eq!(menu.name(2), &b"wc"[..]);
     }
 
     #[test]
-    fn a_cached_applet_is_recognized_by_its_whole_name() {
-        let list = b"cat\nwc\nhead\n";
-        assert!(applet_cached(list, b"wc"));
-        assert!(!applet_cached(list, b"catx"));
-        assert!(!applet_cached(list, b""));
+    fn a_menu_renders_names_in_screen_rows() {
+        let menu = menu_of(&["aaaa", "bbbb", "cccc"]);
+        let mut out = [0u8; 64];
+        let n = menu.render(&mut out);
+        assert_eq!(&out[..n], &b"aaaa bbbb cccc\n"[..]);
+    }
+
+    #[test]
+    fn a_menu_wraps_a_row_that_would_not_fit() {
+        let a = [b'a'; 50];
+        let b = [b'b'; 50];
+        let mut menu = Menu::new();
+        menu.offer(&a);
+        menu.offer(&b);
+        menu.sort();
+        let mut out = [0u8; 128];
+        let n = menu.render(&mut out);
+        assert_eq!(n, 103);
+        assert_eq!(out[50], b' ');
+        assert_eq!(out[51], b'\n');
+        assert_eq!(&out[52..102], &b);
+        assert_eq!(out[102], b'\n');
+    }
+
+    #[test]
+    fn a_menu_marks_a_list_it_could_not_hold() {
+        let mut menu = menu_of(&["cat"]);
+        menu.overflow = true;
+        let mut out = [0u8; 32];
+        let n = menu.render(&mut out);
+        assert_eq!(&out[..n], &b"cat ...\n"[..]);
     }
 
     #[test]
     fn a_unique_completion_adds_the_rest_and_a_separator() {
         let mut ed = Editor::new();
         ed.set_line(b"ech");
-        assert!(ed.apply_completion(3, 3, &matches_of(&["echo"]), Some(b' ')));
+        assert!(ed.apply_unique(3, 3, b"echo", Some(b' ')));
         assert_eq!(&ed.line[..ed.len], &b"echo "[..]);
         assert_eq!(ed.cur, 5);
     }
@@ -2238,25 +2446,20 @@ mod tests {
     fn a_path_completion_adds_only_the_basename_suffix() {
         let mut ed = Editor::new();
         ed.set_line(b"cat src/li");
-        assert!(ed.apply_completion(10, 2, &matches_of(&["lib.rs"]), Some(b' ')));
+        assert!(ed.apply_unique(10, 2, b"lib.rs", Some(b' ')));
         assert_eq!(&ed.line[..ed.len], &b"cat src/lib.rs "[..]);
     }
 
     #[test]
-    fn an_ambiguous_completion_adds_only_the_common_prefix() {
+    fn replacing_a_span_keeps_the_text_after_it() {
         let mut ed = Editor::new();
-        ed.set_line(b"fi");
-        assert!(ed.apply_completion(2, 2, &matches_of(&["file1", "file2"]), None));
-        assert_eq!(&ed.line[..ed.len], &b"file"[..]);
-        assert_eq!(ed.cur, 4);
-    }
-
-    #[test]
-    fn an_ambiguous_completion_with_nothing_more_to_add_changes_nothing() {
-        let mut ed = Editor::new();
-        ed.set_line(b"fi");
-        assert!(!ed.apply_completion(2, 2, &matches_of(&["fi1", "fi2"]), None));
-        assert_eq!(&ed.line[..ed.len], &b"fi"[..]);
+        ed.set_line(b"ls fi | wc");
+        assert!(ed.set_span(3, 5, b"file1"));
+        assert_eq!(&ed.line[..ed.len], &b"ls file1 | wc"[..]);
+        assert_eq!(ed.cur, 8);
+        assert!(ed.set_span(3, 8, b"fi"));
+        assert_eq!(&ed.line[..ed.len], &b"ls fi | wc"[..]);
+        assert_eq!(ed.cur, 5);
     }
 
     #[test]
@@ -2264,7 +2467,7 @@ mod tests {
         let mut ed = Editor::new();
         ed.set_line(b"ls fi | wc");
         ed.cur = 5;
-        assert!(ed.apply_completion(5, 2, &matches_of(&["file1"]), Some(b' ')));
+        assert!(ed.apply_unique(5, 2, b"file1", Some(b' ')));
         assert_eq!(&ed.line[..ed.len], &b"ls file1 | wc"[..]);
         assert_eq!(ed.cur, 8);
     }
