@@ -453,7 +453,7 @@ by a toolchain an ordinary image build must not depend on, so they go in the way
   2. **That target's sysroot holds a PIC `core`/`alloc`, and that is *why* it has to be a
      target.** A `-C relocation-model=pic` on the crate cannot fix the *precompiled*
      `core`: the link fails with `R_X86_64_64 cannot be used against local symbol` until
-     the `core` it links against is PIC. `tools/rust-config.py` therefore lists the `-elf`
+     the `core` it links against is PIC. `cargo xtask rust-config` therefore lists the `-elf`
      triples in `config.toml` **with `no-std = true`**, which makes bootstrap build those
      two crates and no std into their sysroots — 7 files where the static target has 51.
      That is the set `-Z build-std=core,alloc` used to produce, now built by the same

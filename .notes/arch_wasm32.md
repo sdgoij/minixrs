@@ -968,7 +968,7 @@ x86_64-pc-minix` is clean too, and every change above is behaviour-neutral there
   no bootstrap; it is now a target of the fork's own, so it is an ordinary
   `--target wasm32-minix` built by the same stage1 compiler as everything else,
   with no nightly and no `-Z`. The spec is `base::wasm::options()` plus
-  `os: minix` and `--no-entry`, and `tools/rust-config.py` lists it with
+  `os: minix` and `--no-entry`, and `cargo xtask rust-config` lists it with
   `no-std = true`, so its sysroot holds `core` and `alloc`. `os: "minix"` is the
   whole point and the `std` PAL below is not needed for it: the servers and
   userland depend on `minix-rt`/`minix-std`, not on `std`.

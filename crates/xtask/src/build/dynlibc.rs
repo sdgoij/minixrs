@@ -22,7 +22,7 @@
 //!   the executable one in being `pic` and allowing dylibs. Neither is a flag that
 //!   could be passed instead: what a `cdylib` must not contain is the absolute
 //!   relocations of the precompiled `core`/`alloc`, and those come from the target's
-//!   sysroot, so the target is what has to be PIC. `tools/rust-config.py` lists these
+//!   sysroot, so the target is what has to be PIC. `cargo xtask rust-config` lists these
 //!   triples with `no-std = true`, so their sysroots hold `core` and `alloc` and
 //!   nothing else.
 //! * `--features so` gives the object the `panic` lang item a final artifact needs,
@@ -47,7 +47,7 @@ const PROGRAM: &str = "dynclib";
 
 /// The PIC triple for `arch`, whose sysroot holds `core` and `alloc`.
 ///
-/// The `-elf` suffix is what the fork's target list and `tools/rust-config.py` agree
+/// The `-elf` suffix is what the fork's target list and `cargo xtask rust-config` agree
 /// on, and cargo's build directory for it follows from the name.
 fn dyn_triple(arch: &Arch) -> String {
     format!("{}-elf", arch.triple)

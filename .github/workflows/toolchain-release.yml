@@ -150,7 +150,7 @@ jobs:
             "- host: \`${host}\`" \
             "- targets: host, the three Minix triples, their \`-elf\` (position-independent)" \
             "forms, and \`wasm32-minix\`" \
-            "- llvm: from source, \`targets = \"AArch64;RISCV;X86;WebAssembly\"\`, \`download-ci-llvm = false\` (\`tools/rust-config.py\`)" \
+            "- llvm: from source, \`targets = \"AArch64;RISCV;X86;WebAssembly\"\`, \`download-ci-llvm = false\` (\`cargo xtask rust-config\`)" \
             "" \
             "Install it with \`just fetch-stage1\`, which derives this tag from the \`rust\`" \
             "submodule commit and verifies \`SHA256SUMS\`. \`just bootstrap\` remains the" \

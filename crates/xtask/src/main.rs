@@ -24,6 +24,7 @@ mod check;
 mod dynamic;
 mod image;
 mod paths;
+mod rust_config;
 mod toolchain;
 
 fn main() -> ExitCode {
@@ -44,6 +45,12 @@ fn main() -> ExitCode {
         Some(("check", matches)) => run_check(&root, matches, &mut out, &mut err),
         Some(("build", matches)) => run_build(&root, matches),
         Some(("image", matches)) => run_image(&root, matches).map(|()| true),
+        Some(("rust-config", matches)) => {
+            let token = matches
+                .get_one::<String>("target")
+                .expect("clap defaults the target");
+            rust_config::run(&root, token).map(|()| true)
+        }
         _ => unreachable!("clap requires a subcommand"),
     };
 
@@ -245,6 +252,16 @@ fn command() -> clap::Command {
                     clap::Command::new("mkfs")
                         .about("Copy the kernel's MinixFS blob to the arch's raw disk image")
                         .arg(target_arg("x86")),
+                ),
+        )
+        .subcommand(
+            clap::Command::new("rust-config")
+                .about("Regenerate the rust fork's rust/config.toml for an arch")
+                .arg(
+                    clap::Arg::new("target")
+                        .value_name("TARGET")
+                        .default_value("all")
+                        .help("all, or one of x86, riscv64, aarch64"),
                 ),
         )
 }

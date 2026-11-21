@@ -68,7 +68,7 @@ rust-channel := `sed -n 's/^channel = "\(.*\)"/\1/p' rust-toolchain.toml | tr -d
 # `libc` is required rather than convenient: `rust/library` and `coreutils` both
 # `[patch.crates-io]` it to the sibling fork, so cargo cannot resolve either
 # workspace without it. Regenerates `rust/config.toml` via
-# `tools/rust-config.py` for the requested arch, then runs x.py and builds the
+# `cargo xtask rust-config` for the requested arch, then runs x.py and builds the
 # `/bin/hello` std smoke-test binary with `cargo xtask build std-hello`.
 # Note: per-arch runs rebuild only that arch's std — x.py prunes the other
 # arches from the stage1 sysroot — so `all` (the default) is the complete
@@ -77,7 +77,7 @@ rust-channel := `sed -n 's/^channel = "\(.*\)"/\1/p' rust-toolchain.toml | tr -d
 # Build the stage1 compiler + std + /bin/hello for a minix target (all by default).
 bootstrap target="all":
     git submodule update --init rust coreutils libc
-    python tools/rust-config.py {{target}}
+    cargo xtask rust-config {{target}}
     # `library/proc_macro` is built alongside std: x.py prunes the stage1
     # sysroot to the listed crates, and without libproc_macro a later host
     # proc-macro build (the coreutils multicall) fails with E0463.

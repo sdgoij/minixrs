@@ -12,7 +12,7 @@
 # `target_os = "minix"` bodies rather than the host stubs. That target is one of the fork's own
 # (`compiler/rustc_target/src/spec/targets/wasm32_minix.rs`), so this needs no nightly and no
 # `-Z build-std`: the stage1 compiler everything else uses has the target built in, and
-# `tools/rust-config.py` lists it with `no-std = true`, so its sysroot holds the `core` and
+# `cargo xtask rust-config` lists it with `no-std = true`, so its sysroot holds the `core` and
 # `alloc` a module links. Binaryen's wasm-opt is the one thing still fetched separately
 # (tools/fork-spike/.tools). Artifacts land in `$here/build/`.
 

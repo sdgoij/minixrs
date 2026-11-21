@@ -84,7 +84,7 @@ of `run`, `mkfs`, `image`, `gltriangle`, `export`, `desktop`.
 ### 2.2 The Python, clustered by what it actually is
 
 1. **Toolchain discovery and pinning.** `stage1.py` (67), `lld.py` (174),
-   `rust-config.py` (145), `pin.py` (38), `bash_pin.py`, `mesa_pin.py`,
+   `pin.py` (38), `bash_pin.py`, `mesa_pin.py`,
    `verify-stage1.py` (151), `fetch-stage1.py` (218), `fetch-mesa.py` (186),
    `fetch-bash.py` (179), `mirror-bash.py`, `ccarch.py`, `ccflags.py`.
    Mostly path resolution, small files, a few network fetches. The pin modules
@@ -436,6 +436,14 @@ byte-identical to the old tool's, `just build-x86`, `just mkfs-x86` and
 tools/mkboot.rs` on every x86 image recipe) is gone. The superseded ports
 (`mkinitramfs.rs`, `mkminixfs.rs`, `mkimg.rs`) go with them. `fetch-stage1`
 and `verify-stage1` are still the phase's other half.
+
+**Phase 2, contd.** `cargo xtask rust-config` replaces `tools/rust-config.py`,
+which `just bootstrap` ran to write the fork's gitignored `rust/config.toml`.
+The generated file is byte-identical to the old script's on the same host,
+except for the header line that named the deleted script; the write keeps the
+platform's line endings for the same reason (`Path.write_text` translated `\n`).
+The target list, the `no-std` sections and the Python-style quoting are unit
+tested, and so is the write against a temporary tree.
 
 **Phase 1, contd.** `cargo xtask build gltriangle|gui` replaced two of the Mesa
 clients. Both artifacts were byte-identical to the Python build's. That slice
