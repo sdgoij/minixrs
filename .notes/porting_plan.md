@@ -44,7 +44,7 @@ from a real block device through the BDEV protocol. The root FS lives on an
 attached virtio disk image (built by `tools/mkfs.rs`, `just mkfs-*`), served
 by the `virtio_blk` driver server (direct grants + `SYS_SAFECOPYTO/FROM`), and
 **file persistence is verified on all three arches**: write a file, reboot
-QEMU, read it back (`python tools/persist_test*.py`, `PERSIST in disk
+QEMU, read it back (`PERSIST in disk
 image: 1`).
 
 All three arches use the **modern virtio 1.x transport** (the legacy
@@ -3584,7 +3584,7 @@ virtio disk image through the BDEV protocol, and files persist across reboot
     BDEV protocol (`crates/fs/src/block_io.rs`); VFS `mount_root` passes the
     `"virtio_blk"` driver label to MFS, which resolves it via `bdev_driver`.
     Verified on x86_64, RISC-V64, and AArch64: root mounts from a virtio disk
-    image and files persist across reboot (`tools/persist_test*.py`).
+    image and files persist across reboot.
 
 - [x] **11b.6 — `minix/drivers/storage/vnd/`**
   - Source: `.refs/minix-3.3.0/minix/drivers/storage/vnd/`
