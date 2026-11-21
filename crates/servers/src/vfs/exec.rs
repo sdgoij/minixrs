@@ -128,11 +128,14 @@ static mut EXEC_FRAME_BUF: [u8; EXEC_FRAME_MAX] = [0u8; EXEC_FRAME_MAX];
 
 /// Room for a wasm module read at exec time. The image *is* the bytes on this arch, so unlike the
 /// ELF arm — which reads a header and lets VM demand-page the rest — this arm has to hold the
-/// whole program. 256 KiB fits the port's one program module (141 KiB Asyncify'd) with room to
-/// grow, and a module that will not fit is refused rather than truncated: a truncated wasm module
-/// is not a smaller program, it is an invalid one.
+/// whole program. The port's one program module carries the shell, the applets and `ping`, and it
+/// grows with them: 141 KiB when this bound was written, 368 KiB once the shell learned to
+/// complete paths, and a module that will not fit is refused rather than truncated: a truncated
+/// wasm module is not a smaller program, it is an invalid one. A megabyte is the same order as the
+/// exec frame's own bound below and leaves the shell room to keep growing; VFS's instance has tens
+/// of megabytes for this buffer.
 #[cfg(target_arch = "wasm32")]
-const EXEC_MODULE_MAX: usize = 256 * 1024;
+const EXEC_MODULE_MAX: usize = 1024 * 1024;
 
 #[cfg(target_arch = "wasm32")]
 static mut EXEC_MODULE_BUF: [u8; EXEC_MODULE_MAX] = [0u8; EXEC_MODULE_MAX];
