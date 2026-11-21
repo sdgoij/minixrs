@@ -51,7 +51,7 @@ from ccarch import ALL, Arch, resolve_argv  # noqa: E402
 
 
 # Mesa and libdrm are pinned in `tools/mesa_pin.py`, which the fetch
-# (`tools/fetch-mesa.py`) and the release workflow read too: pinned by *tag* and
+# (`cargo xtask fetch mesa`) and the release workflow read too: pinned by *tag* and
 # asserted against the commit that tag resolved to when the pin was written. A
 # shallow `--branch <tag>` clone is enough (unlike bash's commit pin, the tag is
 # the fetchable name), and the assert is what turns a moved tag into a failure

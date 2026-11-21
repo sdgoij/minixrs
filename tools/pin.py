@@ -21,6 +21,18 @@ import sys
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 
 
+def read(key: str) -> str:
+    """One value from `tools/pins.ini`, the file the xtask reads too."""
+    for line in (ROOT / "tools" / "pins.ini").read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        name, value = line.split("=", 1)
+        if name.strip() == key:
+            return value.strip()
+    raise KeyError(f"tools/pins.ini has no {key}")
+
+
 def rust_gitlink() -> str:
     """The commit the `rust` submodule pins, or a die naming the failure."""
     try:

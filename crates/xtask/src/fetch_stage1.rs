@@ -124,8 +124,23 @@ pub(crate) fn install(
     let sums = tmp.join("SHA256SUMS");
 
     println!("fetching {asset_name}");
-    download(&format!("{base}/{asset_name}"), &asset)?;
-    download(&format!("{base}/SHA256SUMS"), &sums)?;
+    let asset_url = format!("{base}/{asset_name}");
+    let sums_url = format!("{base}/SHA256SUMS");
+    download(
+        &asset_url,
+        &asset,
+        &format!(
+            "no prebuilt stage1 at {asset_url}\n\
+             Nothing has been published for this rust commit and host yet.\n\
+             Run `just bootstrap` to build the toolchain from source, or publish a\n\
+             release with the `toolchain release` workflow."
+        ),
+    )?;
+    download(
+        &sums_url,
+        &sums,
+        &format!("no prebuilt stage1 at {sums_url}"),
+    )?;
     verify(&asset, &sums)?;
 
     // Replace rather than merge: a toolchain built from another commit may not
@@ -195,8 +210,8 @@ pub(crate) fn recorded_sha(stage1: &Path) -> Option<String> {
     text.split_whitespace().next().map(str::to_string)
 }
 
-/// Download `url` to `dest`, failing with the publish advice on a 404.
-fn download(url: &str, dest: &Path) -> io::Result<()> {
+/// Download `url` to `dest`, failing with the caller's advice on a 404.
+pub(crate) fn download(url: &str, dest: &Path, not_found: &str) -> io::Result<()> {
     let output = Command::new("curl")
         .args(["--silent", "--show-error", "--location", "--output"])
         .arg(dest)
@@ -206,7 +221,7 @@ fn download(url: &str, dest: &Path) -> io::Result<()> {
         .map_err(|error| {
             io::Error::new(
                 error.kind(),
-                format!("cannot run `curl`, needed to download the toolchain: {error}"),
+                format!("cannot run `curl`, needed to download {url}: {error}"),
             )
         })?;
     let code = String::from_utf8_lossy(&output.stdout).trim().to_string();
@@ -219,15 +234,7 @@ fn download(url: &str, dest: &Path) -> io::Result<()> {
 
     remove_file_if_present(dest)?;
     if code == "404" {
-        return Err(io::Error::new(
-            io::ErrorKind::NotFound,
-            format!(
-                "no prebuilt stage1 at {url}\n\
-                 Nothing has been published for this rust commit and host yet.\n\
-                 Run `just bootstrap` to build the toolchain from source, or publish a\n\
-                 release with the `toolchain release` workflow."
-            ),
-        ));
+        return Err(io::Error::new(io::ErrorKind::NotFound, not_found.to_string()));
     }
     Err(io::Error::other(format!(
         "downloading {url} failed (curl exit {}, HTTP {code}): {}",
@@ -237,7 +244,7 @@ fn download(url: &str, dest: &Path) -> io::Result<()> {
 }
 
 /// Check `asset` against its line in `sums` (a `sha256sum` file).
-fn verify(asset: &Path, sums: &Path) -> io::Result<()> {
+pub(crate) fn verify(asset: &Path, sums: &Path) -> io::Result<()> {
     let name = asset
         .file_name()
         .and_then(OsStr::to_str)
@@ -290,7 +297,7 @@ fn sha256_file(path: &Path) -> io::Result<String> {
         .collect())
 }
 
-fn extract(asset: &Path, dest: &Path) -> io::Result<()> {
+pub(crate) fn extract(asset: &Path, dest: &Path) -> io::Result<()> {
     fs::create_dir_all(dest)?;
     let file = fs::File::open(asset)?;
     let decoder = xz2::read::XzDecoder::new(file);
@@ -313,7 +320,7 @@ fn dir_size(path: &Path) -> io::Result<u64> {
     Ok(total)
 }
 
-fn remove_dir_if_present(path: &Path) -> io::Result<()> {
+pub(crate) fn remove_dir_if_present(path: &Path) -> io::Result<()> {
     match fs::remove_dir_all(path) {
         Ok(()) => Ok(()),
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
@@ -321,7 +328,7 @@ fn remove_dir_if_present(path: &Path) -> io::Result<()> {
     }
 }
 
-fn remove_file_if_present(path: &Path) -> io::Result<()> {
+pub(crate) fn remove_file_if_present(path: &Path) -> io::Result<()> {
     match fs::remove_file(path) {
         Ok(()) => Ok(()),
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),

@@ -9,7 +9,7 @@ releases, not each patch. The clone comes from [`BASH_GIT`] — a mirror in this
 project's own GitHub org, refreshed by `just mirror-bash` when the pin moves —
 because savannah is slow and times out.
 
-Both the build (`tools/build-bash.py`) and the fetch (`tools/fetch-bash.py`) read
+Both the build (`tools/build-bash.py`) and the fetch (`cargo xtask fetch bash`) read
 the pin from here, and `.github/workflows/bash-release.yml` derives its release tag
 from [`tag`] — the commit plus the `rust` gitlink (`tools/pin.py`) — so an artifact
 matches both the sources this file names and the toolchain the tree pins. Bumping
@@ -27,16 +27,16 @@ import sys
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 
-from pin import rust_gitlink  # noqa: E402
+from pin import read, rust_gitlink  # noqa: E402
 
 # The build clones the mirror, not upstream: savannah is slow and times out, and no
 # CI run should depend on it. `BASH_GIT` is the credential-free read URL, `BASH_PUSH`
 # the write one, and `just mirror-bash` refreshes the mirror from [`BASH_UPSTREAM`].
-BASH_UPSTREAM = "https://git.savannah.gnu.org/git/bash.git"
-BASH_GIT = "https://github.com/sdgoij/bash.git"
-BASH_PUSH = "git@github.com:sdgoij/bash.git"
-BASH_COMMIT = "b460816602167718f78a6233164e8875f49b75b2"
-BASH_DESCRIBE = "Bash-5.3 patch 15"
+BASH_UPSTREAM = read("bash.upstream")
+BASH_GIT = read("bash.git")
+BASH_PUSH = read("bash.push")
+BASH_COMMIT = read("bash.commit")
+BASH_DESCRIBE = read("bash.describe")
 
 
 def tag(rust_commit: str) -> str:

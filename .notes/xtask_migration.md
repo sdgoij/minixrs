@@ -487,6 +487,16 @@ The Mesa gates need `target/mesa-src`, which only a WSL `just build-mesa --build
 populates, so the artifacts were not rebuilt here; the local gate is
 `cargo test --workspace`, `just check` and the command-line unit tests.
 
+**Phase 3, started.** `cargo xtask fetch bash|mesa` replace
+`tools/fetch-bash.py` and `tools/fetch-mesa.py`. The pinned values moved to
+`tools/pins.ini`, which the xtask and the Python builders that still run under
+WSL both read, so there is one source of truth; `cargo xtask pin bash|mesa`
+derives the release tag from it, and the Python pin modules are thin readers that
+keep the workflows' interface unchanged. Both fetchers were exercised end to end
+against a `file://` release, including the idempotent path and the marker.
+`mirror-bash`, `build-bash` and `build-mesa` stay Python for now: they drive the
+WSL-only `cc` wrappers.
+
 **Phase 5, started.** `cargo xtask probe read-hist` replaces
 `tools/virtio_read_hist.py`, the first of the CI gate probes, and
 `just test-read-cost-x86` calls it. Its output and its `--max` verdict match the

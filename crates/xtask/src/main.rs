@@ -22,10 +22,12 @@ mod build;
 mod cc;
 mod check;
 mod dynamic;
+mod fetch;
 mod fetch_stage1;
 mod guest;
 mod image;
 mod paths;
+mod pin;
 mod probe;
 mod qmp;
 mod rust_config;
@@ -54,6 +56,8 @@ fn main() -> ExitCode {
         Some(("fetch-stage1", matches)) => {
             fetch_stage1::run(&root, matches.get_flag("force")).map(|()| true)
         }
+        Some(("fetch", matches)) => run_fetch(&root, matches),
+        Some(("pin", matches)) => pin::run(&root, matches).map(|()| true),
         Some(("verify-stage1", _)) => verify_stage1::run(&root).map(|()| true),
         Some(("probe", matches)) => run_probe(&root, matches),
         Some(("smoke", matches)) => {
@@ -143,6 +147,18 @@ fn run_build(root: &Path, matches: &clap::ArgMatches) -> io::Result<bool> {
 
 fn target(matches: &clap::ArgMatches) -> Option<&str> {
     matches.get_one::<String>("target").map(String::as_str)
+}
+
+fn run_fetch(root: &Path, matches: &clap::ArgMatches) -> io::Result<bool> {
+    match matches.subcommand() {
+        Some(("bash", matches)) => {
+            fetch::bash(root, target(matches), matches.get_flag("force"))
+        }
+        Some(("mesa", matches)) => {
+            fetch::mesa(root, target(matches), matches.get_flag("force"))
+        }
+        _ => unreachable!("clap requires a fetch subcommand"),
+    }
 }
 
 fn run_image(root: &Path, matches: &clap::ArgMatches) -> io::Result<()> {
@@ -369,6 +385,59 @@ fn command() -> clap::Command {
                 ),
         )
         .subcommand(
+            clap::Command::new("fetch")
+                .about("Install a prebuilt third-party artifact for its pinned sources")
+                .subcommand_required(true)
+                .arg_required_else_help(true)
+                .subcommand(
+                    clap::Command::new("bash")
+                        .about("The prebuilt GNU bash for an arch")
+                        .arg(target_arg("x86"))
+                        .arg(force_arg()),
+                )
+                .subcommand(
+                    clap::Command::new("mesa")
+                        .about("The prebuilt Mesa and libdrm DSOs for an arch")
+                        .arg(target_arg("x86"))
+                        .arg(force_arg()),
+                ),
+        )
+        .subcommand(
+            clap::Command::new("pin")
+                .about("Print a pinned third-party release tag or source field")
+                .subcommand_required(true)
+                .arg_required_else_help(true)
+                .subcommand(
+                    clap::Command::new("bash")
+                        .about("The bash release tag, or a source field")
+                        .arg(
+                            clap::Arg::new("field")
+                                .value_name("FIELD")
+                                .value_parser(["tag", "describe", "commit"])
+                                .default_value("tag")
+                                .help("tag, describe or commit"),
+                        ),
+                )
+                .subcommand(
+                    clap::Command::new("mesa")
+                        .about("The Mesa release tag, or a source field")
+                        .arg(
+                            clap::Arg::new("field")
+                                .value_name("FIELD")
+                                .value_parser([
+                                    "tag",
+                                    "mesa-tag",
+                                    "mesa-commit",
+                                    "drm-tag",
+                                    "drm-commit",
+                                    "build-config",
+                                ])
+                                .default_value("tag")
+                                .help("tag or one of the pinned source fields"),
+                        ),
+                ),
+        )
+        .subcommand(
             clap::Command::new("fetch-stage1")
                 .about("Install the prebuilt stage1 toolchain for the pinned rust commit")
                 .arg(
@@ -536,6 +605,13 @@ fn target_option(default: &'static str) -> clap::Arg {
         .value_name("TARGET")
         .default_value(default)
         .help("An arch name or a minix triple")
+}
+
+fn force_arg() -> clap::Arg {
+    clap::Arg::new("force")
+        .long("force")
+        .action(clap::ArgAction::SetTrue)
+        .help("Replace an existing artifact, even one built from source")
 }
 
 fn target_arg(default: &'static str) -> clap::Arg {

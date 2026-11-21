@@ -12,7 +12,7 @@
 #
 # The asset is per-arch (`mesa-<pin>-<arch>.tar.xz`, the seven DSOs under `lib/`),
 # because they are target code; the C++ runtime is linked into them statically, so
-# there is no second artifact. `tools/fetch-mesa.py` derives the tag from the same
+# there is no second artifact. `cargo xtask fetch mesa` derives the tag from the same
 # pin, downloads one arch's asset, and verifies `SHA256SUMS`.
 #
 # The release lives here rather than on a fork, because the built-in
@@ -123,7 +123,7 @@ jobs:
           test -f "${stage}/lib/libEGL.so.1" || { echo "!! no staged DSOs at ${stage}/lib"; exit 1; }
           # `lib/` and the EGL/GLES2/KHR headers the surfaceless client compiles
           # against, so a consumer can build `tools/gl_triangle.c` without the Mesa
-          # source checkout. `tools/fetch-mesa.py` extracts both into
+          # source checkout. `cargo xtask fetch mesa` extracts both into
           # `target/mesa/<arch>`.
           publish="target/mesa-publish"
           rm -rf "${publish}"

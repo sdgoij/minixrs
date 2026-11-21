@@ -38,7 +38,7 @@ sys.path.insert(0, str(TOOLS))
 from ccarch import ALL, Arch, resolve_argv  # noqa: E402
 from lld import find_lld, host_triple  # noqa: E402
 
-# Pinned in `tools/bash_pin.py`, which the fetch (`tools/fetch-bash.py`) and the
+# Pinned in `tools/bash_pin.py`, which the fetch (`cargo xtask fetch bash`) and the
 # release workflow read too: the commit the working build was validated against —
 # "Bash-5.3 patch 15" (`git describe`: bash-5.3-16-gb4608166). bash's git
 # repository ships its generated files (configure, y.tab.c, the builtins), so a

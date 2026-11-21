@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """The pinned Mesa + libdrm sources, and the release tag that identifies them.
 
-Both the build (`tools/build-mesa.py`) and the fetch (`tools/fetch-mesa.py`) read
+Both the build (`tools/build-mesa.py`) and the fetch (`cargo xtask fetch mesa`) read
 the pin from here, and `.github/workflows/mesa-release.yml` derives its release
 tag from [`tag`] — the two commits plus the `rust` gitlink (`tools/pin.py`) — so an
 artifact matches both the sources this file names and the toolchain the tree pins.
@@ -19,15 +19,15 @@ import sys
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 
-from pin import rust_gitlink  # noqa: E402
+from pin import read, rust_gitlink  # noqa: E402
 
-MESA_GIT = "https://gitlab.freedesktop.org/mesa/mesa.git"
-MESA_TAG = "mesa-25.3.6"
-MESA_COMMIT = "06f9e28304d5d3f109c33535c1c25b9df5769af2"
+MESA_GIT = read("mesa.git")
+MESA_TAG = read("mesa.tag")
+MESA_COMMIT = read("mesa.commit")
 
-DRM_GIT = "https://gitlab.freedesktop.org/mesa/drm.git"
-DRM_TAG = "libdrm-2.4.129"
-DRM_COMMIT = "a8e5e10a873f67f557dc70e5407af4553f35edd9"
+DRM_GIT = read("drm.git")
+DRM_TAG = read("drm.tag")
+DRM_COMMIT = read("drm.commit")
 
 # A fingerprint of the *build configuration* — the option sets in
 # `tools/build-mesa.py` — and part of the release tag because the artifact is a
@@ -37,7 +37,7 @@ DRM_COMMIT = "a8e5e10a873f67f557dc70e5407af4553f35edd9"
 # be handed to a tree that expects the new set. A short, human-readable string;
 # bump it whenever an option in `tools/build-mesa.py` changes. (The commit halves
 # cannot do this job: the sources are unchanged when only an option moves.)
-BUILD_CONFIG = "gbm"
+BUILD_CONFIG = read("mesa.build_config")
 
 
 def tag(rust_commit: str) -> str:

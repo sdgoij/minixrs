@@ -12,7 +12,7 @@
 # before anything consumes one.
 #
 # The asset is per-arch (`bash-<pin>-<arch>.tar.xz`, the one binary), because bash
-# is target code. `tools/fetch-bash.py` derives the tag from the same pin,
+# is target code. `cargo xtask fetch bash` derives the tag from the same pin,
 # downloads one arch's asset, and verifies `SHA256SUMS`.
 #
 # The release lives here rather than on a fork, because the built-in

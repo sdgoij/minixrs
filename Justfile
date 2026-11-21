@@ -1867,7 +1867,7 @@ build-bash arch="x86":
 # by that commit. `just build-bash` stays authoritative (a C header or libc change
 # needs it); this is the cache CI and dev machines use.
 fetch-bash arch="x86" *args:
-    python tools/fetch-bash.py {{arch}} {{args}}
+    cargo xtask fetch bash {{arch}} {{args}}
 
 # Create or refresh the `sdgoij/bash` GitHub mirror and push it, so the build never
 # clones savannah (it is slow and times out) — `tools/mirror-bash.py` takes the
@@ -1890,7 +1890,7 @@ build-mesa arch="x86" *args:
 # libdrm commits. `just build-mesa` stays authoritative (it is what a pin bump or
 # a `cc-dso-minix.py` change needs); this is the cache CI and dev machines use.
 fetch-mesa arch="x86" *args:
-    python tools/fetch-mesa.py {{arch}} {{args}}
+    cargo xtask fetch mesa {{arch}} {{args}}
 
 # The dynamic-linking artifacts an *image* carries: the loader (`/libexec/ld.so`,
 # `crates/ldso` linked with its own script, `tools/minix-ldso.ld`), the shared C library
