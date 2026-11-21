@@ -2919,9 +2919,8 @@ pub fn net_server_main() {
 mod tests {
     use super::*;
 
-    /// Probe anchors for the QEMU-monitor dumps of the net server's
-    /// statics (see tools/udp_netstate_probe.py). Keep in sync with the
-    /// struct definitions.
+    /// Probe anchors for an external QEMU-monitor dump of the net server's
+    /// statics. Keep in sync with the struct definitions.
     #[test]
     fn probe_offsets() {
         assert_eq!(core::mem::offset_of!(NetState, mac), 0);

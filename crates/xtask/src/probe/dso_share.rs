@@ -44,7 +44,7 @@ use std::process::Command;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use super::{command_from, secs};
+use super::{command_from, fail, secs, send_command};
 use crate::guest::Guest;
 use crate::qmp::Qmp;
 use crate::toolchain;
@@ -370,46 +370,6 @@ fn qemu(paging: &Paging, arch: &str, memory: &str) -> Command {
     let mut command = command_from(&words);
     command.arg("-kernel").arg(&paging.image);
     command
-}
-
-fn fail(guest: &Guest, message: &str) -> bool {
-    // A probe that fails without the console is one that has to be re-run to be
-    // understood.
-    eprintln!("error: {message}");
-    eprintln!("--- guest console (tail) ---");
-    eprintln!("{}", guest.tail(2000));
-    eprintln!("--- end ---");
-    false
-}
-
-/// Type one command, paced, and check the guest echoed the whole of it.
-///
-/// The console drops what it is not ready for, and it does so *mid-line*, not
-/// just at the tail. A truncated line still runs, as a shorter command, so
-/// sending is not evidence that the command ran; the echo is, checked whole. One
-/// byte per write is what a riscv64 console keeps, and it is safe on x86 too.
-fn send_command(guest: &mut Guest, command: &str) -> bool {
-    let echo = command.as_bytes();
-    for _ in 0..4 {
-        thread::sleep(Duration::from_millis(400));
-        let start = guest.transcript_len();
-        if guest
-            .send_paced(command, Duration::from_millis(20))
-            .is_err()
-        {
-            return false;
-        }
-        // The command's own echo, not `"# " + command`: the prompt that precedes
-        // it was printed before `start`, so a needle spanning the two is never
-        // contiguous in the window.
-        if guest.wait_for_after(echo, start, secs(10)) {
-            return true;
-        }
-        // Something shorter ran. Let the shell come back before trying again, or
-        // the retry lands in the same window.
-        guest.wait_for_after(b"\n# ", start, secs(10));
-    }
-    false
 }
 
 /// Guest physical memory, read through QMP's `pmemsave`.

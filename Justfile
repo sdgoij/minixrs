@@ -1426,6 +1426,43 @@ test-rc-x86: build-x86
     cargo xtask probe rc
     @echo "rc: /etc/rc's commands ran at boot before the shell (x86_64)"
 
+# alloc: `cargo xtask probe alloc` types `allocprobe`, which grows the rt heap across several
+# chunks and frees all of it (a fully free chunk must be munmapped, so the region count returns
+# to its baseline), then churns 200 x 1 KiB blocks inside one chunk (a freed block must be
+# reused, so the count does not grow). A count that climbs is a leaked region or a chunk handed
+# out twice. `/bin/allocprobe` prints its own verdict, so `--arch riscv64` or `--arch aarch64`
+# boots the same command on the other kernels after `just build-riscv64`/`build-aarch64`.
+test-alloc-x86: build-x86
+    mkdir -p target/images/x86_64-pc-minix
+    cp target/trampoline.elf target/images/x86_64-pc-minix/minix-x86.elf
+    @just _assert-qemu-version qemu-system-x86_64
+    cargo xtask probe alloc
+    @echo "alloc: the region count returned to its baseline (x86_64)"
+
+# fb: `cargo xtask probe fb` takes a QMP screendump and reads its corners. The fb server paints
+# the boot frame as three vertical thirds, red then green then blue, so the pixels prove the
+# mode set and the BAR mapping with no input and no guest-side reporting. `/bin/fbmmap paint`
+# overwrites the top-left block and `restore` repaints it red for this reason: a run left
+# half-restored fails here.
+test-fb-x86: build-x86
+    mkdir -p target/images/x86_64-pc-minix
+    cp target/trampoline.elf target/images/x86_64-pc-minix/minix-x86.elf
+    @just _assert-qemu-version qemu-system-x86_64
+    cargo xtask probe fb
+    @echo "fb: the frame is the red/green/blue boot pattern (x86_64)"
+
+# exec-loop: `cargo xtask probe exec-loop` runs a command N times and samples `memstat` and
+# `regions` every K execs, which is how the repeated-exec leak is measured: free pages that fall
+# a little per exec, or a wedge at a round exec count, both show up in the samples. It types
+# into the guest for every exec, so it never samples past an exec that has not finished, and a
+# wedge is reported by sending `hangdump` rather than guessed at.
+test-exec-loop-x86 execs="100" sample="10": build-x86
+    mkdir -p target/images/x86_64-pc-minix
+    cp target/trampoline.elf target/images/x86_64-pc-minix/minix-x86.elf
+    @just _assert-qemu-version qemu-system-x86_64
+    cargo xtask probe exec-loop --execs {{execs}} --sample {{sample}}
+    @echo "exec-loop: {{execs}} execs left the free-page and region counts flat (x86_64)"
+
 
 # wlxd: `diag wlxd` drives the Phase 2d damage and cursor path — it damages a small
 # rectangle and checks the rest of the frame survives, then gives the pointer an

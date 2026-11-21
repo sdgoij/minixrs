@@ -191,6 +191,36 @@ fn run_probe(root: &Path, matches: &clap::ArgMatches) -> io::Result<bool> {
             probe::read_hist::read_hist(Path::new(trace), matches.get_one::<u64>("max").copied())
         }
         Some(("rc", _)) => probe::rc::run(root),
+        Some(("alloc", matches)) => probe::alloc::run(
+            root,
+            matches.get_one::<String>("arch").expect("clap defaults the arch"),
+            matches
+                .get_one::<String>("memory")
+                .expect("clap defaults the memory"),
+        ),
+        Some(("fb", _)) => probe::fb::run(root),
+        Some(("exec-loop", matches)) => probe::exec_loop::run(
+            root,
+            &probe::exec_loop::Options {
+                arch: matches.get_one::<String>("arch").expect("clap defaults the arch"),
+                memory: matches
+                    .get_one::<String>("memory")
+                    .expect("clap defaults the memory"),
+                execs: *matches.get_one::<u64>("execs").expect("clap defaults the count"),
+                sample_every: *matches
+                    .get_one::<u64>("sample")
+                    .expect("clap defaults the interval"),
+                command: matches
+                    .get_one::<String>("command")
+                    .expect("clap defaults the command"),
+                marker: matches
+                    .get_one::<String>("marker")
+                    .expect("clap defaults the marker"),
+                complete: matches
+                    .get_one::<String>("complete")
+                    .expect("clap defaults the completion marker"),
+            },
+        ),
         Some(("dso-share", matches)) => probe::dso_share::run(
             root,
             matches.get_one::<String>("arch").expect("clap defaults the arch"),
@@ -233,6 +263,23 @@ fn trailing_words(matches: &clap::ArgMatches) -> Vec<String> {
         .get_many::<String>("qemu")
         .map(|values| values.cloned().collect())
         .unwrap_or_default()
+}
+
+/// The arch a probe boots, named the way the recipes and images are.
+fn probe_arch_arg() -> clap::Arg {
+    clap::Arg::new("arch")
+        .long("arch")
+        .value_name("ARCH")
+        .value_parser(["x86", "riscv64", "aarch64"])
+        .default_value("x86")
+        .help("Which arch's image to boot")
+}
+
+fn probe_memory_arg() -> clap::Arg {
+    clap::Arg::new("memory")
+        .value_name("MEM")
+        .default_value("256M")
+        .help("The guest's RAM")
 }
 
 /// A gate that boots the image with a QEMU line the recipe owns, because the
@@ -541,6 +588,59 @@ fn command() -> clap::Command {
                 .subcommand(
                     clap::Command::new("rc")
                         .about("The /etc/rc chain: the session manager, a prompt of its own, the panel"),
+                )
+                .subcommand(
+                    clap::Command::new("alloc")
+                        .about("The rt allocator's region count is flat under alloc/free churn")
+                        .arg(probe_arch_arg())
+                        .arg(probe_memory_arg()),
+                )
+                .subcommand(
+                    clap::Command::new("fb")
+                        .about("The framebuffer carries the red/green/blue boot pattern"),
+                )
+                .subcommand(
+                    clap::Command::new("exec-loop")
+                        .about("N execs leave the free-page and region counts flat")
+                        .arg(probe_arch_arg())
+                        .arg(probe_memory_arg())
+                        .arg(
+                            clap::Arg::new("execs")
+                                .long("execs")
+                                .value_name("N")
+                                .value_parser(clap::value_parser!(u64).range(1..))
+                                .default_value("100")
+                                .help("How many execs to run"),
+                        )
+                        .arg(
+                            clap::Arg::new("sample")
+                                .long("sample")
+                                .value_name("K")
+                                .value_parser(clap::value_parser!(u64).range(1..))
+                                .default_value("10")
+                                .help("Sample the counts every K execs"),
+                        )
+                        .arg(
+                            clap::Arg::new("command")
+                                .long("command")
+                                .value_name("CMD")
+                                .default_value("hello")
+                                .help("The line typed for each exec"),
+                        )
+                        .arg(
+                            clap::Arg::new("marker")
+                                .long("marker")
+                                .value_name("TEXT")
+                                .default_value("pid=")
+                                .help("Output that proves the exec started"),
+                        )
+                        .arg(
+                            clap::Arg::new("complete")
+                                .long("complete")
+                                .value_name("TEXT")
+                                .default_value("threadstd")
+                                .help("Output that proves the exec finished"),
+                        ),
                 )
                 .subcommand(
                     clap::Command::new("dso-share")

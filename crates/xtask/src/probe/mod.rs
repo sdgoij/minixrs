@@ -13,10 +13,16 @@
 
 use std::path::Path;
 use std::process::Command;
+use std::thread;
 use std::time::Duration;
 
+use crate::guest::Guest;
+
+pub mod alloc;
 pub mod console;
 pub mod dso_share;
+pub mod exec_loop;
+pub mod fb;
 pub mod interactive_bash;
 pub mod rc;
 pub mod read_hist;
@@ -83,6 +89,51 @@ pub(crate) fn step(number: u32, name: &str, passed: bool) -> bool {
 
 pub(crate) fn secs(seconds: u64) -> Duration {
     Duration::from_secs(seconds)
+}
+
+/// Whether `needle` occurs in `haystack`.
+pub(crate) fn contains(haystack: &[u8], needle: &[u8]) -> bool {
+    !needle.is_empty() && haystack.windows(needle.len()).any(|window| window == needle)
+}
+
+/// Type one command, paced, and check the guest echoed the whole of it.
+///
+/// The console drops what it is not ready for, and it does so *mid-line*, not
+/// just at the tail. A truncated line still runs, as a shorter command, so
+/// sending is not evidence that the command ran; the echo is, checked whole. One
+/// byte per write is what a riscv64 console keeps, and it is safe on x86 too.
+pub(crate) fn send_command(guest: &mut Guest, command: &str) -> bool {
+    let echo = command.as_bytes();
+    for _ in 0..4 {
+        thread::sleep(Duration::from_millis(400));
+        let start = guest.transcript_len();
+        if guest
+            .send_paced(command, Duration::from_millis(20))
+            .is_err()
+        {
+            return false;
+        }
+        // The command's own echo, not `"# " + command`: the prompt that precedes
+        // it was printed before `start`, so a needle spanning the two is never
+        // contiguous in the window.
+        if guest.wait_for_after(echo, start, secs(10)) {
+            return true;
+        }
+        // Something shorter ran. Let the shell come back before trying again, or
+        // the retry lands in the same window.
+        guest.wait_for_after(b"\n# ", start, secs(10));
+    }
+    false
+}
+
+/// A probe that fails without the console is one that has to be re-run to be
+/// understood.
+pub(crate) fn fail(guest: &Guest, message: &str) -> bool {
+    eprintln!("error: {message}");
+    eprintln!("--- guest console (tail) ---");
+    eprintln!("{}", guest.tail(2000));
+    eprintln!("--- end ---");
+    false
 }
 
 /// The console lines that contain `needle`, for the evidence a gate prints.

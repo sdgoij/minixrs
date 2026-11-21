@@ -735,3 +735,14 @@ importer (`stage1.py`). Four probes whose comments in kernel and server code nam
 them as the instrument for a live invariant (`alloc_churn_probe`,
 `exec_loop_mem`, `udp_netstate_probe`, `fb_screendump`) stay until those comments,
 or the probes, are settled.
+
+The last four probes with a caller in the source have moved. `cargo xtask probe alloc` types
+`allocprobe` into a guest and reads its own PASS/FAIL line, `probe fb` takes a QMP screendump and
+checks the red/green/blue boot pattern in its corners, and `probe exec-loop` runs a command N times
+while sampling `memstat` and `regions` every K execs, with the Python driver's positional-argument
+hunt (N, MEM, K, CMD, MARKER, COMPLETE, ARCH) turned into named flags. The three comments in
+`boot-image`, `userland` and `vm` that named the old scripts now name the subcommands. The
+`udp_netstate_probe.py` dump was deleted rather than ported: it printed hardcoded aarch64 physical
+addresses for one build and asserted nothing, while the `probe_offsets` test that pins the same
+structure layout stays. What is left in `tools/` is the WSL-bound build pair, their `cc` wrappers,
+the two parse-time lookups and the pin shims.

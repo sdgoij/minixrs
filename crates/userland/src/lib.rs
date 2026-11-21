@@ -295,7 +295,7 @@ fn keytest_impl(args: &[&str]) -> i32 {
 /// Subcommands: `paint` fills a 200×200 block at the top-left corner
 /// white and read-backs pixels to prove the mapping is the live
 /// framebuffer; `restore` repaints that block red (the boot test pattern's
-/// left third) so `fb_screendump.py` stays green afterwards.
+/// left third) so `cargo xtask probe fb` stays green afterwards.
 pub fn fbmmap(args: &[&str]) -> i32 {
     fbmmap_impl(args)
 }
@@ -2349,7 +2349,7 @@ pub fn regions(_args: &[&str]) -> i32 {
 /// returns to baseline after every full free and stays flat while freed
 /// blocks are reused. Pins that fully-free chunks are munmapped (the heap
 /// can shrink) and that churn doesn't leak a chunk per cycle. Prints
-/// `allocprobe: PASS`/`FAIL` for the driver in `tools/alloc_churn_probe.py`.
+/// `allocprobe: PASS`/`FAIL`, which `cargo xtask probe alloc` reads.
 pub fn allocprobe(_args: &[&str]) -> i32 {
     #[cfg(target_os = "minix")]
     {

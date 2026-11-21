@@ -39,8 +39,8 @@ pub struct VirRegion {
     pub flags: u32,
     /// How many of this region's pages have been faulted in.
     ///
-    /// Reported by `VMIW_REGION` as the region's backing pages (`tools/exec_loop_mem.py`
-    /// checks the total does not grow across execs). For a lazy region it counts the
+    /// Reported by `VMIW_REGION` as the region's backing pages (`cargo xtask probe
+    /// exec-loop` checks the total does not grow across execs). For a lazy region it counts the
     /// pages *present*, which is what makes it a number distinct from `length`.
     pub npages: u32,
     /// For VR_FILE regions: device of the backing file (from FDLOOKUP).

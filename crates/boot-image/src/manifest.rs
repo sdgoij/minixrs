@@ -100,7 +100,7 @@ pub const BOOT_BINS: &[(&str, &str)] = &[
     ("/bin/dstest", "dstest"),
     // `/bin/allocprobe` is the allocator QEMU probe: alloc/free churn
     // through the rt mmap allocator while asserting the VM region count
-    // returns to baseline (see tools/alloc_churn_probe.py).
+    // returns to baseline (see `cargo xtask probe alloc`).
     ("/bin/allocprobe", "allocprobe"),
     // `/bin/mmapfd` is the file-backed mmap test: maps a file with
     // MAP_PRIVATE, verifies the mapping matches the file page-by-page
@@ -109,7 +109,7 @@ pub const BOOT_BINS: &[(&str, &str)] = &[
     ("/bin/mmapfd", "mmapfd"),
     // `/bin/fbmmap` is the char-device mmap test: maps /dev/fb with
     // MAP_SHARED and draws (K3). `paint`/`restore` subcommands keep
-    // fb_screendump.py green after a probe run.
+    // `cargo xtask probe fb` green after a probe run.
     ("/bin/fbmmap", "fbmmap"),
     // `/bin/fbterm` is the framebuffer console (K4): an 8×16 text console
     // over the mapped fb with PS/2 keyboard echo.
