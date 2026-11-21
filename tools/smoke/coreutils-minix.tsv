@@ -380,3 +380,10 @@ coreutils echo AFTER-MORE	AFTER-MORE
 echo aboba | wc -l	1
 printf 'a\nb\n' | wc -l	2
 wc -l /etc/group	[0-9]+[[:space:]]+/etc/group
+# Tab completion and the applet cache: the smoke driver cannot send a tab, so a file holds the
+# inner shell's input (`numf<TAB>1000 > /dev/console`). The inner shell completes `numf` to
+# `numfmt` from `coreutils --list`, runs the applet, and sends the marker to the console while
+# its own prompt and echo go to tablog, so the only prompt the driver sees is the outer shell's.
+# Without the cache, `numf` stays `numf1000`, which is not a command, and no `1000` appears.
+coreutils printf 'numf\t1000 > /dev/console\n\004' > tabin && coreutils echo TABIN-OK	TABIN-OK
+coreutils cat tabin | sh > tablog	1000

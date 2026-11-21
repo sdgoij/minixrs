@@ -8,8 +8,8 @@ use crate::write_out;
 use crate::write_err;
 #[cfg(target_os = "minix")]
 use crate::{
-    cat, chmod, chown, cp, echo, errstr, fsck, hangdump, ln, ls, memstat, mkdir, mknod, reboot,
-    regions, rm, set_redirect_fd, sync,
+    cat, chmod, chown, cp, echo, errstr, for_each_dir_entry, fsck, hangdump, ln, ls, memstat,
+    mkdir, mknod, reboot, regions, rm, set_redirect_fd, sync,
 };
 #[cfg(target_os = "minix")]
 use core::sync::atomic::{AtomicI32, AtomicU32, AtomicUsize, Ordering};
@@ -31,30 +31,32 @@ struct ParsedCommand<'a> {
 #[cfg(target_os = "minix")]
 const MAX_PIPELINE: usize = 8;
 
+/// Commands `run_builtin` implements in-process.
+#[cfg(target_os = "minix")]
+const BUILTINS: &[&str] = &[
+    "echo", "cat", "cp", "ls", "mkdir", "rm", "ln", "chmod", "chown", "sync", "mknod", "reboot",
+    "fsck", "memstat", "regions", "hangdump", "help", "clear",
+];
+
+/// Commands the prompt handles before `is_builtin_cmd`: `cd` moves the shell's directory and
+/// `exit` ends its loop, so neither has a `run_builtin` arm.
+#[cfg(target_os = "minix")]
+const INTERNAL_COMMANDS: &[&str] = &["cd", "exit"];
+
 /// True if `cmd` is a shell builtin (run in-process).
 #[cfg(target_os = "minix")]
 fn is_builtin_cmd(cmd: &str) -> bool {
-    matches!(
-        cmd,
-        "echo"
-            | "cat"
-            | "cp"
-            | "ls"
-            | "mkdir"
-            | "rm"
-            | "ln"
-            | "chmod"
-            | "chown"
-            | "sync"
-            | "mknod"
-            | "reboot"
-            | "fsck"
-            | "memstat"
-            | "regions"
-            | "hangdump"
-            | "help"
-            | "clear"
-    )
+    BUILTINS.contains(&cmd)
+}
+
+/// True if `name` is a command the prompt runs itself. Completion uses it to skip the `/bin`
+/// copy of a builtin, which would otherwise be offered twice.
+#[cfg(target_os = "minix")]
+fn is_shell_command(name: &[u8]) -> bool {
+    BUILTINS
+        .iter()
+        .chain(INTERNAL_COMMANDS.iter())
+        .any(|cmd| cmd.as_bytes() == name)
 }
 
 // ---------------------------------------------------------------------------
@@ -368,6 +370,211 @@ fn line_taken() -> u32 {
     count
 }
 
+/// Characters that end a completion word. `>` and `<` are redirections, so the word after one
+/// names a file; `|`, `&` and `;` begin another command.
+#[cfg(any(target_os = "minix", test))]
+fn is_word_sep(b: u8) -> bool {
+    matches!(b, b' ' | b'\t' | b'|' | b'>' | b'<' | b'&' | b';')
+}
+
+/// The word around `cur`: from the previous separator to the next one. The word is empty when
+/// the cursor sits on a separator or in the blank after one.
+#[cfg(any(target_os = "minix", test))]
+fn word_at(line: &[u8], cur: usize) -> (usize, usize) {
+    let cur = cur.min(line.len());
+    let mut start = cur;
+    while start > 0 && !is_word_sep(line[start - 1]) {
+        start -= 1;
+    }
+    let mut end = cur;
+    while end < line.len() && !is_word_sep(line[end]) {
+        end += 1;
+    }
+    (start, end)
+}
+
+/// Whether a word beginning at `start` is a command. The preceding non-blank byte decides:
+/// nothing, `|`, `&` or `;` begins a command; a word or a redirection does not.
+#[cfg(any(target_os = "minix", test))]
+fn at_command_position(line: &[u8], start: usize) -> bool {
+    let mut i = start;
+    while i > 0 && (line[i - 1] == b' ' || line[i - 1] == b'\t') {
+        i -= 1;
+    }
+    if i == 0 {
+        return true;
+    }
+    matches!(line[i - 1], b'|' | b'&' | b';')
+}
+
+/// The length of the longest common prefix of `a` and `b`.
+#[cfg(any(target_os = "minix", test))]
+fn common_prefix_len(a: &[u8], b: &[u8]) -> usize {
+    a.iter().zip(b).take_while(|(a, b)| a == b).count()
+}
+
+/// What a completion scan found: the match count, the longest common prefix of every match, and
+/// the first match, which is the whole answer when exactly one was found.
+#[cfg(any(target_os = "minix", test))]
+struct Matches {
+    count: usize,
+    prefix: [u8; EDIT_MAX],
+    prefix_len: usize,
+    first: [u8; EDIT_MAX],
+    first_len: usize,
+}
+
+#[cfg(any(target_os = "minix", test))]
+impl Matches {
+    fn new() -> Self {
+        Self {
+            count: 0,
+            prefix: [0; EDIT_MAX],
+            prefix_len: 0,
+            first: [0; EDIT_MAX],
+            first_len: 0,
+        }
+    }
+
+    fn offer(&mut self, name: &[u8]) {
+        let n = name.len().min(EDIT_MAX);
+        if self.count == 0 {
+            self.prefix[..n].copy_from_slice(&name[..n]);
+            self.prefix_len = n;
+            self.first[..n].copy_from_slice(&name[..n]);
+            self.first_len = n;
+        } else {
+            self.prefix_len = common_prefix_len(&self.prefix[..self.prefix_len], &name[..n]);
+        }
+        self.count += 1;
+    }
+}
+
+/// True when `name` is one of the newline-separated applet names in `applets`.
+#[cfg(any(target_os = "minix", test))]
+fn applet_cached(applets: &[u8], name: &[u8]) -> bool {
+    !name.is_empty() && applets.split(|&b| b == b'\n').any(|applet| applet == name)
+}
+
+/// The byte that follows a unique path completion: `/` when it names a directory, a space when
+/// it names a file.
+#[cfg(target_os = "minix")]
+fn directory_suffix(dir: &[u8], name: &[u8]) -> u8 {
+    let mut path = [0u8; EDIT_MAX + 64];
+    let len = dir.len() + name.len();
+    if len > path.len() {
+        return b' ';
+    }
+    path[..dir.len()].copy_from_slice(dir);
+    path[dir.len()..len].copy_from_slice(name);
+    let is_dir = minix_std::fs::stat_bytes(&path[..len])
+        .map(|st| st.st_mode & minix_std::fs::S_IFMT == minix_std::fs::S_IFDIR)
+        .unwrap_or(false);
+    if is_dir { b'/' } else { b' ' }
+}
+
+/// Room for the applet names `coreutils --list` prints. The `feat_minix` set is about 100
+/// names, under 1 KiB; the rest is headroom.
+#[cfg(target_os = "minix")]
+const APPLETS_MAX: usize = 2048;
+
+/// The multicall's applet names, read once from `coreutils --list`.
+///
+/// Command completion otherwise knows only names that are files in `/bin` and `/sbin`, and the
+/// applets are not: they are dispatch targets inside `/bin/coreutils`. The read is lazy so a
+/// boot that never completes a command does not pay the 6 MiB multicall's first-run pre-fault,
+/// and the cache keeps later Tabs from paying it again. A failed read stays an empty ready
+/// cache, so a missing multicall is not retried on every Tab.
+#[cfg(target_os = "minix")]
+struct AppletCache {
+    names: [u8; APPLETS_MAX],
+    len: usize,
+    ready: bool,
+}
+
+#[cfg(target_os = "minix")]
+impl AppletCache {
+    fn new() -> Self {
+        Self {
+            names: [0; APPLETS_MAX],
+            len: 0,
+            ready: false,
+        }
+    }
+
+    fn ensure(&mut self) {
+        if self.ready {
+            return;
+        }
+        self.ready = true;
+        self.len = 0;
+        let (r, w) = match minix_std::fs::pipe() {
+            Ok(pair) => pair,
+            Err(_) => return,
+        };
+        let (r, w) = lift_pipe_fds(r, w, 0);
+        // A pipe end still below 3 could not be lifted, and reading it would read the console.
+        if r < 3 || w < 3 {
+            let _ = minix_std::fs::close(r);
+            let _ = minix_std::fs::close(w);
+            return;
+        }
+        let pid = minix_rt::fork();
+        if pid < 0 {
+            let _ = minix_std::fs::close(r);
+            let _ = minix_std::fs::close(w);
+            return;
+        }
+        if pid == 0 {
+            if minix_std::fs::dup2(w, 1).is_err() {
+                minix_rt::exit(127);
+            }
+            unsafe { minix_rt::set_fd_vfs(1, 1) };
+            let _ = minix_std::fs::close(r);
+            let _ = minix_std::fs::close(w);
+            let argv0 = b"/bin/coreutils\0";
+            let argv1 = b"--list\0";
+            let argv = [argv0.as_ptr(), argv1.as_ptr(), core::ptr::null()];
+            unsafe {
+                minix_rt::execve(
+                    COREUTILS_PATH.as_ptr(),
+                    COREUTILS_PATH.len(),
+                    argv.as_ptr(),
+                    core::ptr::null(),
+                )
+            };
+            minix_rt::exit(127);
+        }
+        let _ = minix_std::fs::close(w);
+        let mut scratch = [0u8; 256];
+        loop {
+            match unsafe { minix_std::fs::read(r, &mut scratch) } {
+                Ok(0) => break,
+                Ok(n) => {
+                    let n = n as usize;
+                    let room = APPLETS_MAX - self.len;
+                    let copy = n.min(room);
+                    self.names[self.len..self.len + copy].copy_from_slice(&scratch[..copy]);
+                    self.len += copy;
+                }
+                Err(e) if e.0 == -minix_std::EAGAIN => continue,
+                Err(_) => break,
+            }
+        }
+        let _ = minix_std::fs::close(r);
+        if minix_rt::waitpid_status(pid) != 0 {
+            self.len = 0;
+        } else if self.len == APPLETS_MAX {
+            // Keep the last complete name: a partial one would complete to something that is
+            // not an applet.
+            self.len = match self.names[..self.len].iter().rposition(|&b| b == b'\n') {
+                Some(pos) => pos + 1,
+                None => 0,
+            };
+        }
+    }
+}
+
 /// Raw-mode line editor state (the shell's own echo/editing — the tty's
 /// canonical mode cannot do arrows or history).
 #[cfg(any(target_os = "minix", test))]
@@ -381,6 +588,8 @@ struct Editor {
     hist_pos: usize,
     draft: [u8; EDIT_MAX],
     draft_len: usize,
+    #[cfg(target_os = "minix")]
+    applets: AppletCache,
 }
 
 #[cfg(any(target_os = "minix", test))]
@@ -396,6 +605,8 @@ impl Editor {
             hist_pos: 0,
             draft: [0; EDIT_MAX],
             draft_len: 0,
+            #[cfg(target_os = "minix")]
+            applets: AppletCache::new(),
         }
     }
 
@@ -404,6 +615,133 @@ impl Editor {
         self.line[..n].copy_from_slice(&src[..n]);
         self.len = n;
         self.cur = n;
+    }
+
+    /// Insert what `matches` adds after the `base_len` bytes already typed, then the suffix when
+    /// one candidate matched and the word ends the line. Returns false when nothing was added,
+    /// which is the caller's cue to beep.
+    #[cfg(any(target_os = "minix", test))]
+    fn apply_completion(
+        &mut self,
+        word_end: usize,
+        base_len: usize,
+        matches: &Matches,
+        suffix: Option<u8>,
+    ) -> bool {
+        let candidate = match matches.count {
+            0 => return false,
+            1 => &matches.first[..matches.first_len],
+            _ => &matches.prefix[..matches.prefix_len],
+        };
+        if base_len > candidate.len() {
+            return false;
+        }
+        let extra = &candidate[base_len..];
+        // A space or slash joins the completed word to what follows, so it only goes on when
+        // the word is the last thing on the line.
+        let suffix = if matches.count == 1 && self.len == word_end {
+            suffix
+        } else {
+            None
+        };
+        let add = extra.len() + if suffix.is_some() { 1 } else { 0 };
+        if add == 0 || self.len + add > EDIT_MAX {
+            return false;
+        }
+        while self.cur < word_end {
+            self.cursor_right();
+        }
+        for &b in extra {
+            self.insert(b);
+        }
+        if let Some(b) = suffix {
+            self.insert(b);
+        }
+        true
+    }
+
+    /// Complete the word at the cursor: command names at a command position, directory entries
+    /// anywhere else. One match is completed and followed by a space (or `/` for a directory);
+    /// several complete to their longest common prefix. A beep means there was nothing to add.
+    #[cfg(target_os = "minix")]
+    fn complete(&mut self) {
+        let command = {
+            let line = &self.line[..self.len];
+            let (start, end) = word_at(line, self.cur);
+            at_command_position(line, start) && !line[start..end].contains(&b'/')
+        };
+        if command {
+            self.applets.ensure();
+        }
+        let (word_end, base_len, matches, suffix) = {
+            let line = &self.line[..self.len];
+            let (start, end) = word_at(line, self.cur);
+            let word = &line[start..end];
+            if command {
+                let mut matches = Matches::new();
+                for cmd in BUILTINS.iter().chain(INTERNAL_COMMANDS.iter()) {
+                    let name = cmd.as_bytes();
+                    if name.starts_with(word) {
+                        matches.offer(name);
+                    }
+                }
+                let applets = &self.applets.names[..self.applets.len];
+                for applet in applets.split(|&b| b == b'\n') {
+                    if !applet.is_empty() && !is_shell_command(applet) && applet.starts_with(word) {
+                        matches.offer(applet);
+                    }
+                }
+                for dir in [&b"/bin"[..], &b"/sbin"[..]] {
+                    if let Ok(fd) = unsafe { minix_std::fs::open(dir, 0, 0) } {
+                        for_each_dir_entry(fd, |name| {
+                            if name != b"."
+                                && name != b".."
+                                && !is_shell_command(name)
+                                && !applet_cached(applets, name)
+                                && name.starts_with(word)
+                            {
+                                matches.offer(name);
+                            }
+                        });
+                        let _ = minix_std::fs::close(fd);
+                    }
+                }
+                (end, word.len(), matches, Some(b' '))
+            } else {
+                let slash = word.iter().rposition(|&b| b == b'/');
+                let (dir, base) = match slash {
+                    Some(i) => (&word[..=i], &word[i + 1..]),
+                    None => (&b"."[..], word),
+                };
+                let mut matches = Matches::new();
+                if let Ok(fd) = unsafe { minix_std::fs::open(dir, 0, 0) } {
+                    for_each_dir_entry(fd, |name| {
+                        if name == b"." || name == b".." {
+                            if base.starts_with(b".") && name.starts_with(base) {
+                                matches.offer(name);
+                            }
+                            return;
+                        }
+                        if name.starts_with(b".") && !base.starts_with(b".") {
+                            return;
+                        }
+                        if name.starts_with(base) {
+                            matches.offer(name);
+                        }
+                    });
+                    let _ = minix_std::fs::close(fd);
+                }
+                let suffix = if matches.count == 1 {
+                    Some(directory_suffix(dir, &matches.first[..matches.first_len]))
+                } else {
+                    None
+                };
+                (end, base.len(), matches, suffix)
+            }
+        };
+        if matches.count == 0 || !self.apply_completion(word_end, base_len, &matches, suffix) {
+            tty_write(b"\x07");
+        }
     }
 
     /// Blank the current row and redraw the prompt + line, positioning the
@@ -536,7 +874,7 @@ impl Editor {
         }
     }
 
-    #[cfg(target_os = "minix")]
+    #[cfg(any(target_os = "minix", test))]
     fn cursor_right(&mut self) {
         if self.cur < self.len {
             tty_write(&self.line[self.cur..self.cur + 1]);
@@ -711,6 +1049,7 @@ fn read_line(ed: &mut Editor, buf: &mut [u8]) -> usize {
                 return n;
             }
             0x08 | 0x7F => ed.backspace(),
+            0x09 => ed.complete(),
             0x01 => ed.cursor_home(),
             0x05 => ed.cursor_end(),
             0x0B => ed.kill_to_end(),
@@ -1834,5 +2173,99 @@ mod tests {
             "the multicall is not one of its own applets"
         );
         assert!(!should_try_multicall("", ENOENT));
+    }
+
+    fn matches_of(names: &[&str]) -> Matches {
+        let mut matches = Matches::new();
+        for name in names {
+            matches.offer(name.as_bytes());
+        }
+        matches
+    }
+
+    #[test]
+    fn a_completion_word_ends_at_a_separator() {
+        assert_eq!(word_at(b"ls fi", 5), (3, 5));
+        assert_eq!(word_at(b"ls fi", 4), (3, 5));
+        assert_eq!(word_at(b"ls ", 3), (3, 3));
+        assert_eq!(word_at(b"echo a | wc", 11), (9, 11));
+        assert_eq!(word_at(b"ls fi|wc", 6), (6, 8));
+    }
+
+    #[test]
+    fn a_command_position_follows_a_pipeline_and_a_logical_and() {
+        assert!(at_command_position(b"ls", 0));
+        assert!(!at_command_position(b"echo fi", 5));
+        assert!(at_command_position(b"echo a | wc", 9));
+        assert!(at_command_position(b"echo a && wc", 10));
+        assert!(!at_command_position(b"echo a > out", 9));
+        assert!(at_command_position(b"   ls", 3));
+    }
+
+    #[test]
+    fn candidates_complete_to_their_longest_common_prefix() {
+        assert_eq!(common_prefix_len(b"file1", b"file2"), 4);
+        assert_eq!(common_prefix_len(b"fi", b"file"), 2);
+        assert_eq!(common_prefix_len(b"", b"x"), 0);
+        let two = matches_of(&["file1", "file2"]);
+        assert_eq!(two.count, 2);
+        assert_eq!(&two.prefix[..two.prefix_len], &b"file"[..]);
+        let one = matches_of(&["echo"]);
+        assert_eq!(one.count, 1);
+        assert_eq!(&one.first[..one.first_len], &b"echo"[..]);
+    }
+
+    #[test]
+    fn a_cached_applet_is_recognized_by_its_whole_name() {
+        let list = b"cat\nwc\nhead\n";
+        assert!(applet_cached(list, b"wc"));
+        assert!(!applet_cached(list, b"catx"));
+        assert!(!applet_cached(list, b""));
+    }
+
+    #[test]
+    fn a_unique_completion_adds_the_rest_and_a_separator() {
+        let mut ed = Editor::new();
+        ed.set_line(b"ech");
+        assert!(ed.apply_completion(3, 3, &matches_of(&["echo"]), Some(b' ')));
+        assert_eq!(&ed.line[..ed.len], &b"echo "[..]);
+        assert_eq!(ed.cur, 5);
+    }
+
+    /// A path completion is measured against the basename, so the directory the user typed
+    /// stays as it was.
+    #[test]
+    fn a_path_completion_adds_only_the_basename_suffix() {
+        let mut ed = Editor::new();
+        ed.set_line(b"cat src/li");
+        assert!(ed.apply_completion(10, 2, &matches_of(&["lib.rs"]), Some(b' ')));
+        assert_eq!(&ed.line[..ed.len], &b"cat src/lib.rs "[..]);
+    }
+
+    #[test]
+    fn an_ambiguous_completion_adds_only_the_common_prefix() {
+        let mut ed = Editor::new();
+        ed.set_line(b"fi");
+        assert!(ed.apply_completion(2, 2, &matches_of(&["file1", "file2"]), None));
+        assert_eq!(&ed.line[..ed.len], &b"file"[..]);
+        assert_eq!(ed.cur, 4);
+    }
+
+    #[test]
+    fn an_ambiguous_completion_with_nothing_more_to_add_changes_nothing() {
+        let mut ed = Editor::new();
+        ed.set_line(b"fi");
+        assert!(!ed.apply_completion(2, 2, &matches_of(&["fi1", "fi2"]), None));
+        assert_eq!(&ed.line[..ed.len], &b"fi"[..]);
+    }
+
+    #[test]
+    fn a_completion_in_the_middle_of_a_line_keeps_the_text_after_it() {
+        let mut ed = Editor::new();
+        ed.set_line(b"ls fi | wc");
+        ed.cur = 5;
+        assert!(ed.apply_completion(5, 2, &matches_of(&["file1"]), Some(b' ')));
+        assert_eq!(&ed.line[..ed.len], &b"ls file1 | wc"[..]);
+        assert_eq!(ed.cur, 8);
     }
 }

@@ -1344,6 +1344,38 @@ pub struct Dirent {
 
 const DIRENT_NAME_OFF: usize = 13; // offset of d_name in struct Dirent
 
+/// Walk a directory's entries, handing each name to `f`.
+///
+/// `getdents` returns one buffer's worth per call, so a single call lists only a prefix of a
+/// directory larger than it; the loop runs until it reports the end. Returns false when a call
+/// failed, which is the one error the names alone cannot show.
+#[cfg(target_os = "minix")]
+pub(crate) fn for_each_dir_entry(fd: i32, mut f: impl FnMut(&[u8])) -> bool {
+    let mut buf = [0u8; 4096];
+    loop {
+        let n = match minix_std::fs::getdents(fd, &mut buf) {
+            Ok(n) if n > 0 => n as usize,
+            Ok(_) => return true,
+            Err(_) => return false,
+        };
+        let mut off = 0usize;
+        while off < n {
+            if off + DIRENT_NAME_OFF > n {
+                break;
+            }
+            let reclen = u16::from_ne_bytes([buf[off + 8], buf[off + 9]]) as usize;
+            if reclen == 0 || off + reclen > n {
+                break;
+            }
+            let namlen = u16::from_ne_bytes([buf[off + 10], buf[off + 11]]) as usize;
+            if namlen > 0 && off + DIRENT_NAME_OFF + namlen <= n {
+                f(&buf[off + DIRENT_NAME_OFF..off + DIRENT_NAME_OFF + namlen]);
+            }
+            off += reclen;
+        }
+    }
+}
+
 /// Names held for one `ls` listing: enough for this image's `/bin`, and a bound
 /// on what a directory far larger than that costs. There is no allocator in the
 /// userland, so a listing that overflows is reported rather than silently
