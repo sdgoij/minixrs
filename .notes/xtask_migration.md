@@ -746,3 +746,85 @@ hunt (N, MEM, K, CMD, MARKER, COMPLETE, ARCH) turned into named flags. The three
 addresses for one build and asserted nothing, while the `probe_offsets` test that pins the same
 structure layout stays. What is left in `tools/` is the WSL-bound build pair, their `cc` wrappers,
 the two parse-time lookups and the pin shims.
+
+## 12 The WSL entry point, and open question 2
+
+Open question 2 asked whether `build-bash.py` and `build-mesa.py`, with the `cc`
+wrappers they drive, could be reached through one small entry point on the WSL
+side instead of staying Python. Measured on this checkout: they can, and most of
+the Rust they need is already in `crates/xtask`.
+
+What is already there:
+
+* `crates/xtask/src/arch.rs` is the `ccarch.py` table, and says so: "Three
+  drivers need the same answers (`cc-minix`, the smoke binaries, and the bash
+  build), so the table lives here rather than three times over."
+* `crates/xtask/src/cc.rs` is the `-nostdinc` half of `ccflags.py`. Only
+  `link_passthrough` and its two flag tables (`-L`, `-l`, `-Wl,`, `-static`,
+  `-rdynamic`, `-pthread`; `-Xlinker`, `-u`, `-z`) have no Rust counterpart.
+* `crates/xtask/src/toolchain.rs` resolves the stage1 `rustc` and finds an lld,
+  which is what `stage1.py` and `lld.py` do for the wrappers.
+* `crates/xtask/src/build/dynlink.rs` already compiles `-fPIC` objects and links
+  shared objects with lld, which is the shape of `cc-dso-minix.py`.
+
+What was measured here:
+
+* FedoraLinux-44 in WSL has cargo 1.96, clang 22.1.8, make 4.4, python 3.14 and
+  `rust/build/x86_64-unknown-linux-gnu/stage1/bin/rustc` at 1.100.0-dev, so the
+  Linux host has everything a link needs.
+* `cargo build --package xtask --target-dir .xtask/linux` under that distro
+  succeeds and `.xtask/linux/debug/xtask --list` prints the command tree. The
+  WSL-side entry point already exists; today it is Python.
+* `build-bash.py`'s Windows path is already the entry point: it runs
+  `wsl -d FedoraLinux-44 -- bash -lc 'cd /mnt/c/... && python3 tools/build-bash.py ...'`.
+  Replacing the inner word with the Linux `xtask` is the whole mechanism.
+* The meson cross file in `build-mesa.py` writes an array,
+  `c = ['<python>', 'tools/cc-dso-minix.py', 'x86']`, so
+  `c = ['<repo>/.xtask/linux/debug/xtask', 'cc', 'dso', 'x86']` is a drop-in.
+  The `CC` make sees in bash's Makefile is the same shape.
+* `cargo xtask pin bash|mesa` already exists and reads `tools/pins.ini`; the
+  three shims only re-export those values for scripts and workflows.
+
+The design that follows is two subcommands and one helper:
+
+1. `crates/xtask/src/wsl.rs`: `distro()` from `MINIX_WSL_DISTRO` (default
+   `FedoraLinux-44`), `path()` for `C:\a\b` to `/mnt/c/a/b`, and
+   `reenter(argv)`, which on Windows builds the Linux binary if it is missing
+   (`cargo build --package xtask --target-dir .xtask/linux` inside the same
+   login shell, because `~/.cargo/bin` is only on a login shell's PATH) and runs
+   it. `.xtask/linux` and not `.xtask`: cargo fingerprints and the
+   `cargo clean cannot delete a running executable` rule (3.1) are per host.
+2. `xtask cc minix|dso <arch> <args...>`: the two wrappers, process-shaped. The
+   argv split (`VALUE_FLAGS`, the version probes that must answer without
+   compiling, compile-only versus link, `-Wl,` and soname handling for the DSO
+   one) is what has to be ported exactly; the tables and the link itself are in
+   the tree already.
+3. `xtask build bash|mesa`: the fetch/configure/make and fetch/cross-file/
+   meson drivers, with `wsl::reenter` on Windows.
+
+Size: 2093 lines of Python remain. `stage1.py` and `lld.py` (240) stay for the
+reason in 3.2, which leaves roughly 1850 lines deletable for 700 to 900 lines of
+Rust, much of which the four files above already hold.
+
+Order, and what each is validated by:
+
+* W1, the `cc` wrappers, first, because everything else calls them. Give both a
+  `--dry-run` that prints the command instead of running it, capture Python's
+  argv and Rust's for the same inputs (bash's recorded compile and link lines
+  from `make.log` are the corpus), diff them, then run one real
+  `just build-bash x86` and `just test-bash x86` plus
+  `just test-interactive-bash x86`.
+* W2, `build bash`. Validated by the same two gates plus `cargo xtask fetch bash`
+  still installing the artifact a rebuilt `build-bash` produced.
+* W3, `build mesa`, is optional and keeps the third-party argument from 3.10 and
+  question 2: the script is long because meson, ninja and libdrm are long. Do it
+  for the flag tables (`cc-dso-minix` is needed by W1 anyway) or not at all.
+* W4: the release workflows call `cargo xtask pin bash|mesa` on runners that
+  already run `just build-bash`, and the three shims are deleted with them.
+
+The traps to keep: `newest_libc_rlib` is by mtime because two hosts' rlibs sit in
+one `deps/`, and `build-bash` deletes the stale one; the version probes must
+answer or configure rejects the compiler; the DSO wrapper has to split `-Wl,a,b`
+and honour `-Wl,-soname`; the inner shell must be a login shell; and a Windows
+`cargo clean` must never have to delete a running binary, which is why the Linux
+build gets its own target dir.
