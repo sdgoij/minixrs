@@ -28,13 +28,13 @@
 #
 # The `gltriangle` job consumes the Mesa/libdrm DSOs the same way, from the
 # `mesa-<pin>` release `mesa-release.yml` publishes for the pair
-# `tools/mesa_pin.py` pins. Its `mesa-pin`/`mesa` pair is the `rust-pin`/`stage1`
+# `tools/pins.ini` pins. Its `mesa-pin`/`mesa` pair is the `rust-pin`/`stage1`
 # pattern again: `just fetch-mesa <arch>` downloads the arch's DSOs, and a Mesa
 # build runs only when the pin has no release yet (a pin bump, a new
-# `cc-dso-minix.py` feature, or a manual `mesa release` run).
+# `cargo xtask cc dso` feature, or a manual `mesa release` run).
 #
 # The `bash` job follows the same shape for the shell, from the `bash-<pin>`
-# release `bash-release.yml` publishes for the commit `tools/bash_pin.py` pins
+# release `bash-release.yml` publishes for the commit `tools/pins.ini` pins
 # (`bash-pin`/`bash-release`): the 289 MiB clone and the C build happen only when
 # the pin has no release yet.
 #
@@ -600,7 +600,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          pin="$(python3 tools/bash_pin.py)"
+          pin="$(cargo xtask pin bash)"
           echo "pin=${pin}" >> "$GITHUB_OUTPUT"
 
           published=false
@@ -737,7 +737,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          pin="$(python3 tools/mesa_pin.py)"
+          pin="$(cargo xtask pin mesa)"
           echo "pin=${pin}" >> "$GITHUB_OUTPUT"
 
           published=false

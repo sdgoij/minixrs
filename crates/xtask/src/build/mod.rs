@@ -11,6 +11,7 @@ pub mod dynlibc;
 pub mod dynlink;
 pub mod libcxx;
 pub mod mesa;
+pub mod mesa_tree;
 pub mod std_hello;
 
 use std::fs;

@@ -106,12 +106,12 @@ fn split_args(argv: &[String]) -> Split {
 
 pub fn run(root: &Path, arch: &Arch, argv: &[String], dry_run: bool) -> io::Result<bool> {
     if argv.is_empty() {
-        eprintln!("cc-minix: no arguments");
+        eprintln!("cc minix: no arguments");
         return Ok(false);
     }
     if argv.len() == 1 && VERSION_PROBES.contains(&argv[0].as_str()) {
         println!(
-            "cc-minix: clang for {}, linked by the minix fork's stage1 rustc",
+            "cc minix: clang for {}, linked by the minix fork's stage1 rustc",
             arch.clang_target()
         );
         return Ok(true);
@@ -120,12 +120,12 @@ pub fn run(root: &Path, arch: &Arch, argv: &[String], dry_run: bool) -> io::Resu
     let Some(rustc) = toolchain::find_stage1_rustc(root) else {
         let host = toolchain::host_triple().unwrap_or_else(|| "<unknown>".to_string());
         eprintln!(
-            "cc-minix: no stage1 rustc at rust/build/{host}/stage1/bin - run `just fetch-stage1` (or bootstrap) on this host"
+            "cc minix: no stage1 rustc at rust/build/{host}/stage1/bin - run `just fetch-stage1` (or bootstrap) on this host"
         );
         return Ok(false);
     };
     let Some(lld) = toolchain::find_lld(root) else {
-        eprintln!("cc-minix: no lld to link with (see `cargo xtask check static`)");
+        eprintln!("cc minix: no lld to link with (see `cargo xtask check static`)");
         return Ok(false);
     };
 
@@ -146,7 +146,7 @@ pub fn run(root: &Path, arch: &Arch, argv: &[String], dry_run: bool) -> io::Resu
     }
 
     if split.inputs.is_empty() {
-        eprintln!("cc-minix: no input files");
+        eprintln!("cc minix: no input files");
         return Ok(false);
     }
 
@@ -199,7 +199,7 @@ pub fn run(root: &Path, arch: &Arch, argv: &[String], dry_run: bool) -> io::Resu
         Ok(rlib) => rlib,
         Err(_) => {
             eprintln!(
-                "cc-minix: no minix-libc rlib for {} - run `just build-bash {}` (it builds one with this host's stage1) or `cargo build -p minix-libc --target {} --release`",
+                "cc minix: no minix-libc rlib for {} - run `just build-bash {}` (it builds one with this host's stage1) or `cargo build -p minix-libc --target {} --release`",
                 arch.triple, arch.name, arch.triple
             );
             return Ok(false);

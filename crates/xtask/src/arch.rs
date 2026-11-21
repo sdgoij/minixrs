@@ -78,10 +78,10 @@ impl Arch {
     /// The PIC counterpart of [`Self::base_cflags`], for an object that ends up in
     /// a shared library.
     ///
-    /// The red-zone flag and RISC-V's `-march`/`-mabi` are the same, so a compile
-    /// here agrees with the one `cc-dso-minix` does for Mesa. There is no
-    /// `--target=` here: the C++ build names the triple through
-    /// `CMAKE_<LANG>_COMPILER_TARGET` and `cc-dso-minix` through its own argv.
+    /// This is the **cmake** variant: the C++ runtime build names the triple
+    /// through `CMAKE_<LANG>_COMPILER_TARGET`, so there is no `--target=` here and
+    /// the caller adds `-fno-stack-protector`. `crate::cc::dso`, the `cc` meson
+    /// calls, derives its own set from [`Self::base_cflags`] instead.
     pub fn pic_cflags(&self) -> Vec<String> {
         let mut flags = vec!["-ffreestanding".to_string(), "-fPIC".to_string()];
         if self.red_zone {

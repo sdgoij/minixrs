@@ -871,3 +871,25 @@ run, but the Python builder does the same from the same tree state, so that is
 state to check that. `just test-bash x86` and `just test-interactive-bash x86`
 are green. What remains Python is the Mesa trio (`build-mesa`,
 `cc-dso-minix`, `ccflags`), the parse-time lookups and the pin shims.
+
+W3 and W4 landed together. `cargo xtask build mesa [all|x86|riscv64|aarch64]
+[--force] [--build] [--stage]` replaces `tools/build-mesa.py`: fetch Mesa and
+libdrm by tag and assert the commit, write the meson cross file naming this
+binary's `cc dso`, build libdrm first into a fresh prefix so Mesa's pkg-config
+cannot find a host one, configure Mesa against it with the managarm/DragonFly
+macros, and stage the nine guest-named DSOs into `target/mesa/<arch>/lib`. All
+nine came out byte-identical to the staged files the Python builder produced, and
+`just test-gltriangle x86` renders through surfaceless EGL on softpipe, so the
+`cc dso` port from W1 is now exercised by a real meson build too. That took
+`cc-dso-minix.py`, `ccarch.py` and `ccflags.py` with it, and the two wrappers'
+messages now say `cc minix` and `cc dso` because the scripts they name are gone.
+
+With `build-bash.py` and `build-mesa.py` ported, the pin shims had no Python
+importer left, so the release workflows now call `cargo xtask pin bash|mesa`
+(their fields cover the tag, the describe and both Mesa commits) and
+`bash_pin.py`, `mesa_pin.py` and `pin.py` are deleted. The values are unchanged:
+`bash-b46081660216-rea7d9eb9077a`, and the two Mesa commits the pin names.
+
+What is left in `tools/*.py` is `stage1.py` and `lld.py`, the two lookups the
+Justfile needs at parse time before a toolchain exists (section 3.2). That is the
+endpoint the plan recorded.

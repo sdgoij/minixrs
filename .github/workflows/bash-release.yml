@@ -3,7 +3,7 @@
 # seconds instead of cloning 289 MiB and building 209 objects.
 #
 # This is the `toolchain-release.yml` pattern applied to bash. The pin is
-# `tools/bash_pin.py`: the upstream commit and the `rust` gitlink, from which the
+# `tools/pins.ini`: the upstream commit and the `rust` gitlink, from which the
 # release tag is derived, so an artifact matches both the sources and the toolchain
 # in the tree. Manual or automatic:
 # `workflow_dispatch` rebuilds on demand (after a pin bump, or a change to
@@ -76,7 +76,7 @@ jobs:
         id: package
         run: |
           set -euo pipefail
-          pin="$(python3 tools/bash_pin.py)"
+          pin="$(cargo xtask pin bash)"
           asset="${pin}-${{ matrix.arch }}.tar.xz"
           binary="target/bash/${{ matrix.arch }}/bash"
           test -f "${binary}" || { echo "!! no built bash at ${binary}"; exit 1; }
@@ -105,7 +105,7 @@ jobs:
 
       - name: Resolve the pin
         id: pin
-        run: echo "tag=$(python3 tools/bash_pin.py)" >> "$GITHUB_OUTPUT"
+        run: echo "tag=$(cargo xtask pin bash)" >> "$GITHUB_OUTPUT"
 
       - uses: actions/download-artifact@v8
         with:
@@ -120,15 +120,15 @@ jobs:
         run: |
           set -euo pipefail
           tag='${{ steps.pin.outputs.tag }}'
-          describe="$(python3 -c 'import sys;sys.path.insert(0,"tools");import bash_pin as p;print(p.BASH_DESCRIBE)')"
-          commit="$(python3 -c 'import sys;sys.path.insert(0,"tools");import bash_pin as p;print(p.BASH_COMMIT)')"
+          describe="$(cargo xtask pin bash describe)"
+          commit="$(cargo xtask pin bash commit)"
           shopt -s nullglob
           assets=(bash-*.tar.xz)
           test "${#assets[@]}" -eq 3 || {
             echo "!! expected 3 arch assets, found ${#assets[@]}"; ls -l; exit 1; }
           sha256sum "${assets[@]}" > SHA256SUMS
           notes="$(printf '%s\n' \
-            "GNU bash for the commit pinned in \`tools/bash_pin.py\`:" \
+            "GNU bash for the commit pinned in \`tools/pins.ini\`:" \
             "" \
             "- bash \`${describe}\` (\`${commit}\`)" \
             "- arches: x86_64, riscv64, aarch64 (one asset each)" \

@@ -144,6 +144,15 @@ fn run_build(root: &Path, matches: &clap::ArgMatches) -> io::Result<bool> {
         Some(("libcxx-toolchain", matches)) => {
             build::libcxx::toolchain_command(root, target(matches)).map(|()| true)
         }
+        Some(("mesa", matches)) => build::mesa_tree::run(
+            root,
+            &build::mesa_tree::Options {
+                target: target(matches),
+                force: matches.get_flag("force"),
+                build: matches.get_flag("build"),
+                stage_only: matches.get_flag("stage"),
+            },
+        ),
         Some(("gltriangle", matches)) => build::mesa::gltriangle(root, target(matches)),
         Some(("gui", matches)) => build::mesa::gui(root, target(matches)),
         Some(("gbmtest", matches)) => build::mesa::gbmtest(root, target(matches)),
@@ -408,6 +417,29 @@ fn command() -> clap::Command {
                                 .value_name("N")
                                 .value_parser(clap::value_parser!(u64).range(1..))
                                 .help("Parallel make jobs (default: the host's cores)"),
+                        ),
+                )
+                .subcommand(
+                    clap::Command::new("mesa")
+                        .about("Fetch and build Mesa + libdrm, and stage the DSOs")
+                        .arg(target_arg("x86"))
+                        .arg(
+                            clap::Arg::new("force")
+                                .long("force")
+                                .action(clap::ArgAction::SetTrue)
+                                .help("Refetch the sources and set the build trees up again"),
+                        )
+                        .arg(
+                            clap::Arg::new("build")
+                                .long("build")
+                                .action(clap::ArgAction::SetTrue)
+                                .help("Run ninja as well as meson setup"),
+                        )
+                        .arg(
+                            clap::Arg::new("stage")
+                                .long("stage")
+                                .action(clap::ArgAction::SetTrue)
+                                .help("Only copy the built DSOs into target/mesa"),
                         ),
                 )
                 .subcommand(

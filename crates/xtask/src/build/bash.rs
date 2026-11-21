@@ -140,7 +140,7 @@ fn reenter(root: &Path, target: Option<&str>, force: bool, jobs: Option<u64>) ->
 }
 
 /// `path` as WSL sees it: `C:\a\b` is `/mnt/c/a/b`.
-fn wsl_path(path: &Path) -> String {
+pub(crate) fn wsl_path(path: &Path) -> String {
     let text = path.to_string_lossy().replace('\\', "/");
     let bytes = text.as_bytes();
     if bytes.len() > 1 && bytes[1] == b':' {
@@ -150,7 +150,7 @@ fn wsl_path(path: &Path) -> String {
 }
 
 /// One word for a POSIX shell, in single quotes.
-fn quote(text: &str) -> String {
+pub(crate) fn quote(text: &str) -> String {
     format!("'{}'", text.replace('\'', r"'\''"))
 }
 

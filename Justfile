@@ -1010,19 +1010,19 @@ gltriangle arch="x86":
     @just gltriangle-{{arch}}
 
 gltriangle-x86: dynlib-x86
-    python tools/build-mesa.py x86 --stage
+    cargo xtask build mesa x86 --stage
     @test -f target/mesa/x86/lib/libEGL.so.1 || (echo 'gltriangle: no Mesa DSOs — run `just build-mesa x86 --build` first' >&2; exit 1)
     cargo xtask build gltriangle x86
     @echo "gltriangle: /bin/gltriangle built and the Mesa DSOs staged (x86_64)"
 
 gltriangle-riscv64: dynlib-riscv64
-    python tools/build-mesa.py riscv64 --stage
+    cargo xtask build mesa riscv64 --stage
     @test -f target/mesa/riscv64/lib/libEGL.so.1 || (echo 'gltriangle: no Mesa DSOs — run `just build-mesa riscv64 --build` first' >&2; exit 1)
     cargo xtask build gltriangle riscv64
     @echo "gltriangle: /bin/gltriangle built and the Mesa DSOs staged (riscv64)"
 
 gltriangle-aarch64: dynlib-aarch64
-    python tools/build-mesa.py aarch64 --stage
+    cargo xtask build mesa aarch64 --stage
     @test -f target/mesa/aarch64/lib/libEGL.so.1 || (echo 'gltriangle: no Mesa DSOs — run `just build-mesa aarch64 --build` first' >&2; exit 1)
     cargo xtask build gltriangle aarch64
     @echo "gltriangle: /bin/gltriangle built and the Mesa DSOs staged (aarch64)"
@@ -1069,7 +1069,7 @@ test-gltriangle-virgl-x86 boot-timeout="180": gltriangle-x86 boot-image-x86
 # `cargo xtask build wlgl` is the link: the arch's C crt0 for `_start`, `minix-user.ld`,
 # and Mesa's headers for the GL half (`tools/wlgl_render.c`).
 wlgl-x86: userland-x86 dynlib-x86
-    python tools/build-mesa.py x86 --stage
+    cargo xtask build mesa x86 --stage
     @test -f target/mesa/x86/lib/libEGL.so.1 || (echo 'wlgl: no Mesa DSOs — run `just build-mesa x86 --build` first' >&2; exit 1)
     cargo xtask build wlgl x86
     @echo "wlgl: /bin/wlgl built and the Mesa DSOs staged (x86_64)"
@@ -1091,7 +1091,7 @@ test-wlgl-x86 boot-timeout="60": wlgl-x86 boot-image-x86
 # is a dynamic image that loads Mesa, but the GL half is the `render` crate rather than a C
 # object, and it draws a pass (clear, quad, glyph quads) instead of a triangle.
 gui-x86: userland-x86 dynlib-x86
-    python tools/build-mesa.py x86 --stage
+    cargo xtask build mesa x86 --stage
     @test -f target/mesa/x86/lib/libEGL.so.1 || (echo 'gui: no Mesa DSOs — run `just build-mesa x86 --build` first' >&2; exit 1)
     cargo xtask build gui x86
     @echo "gui: /bin/gui built and the Mesa DSOs staged (x86_64)"
@@ -1111,7 +1111,7 @@ test-gui-x86 boot-timeout="120": gui-x86 boot-image-x86
 # `libgbm` and `libdrm` and includes the GBM/libdrm headers from the source checkouts, so it
 # is built from `just build-mesa x86 --build` like the DSOs are.
 gbmtest-x86: userland-x86 dynlib-x86
-    python tools/build-mesa.py x86 --stage
+    cargo xtask build mesa x86 --stage
     @test -f target/mesa/x86/lib/libgbm.so.1 || (echo 'gbmtest: no libgbm — run `just build-mesa x86 --build` first' >&2; exit 1)
     cargo xtask build gbmtest x86
     @echo "gbmtest: /bin/gbmtest built and the Mesa DSOs staged (x86_64)"
@@ -1165,7 +1165,7 @@ test-wldmabuf-x86: build-x86
 # `-Dplatforms=` leaves no `EGL_PLATFORM_GBM_KHR` — and `tools/egl_bo_probe.c` is the
 # measurement that it works on the port.
 wldmabufgl-x86: userland-x86 dynlib-x86
-    python tools/build-mesa.py x86 --stage
+    cargo xtask build mesa x86 --stage
     @test -f target/mesa/x86/lib/libgbm.so.1 || (echo 'wldmabufgl: no libgbm — run `just build-mesa x86 --build` first' >&2; exit 1)
     cargo xtask build wldmabufgl x86
     @echo "wldmabufgl: /bin/wldmabufgl built and the Mesa DSOs staged (x86_64)"
@@ -1191,7 +1191,7 @@ test-wldmabufgl-x86: wldmabufgl-x86 boot-image-x86
 # gates it is a dynamic image; one binary is both the helper and its test peer, selected by argv
 # (`serve`/`test`), which is what makes the cross-process measurement a real two-process one.
 wlcompose-x86: userland-x86 dynlib-x86
-    python tools/build-mesa.py x86 --stage
+    cargo xtask build mesa x86 --stage
     @test -f target/mesa/x86/lib/libgbm.so.1 || (echo 'wlcompose: no libgbm — run `just build-mesa x86 --build` first' >&2; exit 1)
     cargo xtask build wlcompose x86
     @echo "wlcompose: /bin/wlcompose built and the Mesa DSOs staged (x86_64)"
@@ -1905,7 +1905,7 @@ build-c-hello arch="x86":
 build-bash arch="x86" *args:
     cargo xtask build bash {{arch}} {{args}}
 
-# Install the prebuilt bash for the pinned commit (`tools/bash_pin.py`) instead of
+# Install the prebuilt bash for the pinned commit (`tools/pins.ini`) instead of
 # building it: the release `.github/workflows/bash-release.yml` publishes, tagged
 # by that commit. `just build-bash` stays authoritative (a C header or libc change
 # needs it); this is the cache CI and dev machines use.
@@ -1914,24 +1914,25 @@ fetch-bash arch="x86" *args:
 
 # Create or refresh the `sdgoij/bash` GitHub mirror and push it, so the build never
 # clones savannah (it is slow and times out) — `cargo xtask mirror bash` takes the
-# objects from upstream, verifies the pinned commit (`tools/bash_pin.py`) is present,
+# objects from upstream, verifies the pinned commit (`tools/pins.ini`) is present,
 # and pushes. Needs an empty `sdgoij/bash` in the org and a key that can push to it.
 # `just mirror-bash --check` only verifies the pin, without pushing.
 mirror-bash *args:
     cargo xtask mirror bash {{args}}
 
 # Fetch and configure Mesa + libdrm for a target (§6.10 stage 3c-0): pinned sources
-# under `target/`, a meson cross file naming `tools/cc-dso-minix.py`, and
-# `meson setup` for the softpipe branch. Meson and ninja must be on the host's
-# PATH (a venv install is enough — see the script).
+# under `target/`, a meson cross file naming `cargo xtask cc dso`, and `meson
+# setup` for the softpipe branch. Meson and ninja must be on the host's PATH (a
+# venv install is enough). `--build` also runs ninja and stages the DSOs;
+# `--stage` only copies them into `target/mesa/<arch>/lib`.
 build-mesa arch="x86" *args:
-    python tools/build-mesa.py {{arch}} {{args}}
+    cargo xtask build mesa {{arch}} {{args}}
 
 # Install the prebuilt Mesa + libdrm DSOs for the pinned version
-# (`tools/mesa_pin.py`) instead of building them: the release
+# (`tools/pins.ini`) instead of building them: the release
 # `.github/workflows/mesa-release.yml` publishes, tagged by the pinned Mesa and
 # libdrm commits. `just build-mesa` stays authoritative (it is what a pin bump or
-# a `cc-dso-minix.py` change needs); this is the cache CI and dev machines use.
+# a compiler change needs); this is the cache CI and dev machines use.
 fetch-mesa arch="x86" *args:
     cargo xtask fetch mesa {{arch}} {{args}}
 
@@ -1975,8 +1976,8 @@ cdyn src arch="x86":
 
 # Build the C++ runtime (libc++ + libc++abi) for one minix target and merge them
 # into target/cxx/<arch>/minix-runtime/libstdc++.a — the archive Mesa's shared
-# objects link (tools/cc-dso-minix.py). x86 was the first arch; the others build
-# the same way and only differ in the red-zone/march flags (tools/ccarch.py).
+# objects link (`cargo xtask cc dso`). x86 was the first arch; the others build
+# the same way and only differ in the red-zone/march flags (`crates/xtask/src/arch.rs`).
 #
 # Freestanding CMake cross builds (host clang targeting <machine>-unknown-none)
 # against the Minix C headers (tools/c-include), driven by

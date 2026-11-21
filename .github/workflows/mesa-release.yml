@@ -3,11 +3,11 @@
 # local work can install them in seconds instead of building Mesa from source.
 #
 # This is the `toolchain-release.yml` pattern applied to the GL stack. The pin is
-# `tools/mesa_pin.py`: the Mesa and libdrm commits and the `rust` gitlink, from
+# `tools/pins.ini`: the Mesa and libdrm commits and the `rust` gitlink, from
 # which the release tag is derived, so an artifact matches both the sources and
 # the toolchain in the tree. Manual or
 # automatic: `workflow_dispatch` rebuilds on demand (after a pin bump or a
-# `tools/cc-dso-minix.py` change), and `ci.yml` calls it - through `workflow_call`
+# `cargo xtask cc dso` change), and `ci.yml` calls it - through `workflow_call`
 # - when the pinned tag has no release yet, before anything consumes one.
 #
 # The asset is per-arch (`mesa-<pin>-<arch>.tar.xz`, the seven DSOs under `lib/`),
@@ -117,7 +117,7 @@ jobs:
         id: package
         run: |
           set -euo pipefail
-          pin="$(python3 tools/mesa_pin.py)"
+          pin="$(cargo xtask pin mesa)"
           asset="${pin}-${{ matrix.arch }}.tar.xz"
           stage="target/mesa/${{ matrix.arch }}"
           test -f "${stage}/lib/libEGL.so.1" || { echo "!! no staged DSOs at ${stage}/lib"; exit 1; }
@@ -156,7 +156,7 @@ jobs:
 
       - name: Resolve the pin
         id: pin
-        run: echo "tag=$(python3 tools/mesa_pin.py)" >> "$GITHUB_OUTPUT"
+        run: echo "tag=$(cargo xtask pin mesa)" >> "$GITHUB_OUTPUT"
 
       - uses: actions/download-artifact@v8
         with:
@@ -171,17 +171,17 @@ jobs:
         run: |
           set -euo pipefail
           tag='${{ steps.pin.outputs.tag }}'
-          mesa_tag="$(python3 -c 'import sys;sys.path.insert(0,"tools");import mesa_pin as p;print(p.MESA_TAG)')"
-          mesa_commit="$(python3 -c 'import sys;sys.path.insert(0,"tools");import mesa_pin as p;print(p.MESA_COMMIT)')"
-          drm_tag="$(python3 -c 'import sys;sys.path.insert(0,"tools");import mesa_pin as p;print(p.DRM_TAG)')"
-          drm_commit="$(python3 -c 'import sys;sys.path.insert(0,"tools");import mesa_pin as p;print(p.DRM_COMMIT)')"
+          mesa_tag="$(cargo xtask pin mesa mesa-tag)"
+          mesa_commit="$(cargo xtask pin mesa mesa-commit)"
+          drm_tag="$(cargo xtask pin mesa drm-tag)"
+          drm_commit="$(cargo xtask pin mesa drm-commit)"
           shopt -s nullglob
           assets=(mesa-*.tar.xz)
           test "${#assets[@]}" -eq 3 || {
             echo "!! expected 3 arch assets, found ${#assets[@]}"; ls -l; exit 1; }
           sha256sum "${assets[@]}" > SHA256SUMS
           notes="$(printf '%s\n' \
-            "Prebuilt Mesa + libdrm shared objects for the pins in \`tools/mesa_pin.py\`" \
+            "Prebuilt Mesa + libdrm shared objects for the pins in \`tools/pins.ini\`" \
             "(the release tag is the two commits plus the toolchain pin):" \
             "" \
             "- Mesa \`${mesa_tag}\` (\`${mesa_commit}\`)" \

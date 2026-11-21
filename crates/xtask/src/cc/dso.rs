@@ -371,7 +371,7 @@ fn link(cx: &Link) -> io::Result<bool> {
     let dir = libc_dir(root, arch);
     if !dir.join(LIBC).is_file() {
         eprintln!(
-            "cc-dso-minix: no {} - run `just dynlib-{}` first",
+            "cc dso: no {} - run `just dynlib-{}` first",
             dir.join(LIBC).display(),
             arch.name
         );
@@ -540,19 +540,19 @@ pub fn run(root: &Path, arch: &Arch, argv: &[String], dry_run: bool) -> io::Resu
     let argv: Vec<String> = argv.iter().filter(|arg| *arg != "--cxx").cloned().collect();
     let cc = if cxx { "clang++" } else { "clang" };
     if argv.is_empty() {
-        eprintln!("cc-dso-minix: no arguments");
+        eprintln!("cc dso: no arguments");
         return Ok(false);
     }
     if argv.len() == 1 && VERSION_PROBES.contains(&argv[0].as_str()) {
         println!(
-            "cc-dso-minix: {cc} for {}, linked by lld against {LIBC}",
+            "cc dso: {cc} for {}, linked by lld against {LIBC}",
             arch.clang_target()
         );
         return Ok(true);
     }
 
     let Some(lld) = toolchain::find_lld(root) else {
-        eprintln!("cc-dso-minix: no lld to link with (see `cargo xtask check static`)");
+        eprintln!("cc dso: no lld to link with (see `cargo xtask check static`)");
         return Ok(false);
     };
 
@@ -589,11 +589,11 @@ pub fn run(root: &Path, arch: &Arch, argv: &[String], dry_run: bool) -> io::Resu
             command.args(["-flavor", "gnu"]).args(link_args(&split.link));
             return runner.call(&mut command);
         }
-        eprintln!("cc-dso-minix: no input files");
+        eprintln!("cc dso: no input files");
         return Ok(false);
     }
     let Some(output) = split.output.clone() else {
-        eprintln!("cc-dso-minix: no -o for a link");
+        eprintln!("cc dso: no -o for a link");
         return Ok(false);
     };
 
