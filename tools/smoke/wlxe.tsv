@@ -5,7 +5,7 @@
 # One step per line, as `tools/smoke/scenario.tsv` documents: the command, a tab, and the
 # whole line its output must produce.
 #
-# `/bin/wlxe` connects to `/sbin/wlserver`, maps an opaque window, then a
+# `diag wlxe` connects to `/sbin/wlserver`, maps an opaque window, then a
 # `zwlr_layer_shell_v1` panel 200x32 anchored top and an `xdg_popup` 8x8 over it. It
 # requires the decoration manager to answer client-side, the panel and the popup each to
 # be composited at the output's origin, and neither to cover more of the frame than its

@@ -338,7 +338,7 @@ See `.agents/skills/` for domain deep-dives:
   every arch, which is what catches a physmap change quietly making every client's `mmap` land
   where the framebuffer is not.
 - **Zero-copy present:** `just test-wlfull-<arch>` boots with a `virtio-gpu` as the *output* and runs
-  `/bin/wlclient full`, a whole-output `wl_shm` client. `/sbin/wlserver` hands the client's buffer to
+  `diag wlclient full`, a whole-output `wl_shm` client. `/sbin/wlserver` hands the client's buffer to
   the fb server instead of blitting it, so the scanout *is* the client's memory and the compositor
   copies nothing; `tools/wlfull_probe.py` checks the display with a QMP screendump and the fb
   server's `fb: scanout src` line. Because the frame is the client's buffer, `/dev/fb` no longer

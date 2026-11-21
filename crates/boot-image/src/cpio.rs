@@ -291,11 +291,11 @@ mod tests {
         let cpio = standard_initramfs(&[
             ("/sbin/mfs", b"mfs-elf".to_vec()),
             ("/bin/coreutils", b"coreutils-elf".to_vec()),
-            ("/bin/wlpanel", b"wlpanel-elf".to_vec()),
+            ("/bin/diag", b"diag-elf".to_vec()),
         ]);
         assert!(names(&cpio, b"/sbin/mfs"));
         assert!(!names(&cpio, b"/bin/coreutils"));
-        assert!(!names(&cpio, b"/bin/wlpanel"));
+        assert!(!names(&cpio, b"/bin/diag"));
         assert!(!names(&cpio, b"/etc/rc"));
     }
 

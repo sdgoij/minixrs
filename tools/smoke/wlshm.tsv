@@ -6,7 +6,7 @@
 # whole line its output must produce.
 #
 # `/sbin/wlserver` (boot proc 20) binds `/run/wayland-0` on `/dev/uds` and maps `/dev/fb`.
-# `/bin/wlclient` connects, binds `wl_compositor` and `wl_shm`, draws a 64x64 magenta square
+# `diag wlclient` connects, binds `wl_compositor` and `wl_shm`, draws a 64x64 magenta square
 # into a `memfd` pool, passes the pool fd with `SCM_RIGHTS`, commits the surface, waits for
 # `wl_buffer.release`, then reads the framebuffer back and checks the pixel. It prints the
 # line below only if the frame reached `/dev/fb`; a missing reply hangs the read loop, which

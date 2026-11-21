@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """The 3d-b gate: a whole-output `wl_shm` frame presented by re-pointing the scanout.
 
-`/bin/wlclient full` draws a 1024x768 pool and commits it at the output's own size. `/sbin/wlserver`
+`diag wlclient full` draws a 1024x768 pool and commits it at the output's own size. `/sbin/wlserver`
 hands that buffer to the fb server (`FBIO_SCANOUT_SRC`) instead of blitting it, so the virtio-gpu
 scanout becomes the client's memory and the compositor copies nothing (`.notes/wayland.md` 6.10,
 3d-b). The frame is then *the pool*, so `/dev/fb` (the server's own buffer) no longer holds it;

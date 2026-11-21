@@ -154,10 +154,10 @@ Reached, each with the gate that holds it:
 | Milestone | What runs | Gate |
 |---|---|---|
 | M1 | `/bin/gui`: a quad and a line of text, drawn and presented | `just test-gui-x86` |
-| M2 | `/bin/wloverlap`: two windows, one recommit, no corruption | `just test-wloverlap-x86` |
-| M3 | `/bin/wlpointer` and `/bin/wlmotion`: focus follows the pointer, motion is interpolated | `just test-wlpointer-x86`, `just test-wlmotion-x86` |
-| M4 | `/bin/wldemo`: a text field, a list and a button | `just test-wldemo-x86` |
-| M5 | `/bin/session` starts `/etc/session` after the shell's prompt; `/bin/wlpanel` launches an app | `just test-rc-x86`, `just test-wlpanel-x86` |
+| M2 | `diag wloverlap`: two windows, one recommit, no corruption | `just test-wloverlap-x86` |
+| M3 | `diag wlpointer` and `diag wlmotion`: focus follows the pointer, motion is interpolated | `just test-wlpointer-x86`, `just test-wlmotion-x86` |
+| M4 | `diag wldemo`: a text field, a list and a button | `just test-wldemo-x86` |
+| M5 | `/bin/session` starts `/etc/session` after the shell's prompt; `diag wlpanel` launches an app | `just test-rc-x86`, `just test-wlpanel-x86` |
 
 M6 has not started. The panel speaks `zwlr_layer_shell_v1`, so the second open
 decision is taken; the rasterizer and the default present path are not.

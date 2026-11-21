@@ -25,7 +25,7 @@
 /bin/diag drminfo	drminfo: virtio_gpu 3d=0 err 0 blob=0 err 0 ctx=0 err 0 host=0 err 0 mask=0 err 0 caps=err 38
 /bin/diag drmctx	drmctx: init=err 22 again=err 22
 #
-# The blob step is this device's half of a request the GL gate drives in full: `/bin/drmblob`
+# The blob step is this device's half of a request the GL gate drives in full: `diag drmblob`
 # asks for a guest blob first, so on a device that never offered `VIRTIO_GPU_F_RESOURCE_BLOB`
 # that first request is the whole answer - `EINVAL` (22), for the same reason `GETPARAM`
 # already reported `blob=0`.

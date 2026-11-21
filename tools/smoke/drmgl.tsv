@@ -43,7 +43,7 @@
 # expectations are anchored to what the guest printed *after* that step was sent; `feed.sh`
 # says where, and this pair of steps is what that anchoring is for.
 #
-# The fourth step is the object in motion: `/bin/drmexec` creates one, fills its pages with a
+# The fourth step is the object in motion: `diag drmexec` creates one, fills its pages with a
 # pattern, transfers them to the host's copy of the resource, submits a command that makes the
 # *host* overwrite the first row with the pattern's complement, transfers the result back, and
 # reports how much of each region read back as it should. A transfer alone would prove nothing
@@ -60,7 +60,7 @@
 /bin/diag drmctx	drmctx: init=ok again=err 17
 /bin/diag drmexec	drmexec: h=1 up=ok exec=ok wait=ok down=ok row=32 rest=16352 close=ok
 #
-# The fifth step is the blob request surface: `/bin/drmblob` makes a blob whose memory is the
+# The fifth step is the blob request surface: `diag drmblob` makes a blob whose memory is the
 # guest's, reads its kind back out of `RESOURCE_INFO` - a field that read 0 for every object
 # before this stage - maps it, and then asks for everything this node cannot give, one request
 # per rule with a single field changed. The host kinds are `ENOSYS` (38) because this device has

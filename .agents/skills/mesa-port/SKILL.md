@@ -148,7 +148,7 @@ dev host (headless CI has none) and is not a CI gate.
 node, commits it to `/sbin/wlserver` as a `wl_shm` surface, and reads the composited
 frame back from `/dev/fb`, asserting `GL_RENDERER=virgl` too. Like 3c-3 it needs a
 GL-capable dev host and is not a CI gate. It shares `/dev/fb`'s `mmap` path with
-`/bin/wlclient`, so a break there fails both gates with a black framebuffer.
+`diag wlclient`, so a break there fails both gates with a black framebuffer.
 
 `just test-wldmabufgl-x86` is the 3d-b-4d gate: `/bin/wldmabufgl` renders the triangle
 into a GBM object on the render node, exports it, and commits it as a

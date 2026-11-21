@@ -500,7 +500,7 @@ test-drmmap-x86 boot-timeout="20": build-x86
     @just _assert-qemu-log target/test-drmmap-x86.log "fb: gpu3d device, no VIRTIO_GPU_F_VIRGL"
     @echo "drmmap: a client created a render node memory object, mapped it twice, found one set of frames, saw a second object be other memory, and closed it (x86_64)"
 
-# The render node's PRIME handoff (`tools/smoke/drmprime.tsv`): `/bin/drmprime` exports a
+# The render node's PRIME handoff (`tools/smoke/drmprime.tsv`): `diag drmprime` exports a
 # memory object to a dma-buf descriptor, checks the descriptor's own kind and device with
 # `fstat`, imports it back to the object's handle, and reads the bytes through it. The device
 # is the same plain `virtio-gpu-pci` the other node gates use, for their reason: sharing is a
@@ -1204,7 +1204,7 @@ test-wlcompose-x86: wlcompose-x86 boot-image-x86
     @echo "wlcompose: two GL surfaces were composed on the render node by a helper in another process, and the frame read back holds them (x86_64)"
 
 # The 3d-b-5c/5d gate: two dma-buf surfaces committed on one connection are composed on the GPU by
-# the helper process and scanned out as one frame. `/bin/wlscene` is a plain static client; the
+# the helper process and scanned out as one frame. `diag wlscene` is a plain static client; the
 # helper is the dynamic `/bin/wlcompose`, injected with the Mesa DSOs. The devices and the GL
 # display are the 5b gate's, plus QMP so the host can read the display the frame lands on.
 test-wlscene-x86: wlcompose-x86 boot-image-x86
@@ -1316,7 +1316,7 @@ test-wayland-x86 boot-timeout="40": build-x86
     FEED_SCENARIO=tools/smoke/wayland.tsv sh tools/smoke/feed.sh target/test-wayland-x86.log {{boot-timeout}} qemu-system-x86_64 -nographic -m 256M -no-reboot -vga none -device bochs-display,id=fb0 -kernel target/images/x86_64-pc-minix/minix-x86.elf -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0 -device virtio-tablet-pci,display=fb0
     @echo "wayland: registry + sync handshake over /dev/uds (x86_64)"
 
-# wlshm: /bin/wlclient drives the Phase 1b wl_shm present path — it draws into a
+# wlshm: `diag wlclient` drives the Phase 1b wl_shm present path — it draws into a
 # memfd pool, passes the fd to /sbin/wlserver (boot proc 20), commits a surface,
 # and reads the composited frame back from /dev/fb — .notes/wayland.md §6.11. build-x86
 # embeds both binaries.
@@ -1338,7 +1338,7 @@ test-wloverlap-x86 boot-timeout="60": build-x86
     @echo "wloverlap: the lower window's commit left the window above it intact (x86_64)"
 
 # wlkey: tools/wlkey_probe.py drives the Phase 1c input path and the Phase 2a
-# keymap — /bin/wlkey binds wl_seat's keyboard, resolves the `keymap` event's fd
+# keymap — `diag wlkey` binds wl_seat's keyboard, resolves the `keymap` event's fd
 # and checks its bytes (.notes/wayland.md §6.12), commits a surface, and a key injected
 # with QMP reaches it as `wl_keyboard.key` — .notes/wayland.md §6.11. A host probe rather
 # than a tsv scenario: the key has to be a real device event, and the serial console
@@ -1351,7 +1351,7 @@ test-wlkey-x86: build-x86
     @echo "wlkey: keymap served and wl_seat keyboard events reach a client (x86_64)"
 
 
-# wlx: /bin/wlx drives the Phase 2b xdg_shell path — it maps an xdg_toplevel, the
+# wlx: `diag wlx` drives the Phase 2b xdg_shell path — it maps an xdg_toplevel, the
 # server sends `configure`, the client acks it and commits a frame of the configured
 # size, and the frame reaches /dev/fb — .notes/wayland.md §6.12.
 test-wlx-x86 boot-timeout="40": build-x86
@@ -1362,7 +1362,7 @@ test-wlx-x86 boot-timeout="40": build-x86
     @echo "wlx: xdg_shell toplevel configured, acked and presented (x86_64)"
 
 
-# wlfocus: tools/wlfocus_probe.py drives the Phase 2c focus path — /bin/wlx2 opens
+# wlfocus: tools/wlfocus_probe.py drives the Phase 2c focus path — `diag wlx2` opens
 # two connections, maps a window on each, and a QMP key must reach the focused one as
 # the focus moves between them — .notes/wayland.md §6.12. A host probe, like wlkey's: a key
 # has to be a real device event, which the serial console is not.
@@ -1373,7 +1373,7 @@ test-wlfocus-x86: build-x86
     python tools/wlfocus_probe.py
     @echo "wlfocus: two clients, one focus, and the keys follow it (x86_64)"
 
-# wlmotion: tools/wlmotion_probe.py drives the pointer-interpolation path — /bin/wlmotion
+# wlmotion: tools/wlmotion_probe.py drives the pointer-interpolation path — `diag wlmotion`
 # maps a window, the host moves the absolute pointer in one event, and the client must
 # receive a stream of steps ending where the device landed.
 test-wlmotion-x86: build-x86
@@ -1383,7 +1383,7 @@ test-wlmotion-x86: build-x86
     python tools/wlmotion_probe.py
     @echo "wlmotion: the pointer moved in steps to where the device landed (x86_64)"
 
-# wlpointer: tools/wlpointer_probe.py drives pointer-follows-focus — /bin/wlpointer maps
+# wlpointer: tools/wlpointer_probe.py drives pointer-follows-focus — `diag wlpointer` maps
 # a full-output window under a 64x64 one, and moving the pointer between them must move
 # the focus and the keys with it.
 test-wlpointer-x86: build-x86
@@ -1393,7 +1393,7 @@ test-wlpointer-x86: build-x86
     python tools/wlpointer_probe.py
     @echo "wlpointer: the focus followed the pointer between two windows (x86_64)"
 
-# wldemo: tools/wldemo_probe.py drives the widget layer — /bin/wldemo is one window with
+# wldemo: tools/wldemo_probe.py drives the widget layer — `diag wldemo` is one window with
 # a text field, a list and a button, and the keys it is sent have to type, move the
 # selection, fire the button and reach the client as its own state report.
 test-wldemo-x86: build-x86
@@ -1405,7 +1405,7 @@ test-wldemo-x86: build-x86
 
 # wlpanel: tools/wlpanel_probe.py drives the session panel, which is the session's own
 # first program: `/etc/rc` starts `/bin/session`, it waits for the shell's prompt and
-# starts `/etc/session`, and `/bin/wlpanel` maps a 200x32 layer strip at the output's
+# starts `/etc/session`, and `diag wlpanel` maps a 200x32 layer strip at the output's
 # top-right. A click inside its launcher button has to reach it and start an app. This
 # is the shell milestone's gate, together with `test-rc-x86`'s chain.
 test-wlpanel-x86: build-x86
@@ -1426,7 +1426,7 @@ test-rc-x86: build-x86
     @echo "rc: /etc/rc's commands ran at boot before the shell (x86_64)"
 
 
-# wlxd: /bin/wlxd drives the Phase 2d damage and cursor path — it damages a small
+# wlxd: `diag wlxd` drives the Phase 2d damage and cursor path — it damages a small
 # rectangle and checks the rest of the frame survives, then gives the pointer an
 # image and finds it on /dev/fb — .notes/wayland.md §6.12.
 test-wlxd-x86 boot-timeout="40": build-x86
@@ -1437,7 +1437,7 @@ test-wlxd-x86 boot-timeout="40": build-x86
     @echo "wlxd: damage and the pointer's cursor (x86_64)"
 
 
-# wlxe: /bin/wlxe drives the Phase 2e panel, popup and decoration path — it maps an
+# wlxe: `diag wlxe` drives the Phase 2e panel, popup and decoration path — it maps an
 # opaque window, then a zwlr_layer_shell_v1 panel and an xdg_popup over it, requires
 # the decoration manager to answer client-side, and checks both are composited where
 # they asked and no wider — .notes/wayland.md §6.12.

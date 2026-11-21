@@ -159,7 +159,7 @@ def main():
         die("could not type /bin/wlcompose serve & — the console dropped bytes")
     time.sleep(1.5)
     if not type_line("/bin/diag wlscene"):
-        die("could not type /bin/wlscene — the console dropped bytes")
+        die("could not type diag wlscene — the console dropped bytes")
 
     if not wait_for(lambda: b"wlscene: PASS" in out, 150):
         die("wlscene did not reach PASS")

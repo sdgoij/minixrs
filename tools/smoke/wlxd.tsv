@@ -5,7 +5,7 @@
 # One step per line, as `tools/smoke/scenario.tsv` documents: the command, a tab, and the
 # whole line its output must produce.
 #
-# `/bin/wlxd` connects to `/sbin/wlserver`, maps a full-screen surface, and draws a red
+# `diag wlxd` connects to `/sbin/wlserver`, maps a full-screen surface, and draws a red
 # frame. It then makes the buffer blue but damages only an 8x8 rectangle: red must
 # survive everywhere else, which is what proves the compositor recomposited only the
 # damage. Finally it gives the pointer an 8x8 image, commits a window frame again, and

@@ -1614,7 +1614,7 @@ from resolving, is under `# Resolved issues`.
     (`vfs::select::rescan_suspended`). Readiness is level-triggered, so a lost push costs
     nothing, and the socket path now holds no reply queue and raises no alarm of its own. Gates:
     `just test-wayland-x86` (a forked client and server over `/dev/uds`, blocking on `poll`),
-    `just test-wlshm-x86` and `just test-wlkey-x86` (`/bin/wlclient` and `/bin/wlkey` against
+    `just test-wlshm-x86` and `just test-wlkey-x86` (`diag wlclient` and `diag wlkey` against
     `/sbin/wlserver`), `uds`'s host tests for the readiness state machine, and the Phase 0
     readiness gates. (`crates/servers/src/vfs/select.rs`, `crates/servers/src/uds.rs`,
     `crates/servers/src/vfs/main.rs`, `crates/userland/src/lib.rs`)
@@ -3547,7 +3547,7 @@ from resolving, is under `# Resolved issues`.
   written on a Windows host, where the file keeps the CRLF.
 - **A program the `/etc/rc` list starts writes on top of the shell's prompt
   (2026-11-08, fixed in the shell).** `/bin/rc` forks each line and then execs
-  `/bin/sh`. `/bin/wlpanel` started from that list, and its first line of output
+  `/bin/sh`. `diag wlpanel` started from that list, and its first line of output
   (`wlpanel: ready`) arrived after the shell had printed its prompt but before it
   printed a newline, so the console showed `# wlpanel: ready`. A prompt with text
   after it is not a prompt: `tools/smoke/feed.sh` waits for a line that is exactly
