@@ -3591,7 +3591,7 @@ belongs to something else, so it reprints `# ` and the text typed so far on a fr
 row. The first command after boot, typed while the session's two lines are on the
 screen, therefore still appears after its prompt.
 
-  Gates: `tools/rc_probe.py`, which types nothing and looks for the start line, the
+  Gates: `cargo xtask probe rc`, which types nothing and looks for the start line, the
   `# ` prompt as a line of its own, and the panel's ready line, plus every tsv
   scenario, which needs the `# ` prompt.
   (`crates/servers/src/tty.rs`, `crates/userland/src/shell.rs`,

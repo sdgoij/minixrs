@@ -484,6 +484,14 @@ script's on a recorded 1159-request trace, exit status included; only the stdout
 line endings differ, because Rust's `println!` does not translate `\n` the way
 Python's text-mode stdout does on Windows.
 
+**Phase 5, contd.** `cargo xtask probe rc|wlkey` replace `tools/rc_probe.py` and
+`tools/wlkey_probe.py` on a shared harness: `src/guest.rs` spawns QEMU, merges its
+stdout and stderr into one console transcript, paces typed bytes and kills the
+child on drop, and `src/qmp.rs` is the minimal JSON-line client the key injection
+needs (no JSON dependency: every command is a fixed string and the reply only has
+to be classified). Both gates pass with the port, and `probe read-hist` moved to
+`probe/read_hist.rs` unchanged.
+
 `cc-minix` and `cc-dso-minix` are **not** ported, and that is a decision
 rather than a pending item. The reason is a host: `build-bash.py` and
 `build-mesa.py` drive them from inside WSL (`build-mesa.py`'s meson cross file

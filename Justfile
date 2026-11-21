@@ -1338,7 +1338,7 @@ test-wloverlap-x86 boot-timeout="60": build-x86
     @just _assert-qemu-log target/test-wloverlap-x86.log "wloverlap: PASS"
     @echo "wloverlap: the lower window's commit left the window above it intact (x86_64)"
 
-# wlkey: tools/wlkey_probe.py drives the Phase 1c input path and the Phase 2a
+# wlkey: `cargo xtask probe wlkey` drives the Phase 1c input path and the Phase 2a
 # keymap — `diag wlkey` binds wl_seat's keyboard, resolves the `keymap` event's fd
 # and checks its bytes (.notes/wayland.md §6.12), commits a surface, and a key injected
 # with QMP reaches it as `wl_keyboard.key` — .notes/wayland.md §6.11. A host probe rather
@@ -1348,7 +1348,7 @@ test-wlkey-x86: build-x86
     mkdir -p target/images/x86_64-pc-minix
     cp target/trampoline.elf target/images/x86_64-pc-minix/minix-x86.elf
     @just _assert-qemu-version qemu-system-x86_64
-    python tools/wlkey_probe.py
+    cargo xtask probe wlkey
     @echo "wlkey: keymap served and wl_seat keyboard events reach a client (x86_64)"
 
 
@@ -1416,14 +1416,14 @@ test-wlpanel-x86: build-x86
     python tools/wlpanel_probe.py
     @echo "wlpanel: the launcher took a click on the layer surface (x86_64)"
 
-# rc: tools/rc_probe.py boots and types nothing. `/etc/rc` names the session manager,
+# rc: `cargo xtask probe rc` boots and types nothing. `/etc/rc` names the session manager,
 # which waits for the shell's prompt, ends that line and starts `/etc/session`, so the
 # chain from init to the session's first program has to happen on its own.
 test-rc-x86: build-x86
     mkdir -p target/images/x86_64-pc-minix
     cp target/trampoline.elf target/images/x86_64-pc-minix/minix-x86.elf
     @just _assert-qemu-version qemu-system-x86_64
-    python tools/rc_probe.py
+    cargo xtask probe rc
     @echo "rc: /etc/rc's commands ran at boot before the shell (x86_64)"
 
 

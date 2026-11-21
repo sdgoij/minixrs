@@ -350,7 +350,7 @@ test = false
 # from /dev/fb. Driven by `just test-wlshm-x86`.
 # wlkey is the Wayland Phase 1c input client: it binds wl_seat's keyboard,
 # commits a surface so the server sends `enter`, and prints each key it receives.
-# Driven by `tools/wlkey_probe.py`.
+# Driven by `just test-wlkey-x86`.
 # The Phase 2 gate clients are, like wlclient and wlkey, `#![no_main]` binaries
 # whose `main` is the entry point even when compiled for `cargo test`. They need
 # /dev/fb and /sbin/wlserver, so `test = false` keeps the host suite from trying

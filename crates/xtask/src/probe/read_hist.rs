@@ -1,9 +1,11 @@
-//! Gate probes over data a guest produced, rather than over the tree.
+//! Summarise a `virtio_blk_handle_read` trace: request count, bytes, size
+//! histogram.
 //!
-//! `read-hist` summarises a QEMU trace of `virtio_blk_handle_read` so that a
-//! per-command read-cost regression is a count above a ceiling. The recipe
-//! (`just test-read-cost-<arch>`) boots the guest with
+//! The recipe (`just test-read-cost-<arch>`) boots the guest with
 //! `-trace enable=virtio_blk_handle_read`, then runs this over the trace file.
+//! `--max` makes it a gate: a count above the ceiling fails, a count below it
+//! passes, so a change that makes pages lazy can lower the bound rather than
+//! trip it.
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
@@ -94,8 +96,9 @@ fn histogram(sizes: &BTreeMap<u64, u64>) -> String {
 
 fn pattern() -> &'static Regex {
     static PATTERN: OnceLock<Regex> = OnceLock::new();
-    PATTERN
-        .get_or_init(|| Regex::new(r"sector \d+ nsectors (\d+)").expect("the read pattern is a constant"))
+    PATTERN.get_or_init(|| {
+        Regex::new(r"sector \d+ nsectors (\d+)").expect("the read pattern is a constant")
+    })
 }
 
 #[cfg(test)]

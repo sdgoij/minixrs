@@ -23,9 +23,11 @@ mod cc;
 mod check;
 mod dynamic;
 mod fetch_stage1;
+mod guest;
 mod image;
 mod paths;
 mod probe;
+mod qmp;
 mod rust_config;
 mod toolchain;
 mod verify_stage1;
@@ -52,7 +54,7 @@ fn main() -> ExitCode {
             fetch_stage1::run(&root, matches.get_flag("force")).map(|()| true)
         }
         Some(("verify-stage1", _)) => verify_stage1::run(&root).map(|()| true),
-        Some(("probe", matches)) => run_probe(matches),
+        Some(("probe", matches)) => run_probe(&root, matches),
         Some(("rust-config", matches)) => {
             let token = matches
                 .get_one::<String>("target")
@@ -136,14 +138,16 @@ fn run_image(root: &Path, matches: &clap::ArgMatches) -> io::Result<()> {
     }
 }
 
-fn run_probe(matches: &clap::ArgMatches) -> io::Result<bool> {
+fn run_probe(root: &Path, matches: &clap::ArgMatches) -> io::Result<bool> {
     match matches.subcommand() {
         Some(("read-hist", matches)) => {
             let trace = matches
                 .get_one::<String>("trace")
                 .expect("clap requires the trace");
-            probe::read_hist(Path::new(trace), matches.get_one::<u64>("max").copied())
+            probe::read_hist::read_hist(Path::new(trace), matches.get_one::<u64>("max").copied())
         }
+        Some(("rc", _)) => probe::rc::run(root),
+        Some(("wlkey", _)) => probe::wlkey::run(root),
         _ => unreachable!("clap requires a probe subcommand"),
     }
 }
@@ -290,7 +294,7 @@ fn command() -> clap::Command {
         )
         .subcommand(
             clap::Command::new("probe")
-                .about("Gate probes over data a guest produced")
+                .about("Gate probes over a running guest and the data it produced")
                 .subcommand_required(true)
                 .arg_required_else_help(true)
                 .subcommand(
@@ -309,6 +313,14 @@ fn command() -> clap::Command {
                                 .value_parser(clap::value_parser!(u64))
                                 .help("Fail when the request count is above this ceiling"),
                         ),
+                )
+                .subcommand(
+                    clap::Command::new("rc")
+                        .about("The /etc/rc chain: the session manager, a prompt of its own, the panel"),
+                )
+                .subcommand(
+                    clap::Command::new("wlkey")
+                        .about("A host key reaches a Wayland client, and the keymap arrives"),
                 ),
         )
         .subcommand(
