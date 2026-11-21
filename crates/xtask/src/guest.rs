@@ -104,7 +104,12 @@ impl Guest {
             .count()
     }
 
-
+    /// The byte offset of the console's last `needle`, if it has one.
+    pub fn rfind(&self, needle: &[u8]) -> Option<usize> {
+        let out = lock(&self.out);
+        out.windows(needle.len())
+            .rposition(|window| window == needle)
+    }
 
     /// Write `text` to the guest's console a byte at a time.
     ///
@@ -222,5 +227,6 @@ mod tests {
             .unwrap();
         assert!(guest.wait_for_after(b"second", anchor, Duration::from_secs(5)));
         assert_eq!(guest.count(b"first"), 1);
+        assert!(guest.rfind(b"second").unwrap() >= anchor);
     }
 }

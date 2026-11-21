@@ -85,6 +85,10 @@ impl Qmp {
         Ok(())
     }
 
+    /// Press or release a mouse button on the display device.
+    pub fn button(&mut self, button: &str, down: bool) -> io::Result<()> {
+        self.execute(&button_command(button, down))
+    }
 
     /// Write a range of guest physical memory to `path`.
     ///
@@ -134,6 +138,11 @@ fn absolute_command(device: &str, axis: &str, value: u32, size: u32) -> String {
     )
 }
 
+fn button_command(button: &str, down: bool) -> String {
+    format!(
+        r#"{{"execute":"input-send-event","arguments":{{"device":"fb0","events":[{{"type":"btn","data":{{"button":"{button}","down":{down}}}}}]}}}}"#
+    )
+}
 
 #[cfg(test)]
 mod tests {
@@ -154,6 +163,15 @@ mod tests {
         assert!(command.contains(r#""device":"fb0""#));
         assert!(command.contains(r#""axis":"x""#));
         assert!(command.contains(r#""value":16384"#));
+    }
+
+    #[test]
+    fn a_button_is_one_down_or_up_on_the_display() {
+        let command = button_command("left", true);
+        assert!(command.contains(r#""device":"fb0""#));
+        assert!(command.contains(r#""button":"left""#));
+        assert!(command.contains(r#""down":true"#));
+        assert!(button_command("left", false).contains(r#""down":false"#));
     }
 
     #[test]

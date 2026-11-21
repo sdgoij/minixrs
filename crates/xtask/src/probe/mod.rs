@@ -1,22 +1,38 @@
 //! Gate probes over a running guest, and over the data it produced.
 //!
-//! `read_hist` reads a trace file; `rc` and `wlkey` boot an image and watch its
-//! console through `crate::guest`, the latter injecting a key through the QMP
-//! socket (`crate::qmp`). `dso_share` boots the dynamic image and reads guest
-//! physical memory over QMP.
+//! `read_hist` reads a trace file; the rest boot an image and watch its console
+//! through `crate::guest`, injecting input through the QMP socket (`crate::qmp`)
+//! where the gate needs a device event rather than a line typed into the shell.
+//!
+//! Two shapes exist. The input gates (`rc`, `wlkey`, `wlfocus`, `wlpointer`,
+//! `wlmotion`, `wldemo`, `wlpanel`) build their own x86 command with [`qemu`],
+//! because they all run on the same display. The present and Mesa gates
+//! (`wlfull`, `wldmabuf`, `wldmabufgl`, `wlcompose`, `wlscene`) take the whole
+//! QEMU command line from the recipe with [`command_from`], because the devices
+//! and the disk image differ per arch and per gate.
 
 use std::path::Path;
 use std::process::Command;
 use std::time::Duration;
 
+pub mod console;
 pub mod dso_share;
 pub mod rc;
 pub mod read_hist;
+pub mod screen;
+pub mod wldemo;
+pub mod wldmabuf;
+pub mod wldmabufgl;
+pub mod wlcompose;
 pub mod wlfocus;
+pub mod wlfull;
 pub mod wlkey;
+pub mod wlmotion;
+pub mod wlpanel;
 pub mod wlpointer;
+pub mod wlscene;
 
-/// The x86 image every probe here boots, with the bochs display and a tablet so
+/// The x86 image every input probe boots, with the bochs display and a tablet so
 /// the console and the pointer both have a device.
 pub(crate) fn qemu(root: &Path, qmp_port: u16) -> Command {
     let image = root.join("target/images/x86_64-pc-minix/minix-x86.elf");
@@ -66,6 +82,22 @@ pub(crate) fn step(number: u32, name: &str, passed: bool) -> bool {
 
 pub(crate) fn secs(seconds: u64) -> Duration {
     Duration::from_secs(seconds)
+}
+
+/// The console lines that contain `needle`, for the evidence a gate prints.
+///
+/// A GL display drops console bytes, so the printed lines are a convenience and
+/// the pixels in the screendump are the proof.
+pub(crate) fn lines_with(out: &[u8], needle: &[u8]) -> Vec<String> {
+    String::from_utf8_lossy(out)
+        .lines()
+        .filter(|line| {
+            line.as_bytes()
+                .windows(needle.len())
+                .any(|window| window == needle)
+        })
+        .map(str::to_string)
+        .collect()
 }
 
 #[cfg(test)]

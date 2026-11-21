@@ -565,7 +565,7 @@ jobs:
       - name: The framebuffer mmap path
         run: just test-fbmmap ${{ matrix.arch }}
 
-      # The zero-copy present path (`tools/wlfull_probe.py`): a whole-output `wl_shm` client must
+      # The zero-copy present path (`cargo xtask probe wlfull`): a whole-output `wl_shm` client must
       # be presented by re-pointing the scanout at its own buffer, so the compositor copies
       # nothing. A QMP screendump checks the display (the frame *is* the client's buffer, so
       # `/dev/fb` no longer holds it). Needs no GL host, unlike the `wlgl`/virgl gates.

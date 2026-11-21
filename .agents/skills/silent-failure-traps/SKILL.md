@@ -56,7 +56,7 @@ reasoned about; the fix recorded is what the code does now.
   so the symptom is the shell complaining about a command nobody typed, not a send that failed. That
   changes the retry too: check the echoed line whole, and wait for a prompt printed *after* the send,
   because a `wait_for` that scans the whole buffer matches the prompt from before it and types the
-  retry into the window while the truncated command is still running (`tools/dso_share_probe.py`,
+  retry into the window while the truncated command is still running (`cargo xtask probe dso-share`,
   `ARCHS["pace"]` and `wait_for_after`).
 
 ## A prompt that ignores input can be the server, not the harness
@@ -153,7 +153,7 @@ working shell).
 | What | Where |
 |------|-------|
 | Host-side driver that gets all of the above right | `tools/smoke/feed.sh`, `tools/smoke/scenario.tsv` |
-| Host-side driver whose input pace is arch-specific, and which reads guest memory over QMP | `tools/dso_share_probe.py` |
+| Host-side driver whose input pace is arch-specific, and which reads guest memory over QMP | `cargo xtask probe dso-share` |
 | Host-side driver that reaches an interactive bash (readline's poll path) | `tools/smoke/interactive_bash.py` |
 | The same scenario inside the wasm engine | `tools/wasm-browser/run.js` |
 | A delivery's endpoint | `crates/kernel/src/ipc.rs` (`mini_receive`'s async branch, `try_one`) |

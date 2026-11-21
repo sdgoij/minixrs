@@ -340,7 +340,7 @@ See `.agents/skills/` for domain deep-dives:
 - **Zero-copy present:** `just test-wlfull-<arch>` boots with a `virtio-gpu` as the *output* and runs
   `diag wlclient full`, a whole-output `wl_shm` client. `/sbin/wlserver` hands the client's buffer to
   the fb server instead of blitting it, so the scanout *is* the client's memory and the compositor
-  copies nothing; `tools/wlfull_probe.py` checks the display with a QMP screendump and the fb
+  copies nothing; `cargo xtask probe wlfull` checks the display with a QMP screendump and the fb
   server's `fb: scanout src` line. Because the frame is the client's buffer, `/dev/fb` no longer
   shows it — which is why this gate screendumps rather than reading the framebuffer back. It needs
   no GL host.

@@ -285,8 +285,8 @@ modules by roughly twenty scripts (`build-gltest.py` imports three of them). A
 deletion therefore cannot follow the phase that first stops using it: it follows
 the phase that removes its **last importer**. `ccflags.py` has none left after
 the build-wrapper phase, `ccarch.py` keeps two (`build-bash.py`,
-`build-mesa.py`) until the third-party phase, and `lld.py` keeps three
-(`stage1.py`, `rc-cost.py`, `dso_share_probe.py`) for good.
+`build-mesa.py`) until the third-party phase, and `lld.py` keeps two
+(`stage1.py`, `rc-cost.py`) for good.
 
 The phase table says where each file dies. The plan is not "every phase deletes
 what it ported"; it is "every phase deletes what nothing imports any more", and
@@ -398,7 +398,7 @@ ported. A phase that leaves a shared Python module behind records why.
 | 2 | image and fetch: `boot mkboot`, `mkfs`, `fetch stage1`, `verify-stage1`, `rust-config` | ~800 | medium | `just build-x86`, `just mkfs-<arch>`, `just image x86`, `just fetch-stage1`, `just verify-stage1` | `mkboot.rs`, `mkfs.rs`, 3 superseded `.rs`, 3 scripts |
 | 3 | third-party builds: `build bash`, `fetch bash`, `mirror bash`, `build mesa`, `fetch mesa`, the pins | ~1,400 | medium | `just build-bash x86`, `just libcxx x86`, `just gltriangle x86`, `just fetch-mesa x86` | 7 scripts, then `pin.py` and `ccarch.py` |
 | 4 | QEMU harness: `smoke`, `assert-log`, `interactive-bash`, timeouts | ~1,000 | high | `just image <arch>`, `just test-bash-<arch>`, `just test-interactive-bash-<arch>` | `feed.sh`, `interactive_bash.py` |
-| 5 | CI gate probes: `probe fbmmap`, `probe wlfull`, `probe drmprime`, `probe dso-share` | ~900 | medium | `just test-fbmmap <arch>`, `just test-wlfull <arch>` | 4 probes |
+| 5 | CI gate probes: `probe read-hist`, `rc`, `wlkey`, `wlfocus`, `wlpointer`, `wlmotion`, `wldemo`, `wlpanel`, `wlfull`, `wldmabuf`, `wldmabufgl`, `wlcompose`, `wlscene`, `dso-share` | ~1,900 | medium | `just test-wlfull <arch>`, the wl input gates, `just probe-dso-share-x86` | 14 probes |
 
 After phase 5 the Justfile still exists and still has its 215 recipes, and no
 recipe body runs a Python script except the two parse-time lookups in
@@ -503,6 +503,38 @@ and the port matched the script's transcript exactly: the scene composer copied
 each surface into a heap texture, and two output-sized copies exhausted the x86
 guest. Composing now blits straight from the mapped pool, and both ported gates
 pass (see the resolved item).
+
+**Phase 5, done.** The rest of the probe family moved on the same harness. Three
+helpers were extracted, because every port needed them: `probe/screen.rs` reads a
+QMP screendump and waits on the size the PPM header promises (QEMU answers before
+the file is complete); `probe/console.rs` is the paced, echo-checked typing that a
+GL display needs, including `type_line_and_wait`, which splits "the line arrived"
+from "the client answered"; and `guest.rs` grew anchored waits (`wait_for_after`,
+`count`, `rfind`) so a prompt printed before a command cannot answer for it.
+
+`cargo xtask probe wlmotion|wldemo|wlpanel` replace their scripts on the input
+harness, with a mouse-button event added to `qmp.rs` for the panel's launcher.
+`cargo xtask probe wlfull|wldmabuf|wldmabufgl|wlcompose|wlscene` take the whole
+QEMU line from the recipe after `--`, because the devices and the disk image
+differ per arch and per gate; the scripts took the same words positionally.
+`cargo xtask probe dso-share` replaces the 570-line page-table probe, with the
+walk, the shifts and the frame masks per arch as a row in a table, and the
+arithmetic unit-tested against hand-built page tables. It reads symbols through
+`toolchain::find_nm`, the same lookup `tools/lld.py` documents. Two measurements
+changed with it. The console carries at most eight bytes inline, so a 13-byte
+hold marker from each of two lives interleaves and is never contiguous; the
+marker is now `dynhold\n`, eight bytes including its newline. And "maps the
+object" is not enough to identify a life: `fb`'s heap shares `dso_base`, and an
+exited slot keeps a nonzero `p_cr3`, so a candidate must be off `SLOT_FREE` and
+its first page in the window must hold an ELF header. Both arches pass.
+
+The recipes and CI name the new commands, and every reference in `README.md`, the
+skills and `.notes/` moved with them. `tools/lld.py` stays for the Justfile's
+parse-time variable; it lost the `dso_share_probe.py` importer, and the two that
+remain (`stage1.py`, `rc-cost.py`) stay for good. The Mesa gates
+(`wldmabufgl`, `wlcompose`, `wlscene`) were not run here: their clients still
+build against `target/mesa-src`, which only a WSL `just build-mesa --build`
+populates.
 
 `cc-minix` and `cc-dso-minix` are **not** ported, and that is a decision
 rather than a pending item. The reason is a host: `build-bash.py` and

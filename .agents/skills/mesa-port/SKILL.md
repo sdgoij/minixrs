@@ -159,7 +159,7 @@ GL-capable dev host and is not a CI gate. It is also the one gate whose client c
 once (`.notes/wayland.md` §5 row 26): this host's virgl renders into a host-side
 texture, so the client resolves and transfers the render into the object before
 committing — `tools/egl_bo_probe.c` is the measurement. Its input is paced and
-echo-checked (`tools/wldmabufgl_probe.py`), because a GL display drops console bytes
+echo-checked (`cargo xtask probe wldmabufgl`), because a GL display drops console bytes
 mid-line, and the whole-frame screenshot path is a QMP `screendump`.
 
 ## Validating a change

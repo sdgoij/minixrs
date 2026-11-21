@@ -1126,7 +1126,7 @@ test-gbmtest-x86 boot-timeout="120": gbmtest-x86 boot-image-x86
 
 # The 3d-b gate: a whole-output `wl_shm` client is presented by re-pointing the scanout at its own
 # buffer, so the compositor copies nothing (§6.10). `/dev/fb` no longer holds the frame (the frame
-# *is* the client's pool), so tools/wlfull_probe.py checks the display with a QMP screendump and the
+# *is* the client's pool), so `cargo xtask probe wlfull` checks the display with a QMP screendump and the
 # fb server's `fb: scanout src` line. On x86 the output device is a `virtio-gpu`, not `bochs`: the
 # re-point is a virtio-gpu capability (D11); on riscv64/aarch64 the `virtio-gpu` is already the
 # output, so only the full-output client is new.
@@ -1137,7 +1137,7 @@ test-wlfull-x86: build-x86
     mkdir -p target/images/x86_64-pc-minix
     cp target/trampoline.elf target/images/x86_64-pc-minix/minix-x86.elf
     @just _assert-qemu-version qemu-system-x86_64
-    python tools/wlfull_probe.py qemu-system-x86_64 -nographic -monitor none -display none -vga none -device virtio-gpu-pci -m 256M -no-reboot -qmp tcp:127.0.0.1:4447,server=on,wait=off -kernel target/images/x86_64-pc-minix/minix-x86.elf -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0
+    cargo xtask probe wlfull -- qemu-system-x86_64 -nographic -monitor none -display none -vga none -device virtio-gpu-pci -m 256M -no-reboot -qmp tcp:127.0.0.1:4447,server=on,wait=off -kernel target/images/x86_64-pc-minix/minix-x86.elf -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0
     @echo "wlfull: a whole-output wl_shm frame was scanned out of the client's own buffer (x86_64)"
 
 # The 3d-b-4c gate: a linux-dmabuf client's render-node object is scanned out with no copy
@@ -1149,7 +1149,7 @@ test-wldmabuf-x86: build-x86
     mkdir -p target/images/x86_64-pc-minix
     cp target/trampoline.elf target/images/x86_64-pc-minix/minix-x86.elf
     @just _assert-qemu-version qemu-system-x86_64
-    python tools/wldmabuf_probe.py qemu-system-x86_64 -nographic -monitor none -display none -vga none -device virtio-gpu-pci -m 256M -no-reboot -qmp tcp:127.0.0.1:4447,server=on,wait=off -kernel target/images/x86_64-pc-minix/minix-x86.elf -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0
+    cargo xtask probe wldmabuf -- qemu-system-x86_64 -nographic -monitor none -display none -vga none -device virtio-gpu-pci -m 256M -no-reboot -qmp tcp:127.0.0.1:4447,server=on,wait=off -kernel target/images/x86_64-pc-minix/minix-x86.elf -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0
     @echo "wldmabuf: a render-node object was handed over as a linux-dmabuf buffer and scanned out with no copy (x86_64)"
 
 # wldmabufgl: build /bin/wldmabufgl, the 3d-b-4d GL present client (§6.10). Like /bin/wlgl it
@@ -1179,7 +1179,7 @@ test-wldmabufgl-x86: wldmabufgl-x86 boot-image-x86
     @just _assert-qemu-version qemu-system-x86_64
     M=target/mesa/x86; E="/lib/libdrm.so.2=$M/lib/libdrm.so.2;/lib/libEGL.so.1=$M/lib/libEGL.so.1;/lib/libgbm.so.1=$M/lib/libgbm.so.1;/lib/libexpat.so.1=$M/lib/libexpat.so.1;/lib/libgallium-25.3.6.so=$M/lib/libgallium-25.3.6.so;/lib/libGLESv2.so.2=$M/lib/libGLESv2.so.2;/lib/libz.so.1=$M/lib/libz.so.1;/lib/dri_gbm.so=$M/lib/dri_gbm.so;/bin/wldmabufgl=$M/bin/wldmabufgl"; MINIXFS_EXTRA="$E" MINIXFS_BLOCKS=16384 cargo run -q -p boot-image --bin mkminixfs --release -- x86_64
     @just mkfs-x86
-    python tools/wldmabufgl_probe.py qemu-system-x86_64 -display egl-headless -serial stdio -m 512M -no-reboot -vga none -device virtio-gpu-pci -kernel target/images/x86_64-pc-minix/minix-x86-boot.elf -drive if=none,id=disk0,file=target/images/x86_64-pc-minix/disk.img,format=raw,cache=writethrough -device virtio-blk-pci,disable-legacy=on,drive=disk0 -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0 -device virtio-gpu-gl-pci,blob=on -qmp tcp:127.0.0.1:4447,server=on,wait=off
+    cargo xtask probe wldmabufgl -- qemu-system-x86_64 -display egl-headless -serial stdio -m 512M -no-reboot -vga none -device virtio-gpu-pci -kernel target/images/x86_64-pc-minix/minix-x86-boot.elf -drive if=none,id=disk0,file=target/images/x86_64-pc-minix/disk.img,format=raw,cache=writethrough -device virtio-blk-pci,disable-legacy=on,drive=disk0 -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0 -device virtio-gpu-gl-pci,blob=on -qmp tcp:127.0.0.1:4447,server=on,wait=off
     @echo "wldmabufgl: the GL triangle's render target was the dma-buf wl_buffer, scanned out of the client's object with no compositor copy (x86_64)"
 
 # wlcompose: build /bin/wlcompose, the 3d-b-5b GPU-composition helper (§6.10). Like the other Mesa
@@ -1201,7 +1201,7 @@ test-wlcompose-x86: wlcompose-x86 boot-image-x86
     @just _assert-qemu-version qemu-system-x86_64
     M=target/mesa/x86; E="/lib/libdrm.so.2=$M/lib/libdrm.so.2;/lib/libEGL.so.1=$M/lib/libEGL.so.1;/lib/libgbm.so.1=$M/lib/libgbm.so.1;/lib/libexpat.so.1=$M/lib/libexpat.so.1;/lib/libgallium-25.3.6.so=$M/lib/libgallium-25.3.6.so;/lib/libGLESv2.so.2=$M/lib/libGLESv2.so.2;/lib/libz.so.1=$M/lib/libz.so.1;/lib/dri_gbm.so=$M/lib/dri_gbm.so;/bin/wlcompose=$M/bin/wlcompose"; MINIXFS_EXTRA="$E" MINIXFS_BLOCKS=16384 cargo run -q -p boot-image --bin mkminixfs --release -- x86_64
     @just mkfs-x86
-    python tools/wlcompose_probe.py qemu-system-x86_64 -display egl-headless -serial stdio -m 512M -no-reboot -vga none -device virtio-gpu-pci -kernel target/images/x86_64-pc-minix/minix-x86-boot.elf -drive if=none,id=disk0,file=target/images/x86_64-pc-minix/disk.img,format=raw,cache=writethrough -device virtio-blk-pci,disable-legacy=on,drive=disk0 -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0 -device virtio-gpu-gl-pci,blob=on
+    cargo xtask probe wlcompose -- qemu-system-x86_64 -display egl-headless -serial stdio -m 512M -no-reboot -vga none -device virtio-gpu-pci -kernel target/images/x86_64-pc-minix/minix-x86-boot.elf -drive if=none,id=disk0,file=target/images/x86_64-pc-minix/disk.img,format=raw,cache=writethrough -device virtio-blk-pci,disable-legacy=on,drive=disk0 -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0 -device virtio-gpu-gl-pci,blob=on
     @echo "wlcompose: two GL surfaces were composed on the render node by a helper in another process, and the frame read back holds them (x86_64)"
 
 # The 3d-b-5c/5d gate: two dma-buf surfaces committed on one connection are composed on the GPU by
@@ -1212,17 +1212,17 @@ test-wlscene-x86: wlcompose-x86 boot-image-x86
     @just _assert-qemu-version qemu-system-x86_64
     M=target/mesa/x86; E="/lib/libdrm.so.2=$M/lib/libdrm.so.2;/lib/libEGL.so.1=$M/lib/libEGL.so.1;/lib/libgbm.so.1=$M/lib/libgbm.so.1;/lib/libexpat.so.1=$M/lib/libexpat.so.1;/lib/libgallium-25.3.6.so=$M/lib/libgallium-25.3.6.so;/lib/libGLESv2.so.2=$M/lib/libGLESv2.so.2;/lib/libz.so.1=$M/lib/libz.so.1;/lib/dri_gbm.so=$M/lib/dri_gbm.so;/bin/wlcompose=$M/bin/wlcompose"; MINIXFS_EXTRA="$E" MINIXFS_BLOCKS=16384 cargo run -q -p boot-image --bin mkminixfs --release -- x86_64
     @just mkfs-x86
-    python tools/wlscene_probe.py qemu-system-x86_64 -display egl-headless -serial stdio -m 512M -no-reboot -vga none -device virtio-gpu-pci -kernel target/images/x86_64-pc-minix/minix-x86-boot.elf -drive if=none,id=disk0,file=target/images/x86_64-pc-minix/disk.img,format=raw,cache=writethrough -device virtio-blk-pci,disable-legacy=on,drive=disk0 -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0 -device virtio-gpu-gl-pci,blob=on -qmp tcp:127.0.0.1:4447,server=on,wait=off
+    cargo xtask probe wlscene -- qemu-system-x86_64 -display egl-headless -serial stdio -m 512M -no-reboot -vga none -device virtio-gpu-pci -kernel target/images/x86_64-pc-minix/minix-x86-boot.elf -drive if=none,id=disk0,file=target/images/x86_64-pc-minix/disk.img,format=raw,cache=writethrough -device virtio-blk-pci,disable-legacy=on,drive=disk0 -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0 -device virtio-gpu-gl-pci,blob=on -qmp tcp:127.0.0.1:4447,server=on,wait=off
     @echo "wlscene: the compositor composed two dma-buf surfaces on the GPU and scanned the frame out (x86_64)"
 
 test-wlfull-riscv64: system-image-riscv64
     @just _assert-qemu-version qemu-system-riscv64
-    python tools/wlfull_probe.py qemu-system-riscv64 -machine virt -m 256M -nographic -monitor none -display none -global virtio-mmio.force-legacy=off -drive if=none,id=disk0,file=target/images/riscv64gc-unknown-minix/disk.img,format=raw,cache=writethrough -device virtio-blk-device,drive=disk0 -netdev user,id=net0 -device virtio-net-device,netdev=net0 -device virtio-gpu-device -device virtio-keyboard-device -kernel target/images/riscv64gc-unknown-minix/minix-riscv64-boot.elf -qmp tcp:127.0.0.1:4447,server=on,wait=off
+    cargo xtask probe wlfull -- qemu-system-riscv64 -machine virt -m 256M -nographic -monitor none -display none -global virtio-mmio.force-legacy=off -drive if=none,id=disk0,file=target/images/riscv64gc-unknown-minix/disk.img,format=raw,cache=writethrough -device virtio-blk-device,drive=disk0 -netdev user,id=net0 -device virtio-net-device,netdev=net0 -device virtio-gpu-device -device virtio-keyboard-device -kernel target/images/riscv64gc-unknown-minix/minix-riscv64-boot.elf -qmp tcp:127.0.0.1:4447,server=on,wait=off
     @echo "wlfull: a whole-output wl_shm frame was scanned out of the client's own buffer (riscv64)"
 
 test-wlfull-aarch64: system-image-aarch64
     @just _assert-qemu-version qemu-system-aarch64
-    python tools/wlfull_probe.py qemu-system-aarch64 -machine virt -cpu cortex-a57 -m 256M -nographic -monitor none -display none -no-reboot -global virtio-mmio.force-legacy=off -drive if=none,id=disk0,file=target/images/aarch64-unknown-minix/disk.img,format=raw,cache=writethrough -device virtio-blk-device,drive=disk0 -netdev user,id=net0 -device virtio-net-device,netdev=net0 -device virtio-gpu-device -device virtio-keyboard-device -kernel target/images/aarch64-unknown-minix/minix-aarch64-boot.elf -qmp tcp:127.0.0.1:4447,server=on,wait=off
+    cargo xtask probe wlfull -- qemu-system-aarch64 -machine virt -cpu cortex-a57 -m 256M -nographic -monitor none -display none -no-reboot -global virtio-mmio.force-legacy=off -drive if=none,id=disk0,file=target/images/aarch64-unknown-minix/disk.img,format=raw,cache=writethrough -device virtio-blk-device,drive=disk0 -netdev user,id=net0 -device virtio-net-device,netdev=net0 -device virtio-gpu-device -device virtio-keyboard-device -kernel target/images/aarch64-unknown-minix/minix-aarch64-boot.elf -qmp tcp:127.0.0.1:4447,server=on,wait=off
     @echo "wlfull: a whole-output wl_shm frame was scanned out of the client's own buffer (aarch64)"
 
 test-gltriangle-riscv64 boot-timeout="180": gltriangle-riscv64 boot-image-riscv64
@@ -1374,14 +1374,14 @@ test-wlfocus-x86: build-x86
     cargo xtask probe wlfocus
     @echo "wlfocus: two clients, one focus, and the keys follow it (x86_64)"
 
-# wlmotion: tools/wlmotion_probe.py drives the pointer-interpolation path — `diag wlmotion`
+# wlmotion: `cargo xtask probe wlmotion` drives the pointer-interpolation path — `diag wlmotion`
 # maps a window, the host moves the absolute pointer in one event, and the client must
 # receive a stream of steps ending where the device landed.
 test-wlmotion-x86: build-x86
     mkdir -p target/images/x86_64-pc-minix
     cp target/trampoline.elf target/images/x86_64-pc-minix/minix-x86.elf
     @just _assert-qemu-version qemu-system-x86_64
-    python tools/wlmotion_probe.py
+    cargo xtask probe wlmotion
     @echo "wlmotion: the pointer moved in steps to where the device landed (x86_64)"
 
 # wlpointer: `cargo xtask probe wlpointer` drives pointer-follows-focus — `diag wlpointer` maps
@@ -1394,17 +1394,17 @@ test-wlpointer-x86: build-x86
     cargo xtask probe wlpointer
     @echo "wlpointer: the focus followed the pointer between two windows (x86_64)"
 
-# wldemo: tools/wldemo_probe.py drives the widget layer — `diag wldemo` is one window with
+# wldemo: `cargo xtask probe wldemo` drives the widget layer — `diag wldemo` is one window with
 # a text field, a list and a button, and the keys it is sent have to type, move the
 # selection, fire the button and reach the client as its own state report.
 test-wldemo-x86: build-x86
     mkdir -p target/images/x86_64-pc-minix
     cp target/trampoline.elf target/images/x86_64-pc-minix/minix-x86.elf
     @just _assert-qemu-version qemu-system-x86_64
-    python tools/wldemo_probe.py
+    cargo xtask probe wldemo
     @echo "wldemo: the field, the list and the button took their keys (x86_64)"
 
-# wlpanel: tools/wlpanel_probe.py drives the session panel, which is the session's own
+# wlpanel: `cargo xtask probe wlpanel` drives the session panel, which is the session's own
 # first program: `/etc/rc` starts `/bin/session`, it waits for the shell's prompt and
 # starts `/etc/session`, and `diag wlpanel` maps a 200x32 layer strip at the output's
 # top-right. A click inside its launcher button has to reach it and start an app. This
@@ -1413,7 +1413,7 @@ test-wlpanel-x86: build-x86
     mkdir -p target/images/x86_64-pc-minix
     cp target/trampoline.elf target/images/x86_64-pc-minix/minix-x86.elf
     @just _assert-qemu-version qemu-system-x86_64
-    python tools/wlpanel_probe.py
+    cargo xtask probe wlpanel
     @echo "wlpanel: the launcher took a click on the layer surface (x86_64)"
 
 # rc: `cargo xtask probe rc` boots and types nothing. `/etc/rc` names the session manager,

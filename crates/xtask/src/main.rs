@@ -157,12 +157,39 @@ fn run_probe(root: &Path, matches: &clap::ArgMatches) -> io::Result<bool> {
                 .get_one::<String>("dynclib")
                 .expect("clap defaults the dynclib"),
         ),
-
+        Some(("wldemo", _)) => probe::wldemo::run(root),
+        Some(("wldmabuf", matches)) => probe::wldmabuf::run(root, &probe_words(matches)),
+        Some(("wldmabufgl", matches)) => probe::wldmabufgl::run(root, &probe_words(matches)),
+        Some(("wlfull", matches)) => probe::wlfull::run(root, &probe_words(matches)),
+        Some(("wlmotion", _)) => probe::wlmotion::run(root),
+        Some(("wlpanel", _)) => probe::wlpanel::run(root),
+        Some(("wlcompose", matches)) => probe::wlcompose::run(root, &probe_words(matches)),
+        Some(("wlscene", matches)) => probe::wlscene::run(root, &probe_words(matches)),
         Some(("wlkey", _)) => probe::wlkey::run(root),
         Some(("wlfocus", _)) => probe::wlfocus::run(root),
         Some(("wlpointer", _)) => probe::wlpointer::run(root),
         _ => unreachable!("clap requires a probe subcommand"),
     }
+}
+
+/// The trailing QEMU words a recipe passed after `--`.
+fn probe_words(matches: &clap::ArgMatches) -> Vec<String> {
+    matches
+        .get_many::<String>("qemu")
+        .map(|values| values.cloned().collect())
+        .unwrap_or_default()
+}
+
+/// A gate that boots the image with a QEMU line the recipe owns, because the
+/// devices and the disk image differ per arch and per gate.
+fn guest_command_arg() -> clap::Arg {
+    clap::Arg::new("qemu")
+        .value_name("QEMU")
+        .required(true)
+        .num_args(1..)
+        .trailing_var_arg(true)
+        .allow_hyphen_values(true)
+        .help("The QEMU command line to boot, as the recipe gives it")
 }
 
 fn command() -> clap::Command {
@@ -354,6 +381,43 @@ fn command() -> clap::Command {
                                 .default_value("/bin/dynclib")
                                 .help("The dynamic client the pipeline runs twice"),
                         ),
+                )
+                .subcommand(
+                    clap::Command::new("wldemo")
+                        .about("The widget layer: a field, a list and a button take their keys"),
+                )
+                .subcommand(
+                    clap::Command::new("wldmabuf")
+                        .about("A render-node object handed over as a linux-dmabuf buffer and scanned out")
+                        .arg(guest_command_arg()),
+                )
+                .subcommand(
+                    clap::Command::new("wldmabufgl")
+                        .about("A GL client whose render target is the linux-dmabuf buffer scanned out")
+                        .arg(guest_command_arg()),
+                )
+                .subcommand(
+                    clap::Command::new("wlfull")
+                        .about("A whole-output wl_shm frame presented by re-pointing the scanout")
+                        .arg(guest_command_arg()),
+                )
+                .subcommand(
+                    clap::Command::new("wlmotion")
+                        .about("The pointer is interpolated across a tick, not jumped"),
+                )
+                .subcommand(
+                    clap::Command::new("wlpanel")
+                        .about("The panel is a layer surface, and its launcher takes a click"),
+                )
+                .subcommand(
+                    clap::Command::new("wlcompose")
+                        .about("Two GL surfaces composed on the render node by a helper in another process")
+                        .arg(guest_command_arg()),
+                )
+                .subcommand(
+                    clap::Command::new("wlscene")
+                        .about("Two dma-buf surfaces composed on the GPU and scanned out")
+                        .arg(guest_command_arg()),
                 )
                 .subcommand(
                     clap::Command::new("wlkey")
