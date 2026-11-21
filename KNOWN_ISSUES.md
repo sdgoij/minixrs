@@ -161,10 +161,16 @@ are arch-specific, `[env]` is tooling/platform, not kernel.
     `wloverlap` too). `just test-wlx-x86` (one full-output surface) and
     `just test-wlpointer-x86` (a full-output surface plus a 64x64 one) pass, so one
     output-sized surface per connection works and two do not. The Python probes and
-    their xtask ports fail identically, so the client is unchanged: either the
-    server closes the connection or it sends an event the client cannot decode. The
-    scan-out present path (`FBIO_SCANOUT_SRC`, `.notes/wayland.md` §6.10 3d-b-1) is
-    the first suspect, because it acts on a full-output commit.
+    their xtask ports fail identically, so the client is unchanged. A `hangdump`
+    right after the drop shows `/sbin/wlserver` alive and blocked in `receive`
+    (`rts=0x40`), and the client's peer socket is gone, so a connection was closed
+    rather than the server killed or an event mis-decoded. The server closes a
+    client's socket only when its own read ends or when it refuses a ninth
+    connection (`MAX_CLIENTS` is 8, and only the panel and the test's two are
+    open), so the close is not yet explained. The scan-out present path
+    (`FBIO_SCANOUT_SRC`, `.notes/wayland.md` §6.10 3d-b-1) is the first suspect,
+    because it acts on a full-output commit. Next: an LLDB session on `wlserver`
+    (see the `bare-metal-debug` skill), not added prints.
     (`crates/servers/src/wlserver.rs` `pump`, `crates/userland/src/wlclient.rs`
     `wait_peers`)
 
