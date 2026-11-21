@@ -720,3 +720,18 @@ the phase.** Three kinds are cheap here and one is not:
 helper; its table matches the script's line for line on this tree. What remains in
 Python is the WSL-bound build pair (`build-bash`, `build-mesa`) with the
 `cc-minix`/`cc-dso-minix` wrappers they drive and the pin shims those read.
+
+Thirteen one-off probes have now been deleted rather than ported, because nothing
+runs them: no recipe, no CI job, no workflow step, and no code comment names them.
+They are `alloc_probe`, `exec_loop_run`, `fbmmap_probe`, `gen-c-headers`,
+`id_probe`, `mouse_probe`, `pcap_decode`, `piped_matrix`, `rc-cost`,
+`read_trace_probe`, `riscv_blk_probe`, `su_setuid_probe` and
+`tcp_accept_verify`. The findings they produced are in `.notes/filemmap.md`,
+`.notes/dynamic_linking.md`, `.notes/porting_plan.md` and `KNOWN_ISSUES.md`, and
+`gen-c-headers.py` wrote a flattened set into `target/c-include`, which was never
+the contract: `tools/c-include` is hand-maintained and `cargo xtask check headers`
+checks it against the exports. Deleting `rc-cost.py` also leaves `lld.py` with one
+importer (`stage1.py`). Four probes whose comments in kernel and server code name
+them as the instrument for a live invariant (`alloc_churn_probe`,
+`exec_loop_mem`, `udp_netstate_probe`, `fb_screendump`) stay until those comments,
+or the probes, are settled.
