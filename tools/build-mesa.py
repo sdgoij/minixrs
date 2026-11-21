@@ -3,7 +3,7 @@
 them.
 
 This is the build plumbing of §6.10 stage 3c-0. It is the same shape as
-`tools/build-bash.py` — fetch pinned upstream trees, drive their own build system
+`cargo xtask build bash` — fetch pinned upstream trees, drive their own build system
 against the port's C toolchain, log everything — with three differences that come
 from what Mesa is:
 
@@ -229,7 +229,7 @@ def wsl_path(path: pathlib.Path) -> str:
 
 def run_in_wsl(argv: list[str]) -> int:
     """Re-enter this script in WSL: the build needs a POSIX host (see
-    `tools/build-bash.py` and `.notes/c_build.md`)."""
+    `cargo xtask build bash` and `.notes/c_build.md`)."""
     wsl = shutil.which("wsl")
     if wsl is None:
         die("this host is Windows and has no `wsl` to build in; Mesa's build needs a "

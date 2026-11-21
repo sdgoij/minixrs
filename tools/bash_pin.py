@@ -9,7 +9,7 @@ releases, not each patch. The clone comes from [`BASH_GIT`] — a mirror in this
 project's own GitHub org, refreshed by `just mirror-bash` when the pin moves —
 because savannah is slow and times out.
 
-Both the build (`tools/build-bash.py`) and the fetch (`cargo xtask fetch bash`) read
+Both the build (`cargo xtask build bash`) and the fetch (`cargo xtask fetch bash`) read
 the pin from here, and `.github/workflows/bash-release.yml` derives its release tag
 from [`tag`] — the commit plus the `rust` gitlink (`tools/pin.py`) — so an artifact
 matches both the sources this file names and the toolchain the tree pins. Bumping

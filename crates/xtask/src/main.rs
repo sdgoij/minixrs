@@ -130,6 +130,12 @@ fn run_check(
 
 fn run_build(root: &Path, matches: &clap::ArgMatches) -> io::Result<bool> {
     match matches.subcommand() {
+        Some(("bash", matches)) => build::bash::run(
+            root,
+            target(matches),
+            matches.get_flag("force"),
+            matches.get_one::<u64>("jobs").copied(),
+        ),
         Some(("c-hello", matches)) => build::c_hello::run(root, target(matches)),
         Some(("std-hello", matches)) => build::std_hello::run(root, target(matches)),
         Some(("dynlibc", matches)) => build::dynlibc::run(root, target(matches)),
@@ -386,6 +392,24 @@ fn command() -> clap::Command {
                 .about("Build a target program with the fork toolchain")
                 .subcommand_required(true)
                 .arg_required_else_help(true)
+                .subcommand(
+                    clap::Command::new("bash")
+                        .about("GNU bash for a minix target, from the pinned upstream commit")
+                        .arg(target_arg("x86"))
+                        .arg(
+                            clap::Arg::new("force")
+                                .long("force")
+                                .action(clap::ArgAction::SetTrue)
+                                .help("Refetch the source and reconfigure"),
+                        )
+                        .arg(
+                            clap::Arg::new("jobs")
+                                .long("jobs")
+                                .value_name("N")
+                                .value_parser(clap::value_parser!(u64).range(1..))
+                                .help("Parallel make jobs (default: the host's cores)"),
+                        ),
+                )
                 .subcommand(
                     clap::Command::new("c-hello")
                         .about("The C smoke binaries: /bin/helloc, /bin/ctest, /bin/cabi")

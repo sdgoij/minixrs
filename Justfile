@@ -1891,18 +1891,19 @@ build-c-hello arch="x86":
     cargo xtask image mkboot embed_initramfs,embed_minixfs
     cargo xtask image mkfs x86
 
-# GNU bash for a minix target, from the upstream commit `tools/build-bash.py` pins:
+# GNU bash for a minix target, from the upstream commit `tools/pins.ini` pins:
 # fetched, configured against `tools/c-include` and linked against minix-libc by
 # `cargo xtask cc minix`, the `cc` a C project's own build needs. That host must be
 # POSIX (the stage1, the rlib and clang all have to be the same host's), so on
-# Windows the script re-enters WSL by itself; `MINIX_WSL_DISTRO` picks the
-# distribution. Artifact: `target/bash/<arch>/bash`; `just test-bash <arch>`
-# boots it. `.notes/c_build.md` has the why of each flag and each trap this build costs.
+# Windows `cargo xtask build bash` re-enters WSL by itself; `MINIX_WSL_DISTRO`
+# picks the distribution. Artifact: `target/bash/<arch>/bash`; `just test-bash
+# <arch>` boots it. `.notes/c_build.md` has the why of each flag and each trap this
+# build costs.
 #
 # Run this *after* the toolchain: `bootstrap` and `fetch-stage1` start with
 # `cargo clean`, which takes `target/bash-src` and the build tree with it.
-build-bash arch="x86":
-    python tools/build-bash.py {{arch}}
+build-bash arch="x86" *args:
+    cargo xtask build bash {{arch}} {{args}}
 
 # Install the prebuilt bash for the pinned commit (`tools/bash_pin.py`) instead of
 # building it: the release `.github/workflows/bash-release.yml` publishes, tagged

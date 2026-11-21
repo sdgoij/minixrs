@@ -3,7 +3,7 @@
 #   FEED_SCENARIO=tools/smoke/bash.tsv cargo xtask smoke <log> <seconds> <qemu command…>
 #
 # Driven by `just test-bash`, which builds bash from the pinned upstream commit
-# (`tools/build-bash.py`) and injects it as /bin/bash, because it is deliberately not a BOOT_BINS
+# (`cargo xtask build bash`) and injects it as /bin/bash, because it is deliberately not a BOOT_BINS
 # entry: an image that always carries a 1.4 MB bash would only build where bash had been built.
 #
 # One step per line, as `tools/smoke/scenario.tsv` documents: the command, a tab, and the whole line

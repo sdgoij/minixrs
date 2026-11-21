@@ -847,3 +847,27 @@ Justfile's `coreutils-aarch64` builds it with `cargo xtask --list >/dev/null`
 first, and `build-bash.py` builds `.xtask/linux` itself. `tools/cc-minix.py` is
 deleted; `cc-dso-minix.py`, `ccarch.py` and `ccflags.py` stay with the Mesa
 builder until W3.
+
+W2 landed. `cargo xtask build bash [all|x86|riscv64|aarch64] [--force] [--jobs N]`
+replaces `tools/build-bash.py`: fetch the pinned commit, build minix-libc with
+this host's stage1, configure out-of-tree, make, and publish the ELF after
+checking its machine and size. The `cc` it names is this binary
+(`current_exe() cc minix <arch>`), and on Windows it re-enters WSL with
+`MINIX_WSL_DISTRO` and runs `cargo run --target-dir .xtask/linux -- build bash`
+there, so there is no second build tree to keep in step.
+
+The `--force` path found a real bug, which the Python had too and which nobody had
+run into: a `drvfs` mount (a Windows path from WSL) truncates a set mtime down to
+the whole second, so setting `configure` to "now" can leave it *older* than a
+`configure.ac` git wrote later in the same second, and make then runs `autoconf`.
+The port stamps the generated files two seconds ahead and says why; `--force`
+now completes.
+
+Validation: a fresh configure through the new builder produces the same bytes as
+the Python builder (`sha256 119133d4`, the artifact the two bash gates were green
+on before). A *reused* config directory rebuilds to a different shell on every
+run, but the Python builder does the same from the same tree state, so that is
+`config.status --recheck`, not the port; each builder was run twice on the same
+state to check that. `just test-bash x86` and `just test-interactive-bash x86`
+are green. What remains Python is the Mesa trio (`build-mesa`,
+`cc-dso-minix`, `ccflags`), the parse-time lookups and the pin shims.

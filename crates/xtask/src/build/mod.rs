@@ -4,6 +4,7 @@
 //! rustc for the link, and `cargo` only for the `minix-libc` rlib they link
 //! against. The argv is the contract, so every command is echoed before it runs.
 
+pub mod bash;
 pub mod c_hello;
 pub mod cdyn;
 pub mod dynlibc;

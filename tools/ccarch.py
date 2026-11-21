@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """The minix userland C targets, and what a C build has to be told to name one.
 
-Two drivers need the same answers: `tools/build-bash.py` and
+Two callers need the same answers: `tools/build-mesa.py` and
 `tools/cc-dso-minix.py`, the `cc` a project that builds shared objects calls.
-The executable `cc` is now `cargo xtask cc minix`, and the smoke binaries are in
-`crates/xtask`, which carries its own copy of this table; this one stays until
-the two Python callers go.
+The executable `cc` is `cargo xtask cc minix`, the bash build is
+`cargo xtask build bash`, and the smoke binaries are in `crates/xtask`, which
+carries its own copy of this table; this one stays until the Mesa builder moves.
 What the answers are is the point: the *minix* triple is what the rustc rlib is
 built for, and the clang *machine* is what the headers and the object code are
 compiled for. They are the same machine, one per arch, and the link step is

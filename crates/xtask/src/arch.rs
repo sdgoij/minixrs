@@ -23,6 +23,11 @@ pub struct Arch {
     /// also the suffix of the arch's `crt0`.
     pub machine: &'static str,
 
+    /// `e_machine` as the ELF header carries it (`EM_X86_64`, `EM_AARCH64`,
+    /// `EM_RISCV`), so a built artifact can be checked against the target it was
+    /// asked for rather than trusted to be the right one.
+    pub e_machine: u16,
+
     /// Whether `-mno-red-zone` means anything here. It is an x86_64 and AArch64
     /// flag; RISC-V has no red zone, and clang only warns that it is unused.
     red_zone: bool,
@@ -91,6 +96,7 @@ pub static X86_64: Arch = Arch {
     name: "x86",
     triple: "x86_64-pc-minix",
     machine: "x86_64",
+    e_machine: 0x3e,
     red_zone: true,
     extra_cflags: &[],
 };
@@ -99,6 +105,7 @@ pub static RISCV64: Arch = Arch {
     name: "riscv64",
     triple: "riscv64gc-unknown-minix",
     machine: "riscv64",
+    e_machine: 0xf3,
     red_zone: false,
     extra_cflags: &["-march=rv64gc", "-mabi=lp64d"],
 };
@@ -107,6 +114,7 @@ pub static AARCH64: Arch = Arch {
     name: "aarch64",
     triple: "aarch64-unknown-minix",
     machine: "aarch64",
+    e_machine: 0xb7,
     red_zone: true,
     extra_cflags: &[],
 };
@@ -156,6 +164,13 @@ mod tests {
     fn the_clang_target_is_the_machine_the_crt0_names() {
         assert_eq!(X86_64.clang_target(), "x86_64-unknown-none");
         assert!(X86_64.crt0(Path::new("root")).ends_with("tools/crt0-x86_64.S"));
+    }
+
+    #[test]
+    fn each_arch_names_the_elf_machine_a_built_artifact_must_carry() {
+        assert_eq!(X86_64.e_machine, 0x3e);
+        assert_eq!(RISCV64.e_machine, 0xf3);
+        assert_eq!(AARCH64.e_machine, 0xb7);
     }
 
     #[test]
