@@ -12,7 +12,7 @@
  * contexts live for the whole run: the node tracks a context per client endpoint, so the helper's
  * readback is not blocked by the peer's context.
  *
- * A dynamic image is required (Mesa's DSOs); `tools/build-wlcompose.py` links this object in.
+ * A dynamic image is required (Mesa's DSOs); `cargo xtask build wlcompose` links this object in.
  */
 #include <EGL/egl.h>
 #include <EGL/eglext.h>

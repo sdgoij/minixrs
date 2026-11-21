@@ -17,7 +17,7 @@
  * defence for the client-side transfer `/bin/wldmabufgl` does (§5 row 26).
  *
  * It is a dev-host probe: it needs the GL host the virgl gates need. Runs as a normal dynamic
- * minix image (built by `tools/build-eglprobe.py`).
+ * minix image (built as a dynamic minix image against Mesa's DSOs).
  */
 #include <errno.h>
 #include <fcntl.h>

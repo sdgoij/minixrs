@@ -16,7 +16,7 @@
  * the same as `/bin/wlgl`'s: a render node means surfaceless EGL takes `virtio_gpu`
  * (virgl); without one it is forced onto `softpipe`.
  *
- * A dynamic image is required (Mesa's DSOs); `tools/build-wldmabufgl.py` links this object
+ * A dynamic image is required (Mesa's DSOs); `cargo xtask build wldmabufgl` links this object
  * into `/bin/wldmabufgl`. The protocol half lives in `crates/userland`'s `wlclient` module,
  * which calls `wldmabufgl_render` and never touches GL.
  */

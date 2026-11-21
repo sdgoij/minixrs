@@ -13,7 +13,7 @@
  * as sampler textures, drawn as quads into a full-output pbuffer, and the frame is read back and
  * checked at each rectangle and the background.
  *
- * Runs as a normal dynamic minix image (built by `tools/build-composeprobe.py`); needs the GL
+ * Runs as a normal dynamic minix image (built as a dynamic minix image against Mesa's DSOs); needs the GL
  * host the virgl gates need.
  */
 #include <errno.h>

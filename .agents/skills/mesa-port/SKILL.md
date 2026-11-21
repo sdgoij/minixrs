@@ -38,12 +38,12 @@ toolchain. `.notes/wayland.md` §6.10 is the design; these are the recipes and t
   `libc.so`. It is the piece that grows a feature every time Mesa asks for one.
 - `just gltriangle <arch>` — builds the surfaceless-EGL GLES2 triangle client
   (`tools/gl_triangle.c`, `cargo xtask build gltriangle`) and stages the DSOs.
-- `just wlgl-x86` — `tools/build-wlgl.py` builds `/bin/wlgl`, the 3d-a client that
+- `just wlgl-x86` — `cargo xtask build wlgl` builds `/bin/wlgl`, the 3d-a client that
   presents a GL surface through the in-house Wayland compositor: `wlclient`'s
   protocol half plus `tools/wlgl_render.c` for the GL half. It is the tree's first
   *dynamically linked Rust* program, and the link is the interesting part (see the
   trap below).
-- `just wldmabufgl-x86` — `tools/build-wldmabufgl.py` builds `/bin/wldmabufgl`, the
+- `just wldmabufgl-x86` — `cargo xtask build wldmabufgl` builds `/bin/wldmabufgl`, the
   3d-b-4d client: the same shape as `/bin/wlgl`, but the GL half
   (`tools/wldmabufgl_render.c`) renders into a GBM object on the render node (through
   an `EGLImage` over the object's descriptor) and returns its dma-buf instead of

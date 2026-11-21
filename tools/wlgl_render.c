@@ -15,7 +15,7 @@
  * not depend on the shell passing an environment variable.
  *
  * A dynamic image is required — a static minix program has no loader to bring Mesa's
- * DSOs in with (`tools/build-wlgl.py` links this object into `/bin/wlgl`).
+ * DSOs in with (`cargo xtask build wlgl` links this object into `/bin/wlgl`).
  */
 #include <EGL/egl.h>
 #include <GLES2/gl2.h>

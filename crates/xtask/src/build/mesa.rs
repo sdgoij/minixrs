@@ -1,12 +1,10 @@
 //! The Mesa/GL clients: a dynamic image whose GL half is Mesa's shared objects.
 //!
-//! Both links are "a normal dynamic minix executable" (non-PIC, `PT_INTERP` = the
-//! loader, `DT_NEEDED` libs resolved at run time) plus the staged Mesa DSOs from
-//! `just build-mesa <arch> --stage` or `just fetch-mesa <arch>`.
-//!
-//! `gltriangle` is the C-only client, so it is [`dynamic::link_program`] with a
-//! Mesa header path and two extra `-l:` names. `gui` links Rust rlibs instead: its
-//! entry is the crt0's renamed `_start`, and its GL and Wayland halves are crates.
+//! `gltriangle` and `gbmtest` are C-only clients, so they are
+//! [`dynamic::link_program`] with a Mesa header path and extra `-l:` names.
+//! `gui`, `wlgl`, `wlcompose` and `wldmabufgl` link Rust rlibs instead: their
+//! entry is the crt0's renamed `_start`, their GL and Wayland halves are crates,
+//! and an optional C render object provides the GL calls.
 
 use std::fs;
 use std::io;
@@ -37,24 +35,13 @@ fn staging(root: &Path, arch: &Arch) -> Staging {
     }
 }
 
-/// The crate rustc links the `userland` rlib into. Its `main` is what the crt0
-/// below calls; the crt0 ends the image on `exit`.
-///
-/// No `#[panic_handler]` here: `minix-rt` brings one in through `minix-std`, and a
-/// second definition is a duplicate lang item (E0152).
-const GUI_STUB: &str = "\
-#![no_std]
-#![no_main]
-
-// Written by `cargo xtask build gui`.
-
-#[unsafe(no_mangle)]
-pub extern \"C\" fn main(argc: i32, argv: *const *const u8, _envp: *const *const u8) -> i32 {
-    let mut buf = [\"\"; 64];
-    let args = unsafe { userland::parse_args(argc, argv, &mut buf) };
-    userland::wlclient::wl_gui(args)
+/// The source trees the GBM and DRM headers come from (`just build-mesa`).
+fn sources(root: &Path) -> (PathBuf, PathBuf) {
+    (
+        root.join("target").join("mesa-src"),
+        root.join("target").join("drm-src"),
+    )
 }
-";
 
 /// The C crt0's entry symbol, renamed at compile time. `minix-rt` defines `_start`
 /// too (its own runtime's entry, unused here but pulled in with `minix-std`), and
@@ -62,6 +49,28 @@ pub extern \"C\" fn main(argc: i32, argv: *const *const u8, _envp: *const *const
 /// at it with `-e` leaves the crt0 as the entry: it is what sets up the thread
 /// pointer and `environ` through `libc.so`, which a dynamic image needs.
 const CRT0_ENTRY: &str = "minix_crt0_entry";
+
+/// The crate rustc links the `userland` rlib and the optional C object into.
+///
+/// `call` is the `userland` function the crt0 calls. No `#[panic_handler]` here:
+/// `minix-rt` brings one in through `minix-std`, and a second definition is a
+/// duplicate lang item (E0152).
+fn rust_stub(call: &str) -> String {
+    format!(
+        r#"#![no_std]
+#![no_main]
+
+// Written by `cargo xtask build`.
+
+#[unsafe(no_mangle)]
+pub extern "C" fn main(argc: i32, argv: *const *const u8, _envp: *const *const u8) -> i32 {{
+    let mut buf = [""; 64];
+    let args = unsafe {{ userland::parse_args(argc, argv, &mut buf) }};
+    {call}(args)
+}}
+"#
+    )
+}
 
 pub fn gltriangle(root: &Path, target: Option<&str>) -> io::Result<bool> {
     let arch = resolve(target)?;
@@ -119,8 +128,210 @@ pub fn gltriangle(root: &Path, target: Option<&str>) -> io::Result<bool> {
     })
 }
 
+/// The GBM create/export probe: a C-only client that links GBM and libdrm.
+pub fn gbmtest(root: &Path, target: Option<&str>) -> io::Result<bool> {
+    let arch = resolve(target)?;
+    let rustc = toolchain::find_stage1_rustc(root).ok_or_else(toolchain::missing_stage1)?;
+    let lld = toolchain::find_lld(root).ok_or_else(toolchain::missing_lld)?;
+
+    let libc_dir = root.join("target").join(arch.triple).join("release");
+    require(
+        &libc_dir.join(dynamic::LIBC),
+        &format!("run `just dynlib-{}` first", arch.name),
+    )?;
+    let staging = staging(root, arch);
+    require(
+        &staging.lib.join("libgbm.so.1"),
+        &format!("run `just build-mesa {} --build`", arch.name),
+    )?;
+    let (mesa_src, drm_src) = sources(root);
+    for header in [
+        mesa_src.join("src").join("gbm").join("main").join("gbm.h"),
+        drm_src.join("xf86drm.h"),
+    ] {
+        require(
+            &header,
+            &format!(
+                "run `just build-mesa {} --build` (the GBM probe compiles against the source checkouts)",
+                arch.name
+            ),
+        )?;
+    }
+
+    let work = root.join("target").join("mesa").join(arch.name).join("bin");
+    let out = work.join("gbmtest");
+    let scratch = work.join("obj");
+    let source = root.join("tools").join("gbm_test.c");
+
+    let extra_cflags = vec![
+        format!("-I{}", mesa_src.join("src").join("gbm").join("main").display()),
+        format!("-I{}", drm_src.display()),
+        format!("-I{}", drm_src.join("include").join("drm").display()),
+    ];
+    let extra_libs = vec!["-l:libgbm.so.1".to_string(), "-l:libdrm.so.2".to_string()];
+
+    dynamic::link_program(&Program {
+        root,
+        arch,
+        source: &source,
+        out: &out,
+        rustc: &rustc,
+        lld: &lld,
+        libc_dir: &libc_dir,
+        scratch: &scratch,
+        stub: Some("gbmtest"),
+        extra_cflags: &extra_cflags,
+        extra_link_dirs: std::slice::from_ref(&staging.lib),
+        extra_libs: &extra_libs,
+    })
+}
+
 pub fn gui(root: &Path, target: Option<&str>) -> io::Result<bool> {
     let arch = resolve(target)?;
+    let staging = staging(root, arch);
+    let cflags = vec![
+        format!("-I{}", staging.include.display()),
+        "-DEGL_NO_PLATFORM_SPECIFIC_TYPES".to_string(),
+    ];
+    rust_client(
+        root,
+        arch,
+        &RustClient {
+            name: "gui",
+            call: "userland::wlclient::wl_gui",
+            render: None,
+            cflags: &cflags,
+            libs: &["libEGL.so.1", "libGLESv2.so.2"],
+            checks: &egl_checks(arch, &staging),
+        },
+    )
+}
+
+/// `/bin/wlgl`, the Wayland GL present client (§6.10, 3d-a).
+pub fn wlgl(root: &Path, target: Option<&str>) -> io::Result<bool> {
+    let arch = resolve(target)?;
+    let staging = staging(root, arch);
+    let cflags = vec![
+        format!("-I{}", staging.include.display()),
+        "-DEGL_NO_PLATFORM_SPECIFIC_TYPES".to_string(),
+    ];
+    rust_client(
+        root,
+        arch,
+        &RustClient {
+            name: "wlgl",
+            call: "userland::wlclient::wl_gl",
+            render: Some(&root.join("tools").join("wlgl_render.c")),
+            cflags: &cflags,
+            libs: &["libEGL.so.1", "libGLESv2.so.2"],
+            checks: &egl_checks(arch, &staging),
+        },
+    )
+}
+
+/// `/bin/wlcompose`, the GPU-composition helper and its test peer (§6.10, 3d-b-5b).
+pub fn wlcompose(root: &Path, target: Option<&str>) -> io::Result<bool> {
+    let arch = resolve(target)?;
+    rust_client(
+        root,
+        arch,
+        &RustClient {
+            name: "wlcompose",
+            call: "userland::wlcompose::wlcompose",
+            render: Some(&root.join("tools").join("wlcompose_render.c")),
+            cflags: &compose_cflags(root),
+            libs: &[
+                "libEGL.so.1",
+                "libGLESv2.so.2",
+                "libgbm.so.1",
+                "libdrm.so.2",
+            ],
+            checks: &compose_checks(root, arch),
+        },
+    )
+}
+
+/// `/bin/wldmabufgl`, the linux-dmabuf GL present client (§6.10, 3d-b-4d).
+pub fn wldmabufgl(root: &Path, target: Option<&str>) -> io::Result<bool> {
+    let arch = resolve(target)?;
+    rust_client(
+        root,
+        arch,
+        &RustClient {
+            name: "wldmabufgl",
+            call: "userland::wlclient::wl_dmabuf_gl",
+            render: Some(&root.join("tools").join("wldmabufgl_render.c")),
+            cflags: &compose_cflags(root),
+            libs: &[
+                "libEGL.so.1",
+                "libGLESv2.so.2",
+                "libgbm.so.1",
+                "libdrm.so.2",
+            ],
+            checks: &compose_checks(root, arch),
+        },
+    )
+}
+
+fn egl_checks(arch: &Arch, staging: &Staging) -> Vec<(PathBuf, String)> {
+    vec![
+        (
+            staging.lib.join("libEGL.so.1"),
+            format!(
+                "run `just build-mesa {} --stage`, or `just fetch-mesa {}`",
+                arch.name, arch.name
+            ),
+        ),
+        (
+            staging.include.join("EGL").join("egl.h"),
+            format!(
+                "run `just build-mesa {} --build`, or `just fetch-mesa {}`",
+                arch.name, arch.name
+            ),
+        ),
+    ]
+}
+
+fn compose_cflags(root: &Path) -> Vec<String> {
+    let (mesa_src, drm_src) = sources(root);
+    vec![
+        format!("-I{}", mesa_src.join("include").display()),
+        format!("-I{}", mesa_src.join("src").join("gbm").join("main").display()),
+        format!("-I{}", drm_src.display()),
+        format!("-I{}", drm_src.join("include").join("drm").display()),
+        "-DEGL_NO_PLATFORM_SPECIFIC_TYPES".to_string(),
+    ]
+}
+
+fn compose_checks(root: &Path, arch: &Arch) -> Vec<(PathBuf, String)> {
+    let (mesa_src, _) = sources(root);
+    let lib = root.join("target").join("mesa").join(arch.name).join("lib");
+    let build = format!("run `just build-mesa {} --build`", arch.name);
+    vec![
+        (lib.join("libEGL.so.1"), build.clone()),
+        (
+            lib.join("libgbm.so.1"),
+            format!("{build} (GBM is enabled in the build config)"),
+        ),
+        (
+            mesa_src.join("include").join("EGL").join("eglext.h"),
+            format!("{build} (the client compiles against the sources)"),
+        ),
+    ]
+}
+
+struct RustClient<'a> {
+    name: &'a str,
+    call: &'a str,
+    render: Option<&'a Path>,
+    cflags: &'a [String],
+    libs: &'a [&'a str],
+    checks: &'a [(PathBuf, String)],
+}
+
+/// Link a Rust-half client: the `userland` rlib, the crt0's renamed entry, and an
+/// optional C render object, against `libs`.
+fn rust_client(root: &Path, arch: &Arch, client: &RustClient<'_>) -> io::Result<bool> {
     let rustc = toolchain::find_stage1_rustc(root).ok_or_else(toolchain::missing_stage1)?;
     let lld = toolchain::find_lld(root).ok_or_else(toolchain::missing_lld)?;
 
@@ -148,32 +359,19 @@ pub fn gui(root: &Path, target: Option<&str>) -> io::Result<bool> {
         &release.join(dynamic::LIBC),
         &format!("run `just dynlib-{}` first", arch.name),
     )?;
-    let staging = staging(root, arch);
-    require(
-        &staging.lib.join("libEGL.so.1"),
-        &format!(
-            "run `just build-mesa {} --stage`, or `just fetch-mesa {}`",
-            arch.name, arch.name
-        ),
-    )?;
-    require(
-        &staging.include.join("EGL").join("egl.h"),
-        &format!(
-            "run `just build-mesa {} --build`, or `just fetch-mesa {}`",
-            arch.name, arch.name
-        ),
-    )?;
+    for (path, why) in client.checks {
+        require(path, why)?;
+    }
 
     let work = root.join("target").join("mesa").join(arch.name).join("bin");
-    let out = work.join("gui");
+    let out = work.join(client.name);
     let scratch = work.join("obj");
     fs::create_dir_all(&scratch)?;
 
     let mut cflags = arch.base_cflags();
     cflags.extend(["-fno-builtin", "-O2", "-c"].map(String::from));
     cflags.extend(cc::compile_flags(root)?);
-    cflags.push(format!("-I{}", staging.include.display()));
-    cflags.push("-DEGL_NO_PLATFORM_SPECIFIC_TYPES".to_string());
+    cflags.extend(client.cflags.iter().cloned());
 
     let crt0 = scratch.join("crt0.o");
     let mut clang = Command::new("clang");
@@ -185,8 +383,21 @@ pub fn gui(root: &Path, target: Option<&str>) -> io::Result<bool> {
         .arg(arch.crt0(root));
     step(&mut clang, "compiling the crt0")?;
 
-    let stub = scratch.join("gui_stub.rs");
-    fs::write(&stub, GUI_STUB)?;
+    let mut objects = vec![crt0];
+    if let Some(source) = client.render {
+        let stem = source
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .unwrap_or("render");
+        let object = scratch.join(format!("{stem}.o"));
+        let mut clang = Command::new("clang");
+        clang.args(&cflags).arg("-o").arg(&object).arg(source);
+        step(&mut clang, "compiling the C render object")?;
+        objects.push(object);
+    }
+
+    let stub = scratch.join(format!("{}_stub.rs", client.name));
+    fs::write(&stub, rust_stub(client.call))?;
 
     let mut link = Command::new(&rustc);
     link.args([
@@ -209,34 +420,37 @@ pub fn gui(root: &Path, target: Option<&str>) -> io::Result<bool> {
     .arg("-C")
     .arg("link-arg=-e")
     .arg("-C")
-    .arg(format!("link-arg={CRT0_ENTRY}"))
-    .arg("-C")
-    .arg(format!("link-arg={}", crt0.display()))
-    .arg("-C")
-    .arg(format!("link-arg=-L{}", release.display()))
-    .arg("-C")
-    .arg(format!("link-arg=-L{}", staging.lib.display()))
-    // rustc's own crate search, for `userland`'s rlib and its dependencies:
-    // `-C link-arg=-L` reaches only the linker.
-    .arg("-L")
-    .arg(format!("dependency={}", arch.libc_deps(root).display()))
-    .arg("-C")
-    .arg("link-arg=-Bdynamic")
-    .arg("-C")
-    .arg("link-arg=--allow-shlib-undefined")
-    .arg("-C")
-    .arg(format!("link-arg=-l:{}", dynamic::LIBC))
-    .arg("-C")
-    .arg("link-arg=-l:libEGL.so.1")
-    .arg("-C")
-    .arg("link-arg=-l:libGLESv2.so.2")
-    .arg("-C")
-    .arg(format!("link-arg=--dynamic-linker={}", dynamic::INTERP))
-    .arg("--extern")
-    .arg(format!("userland={}", userland.display()))
-    .arg("-o")
-    .arg(&out)
-    .arg(&stub);
+    .arg(format!("link-arg={CRT0_ENTRY}"));
+    for object in &objects {
+        link.arg("-C").arg(format!("link-arg={}", object.display()));
+    }
+    link.arg("-C")
+        .arg(format!("link-arg=-L{}", release.display()))
+        .arg("-C")
+        .arg(format!(
+            "link-arg=-L{}",
+            root.join("target").join("mesa").join(arch.name).join("lib").display()
+        ))
+        // rustc's own crate search, for `userland`'s rlib and its dependencies:
+        // `-C link-arg=-L` reaches only the linker.
+        .arg("-L")
+        .arg(format!("dependency={}", arch.libc_deps(root).display()))
+        .arg("-C")
+        .arg("link-arg=-Bdynamic")
+        .arg("-C")
+        .arg("link-arg=--allow-shlib-undefined")
+        .arg("-C")
+        .arg(format!("link-arg=-l:{}", dynamic::LIBC));
+    for library in client.libs {
+        link.arg("-C").arg(format!("link-arg=-l:{library}"));
+    }
+    link.arg("-C")
+        .arg(format!("link-arg=--dynamic-linker={}", dynamic::INTERP))
+        .arg("--extern")
+        .arg(format!("userland={}", userland.display()))
+        .arg("-o")
+        .arg(&out)
+        .arg(&stub);
     if !cc::run(&mut link)? {
         return Ok(false);
     }
@@ -275,9 +489,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_stub_calls_into_the_in_house_renderer() {
-        assert!(GUI_STUB.contains("wlclient::wl_gui"));
-        assert!(!GUI_STUB.contains("panic_handler"));
+    fn each_stub_calls_its_wayland_entry() {
+        assert!(rust_stub("userland::wlclient::wl_gui").contains("wlclient::wl_gui"));
+        assert!(rust_stub("userland::wlclient::wl_gl").contains("wlclient::wl_gl"));
+        assert!(rust_stub("userland::wlcompose::wlcompose").contains("wlcompose::wlcompose"));
+        assert!(rust_stub("userland::wlclient::wl_dmabuf_gl").contains("wl_dmabuf_gl"));
+        assert!(!rust_stub("userland::wlclient::wl_gui").contains("panic_handler"));
     }
 
     #[test]

@@ -442,7 +442,7 @@ fn check_square(fb: *const u32) -> Result<(), i32> {
 // `XRGB8888` order the server and the framebuffer both use. Returns 0.
 //
 // The whole GL half is minix-only: `wlgl_render` is a C object linked into the
-// `/bin/wlgl` image by `tools/build-wlgl.py`, so a host build of this crate has
+// `/bin/wlgl` image by `cargo xtask build wlgl`, so a host build of this crate has
 // no such symbol, and nothing on the host calls `wl_gl` anyway.
 #[cfg(target_os = "minix")]
 unsafe extern "C" {

@@ -477,6 +477,16 @@ restored, and it stays until the last of the six remaining importers moves
 that was missed: delete what nothing imports, and check that with `grep`, not
 with the test suite.
 
+**Phase 1, done.** `cargo xtask build wlgl|wlcompose|wldmabufgl` replaced the
+three Rust-half Wayland clients and `cargo xtask build gbmtest` the C-only GBM
+probe. The Rust-half clients share one linker (`rust_client` in `build/mesa.rs`):
+the userland rlib, the crt0's renamed entry, an optional C render object and the
+DSOs that object calls. `build-composeprobe.py` and `build-eglprobe.py` had no
+recipe left and went with them; `cdyn.py` lost its last importer and is gone.
+The Mesa gates need `target/mesa-src`, which only a WSL `just build-mesa --build`
+populates, so the artifacts were not rebuilt here; the local gate is
+`cargo test --workspace`, `just check` and the command-line unit tests.
+
 **Phase 5, started.** `cargo xtask probe read-hist` replaces
 `tools/virtio_read_hist.py`, the first of the CI gate probes, and
 `just test-read-cost-x86` calls it. Its output and its `--max` verdict match the

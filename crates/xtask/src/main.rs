@@ -126,6 +126,10 @@ fn run_build(root: &Path, matches: &clap::ArgMatches) -> io::Result<bool> {
         }
         Some(("gltriangle", matches)) => build::mesa::gltriangle(root, target(matches)),
         Some(("gui", matches)) => build::mesa::gui(root, target(matches)),
+        Some(("gbmtest", matches)) => build::mesa::gbmtest(root, target(matches)),
+        Some(("wlgl", matches)) => build::mesa::wlgl(root, target(matches)),
+        Some(("wlcompose", matches)) => build::mesa::wlcompose(root, target(matches)),
+        Some(("wldmabufgl", matches)) => build::mesa::wldmabufgl(root, target(matches)),
         Some(("cdyn", matches)) => {
             let Some(source) = matches.get_one::<String>("source") else {
                 unreachable!("clap requires a source")
@@ -300,6 +304,26 @@ fn command() -> clap::Command {
                 .subcommand(
                     clap::Command::new("gui")
                         .about("The in-house renderer client, linked against Mesa's DSOs")
+                        .arg(target_arg("x86")),
+                )
+                .subcommand(
+                    clap::Command::new("gbmtest")
+                        .about("The GBM create/export probe against libgbm and libdrm")
+                        .arg(target_arg("x86")),
+                )
+                .subcommand(
+                    clap::Command::new("wlgl")
+                        .about("The Wayland GL present client against Mesa's DSOs")
+                        .arg(target_arg("x86")),
+                )
+                .subcommand(
+                    clap::Command::new("wlcompose")
+                        .about("The GPU-composition helper and its test peer")
+                        .arg(target_arg("x86")),
+                )
+                .subcommand(
+                    clap::Command::new("wldmabufgl")
+                        .about("The linux-dmabuf GL present client against Mesa's DSOs")
                         .arg(target_arg("x86")),
                 )
                 .subcommand(

@@ -1061,12 +1061,12 @@ test-gltriangle-virgl-x86 boot-timeout="180": gltriangle-x86 boot-image-x86
 # first *dynamically linked Rust* program, and it has to be one: `dlopen` needs a
 # loader in the address space and a statically linked minix image has none
 # (`crates/minix-libc/src/lib.rs`), so a program that loads Mesa must be dynamic.
-# `tools/build-wlgl.py` is the link: the arch's C crt0 for `_start`, `minix-user.ld`,
+# `cargo xtask build wlgl` is the link: the arch's C crt0 for `_start`, `minix-user.ld`,
 # and Mesa's headers for the GL half (`tools/wlgl_render.c`).
 wlgl-x86: userland-x86 dynlib-x86
     python tools/build-mesa.py x86 --stage
     @test -f target/mesa/x86/lib/libEGL.so.1 || (echo 'wlgl: no Mesa DSOs — run `just build-mesa x86 --build` first' >&2; exit 1)
-    python tools/build-wlgl.py x86
+    cargo xtask build wlgl x86
     @echo "wlgl: /bin/wlgl built and the Mesa DSOs staged (x86_64)"
 
 # The 3d-a gate: the client renders a GL surface with Mesa on the render node and
@@ -1108,7 +1108,7 @@ test-gui-x86 boot-timeout="120": gui-x86 boot-image-x86
 gbmtest-x86: userland-x86 dynlib-x86
     python tools/build-mesa.py x86 --stage
     @test -f target/mesa/x86/lib/libgbm.so.1 || (echo 'gbmtest: no libgbm — run `just build-mesa x86 --build` first' >&2; exit 1)
-    python tools/build-gbmtest.py x86
+    cargo xtask build gbmtest x86
     @echo "gbmtest: /bin/gbmtest built and the Mesa DSOs staged (x86_64)"
 
 # The 3d-b-3 gate: a GBM buffer object made on the render node, exported to a dma-buf by
@@ -1162,7 +1162,7 @@ test-wldmabuf-x86: build-x86
 wldmabufgl-x86: userland-x86 dynlib-x86
     python tools/build-mesa.py x86 --stage
     @test -f target/mesa/x86/lib/libgbm.so.1 || (echo 'wldmabufgl: no libgbm — run `just build-mesa x86 --build` first' >&2; exit 1)
-    python tools/build-wldmabufgl.py x86
+    cargo xtask build wldmabufgl x86
     @echo "wldmabufgl: /bin/wldmabufgl built and the Mesa DSOs staged (x86_64)"
 
 # The 3d-b-4d gate: the GL client's render target *is* the dma-buf `wl_buffer`, which the
@@ -1188,7 +1188,7 @@ test-wldmabufgl-x86: wldmabufgl-x86 boot-image-x86
 wlcompose-x86: userland-x86 dynlib-x86
     python tools/build-mesa.py x86 --stage
     @test -f target/mesa/x86/lib/libgbm.so.1 || (echo 'wlcompose: no libgbm — run `just build-mesa x86 --build` first' >&2; exit 1)
-    python tools/build-wlcompose.py x86
+    cargo xtask build wlcompose x86
     @echo "wlcompose: /bin/wlcompose built and the Mesa DSOs staged (x86_64)"
 
 # The 3d-b-5b gate: two GL surfaces one process rendered are composed on the render node by a

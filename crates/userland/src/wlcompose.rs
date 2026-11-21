@@ -21,7 +21,7 @@
 //!
 //! The frame is a full-output object on the render node, so the fb server can scan it out the same
 //! way it scans a `zwp_linux_dmabuf_v1` client's (3d-b-1). A dynamic image is required (Mesa's
-//! DSOs); `tools/build-wlcompose.py` links this crate and `tools/wlcompose_render.c` together.
+//! DSOs); `cargo xtask build wlcompose` links this crate and `tools/wlcompose_render.c` together.
 
 #![cfg_attr(not(target_os = "minix"), allow(dead_code))]
 
