@@ -1449,7 +1449,7 @@ test-wlxe-x86 boot-timeout="40": build-x86
     FEED_SCENARIO=tools/smoke/wlxe.tsv sh tools/smoke/feed.sh target/test-wlxe-x86.log {{boot-timeout}} qemu-system-x86_64 -nographic -m 256M -no-reboot -vga none -device bochs-display,id=fb0 -kernel target/images/x86_64-pc-minix/minix-x86.elf -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0 -device virtio-tablet-pci,display=fb0
     @echo "wlxe: layer-shell panel, xdg_popup and client-side decoration (x86_64)"
 # Measure whether two processes that map one object through the loader share its
-# physical frames — Phase 5 of .notes/dynamic_linking.md. `tools/dso_share_probe.py` boots
+# physical frames — Phase 5 of .notes/dynamic_linking.md. `cargo xtask probe dso-share` boots
 # the dynamic image, runs `/bin/dynclib hold | /bin/dynclib hold` (two lives of the
 # same dynamic image, `libc.so` mapped by the loader in each), then walks both
 # processes' page tables from outside the guest and compares the frames behind the
@@ -1465,12 +1465,12 @@ probe-dso-share-x86: dynlink-x86
     mkdir -p target/images/x86_64-pc-minix
     cp target/trampoline.elf target/images/x86_64-pc-minix/minix-x86.elf
     @just _assert-qemu-version qemu-system-x86_64
-    python tools/dso_share_probe.py --arch x86
+    cargo xtask probe dso-share --arch x86
 
 probe-dso-share-riscv64: dynlink-riscv64
     DYNLINK_BINS='/lib/libdyn.so=target/dynlink/riscv64/libdyn.so;/lib/libdyn2.so=target/dynlink/riscv64/libdyn2.so;/lib/libdyn3.so=target/dynlink/riscv64/libdyn3.so;/bin/dynhello=target/dynlink/riscv64/dynhello' just build-riscv64
     @just _assert-qemu-version qemu-system-riscv64
-    python tools/dso_share_probe.py --arch riscv64
+    cargo xtask probe dso-share --arch riscv64
 
 # riscv64's bash is the one that does not fit the default embedded filesystem: the release
 # injects it (`MINIXFS_EXTRA`) and the image is embedded in the kernel, where 16 MiB is full

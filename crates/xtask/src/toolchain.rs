@@ -116,6 +116,41 @@ pub fn find_lld(root: &Path) -> Option<PathBuf> {
     find_on_path("lld")
 }
 
+/// The `llvm-nm` to read a minix image's symbols with, or `None`.
+///
+/// Same candidates as [`find_lld`], and for the same reason: the LLVM a build
+/// downloaded is where the linker came from, and its `llvm-nm` is beside it. The
+/// `dso-share` probe reads a struct layout out of the image rather than
+/// hardcoding one.
+pub fn find_nm(root: &Path) -> Option<PathBuf> {
+    if let Some(override_path) = std::env::var_os("MINIXRS_LLVM_NM")
+        && !override_path.is_empty()
+    {
+        let path = PathBuf::from(&override_path);
+        if !path.is_file() {
+            // Not a reason to silently read the symbols with something else.
+            eprintln!(
+                "error: MINIXRS_LLVM_NM is {}, which is not a file",
+                path.display()
+            );
+            return None;
+        }
+        return Some(path);
+    }
+
+    let host = host_triple();
+    for build in build_dirs(root, host.as_deref()) {
+        for bin_dir in [build.join("ci-llvm").join("bin"), build.join("lld").join("bin")] {
+            let nm = bin_dir.join(exe("llvm-nm"));
+            if nm.is_file() {
+                return Some(nm);
+            }
+        }
+    }
+
+    find_on_path("llvm-nm")
+}
+
 /// `name` on PATH, the way `shutil.which` does it.
 pub fn find_on_path(name: &str) -> Option<PathBuf> {
     let file = exe(name);

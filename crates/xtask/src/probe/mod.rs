@@ -2,12 +2,14 @@
 //!
 //! `read_hist` reads a trace file; `rc` and `wlkey` boot an image and watch its
 //! console through `crate::guest`, the latter injecting a key through the QMP
-//! socket (`crate::qmp`).
+//! socket (`crate::qmp`). `dso_share` boots the dynamic image and reads guest
+//! physical memory over QMP.
 
 use std::path::Path;
 use std::process::Command;
 use std::time::Duration;
 
+pub mod dso_share;
 pub mod rc;
 pub mod read_hist;
 pub mod wlfocus;
@@ -46,6 +48,16 @@ pub(crate) fn qemu(root: &Path, qmp_port: u16) -> Command {
     command
 }
 
+/// A `Command` built from the words a recipe passed after `--`.
+pub(crate) fn command_from(words: &[String]) -> Command {
+    let (program, args) = words
+        .split_first()
+        .expect("clap requires at least the program");
+    let mut command = Command::new(program);
+    command.args(args);
+    command
+}
+
 /// Print one step's verdict the way the scripts did, and pass it through.
 pub(crate) fn step(number: u32, name: &str, passed: bool) -> bool {
     println!("[{number}] {name}: {}", if passed { "ok" } else { "FAIL" });
@@ -73,5 +85,21 @@ mod tests {
             .iter()
             .any(|arg| arg.ends_with("minix-x86.elf")));
         assert!(args.contains(&"tcp:127.0.0.1:4470,server=on,wait=off".to_string()));
+    }
+
+    #[test]
+    fn a_recipe_line_becomes_a_command_and_its_arguments() {
+        let command = command_from(&[
+            "qemu-system-x86_64".to_string(),
+            "-nographic".to_string(),
+            "-m".to_string(),
+            "256M".to_string(),
+        ]);
+        assert_eq!(command.get_program(), "qemu-system-x86_64");
+        let args: Vec<String> = command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(args, vec!["-nographic", "-m", "256M"]);
     }
 }

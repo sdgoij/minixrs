@@ -105,7 +105,7 @@ def find_nm() -> "pathlib.Path | None":
     Same candidates as `find_lld`, and for the same reason: the LLVM a build
     downloaded is where the linker came from, and its `llvm-nm` is beside it. The
     host tools use it to read a struct layout out of the image rather than
-    hardcoding one (`tools/dso_share_probe.py`).
+    hardcoding one (`cargo xtask probe dso-share`).
     """
     override = os.environ.get("MINIXRS_LLVM_NM")
     if override:

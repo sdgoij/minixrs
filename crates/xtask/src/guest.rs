@@ -67,6 +67,45 @@ impl Guest {
         }
     }
 
+    /// Wait until `wanted` appears at or after `start`, or `timeout` passes.
+    ///
+    /// The anchor matters: a prompt from before a command was typed is still in
+    /// the console, so searching the whole of it finds a prompt that says
+    /// nothing about whether the shell has come back.
+    pub fn wait_for_after(&self, wanted: &[u8], start: usize, timeout: Duration) -> bool {
+        self.wait_until_after(
+            start,
+            |out| out.windows(wanted.len()).any(|window| window == wanted),
+            timeout,
+        )
+    }
+
+    /// Wait until `predicate` accepts the console from `start` on, or `timeout`
+    /// passes.
+    pub fn wait_until_after(
+        &self,
+        start: usize,
+        predicate: impl Fn(&[u8]) -> bool,
+        timeout: Duration,
+    ) -> bool {
+        self.wait_until(|out| predicate(from(out, start)), timeout)
+    }
+
+    /// The console's length, for anchoring a later [`Self::wait_for_after`].
+    pub fn transcript_len(&self) -> usize {
+        lock(&self.out).len()
+    }
+
+    /// How many times `needle` occurs in the console so far.
+    pub fn count(&self, needle: &[u8]) -> usize {
+        let out = lock(&self.out);
+        out.windows(needle.len())
+            .filter(|window| *window == needle)
+            .count()
+    }
+
+
+
     /// Write `text` to the guest's console a byte at a time.
     ///
     /// A GL display drops serial bytes written in one burst, so the probes that
@@ -118,6 +157,12 @@ impl Drop for Guest {
     }
 }
 
+/// The console from `start` on, clamped so an anchor past the end is empty
+/// rather than a panic.
+fn from(out: &[u8], start: usize) -> &[u8] {
+    &out[start.min(out.len())..]
+}
+
 /// The console lock, taken even if a reader thread panicked while holding it: a
 /// missing line of console output is not worth a second panic.
 fn lock(out: &Mutex<Vec<u8>>) -> MutexGuard<'_, Vec<u8>> {
@@ -160,5 +205,22 @@ mod tests {
         let mut command = Command::new("cat");
         let guest = Guest::spawn(&mut command).unwrap();
         assert!(!guest.wait_for(b"never printed", Duration::from_millis(200)));
+    }
+
+    #[test]
+    fn an_anchored_wait_ignores_what_was_already_there() {
+        let mut command = Command::new("cat");
+        let mut guest = Guest::spawn(&mut command).unwrap();
+        guest
+            .send_paced("first", Duration::from_millis(1))
+            .unwrap();
+        assert!(guest.wait_for(b"first", Duration::from_secs(5)));
+        let anchor = guest.transcript_len();
+        assert!(!guest.wait_for_after(b"first", anchor, Duration::from_millis(200)));
+        guest
+            .send_paced("second", Duration::from_millis(1))
+            .unwrap();
+        assert!(guest.wait_for_after(b"second", anchor, Duration::from_secs(5)));
+        assert_eq!(guest.count(b"first"), 1);
     }
 }

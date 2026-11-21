@@ -147,8 +147,19 @@ fn run_probe(root: &Path, matches: &clap::ArgMatches) -> io::Result<bool> {
             probe::read_hist::read_hist(Path::new(trace), matches.get_one::<u64>("max").copied())
         }
         Some(("rc", _)) => probe::rc::run(root),
-        Some(("wlfocus", _)) => probe::wlfocus::run(root),
+        Some(("dso-share", matches)) => probe::dso_share::run(
+            root,
+            matches.get_one::<String>("arch").expect("clap defaults the arch"),
+            matches
+                .get_one::<String>("memory")
+                .expect("clap defaults the memory"),
+            matches
+                .get_one::<String>("dynclib")
+                .expect("clap defaults the dynclib"),
+        ),
+
         Some(("wlkey", _)) => probe::wlkey::run(root),
+        Some(("wlfocus", _)) => probe::wlfocus::run(root),
         Some(("wlpointer", _)) => probe::wlpointer::run(root),
         _ => unreachable!("clap requires a probe subcommand"),
     }
@@ -319,6 +330,30 @@ fn command() -> clap::Command {
                 .subcommand(
                     clap::Command::new("rc")
                         .about("The /etc/rc chain: the session manager, a prompt of its own, the panel"),
+                )
+                .subcommand(
+                    clap::Command::new("dso-share")
+                        .about("Two processes mapping one shared object share its read-only frames")
+                        .arg(
+                            clap::Arg::new("arch")
+                                .long("arch")
+                                .value_name("ARCH")
+                                .value_parser(["x86", "riscv64"])
+                                .default_value("x86")
+                                .help("The page-table walk to use"),
+                        )
+                        .arg(
+                            clap::Arg::new("memory")
+                                .value_name("MEM")
+                                .default_value("256M")
+                                .help("The guest's RAM"),
+                        )
+                        .arg(
+                            clap::Arg::new("dynclib")
+                                .value_name("DYNCLIB")
+                                .default_value("/bin/dynclib")
+                                .help("The dynamic client the pipeline runs twice"),
+                        ),
                 )
                 .subcommand(
                     clap::Command::new("wlkey")

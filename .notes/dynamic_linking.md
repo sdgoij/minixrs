@@ -831,7 +831,7 @@ The last partial page of a read-only segment being private
 (`file_off + page_size <= file_size` fails there, one page per segment) is expected, and
 the probe shows exactly that for the main program's own text.
 
-**Sharing works for two lives started together.** `tools/dso_share_probe.py` (recipes
+**Sharing works for two lives started together.** `cargo xtask probe dso-share` (recipes
 `just probe-dso-share-x86` and `-riscv64`; `--arch` picks the page-table walk) boots the
 dynamic image, runs `/bin/dynclib hold | /bin/dynclib hold` — two lives of the same dynamic
 image, `libc.so` mapped by the loader in each — and walks **both** processes' page tables from
@@ -1109,7 +1109,7 @@ them.
   thread waiting on the parked process while the parked process waits for the fill. VFS
   answers a fault quickly, and the same shape already exists within one process
   (`page_pending`), but a hang here would look like a wedged guest rather than a bug in a
-  gate — reach for `tools/dso_share_probe.py` and VM's request pool first.
+  gate — reach for `cargo xtask probe dso-share` and VM's request pool first.
 - **A console write keeps fewer bytes on riscv64 than on x86_64.** The probe's pace is per
   arch for a measured reason: on the riscv64 image a single write of *two* bytes keeps only
   its first, and one of six keeps about one in six, so 37 typed bytes have to go one at a
@@ -1148,7 +1148,7 @@ Three layers, matching `minix-testing`:
    on `tools/smoke/feed.sh` + a `tools/smoke/dyn.tsv`, asserting on the serial log. The
    negative assertion (§7 Phase 0 gate: the string is not in the main binary) is what
    makes the gate meaningful rather than a print that would pass either way.
-4. **QEMU measurement, not a serial-log gate** — `tools/dso_share_probe.py` (recipes
+4. **QEMU measurement, not a serial-log gate** — `cargo xtask probe dso-share` (recipes
    `just probe-dso-share-x86` / `-riscv64`) reads two processes' page tables out of guest physical
    memory, because only the kernel knows a virtual address's frame and the loader is the
    subject under test. It is what makes Phase 5's claim a measurement (§7 Phase 5). It

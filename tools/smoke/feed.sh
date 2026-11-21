@@ -45,7 +45,7 @@ scenario=${FEED_SCENARIO:-"$here/scenario.tsv"}
 # *runs*, as a shorter command (measured: `/bin/echo gpu3d-ok` arrived as `/bin/echo gpu3d`).
 # `type_step` is what a nonzero pace buys: byte-sized writes, and a whole-echo check before the
 # step is believed. Measured working on a guest with a GL display, which drops bursts, and the
-# pace riscv64 needed for the same reason (`tools/dso_share_probe.py` measured one byte).
+# pace riscv64 needed for the same reason (`cargo xtask probe dso-share` measured one byte).
 pace=${FEED_PACE:-0}
 steps_file="$log.steps"
 status="$log.status"

@@ -30,7 +30,7 @@
  * `crates/boot-image/src/manifest.rs`'s `BOOT_BINS`, so every image carries it (with
  * `/lib/libc.so` and the loader it needs). This gate is where it runs.
  *
- * `hold` exists for `tools/dso_share_probe.py`, which measures whether two
+ * `hold` exists for `cargo xtask probe dso-share`, which measures whether two
  * processes mapping this object share its frames (Phase 5). It prints a marker and
  * then blocks on the console, so the two lives the probe needs can be started from
  * the shell — as a pipeline, `/bin/dynclib hold | /bin/dynclib hold` — which is the
@@ -82,8 +82,14 @@ static void wait_for_console(void) {
 static void hold_mode(void) {
     /* On stderr, which a pipeline does not redirect: the first side of
      * `/bin/dynclib hold | /bin/dynclib hold` has its stdout in the pipe, and the
-     * probe needs to see *both* lives reach `main`. */
-    write(2, "dynclib-hold\n", 13);
+     * probe needs to see *both* lives reach `main`.
+     *
+     * Eight bytes, newline included: a console write reaches the tty server in
+     * inline chunks of at most eight, so a longer marker is split across two
+     * writes and the other life's marker lands in the gap. The probe counts
+     * this line, and the tty inserts a newline when two writers share an open
+     * line, so a split marker is never contiguous in the console. */
+    write(2, "dynhold\n", 8);
     wait_for_console();
     exit(0);
 }

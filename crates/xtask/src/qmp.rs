@@ -8,6 +8,7 @@
 
 use std::io::{self, BufRead, BufReader, Write};
 use std::net::TcpStream;
+use std::path::Path;
 use std::time::Duration;
 
 pub struct Qmp {
@@ -83,6 +84,40 @@ impl Qmp {
         }
         Ok(())
     }
+
+
+    /// Write a range of guest physical memory to `path`.
+    ///
+    /// `pmemsave` is the only way to read a guest's memory from the host, and it
+    /// answers before returning, so the file is complete when this does.
+    pub fn pmemsave(&mut self, phys: u64, size: u64, path: &Path) -> io::Result<()> {
+        let name = path.to_string_lossy();
+        self.execute(&format!(
+            r#"{{"execute":"pmemsave","arguments":{{"val":{phys},"size":{size},"filename":{}}}}}"#,
+            json_string(&name)
+        ))
+    }
+}
+
+/// `text` as a JSON string, escaping the backslashes a Windows path carries.
+pub(crate) fn json_string(text: &str) -> String {
+    let mut escaped = String::with_capacity(text.len() + 2);
+    escaped.push('"');
+    for ch in text.chars() {
+        match ch {
+            '"' => escaped.push_str("\\\""),
+            '\\' => escaped.push_str("\\\\"),
+            '\n' => escaped.push_str("\\n"),
+            '\r' => escaped.push_str("\\r"),
+            '\t' => escaped.push_str("\\t"),
+            control if (control as u32) < 0x20 => {
+                escaped.push_str(&format!("\\u{:04x}", control as u32))
+            }
+            other => escaped.push(other),
+        }
+    }
+    escaped.push('"');
+    escaped
 }
 
 fn key_command(qcode: &str, down: bool) -> String {
@@ -98,6 +133,7 @@ fn absolute_command(device: &str, axis: &str, value: u32, size: u32) -> String {
         r#"{{"execute":"input-send-event","arguments":{{"device":"{device}","events":[{{"type":"abs","data":{{"axis":"{axis}","value":{scaled}}}}}]}}}}"#
     )
 }
+
 
 #[cfg(test)]
 mod tests {
@@ -118,5 +154,13 @@ mod tests {
         assert!(command.contains(r#""device":"fb0""#));
         assert!(command.contains(r#""axis":"x""#));
         assert!(command.contains(r#""value":16384"#));
+    }
+
+    #[test]
+    fn a_windows_path_survives_the_json_round_trip() {
+        assert_eq!(
+            json_string(r"C:\Users\T\target\dump.bin"),
+            r#""C:\\Users\\T\\target\\dump.bin""#
+        );
     }
 }
