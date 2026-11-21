@@ -492,6 +492,15 @@ needs (no JSON dependency: every command is a fixed string and the reply only ha
 to be classified). Both gates pass with the port, and `probe read-hist` moved to
 `probe/read_hist.rs` unchanged.
 
+`cargo xtask probe wlpointer` replaces `tools/wlpointer_probe.py` and
+`cargo xtask probe wlfocus` replaces `tools/wlfocus_probe.py`, adding an absolute
+pointer move to `qmp.rs` and a transcript read to `guest.rs`. `wlpointer` passes
+with the port. `wlfocus` does not, and neither does its script: both drop a
+connection before the client is ready, as does `test-wloverlap-x86`, while a
+single full-output surface (`test-wlx-x86`) and a 64x64 second window
+(`test-wlpointer-x86`) pass. That is a tree bug recorded as `KNOWN_ISSUES` 81, not
+a port difference; the port matches the script's transcript exactly.
+
 `cc-minix` and `cc-dso-minix` are **not** ported, and that is a decision
 rather than a pending item. The reason is a host: `build-bash.py` and
 `build-mesa.py` drive them from inside WSL (`build-mesa.py`'s meson cross file

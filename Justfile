@@ -1363,7 +1363,7 @@ test-wlx-x86 boot-timeout="40": build-x86
     @echo "wlx: xdg_shell toplevel configured, acked and presented (x86_64)"
 
 
-# wlfocus: tools/wlfocus_probe.py drives the Phase 2c focus path — `diag wlx2` opens
+# wlfocus: `cargo xtask probe wlfocus` drives the Phase 2c focus path — `diag wlx2` opens
 # two connections, maps a window on each, and a QMP key must reach the focused one as
 # the focus moves between them — .notes/wayland.md §6.12. A host probe, like wlkey's: a key
 # has to be a real device event, which the serial console is not.
@@ -1371,7 +1371,7 @@ test-wlfocus-x86: build-x86
     mkdir -p target/images/x86_64-pc-minix
     cp target/trampoline.elf target/images/x86_64-pc-minix/minix-x86.elf
     @just _assert-qemu-version qemu-system-x86_64
-    python tools/wlfocus_probe.py
+    cargo xtask probe wlfocus
     @echo "wlfocus: two clients, one focus, and the keys follow it (x86_64)"
 
 # wlmotion: tools/wlmotion_probe.py drives the pointer-interpolation path — `diag wlmotion`
@@ -1384,14 +1384,14 @@ test-wlmotion-x86: build-x86
     python tools/wlmotion_probe.py
     @echo "wlmotion: the pointer moved in steps to where the device landed (x86_64)"
 
-# wlpointer: tools/wlpointer_probe.py drives pointer-follows-focus — `diag wlpointer` maps
+# wlpointer: `cargo xtask probe wlpointer` drives pointer-follows-focus — `diag wlpointer` maps
 # a full-output window under a 64x64 one, and moving the pointer between them must move
 # the focus and the keys with it.
 test-wlpointer-x86: build-x86
     mkdir -p target/images/x86_64-pc-minix
     cp target/trampoline.elf target/images/x86_64-pc-minix/minix-x86.elf
     @just _assert-qemu-version qemu-system-x86_64
-    python tools/wlpointer_probe.py
+    cargo xtask probe wlpointer
     @echo "wlpointer: the focus followed the pointer between two windows (x86_64)"
 
 # wldemo: tools/wldemo_probe.py drives the widget layer — `diag wldemo` is one window with

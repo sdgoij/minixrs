@@ -152,6 +152,22 @@ are arch-specific, `[env]` is tooling/platform, not kernel.
     needs (a second VFS thread, or VFS answering the ioctl itself as it does for the socket ones)
     is a decision for whoever first needs a file-backed block device.
 
+81. **Two output-sized Wayland surfaces drop a client, so `test-wlfocus-x86` and
+    `test-wloverlap-x86` fail (found 2026-11-21).** Both gates boot x86 with the
+    session's panel already connected, and the client under test opens two
+    connections and maps a full-output surface on each. The guest prints
+    `<client>: a connection dropped` before any `ready` line, reported by
+    `wait_peers` in `crates/userland/src/wlclient.rs` (the message says `wlx2` for
+    `wloverlap` too). `just test-wlx-x86` (one full-output surface) and
+    `just test-wlpointer-x86` (a full-output surface plus a 64x64 one) pass, so one
+    output-sized surface per connection works and two do not. The Python probes and
+    their xtask ports fail identically, so the client is unchanged: either the
+    server closes the connection or it sends an event the client cannot decode. The
+    scan-out present path (`FBIO_SCANOUT_SRC`, `.notes/wayland.md` §6.10 3d-b-1) is
+    the first suspect, because it acts on a full-output commit.
+    (`crates/servers/src/wlserver.rs` `pump`, `crates/userland/src/wlclient.rs`
+    `wait_peers`)
+
 ---
 
 ## RISC-V (`[riscv]`)

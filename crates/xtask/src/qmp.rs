@@ -64,11 +64,38 @@ impl Qmp {
     pub fn key(&mut self, qcode: &str, down: bool) -> io::Result<()> {
         self.execute(&key_command(qcode, down))
     }
+
+    /// Press and release `qcode`, the way a keyboard sends a key.
+    pub fn press(&mut self, qcode: &str) -> io::Result<()> {
+        self.key(qcode, true)?;
+        std::thread::sleep(Duration::from_millis(200));
+        self.key(qcode, false)
+    }
+
+    /// Move the absolute pointer to a pixel of a `size`-wide axis.
+    ///
+    /// The display device has to be named: without it QEMU answers "Input
+    /// handler not found for event type abs", and the bochs display is what
+    /// routes the axis events to the tablet.
+    pub fn absolute(&mut self, device: &str, px: u32, py: u32) -> io::Result<()> {
+        for (axis, value, size) in [("x", px, 1024), ("y", py, 768)] {
+            self.execute(&absolute_command(device, axis, value, size))?;
+        }
+        Ok(())
+    }
 }
 
 fn key_command(qcode: &str, down: bool) -> String {
     format!(
         r#"{{"execute":"input-send-event","arguments":{{"events":[{{"type":"key","data":{{"key":{{"type":"qcode","data":"{qcode}"}},"down":{down}}}}}]}}}}"#
+    )
+}
+
+fn absolute_command(device: &str, axis: &str, value: u32, size: u32) -> String {
+    // The wire wants a fraction of the axis, 0x8000 being its length.
+    let scaled = value * 0x8000 / size;
+    format!(
+        r#"{{"execute":"input-send-event","arguments":{{"device":"{device}","events":[{{"type":"abs","data":{{"axis":"{axis}","value":{scaled}}}}}]}}}}"#
     )
 }
 
@@ -83,5 +110,13 @@ mod tests {
             r#"{"execute":"input-send-event","arguments":{"events":[{"type":"key","data":{"key":{"type":"qcode","data":"a"},"down":true}}]}}"#
         );
         assert!(key_command("a", false).contains(r#""down":false"#));
+    }
+
+    #[test]
+    fn an_absolute_move_is_scaled_to_the_axis_and_names_the_device() {
+        let command = absolute_command("fb0", "x", 512, 1024);
+        assert!(command.contains(r#""device":"fb0""#));
+        assert!(command.contains(r#""axis":"x""#));
+        assert!(command.contains(r#""value":16384"#));
     }
 }

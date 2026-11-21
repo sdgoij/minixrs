@@ -147,7 +147,9 @@ fn run_probe(root: &Path, matches: &clap::ArgMatches) -> io::Result<bool> {
             probe::read_hist::read_hist(Path::new(trace), matches.get_one::<u64>("max").copied())
         }
         Some(("rc", _)) => probe::rc::run(root),
+        Some(("wlfocus", _)) => probe::wlfocus::run(root),
         Some(("wlkey", _)) => probe::wlkey::run(root),
+        Some(("wlpointer", _)) => probe::wlpointer::run(root),
         _ => unreachable!("clap requires a probe subcommand"),
     }
 }
@@ -321,6 +323,14 @@ fn command() -> clap::Command {
                 .subcommand(
                     clap::Command::new("wlkey")
                         .about("A host key reaches a Wayland client, and the keymap arrives"),
+                )
+                .subcommand(
+                    clap::Command::new("wlfocus")
+                        .about("Two clients, one focus, and the keys that follow it"),
+                )
+                .subcommand(
+                    clap::Command::new("wlpointer")
+                        .about("The focus follows the window under the pointer"),
                 ),
         )
         .subcommand(

@@ -10,7 +10,9 @@ use std::time::Duration;
 
 pub mod rc;
 pub mod read_hist;
+pub mod wlfocus;
 pub mod wlkey;
+pub mod wlpointer;
 
 /// The x86 image every probe here boots, with the bochs display and a tablet so
 /// the console and the pointer both have a device.

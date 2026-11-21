@@ -84,11 +84,18 @@ impl Guest {
         Ok(())
     }
 
+    /// The console so far, read under the same lock the readers use.
+    pub fn with_transcript<T>(&self, read: impl FnOnce(&[u8]) -> T) -> T {
+        let out = lock(&self.out);
+        read(&out)
+    }
+
     /// The last `count` bytes of the console, for a failure message.
     pub fn tail(&self, count: usize) -> String {
-        let out = lock(&self.out);
-        let start = out.len().saturating_sub(count);
-        String::from_utf8_lossy(&out[start..]).into_owned()
+        self.with_transcript(|out| {
+            let start = out.len().saturating_sub(count);
+            String::from_utf8_lossy(&out[start..]).into_owned()
+        })
     }
 }
 
