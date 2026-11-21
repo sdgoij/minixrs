@@ -76,7 +76,7 @@ typed byte — came from the guest's own tty server, and looked identical from t
   A pty slave is unaffected because its input arrives by message, not from a ring the server must drain.
 - So a prompt that ignores input is *not* proof of a harness problem — read the tty server's own
   read/select instrumentation before blaming the feeder. `just test-interactive-bash-<arch>`
-  (`tools/smoke/interactive_bash.py`) is the gate that catches it: it types at `bash-5.3#`, which no
+  (`cargo xtask probe interactive-bash`) is the gate that catches it: it types at `bash-5.3#`, which no
   `bash -c` scenario reaches.
 
 ## The kernel's message boundary
@@ -154,7 +154,7 @@ working shell).
 |------|-------|
 | Host-side driver that gets all of the above right | `cargo xtask smoke`, `tools/smoke/scenario.tsv` |
 | Host-side driver whose input pace is arch-specific, and which reads guest memory over QMP | `cargo xtask probe dso-share` |
-| Host-side driver that reaches an interactive bash (readline's poll path) | `tools/smoke/interactive_bash.py` |
+| Host-side driver that reaches an interactive bash (readline's poll path) | `cargo xtask probe interactive-bash` |
 | The same scenario inside the wasm engine | `tools/wasm-browser/run.js` |
 | A delivery's endpoint | `crates/kernel/src/ipc.rs` (`mini_receive`'s async branch, `try_one`) |
 | The diag channel's two halves | `crates/minix-rt/src/lib.rs` (`diag_message`), `crates/kernel/src/system.rs` (`do_diagctl_handler`) |

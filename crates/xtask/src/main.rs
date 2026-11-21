@@ -172,6 +172,17 @@ fn run_probe(root: &Path, matches: &clap::ArgMatches) -> io::Result<bool> {
                 .get_one::<String>("dynclib")
                 .expect("clap defaults the dynclib"),
         ),
+        Some(("interactive-bash", matches)) => probe::interactive_bash::run(
+            Path::new(
+                matches
+                    .get_one::<String>("log")
+                    .expect("clap requires the log"),
+            ),
+            *matches
+                .get_one::<u64>("seconds")
+                .expect("clap requires the seconds"),
+            &mut probe::command_from(&trailing_words(matches)),
+        ),
         Some(("wldemo", _)) => probe::wldemo::run(root),
         Some(("wldmabuf", matches)) => probe::wldmabuf::run(root, &trailing_words(matches)),
         Some(("wldmabufgl", matches)) => probe::wldmabufgl::run(root, &trailing_words(matches)),
@@ -414,6 +425,24 @@ fn command() -> clap::Command {
                                 .default_value("/bin/dynclib")
                                 .help("The dynamic client the pipeline runs twice"),
                         ),
+                )
+                .subcommand(
+                    clap::Command::new("interactive-bash")
+                        .about("An interactive bash accepts a typed line")
+                        .arg(
+                            clap::Arg::new("log")
+                                .value_name("LOG")
+                                .required(true)
+                                .help("Where to write the guest's console"),
+                        )
+                        .arg(
+                            clap::Arg::new("seconds")
+                                .value_name("SECONDS")
+                                .required(true)
+                                .value_parser(clap::value_parser!(u64))
+                                .help("How long each wait may take"),
+                        )
+                        .arg(trailing_command_arg()),
                 )
                 .subcommand(
                     clap::Command::new("wldemo")

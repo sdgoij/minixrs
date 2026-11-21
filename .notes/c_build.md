@@ -254,7 +254,7 @@ scenario, so a stale artifact fails loudly rather than silently.
 — it types into the minix shell and waits for its `#` prompt, which bash's
 `bash-5.3#` replaces — so `just test-interactive-bash-<arch>` boots the split
 system image and drives a typed line at `bash-5.3#`
-(`tools/smoke/interactive_bash.py`), which exercises readline's terminal setup
+(`cargo xtask probe interactive-bash`), which exercises readline's terminal setup
 (`tcsetattr` into raw mode) and its poll-then-read path. That path was broken and
 is now fixed: the console's bytes stayed in the kernel serial ring until a
 blocking `read`, so a poll on the console never became ready

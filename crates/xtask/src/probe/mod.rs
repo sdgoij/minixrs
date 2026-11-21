@@ -17,6 +17,7 @@ use std::time::Duration;
 
 pub mod console;
 pub mod dso_share;
+pub mod interactive_bash;
 pub mod rc;
 pub mod read_hist;
 pub mod screen;
