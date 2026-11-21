@@ -1348,6 +1348,11 @@ fn pack_args(buf: &mut [u8], args: &[&str], argv: &mut [*const u8]) -> bool {
     true
 }
 
+/// The uutils multicall in every hardware image (`crates/boot-image/src/manifest.rs`). A bare
+/// name that `/bin` and `/sbin` both lack is looked up there as an applet.
+#[cfg(target_os = "minix")]
+const COREUTILS_PATH: &[u8] = b"/bin/coreutils";
+
 /// In the child process, try to exec the command.
 ///
 /// Returns `None` when the argument frame could not be built (the caller's line is bounded, so
@@ -1393,11 +1398,12 @@ fn try_exec(args: &[&str], cmd_path: &mut [u8; 256]) -> Option<i32> {
     // Try /sbin/<cmd> as fallback, but only when /bin/<cmd> was simply not there. Any other
     // error is about the command the user asked for, and retrying a path that cannot exist
     // would replace it with the fallback's own ENOENT (item 50).
-    if should_try_sbin(r) && cmd_start > 1 && 6 + cmd_name_len < cmd_path.len() {
+    let mut error = r;
+    if should_try_sbin(error) && cmd_start > 1 && 6 + cmd_name_len < cmd_path.len() {
         cmd_path[..6].copy_from_slice(b"/sbin/");
         cmd_path[6..6 + cmd_name_len].copy_from_slice(&cmd_name[..cmd_name_len]);
         cmd_path[6 + cmd_name_len] = 0;
-        let r2 = unsafe {
+        error = unsafe {
             minix_rt::execve(
                 cmd_path.as_ptr(),
                 6 + cmd_name_len + 1,
@@ -1405,9 +1411,33 @@ fn try_exec(args: &[&str], cmd_path: &mut [u8; 256]) -> Option<i32> {
                 core::ptr::null(),
             )
         };
+    }
+
+    // Try /bin/coreutils as the multicall. It selects its applet from `argv[0]`, so the
+    // command name goes there and the arguments stay where `pack_args` put them. A name that
+    // did not fit with a terminator cannot be an applet, and `should_try_multicall` refuses a
+    // path or the multicall's own name.
+    let cmd = args.first().copied().unwrap_or("");
+    if should_try_multicall(cmd, error) && cmd_name_len < cmd_name.len() {
+        argv_buf[0] = cmd_name.as_ptr();
+        let r2 = unsafe {
+            minix_rt::execve(
+                COREUTILS_PATH.as_ptr(),
+                COREUTILS_PATH.len(),
+                argv_buf.as_ptr(),
+                core::ptr::null(),
+            )
+        };
+        if r2 == ENOENT {
+            // Nothing answered to the multicall's path (the wasm image carries no coreutils),
+            // so the command's own error is the one to report.
+            return Some(error);
+        }
+        cmd_path[..COREUTILS_PATH.len()].copy_from_slice(COREUTILS_PATH);
+        cmd_path[COREUTILS_PATH.len()] = 0;
         return Some(r2);
     }
-    Some(r)
+    Some(error)
 }
 
 /// `ENOENT` as the kernel reports it. The shell compares against no other error, so this is not
@@ -1425,6 +1455,18 @@ const ENOENT: i32 = -2;
 #[cfg(any(target_os = "minix", test))]
 fn should_try_sbin(primary: i32) -> bool {
     primary == ENOENT
+}
+
+/// Whether a command that `/bin` and `/sbin` both lack is an applet of `/bin/coreutils`.
+///
+/// The multicall dispatches on `argv[0]`, so a bare name can be retried with that name as
+/// `argv[0]`. An explicit path names a file, and silently running a different program for it
+/// would be a surprise; `coreutils` itself is skipped so a missing multicall is not retried as
+/// one of its own applets. Like the `/sbin` fallback, only an absent file is worth a retry:
+/// every other error is about the command the user asked for.
+#[cfg(any(target_os = "minix", test))]
+fn should_try_multicall(cmd: &str, last_error: i32) -> bool {
+    last_error == ENOENT && !cmd.is_empty() && !cmd.contains('/') && cmd != "coreutils"
 }
 
 /// Say why an external command did not run.
@@ -1774,5 +1816,23 @@ mod tests {
         assert!(!should_try_sbin(-13), "EACCES is the command's");
         assert!(!should_try_sbin(-1), "the exec-never-returned sentinel is not an errno");
         assert!(!should_try_sbin(0));
+    }
+
+    /// A bare name in neither `/bin` nor `/sbin` is retried as a multicall applet with its own
+    /// name as `argv[0]`, which is how the multicall dispatches. An explicit path names a file,
+    /// and the multicall itself is not one of its own applets.
+    #[test]
+    fn only_a_bare_missing_name_is_retried_as_a_multicall_applet() {
+        assert!(should_try_multicall("wc", ENOENT));
+        assert!(!should_try_multicall("wc", -13), "EACCES is the command's");
+        assert!(
+            !should_try_multicall("/bin/wc", ENOENT),
+            "an explicit path names a file"
+        );
+        assert!(
+            !should_try_multicall("coreutils", ENOENT),
+            "the multicall is not one of its own applets"
+        );
+        assert!(!should_try_multicall("", ENOENT));
     }
 }

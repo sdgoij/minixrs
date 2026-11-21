@@ -373,3 +373,10 @@ coreutils cat mo3 | coreutils wc -l	6
 coreutils cat mq | coreutils more -n 3 mp && coreutils echo MORE-OK > mo2 && coreutils echo	
 coreutils cat mo2	MORE-OK
 coreutils echo AFTER-MORE	AFTER-MORE
+# The shell's multicall fallback: a bare name that is neither a builtin nor a file in
+# /bin or /sbin is re-executed as an applet of /bin/coreutils, with argv[0] naming it.
+# `echo` is a builtin, `wc` and `printf` are applets, so the pipelines cover both sides
+# in a pipeline child; the direct `wc` step is the foreground fork and exec.
+echo aboba | wc -l	1
+printf 'a\nb\n' | wc -l	2
+wc -l /etc/group	[0-9]+[[:space:]]+/etc/group
