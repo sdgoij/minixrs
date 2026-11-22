@@ -304,13 +304,20 @@ fn compile(pattern: &str) -> Result<Regex, String> {
 
 /// Whether any line of `window` matches `pattern`.
 ///
-/// The line's carriage return is dropped first; `feed.sh`'s `[[:space:]]*`
-/// absorbed it, and the patterns here still do.
+/// Every trailing carriage return is dropped first. One is the console's own; a
+/// guest whose tty and serial driver both translate a newline (riscv64 does) emits
+/// two, and a pattern that ends in `$` is compared against the line's last byte,
+/// so a second `\r` left in place fails it even though the line is right. The
+/// driver appends `[[:space:]]*$`, which is exactly what `feed.sh` relied on and
+/// what a `$` inside the expectation itself makes unusable.
 fn line_matches(window: &[u8], pattern: &Regex) -> bool {
     window
         .split(|byte| *byte == b'\n')
         .filter_map(|line| {
-            let line = line.strip_suffix(b"\r").unwrap_or(line);
+            let mut line = line;
+            while let Some(stripped) = line.strip_suffix(b"\r") {
+                line = stripped;
+            }
             std::str::from_utf8(line).ok()
         })
         .any(|line| pattern.is_match(line))
@@ -378,6 +385,17 @@ mod tests {
         let re = compile("coreutils touch t1.txt[[:space:]]*$").unwrap();
         assert!(line_matches(b"# coreutils touch t1.txt\r\n", &re));
         assert!(!line_matches(b"# coreutils touch t1.tx\r\n", &re));
+    }
+
+    #[test]
+    fn a_doubled_carriage_return_does_not_defeat_an_anchored_expectation() {
+        // riscv64's tty and serial driver both translate the newline, so a line
+        // arrives as `...\r\r\n`. The expectation ends in `$` itself, which the
+        // driver cannot rescue with its trailing `[[:space:]]*$`.
+        let re = compile("^BURST-1-[0-9]+$[[:space:]]*$").unwrap();
+        assert!(line_matches(b"BURST-1-42\r\r\n", &re));
+        assert!(line_matches(b"BURST-1-42\r\n", &re));
+        assert!(!line_matches(b"BURST-1-4x\r\r\n", &re));
     }
 
     #[test]
