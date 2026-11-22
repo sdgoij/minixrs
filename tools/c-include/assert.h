@@ -13,9 +13,19 @@
 #ifdef NDEBUG
 #define assert(expr) ((void)0)
 #else
-void __assert_fail(const char *expr, const char *file, int line);
+/* libc++ reaches this through <cassert>, so the declaration needs C linkage:
+ * without it a C++ caller mangles the name and the link fails. The four
+ * arguments match minix-libc's glibc-shaped export. */
+#ifdef __cplusplus
+extern "C" {
+#endif
+void __assert_fail(const char *expr, const char *file, unsigned int line,
+                   const char *function);
+#ifdef __cplusplus
+}
+#endif
 #define assert(expr) \
-    ((expr) ? (void)0 : __assert_fail(#expr, __FILE__, __LINE__))
+    ((expr) ? (void)0 : __assert_fail(#expr, __FILE__, __LINE__, __func__))
 #endif
 
 #endif
