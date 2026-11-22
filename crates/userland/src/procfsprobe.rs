@@ -12,8 +12,13 @@
 //! `/proc/uptime`, `<seconds>.<hundredths>`; `load` is `/proc/loadavg`, three
 //! `%ld.%02ld` averages from `GETINFO`'s `GET_LOADINFO`; `dir` is `/proc` itself,
 //! which has to resolve to a directory; `list` is the root listing, which must name
-//! every entry exactly once; and `gone` is a path under `/proc` that is not there, so
-//! the mount answers from its own tree instead of silently falling back to MFS.
+//! every entry exactly once; `self` and `exe` are `/proc/self` and `/proc/self/exe`,
+//! whose targets depend on the calling process, so they read back only if VFS passes
+//! the caller's endpoint through the mount and restarts an absolute link target from
+//! the root; `name` is `/proc/self/status`, whose `Name:` has to be the program the
+//! probe was exec'd from rather than the name inherited at fork; and `gone` is a path
+//! under `/proc` that is not there, so the mount answers from its own tree instead of
+//! silently falling back to MFS.
 
 use crate::{DIRENT_NAME_OFF, Decimal, append, write_err, write_out};
 use minix_std::fs::O_RDONLY;
@@ -98,8 +103,8 @@ fn parse_pid(name: &[u8]) -> Option<i32> {
     Some(v)
 }
 
-/// What one listing of `/proc`'s root has to look like: `hz`, `uptime`, `loadavg`, and
-/// one directory per live process, each exactly once.
+/// What one listing of `/proc`'s root has to look like: `hz`, `uptime`, `loadavg`,
+/// `self`, and one directory per live process, each exactly once.
 ///
 /// The failure this catches is a listing that repeats an ordinary entry once per
 /// indexed slot (the `indexed` range read as ordinary children) or never yields the
@@ -109,6 +114,7 @@ struct Listing {
     hz: u32,
     uptime: u32,
     loadavg: u32,
+    self_link: u32,
     pids: usize,
     pid_values: [i32; 64],
     unexpected: u32,
@@ -120,6 +126,7 @@ impl Listing {
             hz: 0,
             uptime: 0,
             loadavg: 0,
+            self_link: 0,
             pids: 0,
             pid_values: [0; 64],
             unexpected: 0,
@@ -132,6 +139,7 @@ impl Listing {
             b"hz" => self.hz += 1,
             b"uptime" => self.uptime += 1,
             b"loadavg" => self.loadavg += 1,
+            b"self" => self.self_link += 1,
             _ => match parse_pid(name) {
                 Some(pid) if self.pids < self.pid_values.len() => {
                     if self.pid_values[..self.pids].contains(&pid) {
@@ -152,6 +160,7 @@ impl Listing {
         self.hz == 1
             && self.uptime == 1
             && self.loadavg == 1
+            && self.self_link == 1
             && self.pids >= 1
             && self.unexpected == 0
     }
@@ -202,19 +211,56 @@ fn list_root() -> bool {
     ok && listing.good()
 }
 
-/// Open `path`, read it whole, and hand the bytes to `check`.
-fn read_and(path: &[u8], check: impl Fn(&[u8]) -> bool) -> bool {
+/// Read up to `buf.len()` bytes of `path` and hand them to `check`.
+fn read_into(path: &[u8], buf: &mut [u8], check: impl Fn(&[u8]) -> bool) -> bool {
     let fd = match unsafe { minix_std::fs::open(path, O_RDONLY, 0) } {
         Ok(fd) => fd,
         Err(_) => return false,
     };
-    let mut buf = [0u8; BUF];
-    let read = unsafe { minix_std::fs::read(fd, &mut buf) };
+    let read = unsafe { minix_std::fs::read(fd, buf) };
     let closed = minix_std::fs::close(fd);
     match (read, closed) {
         (Ok(n), Ok(())) => check(&buf[..n.max(0) as usize]),
         _ => false,
     }
+}
+
+/// Open `path`, read it whole (up to `BUF`), and hand the bytes to `check`.
+fn read_and(path: &[u8], check: impl Fn(&[u8]) -> bool) -> bool {
+    let mut buf = [0u8; BUF];
+    read_into(path, &mut buf, check)
+}
+
+/// Read a symbolic link's target into `buf`, returning its length.
+fn read_link(path: &[u8], buf: &mut [u8]) -> Option<usize> {
+    match minix_std::fs::readlink(path, buf) {
+        Ok(n) if n > 0 && n <= buf.len() => Some(n),
+        _ => None,
+    }
+}
+
+/// Whether `target` is exactly `/proc/<pid>`.
+fn names_pid(target: &[u8], pid: i32) -> bool {
+    let digits = Decimal::of(pid.max(0) as u32);
+    let digits = digits.bytes();
+    target.len() == 6 + digits.len() && target.starts_with(b"/proc/") && &target[6..] == digits
+}
+
+/// Whether a `status` text's `Name:` line names `want`.
+///
+/// The field is `Name:` padded with spaces, so the value is what follows the
+/// padding; comparing the whole line would pin the padding too.
+fn names_program(status: &[u8], want: &[u8]) -> bool {
+    status.split(|&b| b == b'\n').any(|line| {
+        let Some(rest) = line.strip_prefix(b"Name:") else {
+            return false;
+        };
+        let start = rest
+            .iter()
+            .position(|&b| b != b' ' && b != b'\t')
+            .unwrap_or(rest.len());
+        &rest[start..] == want
+    })
 }
 
 /// Report a failure that leaves the rest of the line unwritable, with the errno.
@@ -243,6 +289,28 @@ pub fn procfsprobe(_args: &[&str]) -> i32 {
     };
 
     let list = list_root();
+
+    // `/proc/self` names the asking process's own PID directory, and
+    // `/proc/self/exe` the program it was started from. Both targets come from
+    // the caller's endpoint, which VFS passes with the lookup, and `self` also
+    // exercises the restart VFS performs when a link's target is absolute: the
+    // walk has to hand the expanded path back and continue from the root.
+    let pid = minix_std::process::getpid()
+        .map(|(pid, _)| pid)
+        .unwrap_or(-1);
+    let mut link_buf = [0u8; 64];
+    let self_ok = read_link(b"/proc/self", &mut link_buf)
+        .is_some_and(|n| names_pid(&link_buf[..n], pid));
+    let mut link_buf = [0u8; 64];
+    let exe_ok = read_link(b"/proc/self/exe", &mut link_buf)
+        .is_some_and(|n| &link_buf[..n] == b"/bin/procfsprobe");
+
+    // `status`'s `Name:` is the program the process is running, which PM takes
+    // from the exec path; before that it kept the name inherited at fork.
+    let mut status_buf = [0u8; 128];
+    let name_ok = read_into(b"/proc/self/status", &mut status_buf, |b| {
+        names_program(b, b"procfsprobe")
+    });
 
     // A path that is not in procfs must be refused with `ENOENT` from the mounted
     // tree, not by falling through to the root filesystem: this is the line that
@@ -273,10 +341,16 @@ pub fn procfsprobe(_args: &[&str]) -> i32 {
     verdict(&mut line, &mut at, b"dir", dir);
     append(&mut line, &mut at, b" ");
     verdict(&mut line, &mut at, b"list", list);
+    append(&mut line, &mut at, b" ");
+    verdict(&mut line, &mut at, b"self", self_ok);
+    append(&mut line, &mut at, b" ");
+    verdict(&mut line, &mut at, b"exe", exe_ok);
+    append(&mut line, &mut at, b" ");
+    verdict(&mut line, &mut at, b"name", name_ok);
     append(&mut line, &mut at, b" gone=err 2\n");
     write_out(&line[..at]);
 
-    if hz && uptime && load && dir && list {
+    if hz && uptime && load && dir && list && self_ok && exe_ok && name_ok {
         0
     } else {
         1
@@ -322,7 +396,7 @@ mod tests {
     #[test]
     fn a_listing_with_one_of_everything_is_good() {
         let mut l = Listing::new();
-        for name in [&b"."[..], b"..", b"hz", b"uptime", b"loadavg", b"1", b"42"] {
+        for name in [&b"."[..], b"..", b"hz", b"uptime", b"loadavg", b"self", b"1", b"42"] {
             l.add(name);
         }
         assert!(l.good());
@@ -351,6 +425,25 @@ mod tests {
             l.add(name);
         }
         assert!(!l.good());
+    }
+
+    #[test]
+    fn a_self_target_names_its_pid() {
+        assert!(names_pid(b"/proc/27", 27));
+        assert!(names_pid(b"/proc/1", 1));
+        assert!(!names_pid(b"/proc/", 1), "a target with no pid is not it");
+        assert!(!names_pid(b"/proc/21", 12), "the digits are compared whole");
+        assert!(!names_pid(b"/proc/2x", 2), "a non-digit is not it");
+        assert!(!names_pid(b"/proc2/7", 7), "the prefix is exactly /proc/");
+    }
+
+    #[test]
+    fn a_status_name_line_is_read_after_its_padding() {
+        assert!(names_program(b"Name:   procfsprobe\nState:  R\n", b"procfsprobe"));
+        assert!(names_program(b"Name:\tcoreutils\n", b"coreutils"));
+        assert!(!names_program(b"Name:   init\n", b"procfsprobe"));
+        assert!(!names_program(b"State:  R\n", b"procfsprobe"));
+        assert!(!names_program(b"Name:   procfsprobe extra\n", b"procfsprobe"));
     }
 
     #[test]

@@ -35,6 +35,8 @@ pub const NO_INDEX: i32 = -1;
 
 pub const OK: i32 = 0;
 pub const EINVAL: i32 = 22;
+pub const ENOENT: i32 = 2;
+pub const ENAMETOOLONG: i32 = 36;
 
 pub const TYPE_TASK: char = 'T';
 pub const TYPE_SYSTEM: char = 'S';

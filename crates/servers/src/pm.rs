@@ -278,6 +278,10 @@ pub struct MProc {
     pub mp_nice: i32,
     pub mp_scheduler: i32,
     pub mp_name: [i8; PROC_NAME_LEN],
+    /// The path `execve` was given, as it was given. `/proc/<pid>/exe` links to
+    /// it, and the empty string means "PM has none" (a boot process, or an exec
+    /// that has not committed yet).
+    pub mp_exec: [u8; PROC_EXEC_LEN],
     pub mp_magic: u32,
 }
 
@@ -324,6 +328,7 @@ impl MProc {
             mp_nice: 0,
             mp_scheduler: 0,
             mp_name: [0; PROC_NAME_LEN],
+            mp_exec: [0; PROC_EXEC_LEN],
             mp_magic: 0,
         }
     }
@@ -2545,7 +2550,7 @@ pub unsafe fn pm_register_sender(endpoint: i32) -> Option<usize> {
 // Dispatch table + main loop
 
 use arch_common::ipc::Message;
-use arch_common::types::ProcTabEntry;
+use arch_common::types::{PROC_EXEC_LEN, ProcTabEntry};
 
 /// `getsysinfo(PM_PROC_NR, SI_PROC_TAB, ...)`, the code C's `do_getsysinfo` answers from PM's
 /// table (`minix/sysinfo.h`). VFS answers the same code from its own fproc table
@@ -3317,6 +3322,7 @@ fn proc_tab_entry(rmp: &MProc) -> ProcTabEntry {
         euid: rmp.mp_effuid,
         flags: rmp.mp_flags,
         name,
+        exec: rmp.mp_exec,
     }
 }
 
@@ -4602,6 +4608,27 @@ pub unsafe fn do_exec(caller_slot: usize, msg: &mut Message) -> i32 {
 
     let caller_ep = rmp.mp_endpoint;
 
+    // Record the program path for `/proc/<pid>/exe`. This is the path `execve`
+    // was given, not a basename, because the link must name the file that
+    // resolved. It is cleared first so a failed exec does not leave the previous
+    // program's path behind; a path PM cannot read, or one too long to name the
+    // right file, stays empty: no link is better than a lying one.
+    rmp.mp_exec = [0; PROC_EXEC_LEN];
+    if namelen < PROC_EXEC_LEN {
+        let copied = minix_rt::sys_vircopy(
+            caller_ep,
+            name_ptr,
+            minix_rt::SELF,
+            rmp.mp_exec.as_mut_ptr() as u64,
+            namelen,
+        );
+        if copied == 0 {
+            set_prog_name(rmp);
+        } else {
+            rmp.mp_exec = [0; PROC_EXEC_LEN];
+        }
+    }
+
     // Remember the frame for procfs bookkeeping. PARTIAL_EXEC is NOT set
     // here: it must only be set once the old image is actually being
     // replaced (VFS reports that via the reply's partial flag), otherwise a
@@ -4641,6 +4668,27 @@ pub unsafe fn do_exec(caller_slot: usize, msg: &mut Message) -> i32 {
     }
     rmp.mp_flags |= VFS_CALL;
     EDONTREPLY
+}
+
+/// Set `mp_name` from the recorded exec path, as C takes it from VFS's
+/// `progname`: the last path component, truncated to `PROC_NAME_LEN - 1` bytes
+/// and NUL-terminated.
+///
+/// Called only when the path was read, because a copy that failed leaves PM
+/// nothing truthful to name the process with; the name inherited at fork stays
+/// rather than being replaced by a guess.
+fn set_prog_name(rmp: &mut MProc) {
+    let end = rmp.mp_exec.iter().position(|&b| b == 0).unwrap_or(PROC_EXEC_LEN);
+    let path = &rmp.mp_exec[..end];
+    let base = match path.iter().rposition(|&b| b == b'/') {
+        Some(slash) => &path[slash + 1..],
+        None => path,
+    };
+    let mut name = [0i8; PROC_NAME_LEN];
+    for (i, &b) in base.iter().take(PROC_NAME_LEN - 1).enumerate() {
+        name[i] = b as i8;
+    }
+    rmp.mp_name = name;
 }
 
 /// Finish an exec after VFS has loaded the image — matching C `exec_restart()`
@@ -5257,6 +5305,55 @@ mod tests {
         assert_eq!(e.euid, 1000);
         assert_eq!(e.flags & IN_USE, IN_USE);
         assert_eq!(e.name_str(), "procfs");
+    }
+
+    /// Assert `mp_name` holds `want`, NUL-terminated with nothing after it.
+    fn assert_name(mp: &MProc, want: &[u8]) {
+        let n = want.len().min(PROC_NAME_LEN - 1);
+        for (i, &b) in want.iter().take(n).enumerate() {
+            assert_eq!(mp.mp_name[i], b as i8, "byte {i}");
+        }
+        assert_eq!(mp.mp_name[n], 0, "the field is NUL-terminated");
+        for (i, c) in mp.mp_name.iter().enumerate().skip(n + 1) {
+            assert_eq!(*c, 0, "nothing follows the terminator at {i}");
+        }
+    }
+
+    /// Write an exec path into the slot the way `do_exec` leaves it after a copy.
+    fn with_exec(path: &[u8]) -> MProc {
+        let mut mp = MProc::zeroed();
+        mp.mp_exec[..path.len()].copy_from_slice(path);
+        mp
+    }
+
+    #[test]
+    fn the_program_name_is_the_last_component_of_the_exec_path() {
+        // C takes `progname` from VFS; this port derives it from the path it
+        // recorded, which is the same thing for a resolved exec.
+        let mut mp = with_exec(b"/bin/coreutils");
+        set_prog_name(&mut mp);
+        assert_name(&mp, b"coreutils");
+    }
+
+    #[test]
+    fn a_program_path_without_a_slash_is_the_whole_name() {
+        let mut mp = with_exec(b"sh");
+        set_prog_name(&mut mp);
+        assert_name(&mp, b"sh");
+    }
+
+    #[test]
+    fn a_long_program_name_is_truncated_and_terminated() {
+        let mut mp = with_exec(b"/usr/libexec/a-very-long-frontend");
+        set_prog_name(&mut mp);
+        assert_name(&mp, b"a-very-long-fro");
+    }
+
+    #[test]
+    fn a_path_ending_in_a_slash_names_nothing() {
+        let mut mp = with_exec(b"/bin/");
+        set_prog_name(&mut mp);
+        assert_name(&mp, b"");
     }
 
     #[test]

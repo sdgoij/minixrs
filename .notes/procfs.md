@@ -10,7 +10,31 @@ one file, and both are deliberate rather than permanent.
 |---|---|
 | `/proc/hz` | `SYS_TIMES` (`do_times_handler`), ticks per second |
 | `/proc/uptime` | `SYS_TIMES`, monotonic ticks split as C's `100 * ticks / hz` |
+| `/proc/loadavg` | `GETINFO`'s `GET_LOADINFO`, C's three-window arithmetic |
 | `/proc/<pid>/status` | PM's `SI_PROC_TAB` record: name, state, pid, ppid, uid |
+| `/proc/<pid>/exe` | a link to the path `execve` was given, from the same record |
+| `/proc/self` | a link to the caller's own `/proc/<pid>` |
+
+## The two links
+
+The targets of `/proc/self` and `/proc/<pid>/exe` depend on something a path cannot carry,
+so VFS sends the asking process's endpoint with every lookup (`REQ_LOOKUP` payload[28]) and
+every readlink (`REQ_RDLINK` payload[24]). `rdlink_hook` builds `/proc/self` from that
+endpoint, finding the slot whose PM record has it (the endpoint is what both VFS's `fproc`
+and PM's `mp_endpoint` speak; the pid is a property of the slot). `/proc/<pid>/exe` is the
+path PM copied out of the caller at `execve`, cached in `MProc.mp_exec` and handed out as
+`ProcTabEntry.exec`; a boot process has none, so the link answers `ENOENT` rather than
+pointing at a guess.
+
+The hook refreshes PM's table before it looks anything up. That is not belt-and-braces:
+`self` is a *static* root entry, so its lookup is a hit and no lookup miss would ever fetch
+the table the target needs.
+
+`/proc/self/exe` also needs a walk that leaves this filesystem. `self` is mid-path there,
+and its target is absolute, so vtreefs writes the expanded path (`/proc/<pid>/exe`) back
+through the lookup grant and answers `ESYMLINK` with the resume offset and the symlink
+count; VFS restarts from its root with what is left. A link whose own hook fails keeps the
+hook's errno (`ENOENT` for a missing target), rather than every failure becoming `EINVAL`.
 
 ## How it is mounted
 
@@ -40,12 +64,14 @@ boot process.
 ## The gate
 
 `just test-procfs <arch>` types `/bin/procfsprobe` into the shell on all three arches. The probe
-reads the two root files and parses them, stats `/proc`, enumerates `/proc` with `getdents` the
-way `ls` does, and asks for `/proc/no-such-file`. It exists because nothing else in the tree
+reads the three root files and parses them, stats `/proc`, enumerates `/proc` with `getdents` the
+way `ls` does, reads `/proc/self` and `/proc/self/exe` back through the mount, and asks for
+`/proc/no-such-file`. It exists because nothing else in the tree
 opens a path under a user-mounted VTreeFS: the unit tests in `crates/libs/src/vtreefs` and
 `crates/fs/src/procfs` call `handle_fs_message` directly, so they pass whether or not VFS ever
-crosses the mount point. The probe's own parse helpers (`parse_decimal`, `is_uptime`, and the
-listing check) have host tests; the end-to-end case is what proves the two sides meet.
+crosses the mount point. The probe's own parse helpers (`parse_decimal`, `is_uptime`, the
+listing check and `names_pid`) have host tests; the end-to-end case is what proves the two
+sides meet.
 
 The `list` field is the root listing. It found a real defect: the port's `fs_getdents` never
 enumerated a directory's *indexed* children, and the PID directories are exactly that (their
@@ -90,6 +116,10 @@ C has no `status` file; it has the four per-pid files above, all of which need a
 does not have. A text summary of the record PM already gives us is truthful today, and it is not
 C's `psinfo` format with invented numbers in it. `psinfo` (and the rest) can be added file by
 file as their sources land; nothing here prevents that.
+
+`Name:` follows the program: PM sets `mp_name` from the recorded exec path's last component in
+`do_exec`, the same `progname` C takes from VFS, so a process is named after what it exec'd
+rather than after the parent it was forked from.
 
 The `State` letter is PM's view alone: `Z` for a zombie, `T` for a stopped process, `R` for
 anything else PM has in use. C derives a richer set from PM's flags *and* the kernel's run-state

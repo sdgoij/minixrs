@@ -148,6 +148,11 @@ pub struct MinixMemRange {
 
 pub const PROC_NAME_LEN: usize = 16;
 
+/// Longest exec path a process records, `/proc/<pid>/exe`'s target. Sized for a
+/// toolchain path (`/usr/libexec/...`) with room to spare; PM leaves the field
+/// empty rather than truncating a longer one.
+pub const PROC_EXEC_LEN: usize = 256;
+
 /// PM's `mp_flags` bits a reader of `/proc` needs, shared so the record's meaning is defined once.
 ///
 /// PM's own constants (`IN_USE`, `ZOMBIE`, `PROC_STOPPED`) alias these, and `procfs` turns them
@@ -176,6 +181,10 @@ pub struct ProcTabEntry {
     pub euid: i32,
     pub flags: u32,
     pub name: [u8; PROC_NAME_LEN],
+    /// The path passed to `execve`, as PM read it from the caller. Empty when PM
+    /// has none (a boot process, or a failed/partial exec), and left empty rather
+    /// than truncated when it does not fit: a cut-off path names the wrong file.
+    pub exec: [u8; PROC_EXEC_LEN],
 }
 
 impl ProcTabEntry {
@@ -187,6 +196,7 @@ impl ProcTabEntry {
             euid: 0,
             flags: 0,
             name: [0; PROC_NAME_LEN],
+            exec: [0; PROC_EXEC_LEN],
         }
     }
 
@@ -194,6 +204,16 @@ impl ProcTabEntry {
     pub fn name_str(&self) -> &str {
         let end = self.name.iter().position(|&b| b == 0).unwrap_or(PROC_NAME_LEN);
         core::str::from_utf8(&self.name[..end]).unwrap_or("")
+    }
+
+    /// The exec path as a string slice, or `""` when PM has none.
+    ///
+    /// This is what `/proc/<pid>/exe` links to. It is the path the caller gave
+    /// `execve`, so it is absolute for every caller that resolved a `PATH` entry
+    /// first, which is what the C library's `execvp` and this port's shell do.
+    pub fn exec_str(&self) -> &str {
+        let end = self.exec.iter().position(|&b| b == 0).unwrap_or(PROC_EXEC_LEN);
+        core::str::from_utf8(&self.exec[..end]).unwrap_or("")
     }
 }
 
@@ -324,19 +344,34 @@ mod tests {
 
     #[test]
     fn proc_tab_entry_has_the_expected_layout() {
-        // Five i32 fields and the name: 36 bytes, with nothing padded between them.
-        assert_eq!(size_of::<ProcTabEntry>(), 36);
+        // Five i32 fields, then the two byte arrays: 36 bytes of header and name, then the
+        // 256-byte exec path, with nothing padded between them.
+        assert_eq!(size_of::<ProcTabEntry>(), 292);
         assert_eq!(offset_of!(ProcTabEntry, name), 20);
-        let e = ProcTabEntry {
+        assert_eq!(offset_of!(ProcTabEntry, exec), 36);
+        let mut e = ProcTabEntry {
             pid: 7,
             ppid: 1,
             endpoint: 0x10007,
             euid: 0,
             flags: 1,
             name: *b"init\0\0\0\0\0\0\0\0\0\0\0\0",
+            exec: [0; PROC_EXEC_LEN],
         };
         assert_eq!(e.name_str(), "init");
+        e.exec[..14].copy_from_slice(b"/bin/coreutils");
+        assert_eq!(e.exec_str(), "/bin/coreutils");
         assert_eq!(ProcTabEntry::empty().name_str(), "");
+        assert_eq!(ProcTabEntry::empty().exec_str(), "");
+    }
+
+    #[test]
+    fn proc_tab_entry_exec_without_a_nul_is_the_whole_field() {
+        let e = ProcTabEntry {
+            exec: [b'x'; PROC_EXEC_LEN],
+            ..ProcTabEntry::empty()
+        };
+        assert_eq!(e.exec_str().len(), PROC_EXEC_LEN);
     }
 
     #[test]

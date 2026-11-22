@@ -30,6 +30,14 @@ pub static ROOT_FILES: &[File] = &[
         mode: REG_ALL_MODE,
         data: FileData::Static(root_loadavg),
     },
+    // `/proc/self`: a symlink to the asking process's own pid directory. The
+    // target depends on who is looking, so `tree::rdlink_hook` produces it from
+    // the caller's endpoint, which VFS passes with each lookup.
+    File {
+        name: "self",
+        mode: LNK_ALL_MODE,
+        data: FileData::None,
+    },
     // Sentinel
     File {
         name: "",
@@ -158,12 +166,14 @@ mod tests {
 
     #[test]
     fn root_files_lists_only_implemented_files() {
-        // Every entry but the sentinel must name a file whose content this port can produce; a
-        // stub whose output is a constant masquerades as data, so the list stays short on purpose.
-        let names: [&str; 3] = ["hz", "uptime", "loadavg"];
+        // Every entry but the sentinel must name something this port can produce: a file whose
+        // content it computes, or a link whose target its hook builds. A stub whose output is a
+        // constant masquerades as data, so the list stays short on purpose.
+        let names: [&str; 4] = ["hz", "uptime", "loadavg", "self"];
         for (i, name) in names.iter().enumerate() {
             assert_eq!(ROOT_FILES[i].name, *name);
         }
+        assert_eq!(ROOT_FILES[3].mode, LNK_ALL_MODE, "`self` is a link, not a file");
         assert_eq!(ROOT_FILES.len(), names.len() + 1);
     }
 

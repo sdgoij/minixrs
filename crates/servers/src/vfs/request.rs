@@ -653,6 +653,7 @@ pub unsafe fn req_link(fs_e: i32, link_parent: u32, lastc: *const u8, linked_fil
 /// `resolve` must point to a valid `lookup` structure, and `cred`, when
 /// present, must outlive the call. Caller must ensure `fs_e` is a valid FS
 /// endpoint.
+#[allow(clippy::too_many_arguments)] // C's `req_lookup` signature; `who` is the caller `/proc/self` needs
 pub unsafe fn req_lookup(
     fs_e: i32,
     dir_ino: u32,
@@ -661,6 +662,7 @@ pub unsafe fn req_lookup(
     gid: u16,
     cred: Option<&VfsUCred>,
     resolve: &Lookup,
+    who: i32,
 ) -> (i32, LookupRes) {
     #[cfg(target_os = "minix")]
     {
@@ -711,6 +713,7 @@ pub unsafe fn req_lookup(
             grant_ucred,
             path_len,
             grant_path,
+            who,
         );
 
         let r = fs_sendrec(fs_e, &mut msg);
@@ -747,7 +750,7 @@ pub unsafe fn req_lookup(
     }
     #[cfg(not(target_os = "minix"))]
     {
-        let _ = (fs_e, dir_ino, root_ino, uid, gid, cred, resolve);
+        let _ = (fs_e, dir_ino, root_ino, uid, gid, cred, resolve, who);
         (ENOSYS, LookupRes::default())
     }
 }
@@ -768,6 +771,11 @@ pub unsafe fn req_lookup(
 ///   raw[16..20] = grant_ucred (i32, valid with PATH_GET_UCRED)
 ///   raw[20..24] = path_len    (u32, bytes; the NUL terminator is not counted)
 ///   raw[24..28] = grant_path  (i32)
+///   raw[28..32] = who         (i32, the caller's endpoint)
+///
+/// `who` is what lets a virtual filesystem resolve a name that depends on the
+/// caller (`/proc/self`). A filesystem that does not need it ignores the field;
+/// the ones that read it are `libs::vtreefs`'s hook.
 #[cfg(any(test, target_os = "minix"))]
 #[allow(clippy::too_many_arguments)]
 fn build_lookup_msg(
@@ -779,6 +787,7 @@ fn build_lookup_msg(
     grant_ucred: i32,
     path_len: usize,
     grant_path: i32,
+    who: i32,
 ) -> [u8; 56] {
     let mut msg = [0u8; 56];
     w_i32(&mut msg, M_TYPE_OFF, REQ_LOOKUP);
@@ -790,6 +799,7 @@ fn build_lookup_msg(
     w_i32(&mut msg, PAYLOAD_OFF + 16, grant_ucred);
     w_u32(&mut msg, PAYLOAD_OFF + 20, path_len as u32);
     w_i32(&mut msg, PAYLOAD_OFF + 24, grant_path);
+    w_i32(&mut msg, PAYLOAD_OFF + 28, who);
     msg
 }
 
@@ -1071,6 +1081,7 @@ pub unsafe fn req_rdlink(
     _buf: *mut u8,
     len: usize,
     _direct: i32,
+    who: i32,
 ) -> i32 {
     #[cfg(target_os = "minix")]
     {
@@ -1082,6 +1093,9 @@ pub unsafe fn req_rdlink(
         let grant_id = cpf_grant_magic_write(_proc_e, fs_e, _buf as u64, len);
         w_i32(&mut msg, PAYLOAD_OFF + 8, grant_id);
         w_u64(&mut msg, PAYLOAD_OFF + 16, len as u64); // mem_size
+        // The caller's endpoint, for a target that depends on who is asking
+        // (`/proc/self`). A filesystem with static targets ignores it.
+        w_i32(&mut msg, PAYLOAD_OFF + 24, who);
 
         let r = fs_sendrec(fs_e, &mut msg);
         cpf_revoke(grant_id);
@@ -1094,7 +1108,7 @@ pub unsafe fn req_rdlink(
     }
     #[cfg(not(target_os = "minix"))]
     {
-        let _ = (fs_e, inode_nr, _proc_e, _buf, len, _direct);
+        let _ = (fs_e, inode_nr, _proc_e, _buf, len, _direct, who);
         ENOSYS
     }
 }
@@ -1657,6 +1671,7 @@ mod tests {
             -3,
             7,
             -1,
+            0x0001_0042,
         );
         assert_eq!(r_i32(&msg, M_TYPE_OFF), REQ_LOOKUP);
         assert_eq!(r_u32(&msg, PAYLOAD_OFF), 0x1122_3344);
@@ -1667,9 +1682,12 @@ mod tests {
         assert_eq!(r_i32(&msg, PAYLOAD_OFF + 16), -3);
         assert_eq!(r_u32(&msg, PAYLOAD_OFF + 20), 7);
         assert_eq!(r_i32(&msg, PAYLOAD_OFF + 24), -1);
+        // The caller's endpoint, which `libs::vtreefs` reads to resolve
+        // `/proc/self`; a filesystem that does not need it ignores it.
+        assert_eq!(r_i32(&msg, PAYLOAD_OFF + 28), 0x0001_0042);
         // Nothing carries path bytes any more, however long the path is: the
         // rest of the message stays zeroed rather than holding a truncated one.
-        assert!(msg[PAYLOAD_OFF + 28..].iter().all(|&b| b == 0));
+        assert!(msg[PAYLOAD_OFF + 32..].iter().all(|&b| b == 0));
     }
 
     #[test]
@@ -1825,7 +1843,7 @@ mod tests {
         let r = unsafe { req_newdriver(0, 0, core::ptr::null()) };
         assert_eq!(r, ENOSYS);
 
-        let r = unsafe { req_rdlink(0, 0, 0, core::ptr::null_mut(), 0, 0) };
+        let r = unsafe { req_rdlink(0, 0, 0, core::ptr::null_mut(), 0, 0, 0) };
         assert_eq!(r, ENOSYS);
 
         let r = unsafe { req_rmdir(0, 0, core::ptr::null()) };
@@ -1873,7 +1891,7 @@ mod tests {
 
         let (s, _res) = unsafe {
             let lookup = Lookup::default();
-            req_lookup(0, 0, 0, 0, 0, None, &lookup)
+            req_lookup(0, 0, 0, 0, 0, None, &lookup, 0)
         };
         assert_eq!(s, ENOSYS);
     }

@@ -601,6 +601,7 @@ pub unsafe fn mount_devman(root_vp: *mut Vnode) -> i32 {
             0,    /* gid */
             None, /* superuser: no supplemental groups */
             &resolve,
+            0, /* no caller: VFS's own mount-time lookup */
         )
     };
     if lr != OK {
@@ -697,6 +698,7 @@ pub unsafe fn mount_procfs(root_vp: *mut Vnode) -> i32 {
             0,    /* gid */
             None, /* superuser: no supplemental groups */
             &resolve,
+            0, /* no caller: VFS's own mount-time lookup */
         )
     };
     if lr != OK {

@@ -88,6 +88,10 @@ unsafe fn lookup(dirp: *mut Vnode, resolve: &Lookup, rfp: &Fproc) -> (i32, Looku
         rfp.fp_effgid,
         cred.as_ref(),
         resolve,
+        // Who is asking. A virtual filesystem resolves `/proc/self` from it:
+        // the name means "the caller's own pid directory", which is not a
+        // property the filesystem can look up on its own.
+        rfp.fp_endpoint,
     )
 }
 

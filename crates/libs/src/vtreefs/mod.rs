@@ -69,7 +69,9 @@ pub struct FsHooks {
     pub lookup_hook: Option<fn(parent: u32, name: &str) -> i32>,
     pub getdents_hook: Option<fn(node: u32) -> i32>,
     pub read_hook: Option<fn(node: u32, offset: u64, buf: &mut [u8]) -> usize>,
-    pub rdlink_hook: Option<fn(node: u32, buf: &mut [u8]) -> i32>,
+    /// `caller` is the endpoint of the process the lookup or readlink is for,
+    /// which is what lets a target depend on who is asking (`/proc/self`).
+    pub rdlink_hook: Option<fn(node: u32, caller: i32, buf: &mut [u8]) -> i32>,
     pub message_hook: Option<fn(msg: &mut [u8; 64]) -> i32>,
 }
 
@@ -627,6 +629,24 @@ fn fetch_path(grant_id: i32, dst: &mut [u8]) -> i32 {
     }
 }
 
+/// Copy an expanded lookup path back into VFS's grant.
+///
+/// A symlink whose target starts with `/` is answered with `ESYMLINK`: VFS
+/// restarts the walk from the process root at the offset it is told, so the
+/// expanded path has to reach its buffer, not stay in this server.
+fn store_path(grant_id: i32, src: &[u8]) -> i32 {
+    #[cfg(target_os = "minix")]
+    {
+        safecopy_to(arch_common::com::VFS_PROC_NR, grant_id, src)
+    }
+    #[cfg(not(target_os = "minix"))]
+    {
+        let _ = grant_id;
+        host_path::store_from(src);
+        OK
+    }
+}
+
 /// Host-side stand-in for the bytes of a lookup grant.
 #[cfg(not(target_os = "minix"))]
 mod host_path {
@@ -652,6 +672,15 @@ mod host_path {
         // Safety: single-threaded, as above.
         let store = unsafe { &*STORE.0.get() };
         dst[..n].copy_from_slice(&store[..n]);
+    }
+
+    /// Record the path the handler wrote back, so a test can read the expansion.
+    pub fn store_from(src: &[u8]) {
+        let n = src.len().min(super::PATH_MAX);
+        // Safety: single-threaded, as above.
+        let store = unsafe { &mut *STORE.0.get() };
+        store[..n].copy_from_slice(&src[..n]);
+        STORE.1.store(n, Ordering::Relaxed);
     }
 }
 
@@ -715,13 +744,17 @@ fn fs_putnode(msg: &mut Message) -> i32 {
 
 /// Resolve a symlink's target via the rdlink hook into `out`.
 /// Returns the target length (excluding the NUL), or an error.
-fn resolve_link(node: u32, out: &mut [u8]) -> Result<usize, i32> {
+fn resolve_link(node: u32, caller: i32, out: &mut [u8]) -> Result<usize, i32> {
     let hook = match hooks().rdlink_hook {
         Some(h) => h,
         None => return Err(EINVAL),
     };
-    if hook(node, out) != OK {
-        return Err(EINVAL);
+    // The hook's own code is the answer: it is the only place that knows why a
+    // target is missing (`ENOENT` for a link with no recorded path), and folding
+    // every failure into `EINVAL` would hide that from the caller.
+    let r = hook(node, caller, out);
+    if r != OK {
+        return Err(r);
     }
     let len = out.iter().position(|&b| b == 0).unwrap_or(out.len());
     if len == 0 || len >= out.len() {
@@ -734,7 +767,8 @@ fn resolve_link(node: u32, out: &mut [u8]) -> Result<usize, i32> {
 /// payload[4], uid (u16) at payload[8], gid (u16) at payload[10], flags (u32)
 /// at payload[12], grant_ucred (i32) at payload[16], path_len (u32) at
 /// payload[20] (path bytes, without the NUL), grant_path (i32) at payload[24]
-/// — a read-only grant over VFS's own path buffer.
+/// — a read-only grant over VFS's own path buffer — and the caller's endpoint
+/// (i32) at payload[28], for a name whose meaning depends on who asks.
 ///
 /// Reply (mess_fs_vfs_lookup): file_size (i64) at payload[8], device (u32)
 /// at payload[16], inode (u32) at payload[20], mode (u32) at payload[24].
@@ -744,6 +778,7 @@ fn fs_lookup(msg: &mut Message) -> i32 {
     let flags = u32::from_ne_bytes(raw[12..16].try_into().unwrap_or([0u8; 4]));
     let mut path_len = u32::from_ne_bytes(raw[20..24].try_into().unwrap_or([0u8; 4])) as usize;
     let grant_path = i32::from_ne_bytes(raw[24..28].try_into().unwrap_or([0u8; 4]));
+    let caller = i32::from_ne_bytes(raw[28..32].try_into().unwrap_or([0u8; 4]));
 
     if path_len == 0 {
         return EINVAL;
@@ -832,7 +867,7 @@ fn fs_lookup(msg: &mut Message) -> i32 {
             }
 
             let mut target = [0u8; PATH_MAX];
-            let tlen = match resolve_link(next, &mut target) {
+            let tlen = match resolve_link(next, caller, &mut target) {
                 Ok(n) => n,
                 Err(e) => {
                     r = e;
@@ -840,7 +875,31 @@ fn fs_lookup(msg: &mut Message) -> i32 {
                 }
             };
             if target[0] == b'/' {
-                // Absolute link — hand the whole path back to VFS.
+                // Absolute link: VFS restarts the walk from the process root. The
+                // expanded path goes back through the grant with the target
+                // replacing this one component, and the reply names the offset
+                // VFS resumes at (the component's start) and how many links
+                // were followed.
+                let tail = &path[consumed..];
+                let ttail = tail.iter().position(|&b| b == 0).unwrap_or(tail.len());
+                if start + tlen + ttail + 1 > PATH_MAX {
+                    r = ENAMETOOLONG;
+                    break;
+                }
+                let mut expanded = [0u8; PATH_MAX];
+                expanded[..start].copy_from_slice(&path[..start]);
+                expanded[start..start + tlen].copy_from_slice(&target[..tlen]);
+                let tail_at = start + tlen;
+                expanded[tail_at..tail_at + ttail].copy_from_slice(&tail[..ttail]);
+                expanded[tail_at + ttail] = 0;
+
+                r = store_path(grant_path, &expanded[..tail_at + ttail + 1]);
+                if r != OK {
+                    break;
+                }
+                let raw = raw_of_mut(msg);
+                raw[0..8].copy_from_slice(&(start as i64).to_le_bytes());
+                raw[32..34].copy_from_slice(&(symloops as u16).to_le_bytes());
                 r = ESYMLINK;
                 break;
             }
@@ -1064,13 +1123,14 @@ fn fs_rdlink(msg: &mut Message) -> i32 {
     let ino = u32::from_ne_bytes(raw[0..4].try_into().unwrap_or([0u8; 4]));
     let grant = i32::from_ne_bytes(raw[8..12].try_into().unwrap_or([0u8; 4]));
     let mem_size = u64::from_ne_bytes(raw[16..24].try_into().unwrap_or([0u8; 8])) as usize;
+    let caller = i32::from_ne_bytes(raw[24..28].try_into().unwrap_or([0u8; 4]));
 
     if ino as usize >= MAX_INODES {
         return EINVAL;
     }
 
     let mut path = [0u8; PATH_MAX];
-    let len = match resolve_link(ino, &mut path) {
+    let len = match resolve_link(ino, caller, &mut path) {
         Ok(n) => n,
         Err(e) => return e,
     };
@@ -1286,6 +1346,150 @@ mod tests {
     #[test]
     fn test_path_ret_symlink_matches_vfs() {
         assert_eq!(PATH_RET_SYMLINK, 4);
+    }
+
+    /// A link hook's own error reaches the caller.
+    ///
+    /// The hook is the one component that knows why a target is missing (procfs
+    /// answers `ENOENT` for a link whose process has no recorded path), so
+    /// `resolve_link` must not rewrite every failure into `EINVAL`.
+    #[test]
+    fn a_link_hooks_error_is_not_rewritten_to_einval() {
+        fn link(_node: u32, caller: i32, out: &mut [u8]) -> i32 {
+            assert_eq!(caller, 0x1002B, "the caller reaches the hook");
+            assert_eq!(out.len(), PATH_MAX, "the hook gets the full target buffer");
+            ENOENT
+        }
+        vtreefs_init(
+            FsHooks {
+                rdlink_hook: Some(link),
+                ..FsHooks::empty()
+            },
+            64,
+            test_root_stat(),
+        );
+        let linkstat = InodeStat {
+            mode: I_SYMBOLIC_LINK as u32 | 0o777,
+            ..test_root_stat()
+        };
+        let id = add_inode(0, "self", NO_INDEX, &linkstat, 0);
+
+        // Only `REQ_READSUPER` is served before mounting.
+        let mut mnt = new_message(REQ_READSUPER, arch_common::com::VFS_PROC_NR);
+        assert_eq!(handle_fs_message(&mut mnt), OK);
+
+        let mut msg = new_message(REQ_RDLINK, arch_common::com::VFS_PROC_NR);
+        {
+            let raw = raw_of_mut(&mut msg);
+            w_u32(raw, 0, id);
+            w_i32(raw, 8, -1); // grant: no copy on host
+            w_i64(raw, 16, PATH_MAX as i64); // mem_size
+            w_i32(raw, 24, 0x1002B); // caller endpoint
+        }
+        assert_eq!(handle_fs_message(&mut msg), ENOENT);
+    }
+
+    /// An absolute link target goes back through the grant with the rest of the
+    /// path behind it, and the reply names where VFS resumes.
+    ///
+    /// `/proc/self/exe` is the case: `self` is mid-path, its target is
+    /// `/proc/<pid>`, and VFS can only continue if the filesystem hands back
+    /// both the expanded path and the offset to restart at.
+    #[test]
+    fn an_absolute_link_expands_into_the_grant_for_vfs_to_restart() {
+        fn link(_node: u32, _caller: i32, out: &mut [u8]) -> i32 {
+            let target = b"/proc/43";
+            out[..target.len()].copy_from_slice(target);
+            out[target.len()] = 0;
+            OK
+        }
+        vtreefs_init(
+            FsHooks {
+                rdlink_hook: Some(link),
+                ..FsHooks::empty()
+            },
+            64,
+            test_root_stat(),
+        );
+        let linkstat = InodeStat {
+            mode: I_SYMBOLIC_LINK as u32 | 0o777,
+            ..test_root_stat()
+        };
+        add_inode(0, "self", NO_INDEX, &linkstat, 0);
+
+        let mut mnt = new_message(REQ_READSUPER, arch_common::com::VFS_PROC_NR);
+        assert_eq!(handle_fs_message(&mut mnt), OK);
+
+        let mut msg = new_message(REQ_LOOKUP, arch_common::com::VFS_PROC_NR);
+        {
+            let raw = raw_of_mut(&mut msg);
+            w_u32(raw, 0, 0); // dir_ino = root
+            w_u32(raw, 4, 0); // root_ino
+            w_u32(raw, 12, 0); // flags: mid-path, so the link is followed
+            w_u32(raw, 20, 8); // "self/exe"
+            w_i32(raw, 24, -1); // grant; the host store stands in
+            host_path::set(b"self/exe");
+        }
+        assert_eq!(handle_fs_message(&mut msg), ESYMLINK);
+
+        let raw = raw_of(&msg);
+        assert_eq!(r_i64(raw, 0), 0, "VFS resumes at the link component");
+        assert_eq!(
+            u16::from_le_bytes(raw[32..34].try_into().unwrap()),
+            1,
+            "one link was followed"
+        );
+        let mut expanded = [0u8; PATH_MAX];
+        host_path::copy_into(&mut expanded);
+        let end = expanded
+            .iter()
+            .position(|&b| b == 0)
+            .expect("the expansion is NUL-terminated");
+        assert_eq!(&expanded[..end], b"/proc/43/exe");
+    }
+
+    /// A link that is the last component is returned unresolved when VFS asks
+    /// for it (`PATH_RET_SYMLINK`), which is what makes `readlink` read the
+    /// link instead of following it.
+    #[test]
+    fn a_last_component_link_is_returned_unresolved_when_asked() {
+        fn link(_node: u32, _caller: i32, out: &mut [u8]) -> i32 {
+            let target = b"/proc/43";
+            out[..target.len()].copy_from_slice(target);
+            out[target.len()] = 0;
+            OK
+        }
+        vtreefs_init(
+            FsHooks {
+                rdlink_hook: Some(link),
+                ..FsHooks::empty()
+            },
+            64,
+            test_root_stat(),
+        );
+        let linkstat = InodeStat {
+            mode: I_SYMBOLIC_LINK as u32 | 0o777,
+            ..test_root_stat()
+        };
+        let id = add_inode(0, "self", NO_INDEX, &linkstat, 0);
+
+        let mut mnt = new_message(REQ_READSUPER, arch_common::com::VFS_PROC_NR);
+        assert_eq!(handle_fs_message(&mut mnt), OK);
+
+        let mut msg = new_message(REQ_LOOKUP, arch_common::com::VFS_PROC_NR);
+        {
+            let raw = raw_of_mut(&mut msg);
+            w_u32(raw, 0, 0);
+            w_u32(raw, 4, 0);
+            w_u32(raw, 12, PATH_RET_SYMLINK);
+            w_u32(raw, 20, 4); // "self"
+            w_i32(raw, 24, -1);
+            host_path::set(b"self");
+        }
+        assert_eq!(handle_fs_message(&mut msg), OK);
+        let raw = raw_of(&msg);
+        assert_eq!(r_u32(raw, 20), id, "the link's own inode comes back");
+        assert_eq!(r_u32(raw, 24), linkstat.mode, "with the link's mode");
     }
 
     fn test_root_stat() -> InodeStat {

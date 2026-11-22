@@ -22,6 +22,15 @@ pub static PID_FILES: &[File] = &[
         mode: REG_ALL_MODE,
         data: FileData::Dynamic(pid_status),
     },
+    // A symlink to the program this process is running, as `execve` was told it.
+    // Its target is produced at read time by `tree::rdlink_hook`, which finds the
+    // slot through this inode's parent; `FileData::None` because a link has no
+    // content of its own.
+    File {
+        name: "exe",
+        mode: LNK_ALL_MODE,
+        data: FileData::None,
+    },
     // Sentinel
     File {
         name: "",
@@ -82,6 +91,8 @@ mod tests {
     #[test]
     fn pid_files_has_sentinel_and_names_status() {
         assert_eq!(PID_FILES[0].name, "status");
+        assert_eq!(PID_FILES[1].name, "exe");
+        assert_eq!(PID_FILES[1].mode, LNK_ALL_MODE, "`exe` is a link, not a file");
         let last = PID_FILES.last().unwrap();
         assert!(matches!(last.data, crate::procfs::types::FileData::None));
     }

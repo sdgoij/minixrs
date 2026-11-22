@@ -274,14 +274,93 @@ pub fn read_hook(node: u32, offset: u64, buf: &mut [u8]) -> usize {
 }
 
 /// Symbolic link resolution hook.
-pub fn rdlink_hook(_node: u32, _ptr: &mut [u8]) -> i32 {
+///
+/// Two links in this tree depend on something the path cannot carry:
+///
+/// * `/proc/<pid>/exe` names the program the process was started from. PM records
+///   the path `execve` was given and hands it over with the process table.
+/// * `/proc/self` means "the caller's own pid directory", so its target is built
+///   from `caller`, the endpoint VFS passes with the lookup or the readlink.
+///
+/// Anything else is not a link this filesystem serves. A link whose data is
+/// missing (a boot process has no recorded path; a lookup with no caller) answers
+/// `ENOENT`, so a reader gets "no such file" rather than a link to nowhere.
+pub fn rdlink_hook(node: u32, caller: i32, ptr: &mut [u8]) -> i32 {
+    // A path through `/proc/self` can reach this hook without any lookup that
+    // would have refreshed the table: `self` is a static root entry, so its
+    // lookup is a hit. Both targets read from the table (the caller's slot, and
+    // the process's exec path), so ask PM first. A host build has no PM; its
+    // tests install the table directly.
+    #[cfg(target_os = "minix")]
+    refresh_proc_tab();
+
+    let inode = libs::vtreefs::get_inode(node);
+    let name = inode_name(inode);
+
+    if name == b"exe" {
+        let slot = libs::vtreefs::get_inode(inode.parent_id).index;
+        let e = entry(slot);
+        let path = e.exec_str();
+        if path.is_empty() {
+            return ENOENT;
+        }
+        return write_target(ptr, path.as_bytes());
+    }
+
+    if name == b"self" {
+        let Some(slot) = slot_by_endpoint(caller) else {
+            return ENOENT;
+        };
+        let mut digits_buf = [0u8; 12];
+        let digits = format_pid(&mut digits_buf, entry(slot).pid).as_bytes();
+        let mut out = [0u8; 18];
+        out[..6].copy_from_slice(b"/proc/");
+        let n = 6 + digits.len();
+        out[6..n].copy_from_slice(digits);
+        return write_target(ptr, &out[..n]);
+    }
+
+    EINVAL
+}
+
+/// Copy a link target into the hook's buffer, NUL-terminated.
+fn write_target(ptr: &mut [u8], target: &[u8]) -> i32 {
+    if target.len() + 1 > ptr.len() {
+        return ENAMETOOLONG;
+    }
+    ptr[..target.len()].copy_from_slice(target);
+    ptr[target.len()] = 0;
     OK
+}
+
+/// An inode's name, stopping at the first NUL.
+fn inode_name(inode: &libs::vtreefs::INode) -> &[u8] {
+    let end = inode.name.iter().position(|&b| b == 0).unwrap_or(inode.name.len());
+    &inode.name[..end]
+}
+
+/// The process slot whose endpoint is `endpoint`, if PM has one.
+///
+/// `/proc/self` is resolved this way rather than from a pid carried in the
+/// request: the endpoint is what both VFS's fproc table and PM's `mp_endpoint`
+/// speak, and the pid is a property of the slot.
+fn slot_by_endpoint(endpoint: i32) -> Option<i32> {
+    if endpoint == 0 {
+        return None;
+    }
+    for slot in 0..NR_PROCS as i32 {
+        let e = entry(slot);
+        if e.endpoint == endpoint && e.flags & PM_PROC_IN_USE != 0 {
+            return Some(slot);
+        }
+    }
+    None
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use arch_common::types::{PM_PROC_ZOMBIE, PROC_NAME_LEN};
+    use arch_common::types::{PM_PROC_ZOMBIE, PROC_EXEC_LEN, PROC_NAME_LEN};
 
     fn name_of(s: &str) -> [u8; PROC_NAME_LEN] {
         let mut n = [0u8; PROC_NAME_LEN];
@@ -292,6 +371,14 @@ mod tests {
     }
 
     fn live(pid: i32, name: &str) -> ProcTabEntry {
+        live_with_exec(pid, name, "")
+    }
+
+    fn live_with_exec(pid: i32, name: &str, exec: &str) -> ProcTabEntry {
+        let mut path = [0u8; PROC_EXEC_LEN];
+        for (i, &b) in exec.as_bytes().iter().enumerate().take(PROC_EXEC_LEN - 1) {
+            path[i] = b;
+        }
         ProcTabEntry {
             pid,
             ppid: 1,
@@ -299,6 +386,7 @@ mod tests {
             euid: 0,
             flags: PM_PROC_IN_USE,
             name: name_of(name),
+            exec: path,
         }
     }
 
@@ -364,7 +452,7 @@ mod tests {
     #[test]
     fn a_pid_dir_adds_its_files_once() {
         // The hook runs on every read of the directory, so a second call must not add a
-        // second `status`.
+        // second `status` or a second `exe`.
         init();
         set_table(&[live(42, "init")]);
         construct_pid_dirs();
@@ -375,9 +463,12 @@ mod tests {
         construct_pid_entries(dir);
 
         assert_eq!(child_count(dir, "status"), 1);
+        assert_eq!(child_count(dir, "exe"), 1);
         let status = libs::vtreefs::get_inode_by_index(dir, 0).expect("status is indexed");
         assert_eq!(libs::vtreefs::get_inode_name(status), "status");
-        assert_eq!(libs::vtreefs::get_inode(dir).indexed, 1);
+        let exe = libs::vtreefs::get_inode_by_index(dir, 1).expect("exe is indexed");
+        assert_eq!(libs::vtreefs::get_inode_name(exe), "exe");
+        assert_eq!(libs::vtreefs::get_inode(dir).indexed, 2);
     }
 
     #[test]
@@ -472,5 +563,110 @@ mod tests {
         init();
         // No `set_table`, and the host has no PM: lookups under the root fail rather than panic.
         assert_eq!(lookup_hook(libs::vtreefs::get_root_inode(), "42"), EINVAL);
+    }
+
+    /// Build the root's static entries, which `init_tree` leaves to the mount's `init_hook`.
+    fn construct_root_files() {
+        let root = libs::vtreefs::get_root_inode() as u16;
+        crate::procfs::main::construct_tree(root, crate::procfs::root::ROOT_FILES);
+    }
+
+    /// A NUL-terminated link target, as `write_target` leaves it.
+    fn target_of(buf: &[u8]) -> &[u8] {
+        let end = buf.iter().position(|&b| b == 0).expect("the target is NUL-terminated");
+        &buf[..end]
+    }
+
+    #[test]
+    fn exe_link_names_the_program_the_process_ran() {
+        init();
+        set_table(&[live_with_exec(42, "clang", "/bin/coreutils")]);
+        construct_pid_dirs();
+        let root = libs::vtreefs::get_root_inode();
+        let dir = find_pid_dir(root, 42).unwrap();
+        construct_pid_entries(dir);
+        let exe = libs::vtreefs::find_inode(dir, "exe").expect("exe is constructed");
+
+        let mut out = [0u8; 64];
+        assert_eq!(rdlink_hook(exe, 0, &mut out), OK);
+        assert_eq!(target_of(&out), b"/bin/coreutils");
+    }
+
+    #[test]
+    fn exe_link_without_a_recorded_path_is_enoent() {
+        // A boot process was never `execve`d, so PM has no path to hand over. A reader gets
+        // "no such file", not a link to nowhere.
+        init();
+        set_table(&[live(42, "boot")]);
+        construct_pid_dirs();
+        let root = libs::vtreefs::get_root_inode();
+        let dir = find_pid_dir(root, 42).unwrap();
+        construct_pid_entries(dir);
+        let exe = libs::vtreefs::find_inode(dir, "exe").unwrap();
+
+        let mut out = [0u8; 64];
+        assert_eq!(rdlink_hook(exe, 0, &mut out), ENOENT);
+    }
+
+    #[test]
+    fn self_link_names_the_callers_directory() {
+        // The target depends on who asks, so it comes from the caller's endpoint rather than
+        // from the inode: the same `self` inode answers differently for two processes.
+        init();
+        construct_root_files();
+        set_table(&[live(42, "init"), live(43, "coreutils")]);
+        let root = libs::vtreefs::get_root_inode();
+        let link = libs::vtreefs::find_inode(root, "self").expect("self is a root entry");
+
+        let mut out = [0u8; 32];
+        assert_eq!(rdlink_hook(link, 0x10000 | 43, &mut out), OK);
+        assert_eq!(target_of(&out), b"/proc/43");
+
+        let mut out = [0u8; 32];
+        assert_eq!(rdlink_hook(link, 0x10000 | 42, &mut out), OK);
+        assert_eq!(target_of(&out), b"/proc/42");
+    }
+
+    #[test]
+    fn self_link_without_a_known_caller_is_enoent() {
+        init();
+        construct_root_files();
+        set_table(&[live(42, "init")]);
+        let root = libs::vtreefs::get_root_inode();
+        let link = libs::vtreefs::find_inode(root, "self").unwrap();
+
+        let mut out = [0u8; 32];
+        // No caller at all, and an endpoint that belongs to nobody.
+        assert_eq!(rdlink_hook(link, 0, &mut out), ENOENT);
+        assert_eq!(rdlink_hook(link, 0x9999, &mut out), ENOENT);
+    }
+
+    #[test]
+    fn a_regular_file_is_not_a_link() {
+        init();
+        set_table(&[live(42, "init")]);
+        construct_pid_dirs();
+        let root = libs::vtreefs::get_root_inode();
+        let dir = find_pid_dir(root, 42).unwrap();
+        construct_pid_entries(dir);
+        let status = libs::vtreefs::find_inode(dir, "status").unwrap();
+
+        let mut out = [0u8; 64];
+        assert_eq!(rdlink_hook(status, 0, &mut out), EINVAL);
+    }
+
+    #[test]
+    fn a_target_too_long_for_the_buffer_names_the_error() {
+        init();
+        set_table(&[live_with_exec(42, "clang", "/bin/coreutils")]);
+        construct_pid_dirs();
+        let root = libs::vtreefs::get_root_inode();
+        let dir = find_pid_dir(root, 42).unwrap();
+        construct_pid_entries(dir);
+        let exe = libs::vtreefs::find_inode(dir, "exe").unwrap();
+
+        // "/bin/coreutils" plus its NUL is 15 bytes; 14 leaves no room for the terminator.
+        let mut out = [0u8; 14];
+        assert_eq!(rdlink_hook(exe, 0, &mut out), ENAMETOOLONG);
     }
 }

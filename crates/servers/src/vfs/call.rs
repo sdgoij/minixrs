@@ -2174,6 +2174,7 @@ pub fn do_rdlink() -> i32 {
             buf_addr as *mut u8,
             buf_size,
             0,
+            fp.fp_endpoint,
         )
     };
     unsafe { mount::put_vnode(vp) };

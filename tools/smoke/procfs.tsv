@@ -10,16 +10,23 @@
 # The client's fields are separate claims, so a mount that half-works cannot read as
 # a pass. `hz` is `/proc/hz`, a positive decimal from the kernel clock (`SYS_TIMES`).
 # `uptime` is `/proc/uptime`, `<seconds>.<hundredths>`, which is C's `%ld.%02ld`
-# split. `load` is `/proc/loadavg`, three `%ld.%02ld` figures the kernel's
+# `load` is `/proc/loadavg`, three `%ld.%02ld` figures the kernel's
 # `GET_LOADINFO` supplies. `dir` is `/proc` itself resolving to a directory through the
-# mount. `list` is the root listing, read with `getdents` the way `ls` reads it: `hz`,
+# root listing, read with `getdents` the way `ls` reads it: `hz`,
 # `uptime`, `loadavg` and one directory per live process, each exactly once. That is
 # the claim a listing bug broke (every PID directory was invisible and the first static
-# file repeated once per process slot). `gone` is a path under `/proc` that is not
-# there: it has to be the mounted tree's own `ENOENT` (2), which is only reachable if
-# VFS split the path at `/proc` rather than falling through to the root filesystem.
+# file repeated once per process slot). `self` is `/proc/self`, a link whose target is
+# the asking process's own `/proc/<pid>`: its target depends on the caller, so it only
+# reads back if VFS passed the caller's endpoint through the mount. `exe` is
+# caller's endpoint through the mount. `exe` is
+# `/proc/self/exe` read through that link, which is `/bin/procfsprobe`. `name` is
+# `/proc/self/status`, whose `Name:` field has to be the program the probe was exec'd
+# from, which PM records at `execve`. `gone` is a
+# path under `/proc` that is not there: it has to be the mounted tree's own `ENOENT`
+# (2), which is only reachable if VFS split the path at `/proc` rather than falling
+# through to the root filesystem.
 #
 # The same line holds on all three arches because none of the claims is a number the
 # arch chooses: the files are parsed, not compared, the listing is checked for shape
 # rather than contents, and the refusals are errnos.
-/bin/procfsprobe	procfs: hz=ok uptime=ok load=ok dir=ok list=ok gone=err 2
+/bin/procfsprobe	procfs: hz=ok uptime=ok load=ok dir=ok list=ok self=ok exe=ok name=ok gone=err 2
