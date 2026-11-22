@@ -184,10 +184,11 @@ mod tests {
     #[test]
     fn mfs_global_layout_offsets() {
         // Byte offsets of protocol fields inside MfsGlobal (used by the
-        // QEMU-monitor debug probe; keep in sync with the struct). Each moved
-        // by 8 when `lookup_grant_path` was added before them.
-        assert_eq!(core::mem::offset_of!(MfsGlobal, m_in), 77648);
-        assert_eq!(core::mem::offset_of!(MfsGlobal, readwrite_res_count), 77640);
-        assert_eq!(core::mem::offset_of!(MfsGlobal, readwrite_res_pos), 77632);
+        // QEMU-monitor debug probe; keep in sync with the struct). The in-core
+        // inode table grew to 2048 entries for the in-guest compiler, which moved
+        // every field after it.
+        assert_eq!(core::mem::offset_of!(MfsGlobal, m_in), 304976);
+        assert_eq!(core::mem::offset_of!(MfsGlobal, readwrite_res_count), 304968);
+        assert_eq!(core::mem::offset_of!(MfsGlobal, readwrite_res_pos), 304960);
     }
 }

@@ -3133,6 +3133,8 @@ from resolving, is under `# Resolved issues`.
     records. (`crates/servers/src/{pm.rs,vfs/request.rs}`, `crates/fs/src/procfs/`,
     `crates/libs/src/vtreefs/mod.rs`, `.notes/procfs.md`)
 
+87. **~~MFS's in-core inode table was too small for an in-guest compiler~~**: FIXED (2026-11-22). `NR_INODES` was 512, sized for a boot workload. An in-guest `clang++` of LLVM's FileCheck keeps every included header's inode alive for diagnostics and exhausted the table; `get_free_inode` answered `ENFILE`, which surfaced first as a header "not found" and then as a failed open of the output file. The table is now 2048 with a 256-bucket hash, costing about 240 KiB of MFS BSS, and the offsets in `mfs_global_layout_offsets` moved with it. (`crates/fs/src/mfs/consts.rs`, `crates/fs/src/mfs/glo.rs`, `.notes/toolchain_in_os.md`)
+
 ---
 
 ## x86_64 (`[x86]`)

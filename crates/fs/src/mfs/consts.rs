@@ -5,10 +5,19 @@ pub const V2_NR_DZONES: usize = 7;
 /// Total # zone numbers in a V2 inode.
 pub const V2_NR_TZONES: usize = 10;
 
-/// # slots in "in core" inode table (matches NR_VNODES in VFS).
-pub const NR_INODES: usize = 512;
+/// # slots in "in core" inode table.
+///
+/// C has 512, sized for a boot workload. An in-guest clang keeps every included
+/// header's buffer (and so its inode) alive for diagnostics, and a real LLVM
+/// translation unit exhausted 512: `get_inode` answered `ENFILE`, which surfaced
+/// as a header "not found" and then as a failed output-file open. VFS admits 1024
+/// vnodes, so this matches that order of magnitude rather than C's boot-sized
+/// table; the cost is ~240 KiB of MFS BSS for 2048 `Inode`s.
+pub const NR_INODES: usize = 2048;
 
-pub const INODE_HASH_LOG2: usize = 7;
+/// Two-based logarithm of the inode hash size. 8 doubles C's 128 buckets to 256,
+/// which keeps the average chain at eight entries for the larger table.
+pub const INODE_HASH_LOG2: usize = 8;
 pub const INODE_HASH_SIZE: usize = 1 << INODE_HASH_LOG2;
 pub const INODE_HASH_MASK: usize = INODE_HASH_SIZE - 1;
 
