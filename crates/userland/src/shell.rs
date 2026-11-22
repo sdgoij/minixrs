@@ -65,7 +65,7 @@ pub fn sh(args: &[&str]) -> i32 {
         match minix_std::utmpx::retire_record(minix_std::utmpx::DEFAULT_FILE, pid) {
             Ok(()) => {}
             Err(e) if e.0 == 2 => {}
-            Err(_) => write_err(b"sh: cannot update the session file\n"),
+            Err(_) => write_err(b"sh: cannot update /var/run/utmpx\n"),
         }
         status
     }

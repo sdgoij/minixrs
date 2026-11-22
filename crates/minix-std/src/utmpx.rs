@@ -42,10 +42,10 @@ pub const DEAD_PROCESS: u16 = 8;
 
 /// Where the port keeps the login records.
 ///
-/// `_PATH_UTMPX` on a full system is `/var/run/utmpx`; this image has no `/var`, so
-/// the file lives in the writable tmpfs the image already carries. `who`, `users`,
-/// `pinky` and `uptime` name this path in their help and read it by default.
-pub const DEFAULT_FILE: &[u8] = b"/tmp/utmpx";
+/// Where the port keeps the login records: `_PATH_UTMPX`, which the image has a
+/// `/var/run` for. `who`, `users`, `pinky` and `uptime` name this path in their
+/// help and read it by default.
+pub const DEFAULT_FILE: &[u8] = b"/var/run/utmpx";
 
 /// The most entries the file may hold. A fixed bound is what lets every reader
 /// and writer work in a static buffer: there is one console session, so 16 is

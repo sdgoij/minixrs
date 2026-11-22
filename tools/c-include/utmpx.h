@@ -1,7 +1,7 @@
 /* utmpx.h for the minix OS - the login-record file.
  *
  * The entries are `struct utmpx` images stored one after another in
- * `/tmp/utmpx` (crates/minix-std/src/utmpx.rs owns the file and the
+ * `/var/run/utmpx` (crates/minix-std/src/utmpx.rs owns the file and the
  * layout; crates/minix-libc owns the cursor calls). The port does not
  * implement NetBSD's on-disk utmp v2 encoding: the file holds this struct.
  *
@@ -18,7 +18,7 @@
 #include <sys/time.h>
 #include <stdint.h>
 
-#define _PATH_UTMPX "/tmp/utmpx"
+#define _PATH_UTMPX "/var/run/utmpx"
 
 #define _UTX_USERSIZE 32
 #define _UTX_LINESIZE 32

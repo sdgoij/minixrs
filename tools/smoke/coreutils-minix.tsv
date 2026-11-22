@@ -400,7 +400,7 @@ coreutils df /	rootfs[[:space:]]+[0-9]+[[:space:]]+[0-9]+[[:space:]]+[0-9]+[[:sp
 coreutils df	rootfs[[:space:]]+[0-9]+[[:space:]]+[0-9]+[[:space:]]+[0-9]+[[:space:]]+[0-9]+%[[:space:]]+/
 
 # The session file: init records the boot and the console session in
-# /tmp/utmpx (`minix_std::utmpx::DEFAULT_FILE`) before it execs the shell, and
+# /var/run/utmpx (`minix_std::utmpx::DEFAULT_FILE`) before it execs the shell, and
 # the shell retires its entry on exit. `users`, `who` and `pinky` read that file,
 # so a record that is missing or whose fields are in the wrong place shows here as
 # an empty listing. `uptime` reads /proc/uptime and /proc/loadavg (the kernel's

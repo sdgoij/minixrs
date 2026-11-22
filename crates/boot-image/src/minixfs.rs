@@ -220,13 +220,25 @@ impl MinixFs {
 
     /// Create a named directory under `root_zone` and link it into the root;
     /// returns the zone holding the directory data.
-    pub fn add_directory(&mut self, root_zone: u32, name: &str) -> u32 {
+    /// Add a directory to `parent_zone`; returns the new directory's zone.
+    pub fn add_directory(&mut self, parent_zone: u32, name: &str) -> u32 {
+        // `..` names the inode that owns `parent_zone`, not the root: a nested
+        // directory whose `..` points at `/` makes `getcwd` walk to the wrong
+        // tree and `cd ..` leave the filesystem it is in (`/dev/dri` and
+        // `/var/run` are both nested).
+        let parent = self
+            .inode_table
+            .iter()
+            .position(|e| e.d2_zone[0] == parent_zone && (e.d2_mode & I_DIRECTORY) != 0)
+            .unwrap_or_else(|| panic!("no directory inode owns zone {parent_zone}"))
+            as u32
+            + 1;
         let zone = self.alloc_zone();
         let ino = self.alloc_inode(I_DIRECTORY | RWX_ALL, 64);
         self.write_inode_zone(ino, zone);
-        self.add_dirent(root_zone, ino, name);
+        self.add_dirent(parent_zone, ino, name);
         self.add_dirent(zone, ino, ".");
-        self.add_dirent(zone, ROOT_INODE, "..");
+        self.add_dirent(zone, parent, "..");
         zone
     }
 
@@ -640,6 +652,13 @@ pub fn build_minixfs(files: &[(&'static str, Vec<u8>)]) -> Vec<u8> {
     // its number; `/devices` stays inode 7 and `/bin/echo` stays inode 8.
     let _proc_zone = fs.add_directory(root_zone, "proc");
 
+    // `/var/run` holds the session file that `init` writes and the shell retires
+    // (`/var/run/utmpx`, `minix_std::utmpx::DEFAULT_FILE`), so the directory has to
+    // exist before either runs. Made here, after every inode the layout tests pin,
+    // for the same reason as the two entries above.
+    let var_zone = fs.add_directory(root_zone, "var");
+    let _run_zone = fs.add_directory(var_zone, "run");
+
     // `alloc_inode` only fails once the *bitmap block* (32768 bits) fills, so a payload that
     // outgrows `INODES` is written with the overflow bits set and fails in the guest as
     // `err=28` on the first `> file`, with nothing in the build saying why. Refuse such an
@@ -934,11 +953,11 @@ mod tests {
         // Every inode in the table must be marked in use (bit N), so MFS's
         // alloc_bit never hands out an inode that already has table data.
         // The builder writes slot N-1 for inode N; walk the table. The
-        // The empty image has 9 dirs (root, bin, sbin, etc, tmp, dev, devices,
-        // dri, proc) + 6 data files (rc, session, hostname, passwd, secret, group) + 20 devices (tty00, tty01, null,
+        // The empty image has 11 dirs (root, bin, sbin, etc, tmp, dev, devices,
+        // dri, proc, var, run) + 6 data files (rc, session, hostname, passwd, secret, group) + 20 devices (tty00, tty01, null,
         // console, ip, udp, tcp, fb, kbd, the 8 pty nodes ttyp0-3/ptyp0-3, uds,
-        // dri/renderD128 and zero) + the /link symlink = 36 inodes.
-        let n_inodes = 36usize;
+        // dri/renderD128 and zero) + the /link symlink = 38 inodes.
+        let n_inodes = 38usize;
         for ino in 1..=n_inodes {
             assert_eq!(
                 (imap[ino / 8] >> (ino % 8)) & 1,
@@ -946,12 +965,66 @@ mod tests {
                 "inode {ino} must be marked in use at bit {ino}"
             );
         }
-        // And the next bit (inode 37) is free, the first allocatable inode.
+        // And the next bit (inode 39) is free, the first allocatable inode.
         assert_eq!(
-            imap[37 / 8] & (1 << (37 % 8)),
+            imap[39 / 8] & (1 << (39 % 8)),
             0,
-            "inode 37 must be free for the first create"
+            "inode 39 must be free for the first create"
         );
         let _ = itable_off;
+    }
+
+    /// The inode number a directory entry names.
+    fn dirent_inode(image: &[u8], dir_zone: u32, name: &[u8]) -> Option<u32> {
+        let base = dir_zone as usize * BLOCK_SIZE;
+        let entry = 4 + NAMESIZE;
+        for i in 0..(BLOCK_SIZE / entry) {
+            let off = base + i * entry;
+            let ino = u32::from_le_bytes(image[off..off + 4].try_into().unwrap());
+            if ino == 0 {
+                continue;
+            }
+            let field = &image[off + 4..off + 4 + NAMESIZE];
+            let len = field.iter().position(|&b| b == 0).unwrap_or(NAMESIZE);
+            if &field[..len] == name {
+                return Some(ino);
+            }
+        }
+        None
+    }
+
+    /// A nested directory's `..` names the inode that owns its parent's zone,
+    /// not the root. `/var/run` is a directory two levels down that a shell can
+    /// be in (`getcwd` and `cd ..` walk it), and `/dev/dri` is the other one the
+    /// builder makes.
+    #[test]
+    fn a_nested_directorys_dotdot_names_its_parent() {
+        let empty: &[(&'static str, Vec<u8>)] = &[];
+        let image = build_minixfs(empty);
+
+        let imap_blocks = i16::from_le_bytes(image[1024 + 8..1024 + 10].try_into().unwrap());
+        let zmap_blocks = i16::from_le_bytes(image[1024 + 10..1024 + 12].try_into().unwrap());
+        let itable_off = (2 + imap_blocks as usize + zmap_blocks as usize) * BLOCK_SIZE;
+        let zone_of = |ino: u32| -> u32 {
+            let off = itable_off + (ino - 1) as usize * INODE_SIZE;
+            u32::from_le_bytes(image[off + 24..off + 28].try_into().unwrap())
+        };
+
+        let root_zone = zone_of(ROOT_INODE);
+        let var = dirent_inode(&image, root_zone, b"var").expect("/var must be in the root");
+        let var_zone = zone_of(var);
+        let run = dirent_inode(&image, var_zone, b"run").expect("/var/run must be in /var");
+        let run_zone = zone_of(run);
+
+        assert_eq!(
+            dirent_inode(&image, var_zone, b".."),
+            Some(ROOT_INODE),
+            "/var/.. must be 1"
+        );
+        assert_eq!(
+            dirent_inode(&image, run_zone, b".."),
+            Some(var),
+            "/var/run/.. must be /var, not the root"
+        );
     }
 }

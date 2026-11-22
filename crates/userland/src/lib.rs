@@ -3576,7 +3576,7 @@ unsafe fn exec_one(path: &core::ffi::CStr) -> i64 {
 }
 
 /// Record this boot and the console session in the session file
-/// (`minix_std::utmpx::DEFAULT_FILE`, `/tmp/utmpx`).
+/// (`minix_std::utmpx::DEFAULT_FILE`, `/var/run/utmpx`).
 ///
 /// `who`, `users`, `pinky` and `uptime` read that file, and init is the process
 /// that stays the session's leader: it execs `/bin/rc`, which execs the shell, so
@@ -3609,7 +3609,7 @@ fn record_session(pid: i32) {
     let session = utmpx::Utmpx::new(utmpx::USER_PROCESS, pid, user, b"tty").at(sec, usec);
     for rec in [&boot, &session] {
         if utmpx::put_record(utmpx::DEFAULT_FILE, rec).is_err() {
-            write_err(b"init: cannot write the session file\n");
+            write_err(b"init: cannot write /var/run/utmpx\n");
             return;
         }
     }
