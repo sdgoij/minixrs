@@ -204,6 +204,7 @@ impl Driver<'_> {
                 step.send
             ));
         }
+        self.ensure_submitted(at, &step.send);
 
         if step.expect.is_empty() {
             // No read-back, so the echoed command is the evidence. It is matched
@@ -270,6 +271,26 @@ impl Driver<'_> {
         self.guest.send_raw(b"\n")
     }
 
+    /// Make sure the shell received the line's terminator.
+    ///
+    /// The console drops input while it is still printing boot messages, and the
+    /// byte most likely to go is the newline: the echo is complete, the line looks
+    /// sent, and the shell is still editing it, so the step waits out the whole
+    /// deadline with nothing to show. A submitted line has a newline after its
+    /// echo, so resend the terminator for one that does not.
+    fn ensure_submitted(&mut self, anchor: usize, sent: &str) {
+        for _ in 0..ATTEMPTS {
+            let submitted = self
+                .guest
+                .with_transcript(|out| line_submitted(window(out, anchor), sent.as_bytes()));
+            if submitted {
+                return;
+            }
+            let _ = self.guest.send_raw(b"\n");
+            thread::sleep(self.pace.max(Duration::from_millis(30)));
+        }
+    }
+
     fn wait_prompt(&self, from: usize) -> bool {
         self.wait_lines(from, prompt())
     }
@@ -327,6 +348,19 @@ fn contains(window: &[u8], needle: &[u8]) -> bool {
     !needle.is_empty() && window.windows(needle.len()).any(|window| window == needle)
 }
 
+/// Whether the last `sent` in `window` is followed by a newline, i.e. the shell
+/// received the terminator. A retry can echo the line more than once, so the last
+/// occurrence decides.
+fn line_submitted(window: &[u8], sent: &[u8]) -> bool {
+    if sent.is_empty() {
+        return false;
+    }
+    match window.windows(sent.len()).rposition(|window| window == sent) {
+        Some(at) => window[at + sent.len()..].contains(&b'\n'),
+        None => false,
+    }
+}
+
 fn window(out: &[u8], from: usize) -> &[u8] {
     &out[from.min(out.len())..]
 }
@@ -348,6 +382,19 @@ fn last_lines(text: &[u8], count: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_line_is_submitted_only_after_its_newline() {
+        assert!(!line_submitted(b"# echo hi", b"echo hi"));
+        assert!(line_submitted(b"# echo hi\r\n", b"echo hi"));
+        assert!(line_submitted(b"# echo hi\r\n# echo hi\r\n", b"echo hi"));
+        assert!(
+            !line_submitted(b"# echo hi\r\n# echo hi", b"echo hi"),
+            "a retry still being edited is not submitted"
+        );
+        assert!(!line_submitted(b"# other", b"echo hi"));
+        assert!(!line_submitted(b"anything", b""), "an empty send is never submitted");
+    }
 
     #[test]
     fn a_step_needs_a_tab() {
