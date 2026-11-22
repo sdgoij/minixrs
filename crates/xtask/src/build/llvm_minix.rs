@@ -480,6 +480,60 @@ fn stage(
         usr_lib.join("minix-user.ld"),
     )?;
     fs::copy(root.join("tools/hello.c"), usr_src.join("hello.c"))?;
+    fs::copy(root.join("tools/hello-cpp.cpp"), usr_src.join("hello.cpp"))?;
+
+    // One translation unit per C++ header the toolchain has to get right; a
+    // wrong search order shows up here before it reaches LLVM.
+    let cxx_src = usr_src.join("cxx");
+    fs::create_dir_all(&cxx_src)?;
+    for name in ["cstddef.cpp", "algorithm.cpp", "vector.cpp"] {
+        fs::copy(root.join("tools/cxx").join(name), cxx_src.join(name))?;
+    }
+
+    // Phase 4's first target: FileCheck, two real LLVM translation units the
+    // guest compiles itself and links against the cross build's Support archive.
+    // The include tree is the source headers with the build's generated files
+    // overlaid, which is the include order the cross build used.
+    let build = build_dir(root, arch);
+    let llvm_include = stage.join("usr/lib/llvm/include");
+    copy_tree(
+        &root.join("rust/src/llvm-project/llvm/include"),
+        &llvm_include,
+    )?;
+    copy_tree(&build.join("include"), &llvm_include)?;
+    fs::copy(
+        build.join("lib/libLLVMSupport.a"),
+        stage.join("usr/lib/llvm/libLLVMSupport.a"),
+    )?;
+
+    let llvm = root.join("rust/src/llvm-project/llvm");
+    let llvm_src = stage.join("usr/src/llvm");
+    fs::create_dir_all(&llvm_src)?;
+    fs::copy(
+        llvm.join("lib/FileCheck/FileCheck.cpp"),
+        llvm_src.join("filecheck-lib.cpp"),
+    )?;
+    fs::copy(
+        llvm.join("lib/FileCheck/FileCheckImpl.h"),
+        llvm_src.join("FileCheckImpl.h"),
+    )?;
+    fs::copy(
+        llvm.join("utils/FileCheck/FileCheck.cpp"),
+        llvm_src.join("filecheck-main.cpp"),
+    )?;
+    fs::copy(
+        root.join("tools/filecheck-input.txt"),
+        llvm_src.join("fc-input.txt"),
+    )?;
+    fs::copy(
+        root.join("tools/filecheck-fail.check"),
+        llvm_src.join("fc-fail.check"),
+    )?;
+    // Response files keep the guest's command lines short: the driver expands
+    // them, and `-c` stays on the line so the wrapper knows this is a compile.
+    for name in ["fc-lib.rsp", "fc-main.rsp", "fc-link.rsp"] {
+        fs::copy(root.join("tools/cxx").join(name), llvm_src.join(name))?;
+    }
     Ok(())
 }
 

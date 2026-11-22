@@ -1952,10 +1952,10 @@ llvm-minix arch="x86":
 test-toolchain arch="x86":
     @just test-toolchain-{{arch}}
 
-test-toolchain-x86 boot-timeout="240": boot-image-x86
+test-toolchain-x86 boot-timeout="3600": boot-image-x86
     @test -d target/toolchain/x86/root || (echo "test-toolchain: no staged toolchain root; run 'just llvm-minix x86'" && exit 1)
     @just _assert-qemu-version qemu-system-x86_64
-    MINIXFS_ROOT=target/toolchain/x86/root MINIXFS_BLOCKS=73728 MINIXFS_INODES=4096 cargo run -q -p boot-image --bin mkminixfs --release -- x86_64
+    MINIXFS_ROOT=target/toolchain/x86/root MINIXFS_BLOCKS=98304 MINIXFS_INODES=16384 cargo run -q -p boot-image --bin mkminixfs --release -- x86_64
     cargo xtask image mkfs x86
     FEED_PACE=0.003 FEED_SCENARIO=tools/smoke/toolchain.tsv cargo xtask smoke target/test-toolchain-x86.log {{boot-timeout}} qemu-system-x86_64 -nographic -m 512M -no-reboot -vga none -device bochs-display,id=fb0 -kernel target/images/x86_64-pc-minix/minix-x86-boot.elf -drive if=none,id=disk0,file=target/images/x86_64-pc-minix/disk.img,format=raw,cache=writethrough -device virtio-blk-pci,disable-legacy=on,drive=disk0 -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0 -device virtio-tablet-pci,display=fb0
     @echo "toolchain: the guest's clang compiled and the guest's lld linked hello.c, and it ran (x86_64)"

@@ -1,4 +1,4 @@
-# The in-guest toolchain scenario (`.notes/toolchain_in_os.md` Phases 2 and 3).
+# The in-guest toolchain scenario (`.notes/toolchain_in_os.md` Phases 2, 3 and 4).
 #
 #   FEED_PACE=0.003 FEED_SCENARIO=tools/smoke/toolchain.tsv cargo xtask smoke <log> <seconds> <qemu…>
 #
@@ -6,14 +6,49 @@
 # tree from `cargo xtask build llvm-minix`. `/usr/bin/clang` is a wrapper: the
 # driver is `/usr/libexec/clang-driver`, and the wrapper is what knows the headers,
 # the linker, the script, `crt0.o`, the archives and the image bases. So a `-c`
-# line and a link line are both exercised, and the last step can only pass if the
+# line and a link line are both exercised, and the run steps can only pass if the
 # linked program is a working one (the wrapper also makes it executable, which is
 # why there is no `chmod` step).
 #
 # `--version` answers with the driver's banner, whose first line carries the
 # version; the rest of the line is the build's own (a packaged clang prints its
 # repository and date there).
+#
+# Every compile is followed by a `wc -c` of its output: an empty expectation would
+# also match the blank line the console prints, so a compile that failed with
+# diagnostics would otherwise still read as "ok". The `wc` line only exists if the
+# file does.
+#
+# The C++ steps are the C ones through `clang++`, and `hello.cpp` is
+# `tools/hello-cpp.cpp`: it exercises the heap (vector, string, map through
+# operator new), a static constructor, and an `atexit` destructor, so it fails
+# unless libc++ and libc++abi were staged and linked whole. The three `cxx/*.cpp`
+# units cover the libc++ headers whose search order the wrapper has to get right.
+#
+# The last four steps are Phase 4: the guest compiles LLVM's FileCheck (two
+# translation units from `lib/FileCheck` and `utils/FileCheck`) against the
+# include tree and `libLLVMSupport.a` the cross build staged, links it, and runs
+# it on a check that must fail. The diagnostic is the evidence that it parsed the
+# directive and searched the input.
 /usr/bin/clang --version	^clang version 23\..*
 /usr/bin/clang -c /usr/src/hello.c -o /tmp/hello.o	^$
+/bin/coreutils wc -c /tmp/hello.o	^ *[0-9]+ /tmp/hello.o$
 /usr/bin/clang /usr/src/hello.c -o /tmp/hello	^$
 /tmp/hello	^hello from C$
+/usr/bin/clang++ -c /usr/src/hello.cpp -o /tmp/hello-cpp.o	^$
+/bin/coreutils wc -c /tmp/hello-cpp.o	^ *[0-9]+ /tmp/hello-cpp.o$
+/usr/bin/clang++ /usr/src/hello.cpp -o /tmp/hello-cpp	^$
+/tmp/hello-cpp	^cpp: PASS$
+/usr/bin/clang++ -c /usr/src/cxx/cstddef.cpp -o /tmp/cstddef.o	^$
+/bin/coreutils wc -c /tmp/cstddef.o	^ *[0-9]+ /tmp/cstddef.o$
+/usr/bin/clang++ -c /usr/src/cxx/algorithm.cpp -o /tmp/algorithm.o	^$
+/bin/coreutils wc -c /tmp/algorithm.o	^ *[0-9]+ /tmp/algorithm.o$
+/usr/bin/clang++ -c /usr/src/cxx/vector.cpp -o /tmp/vector.o	^$
+/bin/coreutils wc -c /tmp/vector.o	^ *[0-9]+ /tmp/vector.o$
+/usr/bin/clang++ -c @/usr/src/llvm/fc-lib.rsp	^$
+/bin/coreutils wc -c /tmp/fc-lib.o	^ *[0-9]+ /tmp/fc-lib.o$
+/usr/bin/clang++ -c @/usr/src/llvm/fc-main.rsp	^$
+/bin/coreutils wc -c /tmp/fc-main.o	^ *[0-9]+ /tmp/fc-main.o$
+/usr/bin/clang++ @/usr/src/llvm/fc-link.rsp	^$
+/bin/coreutils wc -c /tmp/filecheck	^ *[0-9]+ /tmp/filecheck$
+/tmp/filecheck /usr/src/llvm/fc-fail.check -input-file /usr/src/llvm/fc-input.txt	.*error: CHECK: expected string not found in input.*

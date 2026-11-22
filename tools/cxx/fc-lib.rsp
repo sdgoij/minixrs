@@ -1,0 +1,6 @@
+-std=c++17
+-fno-rtti
+-I/usr/lib/llvm/include
+/usr/src/llvm/filecheck-lib.cpp
+-o
+/tmp/fc-lib.o

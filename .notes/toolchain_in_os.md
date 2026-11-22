@@ -279,15 +279,33 @@ one. `hello.c` ships in the image under `/usr/src` rather than being typed.
 The gate is not in `test-arches`: the staged root costs an LLVM cross build, so
 a missing root is refused by name instead.
 
-### Phase 4: self-hosting clang
+### Phase 4: self-hosting clang (FileCheck done)
 
-Use the guest's clang, in the guest, to compile a component of LLVM and link it
-with the guest's LLD. Start with `llvm-tblgen` or `llvm-min-tblgen` (small, and
-a real generator), then a full clang if the RAM budget allows. This is the
-reproducibility half of the goal, and where the guest's RAM and time budget get
-measured rather than guessed. `just run-x86` already takes a `memory` argument;
-the default 256M will not build LLVM, and the measurement decides what the
-recipe documents.
+The first target is done: the guest compiles LLVM's FileCheck from
+`lib/FileCheck/FileCheck.cpp` and `utils/FileCheck/FileCheck.cpp` against the
+staged include tree and `libLLVMSupport.a`, links it with the guest's `ld.lld`,
+and runs it on a check that must fail. `tools/cxx/fc-*.rsp` keep the command
+lines short; `-c @file` and a link `@file` both work. The 22-step scenario took
+**24m52s** of guest wall time, from the disk image at 18:48:39 to the last step
+at 19:13:32, against the 3600s budget in `just test-toolchain-x86`. Nearly all of
+that is the two TUs and the link, and the run used `-m 512M`.
+
+Two gaps surfaced and are closed:
+
+- MFS's in-core inode table was sized for a boot workload (512). clang keeps
+  every included header's buffer alive for diagnostics, so a real LLVM TU
+  exhausted it; `get_free_inode` answered `ENFILE`, which surfaced as a header
+  "not found" and then as a failed output-file open. The table is now 2048 with
+  a 256-bucket hash, costing ~240 KiB of MFS BSS.
+- `tools/c-include/assert.h` declared `__assert_fail` with three arguments and
+  no C linkage. libc++'s `<cassert>` includes that header in a C++ TU, so the
+  name mangled and the link failed; the signature also did not match
+  minix-libc's glibc-shaped four-argument export. The declaration is now
+  `extern "C"` and takes `__func__` as its fourth argument.
+
+The next target, if Phase 4 is continued, is `llvm-tblgen` or a full clang. The
+measurement above is the budget to plan against, not an estimate: a full
+self-host is far beyond one TCG session.
 
 ### Phase 5: rustc for minix
 
@@ -313,8 +331,9 @@ the program runs. Then a bootstrap: `x.py` with that binary as stage0,
 
 - **Not the embedded root.** `RAMDISK_IMAGE_SIZE` is 16 MiB. A toolchain image
   is the disk path or it is nothing.
-- **The inode table is a fixed 512** until `MINIXFS_INODES` lands. This is why
-  Phase 3 changes the builder before the first toolchain image.
+- **The image builder's inode table defaults to 512.** `MINIXFS_INODES` raises
+  it, and the toolchain image uses 16384. MFS's in-core table is a separate
+  number (now 2048) and is what an in-guest compile exhausts.
 - **Guest RAM.** `run` defaults to 256M. LLVM's compile of a single translation
   unit is fine in that; linking clang, or self-hosting, is not. Measure and then
   name a bigger `-m` in the recipe; do not quietly raise the default.

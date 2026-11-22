@@ -1,16 +1,18 @@
-// C++ smoke test for the minix libc++ port — exercises heap allocation
-// (std::vector/string/map through operator new → minix-libc malloc) and
-// printf (c-libc). No static constructors (crt0 does not run .init_array
-// yet), no exceptions, no iostream.
+// C++ smoke test for the minix libc++ port: heap allocation (std::vector,
+// std::string and std::map through operator new), a static constructor and an
+// `atexit` destructor, and printf. It ships as /usr/src/hello.cpp in the staged
+// toolchain root and is compiled by the guest's own `clang++` in
+// `just test-toolchain-x86`.
+//
+// `extern "C" int main` keeps the C name, which is what crt0 calls. A hosted
+// compile (the toolchain wrapper) warns about it; a `-ffreestanding` one needs
+// it, and this file is also used that way. No exceptions and no iostream, which
+// is how the staged libc++ runtime is built.
 #include <cstdio>
 #include <cstdlib>
 #include <map>
 #include <string>
 #include <vector>
-
-// -ffreestanding mangles `main` (C++ main is only special in hosted
-// mode), and crt0 calls it unmangled.
-extern "C" int main();
 
 // Static constructor/destructor: crt0 must run .init_array before main,
 // and exit() must run the __cxa_atexit-registered destructor.

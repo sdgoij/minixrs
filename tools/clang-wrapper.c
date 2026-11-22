@@ -128,10 +128,18 @@ int main(int argc, char **argv) {
      * the resource directory. Name all three explicitly, and in this order:
      * libc++'s wrappers `include_next` the C header of the same name. */
     out[n++] = (char *)"-nostdinc";
-    out[n++] = (char *)"-isystem";
-    out[n++] = (char *)MINIX_RESOURCE "/include";
+    /* libc++ before the resource directory for C++: its wrappers (`stddef.h`,
+     * `stdint.h`) `include_next` the C header, and libc++'s `<cstddef>` refuses
+     * a `<stddef.h>` that came from anywhere else. The resource directory is
+     * still searched, after the C++ tree and before the C headers. */
     if (cxx) {
         out[n++] = (char *)"--driver-mode=g++";
+        /* The staged runtime is built with LIBCXX_ENABLE_EXCEPTIONS=OFF (there is
+         * no unwinder), and libc++'s headers pick their throw path from
+         * `__cpp_exceptions`. Compiling a unit with exceptions on leaves their
+         * inline throw helpers referencing `__cxa_allocate_exception` and
+         * `__cxa_throw`, which the archive does not carry. */
+        out[n++] = (char *)"-fno-exceptions";
         out[n++] = (char *)"-nostdinc++";
         out[n++] = (char *)"-isystem";
         out[n++] = (char *)"/usr/include/c++/v1";
@@ -142,6 +150,8 @@ int main(int argc, char **argv) {
         out[n++] = (char *)"-D_LIBCPP_PROVIDES_DEFAULT_RUNE_TABLE";
         out[n++] = (char *)"-D_LIBCPP_NO_ABI_TAG";
     }
+    out[n++] = (char *)"-isystem";
+    out[n++] = (char *)MINIX_RESOURCE "/include";
     out[n++] = (char *)"-isystem";
     out[n++] = (char *)"/usr/include";
 
@@ -164,6 +174,13 @@ int main(int argc, char **argv) {
         out[n++] = (char *)"-Wl,-T," MINIX_SCRIPT;
         out[n++] = (char *)"-Wl,-z,norelro";
         out[n++] = (char *)"-Wl,--no-eh-frame-hdr";
+        /* Minix has one C library: `librt` and `libpthread` are parts of
+         * `libc.a`. Members of the C++ runtime carry `.deplibs` autolink
+         * entries naming them, and LLD stops the link when it cannot find a
+         * separate library by that name, so dependent libraries are ignored.
+         * Everything a program needs is `libc.a`/`libstdc++.a`, both named
+         * below. */
+        out[n++] = (char *)"-Wl,--no-dependent-libraries";
         out[n++] = (char *)MINIX_LIBC;
         if (cxx)
             out[n++] = (char *)MINIX_LIBCXX;
