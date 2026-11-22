@@ -42,11 +42,9 @@ pub const DEAD_PROCESS: u16 = 8;
 
 /// Where the port keeps the login records.
 ///
-/// `_PATH_UTMPX` on a full system is `/var/run/utmpx`; this image has no `/var`,
-/// and its root directory is already close to the one-zone limit MFS currently
-/// stops at (`KNOWN_ISSUES.md` item 82), so the file lives in the writable tmpfs
-/// the image already carries. `who`, `users`, `pinky` and `uptime` name this path
-/// in their help and read it by default.
+/// `_PATH_UTMPX` on a full system is `/var/run/utmpx`; this image has no `/var`, so
+/// the file lives in the writable tmpfs the image already carries. `who`, `users`,
+/// `pinky` and `uptime` name this path in their help and read it by default.
 pub const DEFAULT_FILE: &[u8] = b"/tmp/utmpx";
 
 /// The most entries the file may hold. A fixed bound is what lets every reader

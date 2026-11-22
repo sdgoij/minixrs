@@ -16,10 +16,16 @@ const LOG_ZONE_SIZE: i16 = 0;
 /// set, `BOOT_FILES`, the `DEVICES` nodes, the `/link` symlink and the `/lib`//`/libexec`
 /// pair), so the release payload — coreutils, bash and the seven Mesa DSOs — needs 131
 /// of them. At 128 the overflow set bits past the end of the bitmap silently and only
-/// showed up in the guest, as `err=28` on the smoke scenario's `> smoke.txt`. 256 keeps
-/// headroom for this payload and the next. `MINIXFS_BLOCKS` cannot help here: the table
-/// is sized in inodes, not zones, which is why doubling the image changed nothing.
-pub const INODES: u32 = 256;
+/// showed up in the guest, as `err=28` on the smoke scenario's `> smoke.txt`.
+///
+/// 512, not 256: the guest's own scenarios create files too, and the whole smoke run
+/// (`tools/smoke/coreutils-minix.tsv`) reached 256 inodes while it was checking that a
+/// directory grows past its first block: at 256 the sixty-sixth entry of one directory
+/// was refused with `ENOSPC`, which reads like the directory bug it was meant to catch.
+/// The table costs 64 bytes an inode, so this is 16 KiB more of a 16 MiB image.
+/// `MINIXFS_BLOCKS` cannot help here: the table is sized in inodes, not zones, which is
+/// why doubling the image changed nothing.
+pub const INODES: u32 = 512;
 pub const NAMESIZE: usize = 60;
 
 /// Default root-image size in blocks (16 MiB): the uutils coreutils
@@ -653,12 +659,17 @@ pub fn build_minixfs(files: &[(&'static str, Vec<u8>)]) -> Vec<u8> {
 mod tests {
     use super::*;
 
-    /// `n` tiny files under `/bin` — the shape a payload takes as far as inode accounting
-    /// goes, where the parent directory and the count are what set it.
+    /// `n` tiny files — the shape a payload takes as far as inode accounting goes, where
+    /// the parent directory and the count are what set it.
+    ///
+    /// Spread across `/bin` and `/etc`: the builder stops growing one directory at its
+    /// seventh zone (448 entries of 64 bytes), and a payload used to exhaust the *inode
+    /// table* is 512 of them, so one directory could not hold it.
     fn named_files(n: usize) -> Vec<(&'static str, Vec<u8>)> {
         (0..n)
             .map(|i| {
-                let dest: &'static str = Box::leak(format!("/bin/f{i:03}").into_boxed_str());
+                let dir = if i % 2 == 0 { "bin" } else { "etc" };
+                let dest: &'static str = Box::leak(format!("/{dir}/f{i:03}").into_boxed_str());
                 (dest, vec![b'x'])
             })
             .collect()

@@ -590,8 +590,15 @@ pub fn search_dir(
             return EIO;
         }
         let dp = &mut *((*held_bp).data_ptr as *mut Direct);
-        // If we found a free slot in an existing block (not extended),
-        // re-find it by scanning for a zero mfs_d_ino slot.
+        // The slot's number in the *whole directory*, not in its block: the
+        // i_size check below compares it with `old_slots`, which counts from
+        // the directory's first slot. An in-block index happens to be the same
+        // number for the first block and silently stops matching for any
+        // later one, so `i_size` would stop growing at the first block's end
+        // and the entry just written would fall outside the size a LOOK_UP
+        // scans: the resolve that follows a create then answers ENOENT for a
+        // file that exists (`KNOWN_ISSUES.md` item 82).
+        let block_base_slot = (pos as usize) / DIR_ENTRY_SIZE;
         let mut written_slot = 0usize;
         let dp = if !extended {
             let num_entries = nr_dir_entries(block_size);
@@ -600,7 +607,7 @@ pub fn search_dir(
                 let e = &mut *((*held_bp).data_ptr as *mut Direct).add(i);
                 if (*e).mfs_d_ino == 0 {
                     found = e;
-                    written_slot = i;
+                    written_slot = block_base_slot + i;
                     break;
                 }
             }
@@ -611,9 +618,11 @@ pub fn search_dir(
             }
             &mut *found
         } else {
-            // The newly allocated block starts at the old i_size, so its
-            // first slot covers the first `old_slots` entries.
-            written_slot = old_slots;
+            // The new block starts at the old i_size, which the scan covered
+            // up to its last slot, so its first slot continues the directory's
+            // numbering where the scan stopped.
+            debug_assert_eq!(block_base_slot, old_slots);
+            written_slot = block_base_slot;
             dp
         };
 
@@ -982,5 +991,160 @@ mod tests {
         let r = search_dir(0, b"shellfifo", Some(&mut found), LOOK_UP, IGN_PERM);
         assert_eq!(r, OK, "same-boot LOOK_UP must find the entry in slot 9");
         assert_eq!(found, 88);
+    }
+
+    /// `KNOWN_ISSUES.md` item 82: a directory's slots are numbered across the
+    /// whole directory, not per block.
+    ///
+    /// The first entry to land in a newly allocated block already worked (the
+    /// extension branch feeds the directory-wide count into the i_size check).
+    /// The second one did not: ENTER's free-slot re-scan found it by its index
+    /// *within the block* and compared that with the directory-wide count, so
+    /// `i_size` never grew and the LOOK_UP that follows a create could not see
+    /// the entry it had just written: `touch` reported "No such file or
+    /// directory" for a file that was in the block, which is what a directory
+    /// of more than 64 entries looked like in a guest. The directory then
+    /// allocated a fresh block on every later create (102 visible entries in a
+    /// 65-slot directory).
+    #[test]
+    fn test_search_dir_enter_keeps_growing_size_in_a_second_block() {
+        use alloc::vec;
+
+        const BLOCK: usize = 4096;
+        /// `s_firstdatazone`: the directory's first block is the disk's block 6.
+        const DATA_ZONE: u32 = 6;
+        const DATA_BLOCK: usize = DATA_ZONE as usize;
+
+        /// A distinct name for slot `i`, at most two digits.
+        fn entry_name(i: usize) -> [u8; MFS_NAME_MAX] {
+            let mut n = [0u8; MFS_NAME_MAX];
+            n[0] = b'e';
+            n[1] = b'0' + (i / 10) as u8;
+            n[2] = b'0' + (i % 10) as u8;
+            n
+        }
+
+        init();
+        unsafe {
+            libs::libminixfs::cache::lmfs_buf_pool(10);
+            libs::libminixfs::cache::lmfs_set_blocksize(BLOCK as u32, 0);
+            libs::libminixfs::cache::lmfs_invalidate(0);
+        }
+
+        // Blocks: 1 the superblock (nothing reads it here), 2 imap, 3 zmap,
+        // 4 the inode block `rw_inode` writes, 6 the directory's first block,
+        // 7 the block it has to grow into.
+        let mut disk = vec![0u8; 8 * BLOCK];
+
+        // The zone bitmap: bit 0 is `s_firstdatazone - 1` (reserved, as mkfs
+        // leaves it), bit 1 is the directory's own zone, so the next
+        // allocation is the zone holding disk block 7.
+        unsafe {
+            let zmap = disk.as_mut_ptr().add(3 * BLOCK) as *mut u32;
+            *zmap = 0b11;
+        }
+
+        let entries_per_block = nr_dir_entries(BLOCK);
+        for i in 0..entries_per_block {
+            let e = Direct {
+                mfs_d_ino: (i + 1) as u32,
+                mfs_d_name: entry_name(i),
+            };
+            unsafe {
+                core::ptr::copy_nonoverlapping(
+                    &e as *const Direct as *const u8,
+                    disk.as_mut_ptr()
+                        .add(DATA_BLOCK * BLOCK + i * DIR_ENTRY_SIZE),
+                    DIR_ENTRY_SIZE,
+                );
+            }
+        }
+
+        unsafe {
+            crate::block_io::ram_disk_init(disk.as_ptr(), disk.len());
+            libs::libminixfs::cache::lmfs_set_block_io(crate::block_io::ram_disk_io);
+
+            let sp = crate::mfs::glo::get_super_ptr(0);
+            (*sp).s_block_size = BLOCK as u16;
+            (*sp).s_log_zone_size = 0;
+            (*sp).s_ndzones = 7;
+            (*sp).s_nindirs = (BLOCK / core::mem::size_of::<u32>()) as i32;
+            (*sp).s_native = 1;
+            (*sp).s_dev = 0;
+            (*sp).s_imap_blocks = 1;
+            (*sp).s_zmap_blocks = 1;
+            (*sp).s_firstdatazone = DATA_ZONE;
+            (*sp).s_zones = 64;
+            (*sp).s_inodes_per_block = v2_inodes_per_block(BLOCK) as u32;
+            (*sp).s_isearch = 0;
+            (*sp).s_zsearch = 0;
+
+            let rip = crate::mfs::glo::get_inode_ptr(0);
+            (*rip).i_dev = 0;
+            (*rip).i_num = 1;
+            (*rip).i_mode = I_DIRECTORY;
+            (*rip).i_size = (entries_per_block * DIR_ENTRY_SIZE) as i32;
+            (*rip).i_zone[0] = DATA_ZONE;
+            (*rip).i_sp = Some(&*sp);
+            (*rip).i_zsearch = NO_ZONE;
+            (*rip).i_last_dpos = 0;
+        }
+
+        // The zone map and the directory block have to be visible through the
+        // block cache before the scan can be trusted to mean anything.
+        assert_eq!(entries_per_block, 64);
+        unsafe {
+            let b = read_map(0, 0, 0);
+            assert_eq!(b, DATA_ZONE, "i_zone[0] does not map to the disk block");
+            let bp = libs::libminixfs::cache::lmfs_get_block(0, b as u64);
+            assert!(!bp.is_null());
+            let first = core::ptr::read((*bp).data_ptr as *const u32);
+            assert_eq!(first, 1, "the disk's first directory entry");
+            libs::libminixfs::cache::lmfs_put_block(bp, 0);
+        }
+
+        // The 65th entry needs the directory's second block.
+        let mut ino: u32 = 500;
+        assert_eq!(
+            search_dir(0, b"second", Some(&mut ino), ENTER, IGN_PERM),
+            OK
+        );
+        unsafe {
+            let rip = crate::mfs::glo::get_inode_ptr(0);
+            assert_eq!(
+                (*rip).i_size,
+                ((entries_per_block + 1) * DIR_ENTRY_SIZE) as i32,
+                "the first entry in a new block grows i_size"
+            );
+            assert_ne!(
+                (*rip).i_zone[1],
+                NO_ZONE,
+                "the second block was not allocated"
+            );
+        }
+
+        // The 66th lands in that block, at directory slot 65.
+        let mut ino: u32 = 501;
+        assert_eq!(search_dir(0, b"third", Some(&mut ino), ENTER, IGN_PERM), OK);
+        unsafe {
+            let rip = crate::mfs::glo::get_inode_ptr(0);
+            assert_eq!(
+                (*rip).i_size,
+                ((entries_per_block + 2) * DIR_ENTRY_SIZE) as i32,
+                "i_size must cover the slot in the second block"
+            );
+        }
+
+        // Both are visible to a lookup whose scan stops at i_size.
+        for (name, want) in [(&b"second"[..], 500u32), (&b"third"[..], 501)] {
+            let mut found: u32 = 0;
+            assert_eq!(
+                search_dir(0, name, Some(&mut found), LOOK_UP, IGN_PERM),
+                OK,
+                "LOOK_UP {:?}",
+                core::str::from_utf8(name)
+            );
+            assert_eq!(found, want);
+        }
     }
 }

@@ -409,3 +409,19 @@ coreutils users	root
 coreutils who	root[[:space:]]+tty[[:space:]]+.*
 coreutils pinky	root[[:space:]]+root[[:space:]]+[?]tty[[:space:]]+.*
 coreutils uptime	.*[[:space:]]1 user,[[:space:]]+load average: [0-9]+\.[0-9]{2}, [0-9]+\.[0-9]{2}, [0-9]+\.[0-9]{2}
+
+# A directory has to keep growing past its first block. MFS numbers a
+# directory's slots across the whole directory, and `i_size` is the bound a
+# lookup scans, so an entry that lands in a second block without the size
+# growing is invisible to the resolve that follows the create: `touch` then
+# reports "No such file or directory" for a file that is in the block
+# (KNOWN_ISSUES.md item 82). 72 entries is past the 64 a 4 KiB block holds,
+# and the final count is what the lookup path sees.
+coreutils mkdir many	
+coreutils touch many/f1 many/f2 many/f3 many/f4 many/f5 many/f6 many/f7 many/f8 many/f9 many/f10 many/f11 many/f12 && coreutils echo MANY-0-OK	MANY-0-OK
+coreutils touch many/f13 many/f14 many/f15 many/f16 many/f17 many/f18 many/f19 many/f20 many/f21 many/f22 many/f23 many/f24 && coreutils echo MANY-1-OK	MANY-1-OK
+coreutils touch many/f25 many/f26 many/f27 many/f28 many/f29 many/f30 many/f31 many/f32 many/f33 many/f34 many/f35 many/f36 && coreutils echo MANY-2-OK	MANY-2-OK
+coreutils touch many/f37 many/f38 many/f39 many/f40 many/f41 many/f42 many/f43 many/f44 many/f45 many/f46 many/f47 many/f48 && coreutils echo MANY-3-OK	MANY-3-OK
+coreutils touch many/f49 many/f50 many/f51 many/f52 many/f53 many/f54 many/f55 many/f56 many/f57 many/f58 many/f59 many/f60 && coreutils echo MANY-4-OK	MANY-4-OK
+coreutils touch many/f61 many/f62 many/f63 many/f64 many/f65 many/f66 many/f67 many/f68 many/f69 many/f70 many/f71 many/f72 && coreutils echo MANY-5-OK	MANY-5-OK
+coreutils ls many | coreutils wc -l	72

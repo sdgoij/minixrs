@@ -152,22 +152,6 @@ are arch-specific, `[env]` is tooling/platform, not kernel.
     needs (a second VFS thread, or VFS answering the ioctl itself as it does for the socket ones)
     is a decision for whoever first needs a file-backed block device.
 
-82. **A directory stops growing at one zone, and the create that needs the next one reports
-    ENOENT (found 2026-11-21).** MFS extends a directory with `new_block`
-    (`crates/fs/src/mfs/write.rs`) when `search_dir(ENTER)` finds no free slot
-    (`crates/fs/src/mfs/path.rs`). With a 4 KiB block, 64 entries fill the directory's first
-    zone; the 65th create returns ENOENT rather than creating the entry. The errno is a
-    *stale* one: `new_block` has two paths that return null without setting `err_code` (a
-    `read_map` that answers NO_BLOCK after the `write_map`, and a null
-    `lmfs_get_block_ino`), and `search_dir` then returns whatever `err_code` the previous
-    lookup left, which for a create is ENOENT. The FS is not out of space: `df` reported
-    6136 of 20480 1K-blocks free when the create failed.
-    Reproducer: in a guest, `coreutils touch f1 ... f60` in a fresh directory; the creates
-    stop being accepted at the 65th entry and every later one says "No such file or
-    directory". This is why the session file is `/tmp/utmpx` and not `/var/run/utmpx`: one
-    extra entry in the image's root directory moved
-    `tools/smoke/coreutils-minix.tsv` onto the boundary and failed its 187th step.
-
 ---
 
 ## RISC-V (`[riscv]`)
@@ -2998,6 +2982,46 @@ from resolving, is under `# Resolved issues`.
     `just check`, `just test-coreutils-minix` on x86_64, riscv64 and aarch64,
     `just test-arches`, `just test-linux`.
     (`crates/servers/src/vfs/call.rs`, `tools/smoke/coreutils-minix.tsv`)
+
+82. **~~A directory stopped growing at one block, and the create that needed the next one
+    reported ENOENT~~**: FIXED (2026-11-21). `search_dir(ENTER)` writes a new entry at the
+    first free slot of the block the scan stopped in, then grows the inode's `i_size` to
+    cover that slot. It recorded the slot by its index *within the block* and compared that
+    with `old_slots`, which counts from the directory's first slot: equal for the first
+    block, wrong for every later one, so from the second block on `i_size` never grew. The
+    entry was written; the LOOK_UP that follows a create (`do_creat` resolves the path
+    again after `req_create`) bounds its scan by `i_size` and could not see it, and answered
+    ENOENT for a file that existed. Every later create wrote its entry into the same second
+    block and then failed the same lookup.
+
+    Measured in the guest before the fix: a fresh directory took 64 files, its 65th (the
+    first in a second block) worked, and the 66th onward failed with "No such file or
+    directory" while `ls` listed 102 entries in a directory whose `i_size` said 65 slots.
+    The first reading of this, that `new_block` had returned null with a stale `err_code`,
+    was wrong: `new_block` was fine, and the size bookkeeping downstream of it was not.
+
+    `written_slot` is now the directory-wide slot (`block base slot + index in block`), and
+    an `assert_eq!` pins the extension branch's premise that the new block starts where the
+    scan stopped. C has no such bookkeeping to get wrong: it writes through the `dp` its
+    scan found and sizes the directory by the global `new_slots`.
+
+    The image's `INODES` went from 256 to 512 in the same change: the smoke run reached 256
+    inodes while creating the 72 entries that prove the fix, and the 66th was refused with
+    `ENOSPC`. `named_files` in the image tests spreads its payload over `/bin` and `/etc`
+    for the same reason (one directory stops at the builder's seventh zone).
+
+    Pinned by `test_search_dir_enter_keeps_growing_size_in_a_second_block` (red before the
+    fix: `i_size` 4160 where 4224 is required) and by the `many/` steps in
+    `tools/smoke/coreutils-minix.tsv`, which create 72 entries in one directory and count
+    them back.
+
+    There is no second bug waiting here: the guest smoke runs `df`, `ls`, `cp`, `mv`, `rm`,
+    the link and install paths, and the 72-entry directory on all three arches.
+    Gates: `cargo test --workspace`, `cargo clippy --all-targets -- -D warnings`,
+    `just check`, `just test-coreutils-minix` and `just test-boot` on all three arches,
+    `just test-qemu` and `just test-procfs` on x86_64.
+    (`crates/fs/src/mfs/path.rs`, `crates/boot-image/src/minixfs.rs`,
+    `tools/smoke/coreutils-minix.tsv`)
 
 ---
 
