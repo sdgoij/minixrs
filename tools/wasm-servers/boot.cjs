@@ -2406,4 +2406,8 @@ note(
 
 const failed = checks.filter((c) => !c.ok);
 console.log(`\n${checks.length - failed.length}/${checks.length} checks passed`);
-process.exit(failed.length === 0 ? 0 : 1);
+// `process.exit()` races the runtime's teardown: on Windows, Node 24 aborts with
+// a libuv assertion (`UV_HANDLE_CLOSING`) just after this summary has printed,
+// which turns a passing run red. The harness holds no timer or socket open, so
+// setting the code lets the loop drain and the process exit on its own.
+process.exitCode = failed.length === 0 ? 0 : 1;
