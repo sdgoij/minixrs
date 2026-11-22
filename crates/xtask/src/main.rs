@@ -27,6 +27,7 @@ mod fetch_stage1;
 mod guest;
 mod image;
 mod mirror;
+mod minix_ld;
 mod paths;
 mod pin;
 mod probe;
@@ -90,6 +91,7 @@ fn main() -> ExitCode {
                 .expect("clap defaults the target");
             rust_config::run(&root, token).map(|()| true)
         }
+        Some(("minix-ld", matches)) => run_minix_ld(&root, matches),
         _ => unreachable!("clap requires a subcommand"),
     };
 
@@ -137,12 +139,18 @@ fn run_build(root: &Path, matches: &clap::ArgMatches) -> io::Result<bool> {
             matches.get_one::<u64>("jobs").copied(),
         ),
         Some(("c-hello", matches)) => build::c_hello::run(root, target(matches)),
+        Some(("c-direct", matches)) => build::c_direct::run(root, target(matches)),
+        Some(("libc-static", matches)) => build::libc_static::run(root, target(matches)),
         Some(("std-hello", matches)) => build::std_hello::run(root, target(matches)),
         Some(("dynlibc", matches)) => build::dynlibc::run(root, target(matches)),
         Some(("dynlink", matches)) => build::dynlink::run(root, target(matches)),
         Some(("libcxx", matches)) => build::libcxx::run(root, target(matches)).map(|()| true),
         Some(("libcxx-toolchain", matches)) => {
             build::libcxx::toolchain_command(root, target(matches)).map(|()| true)
+        }
+        Some(("llvm-host-tools", _)) => build::llvm_host::run(root).map(|()| true),
+        Some(("llvm-minix", matches)) => {
+            build::llvm_minix::run(root, target(matches)).map(|()| true)
         }
         Some(("mesa", matches)) => build::mesa_tree::run(
             root,
@@ -196,6 +204,32 @@ fn run_image(root: &Path, matches: &clap::ArgMatches) -> io::Result<()> {
         Some(("mkfs", matches)) => image::mkfs(root, target(matches)),
         _ => unreachable!("clap requires an image subcommand"),
     }
+}
+
+/// The link rule a foreign CMake passes `<OBJECTS>` and `<LINK_LIBRARIES>` to.
+fn run_minix_ld(_root: &Path, matches: &clap::ArgMatches) -> io::Result<bool> {
+    let text = |name: &str| -> &str {
+        matches
+            .get_one::<String>(name)
+            .map(String::as_str)
+            .unwrap_or_else(|| panic!("clap requires {name}"))
+    };
+    let words: Vec<String> = matches
+        .get_many::<String>("args")
+        .map(|values| values.cloned().collect())
+        .unwrap_or_default();
+    minix_ld::run(
+        &minix_ld::Link {
+            arch: text("arch"),
+            out: Path::new(text("out")),
+            crt0: Path::new(text("crt0")),
+            libc: Path::new(text("libc")),
+            libstdcxx: Path::new(text("libstdcxx")),
+            script: Path::new(text("script")),
+            lld: Path::new(text("lld")),
+        },
+        &words,
+    )
 }
 
 fn run_cc(root: &Path, matches: &clap::ArgMatches) -> io::Result<bool> {
@@ -448,6 +482,16 @@ fn command() -> clap::Command {
                         .arg(target_arg("x86")),
                 )
                 .subcommand(
+                    clap::Command::new("c-direct")
+                        .about("A C program linked by clang + LLD against libc.a, with no rustc")
+                        .arg(target_arg("x86")),
+                )
+                .subcommand(
+                    clap::Command::new("libc-static")
+                        .about("The C library as libc.a, for a C toolchain's own linker driver")
+                        .arg(target_arg("x86")),
+                )
+                .subcommand(
                     clap::Command::new("std-hello")
                         .about("The std smoke binary: /bin/hello")
                         .arg(target_arg("x86_64-pc-minix")),
@@ -470,6 +514,15 @@ fn command() -> clap::Command {
                 .subcommand(
                     clap::Command::new("libcxx-toolchain")
                         .about("Write target/cxx/toolchain-<machine>.cmake")
+                        .arg(target_arg("x86")),
+                )
+                .subcommand(
+                    clap::Command::new("llvm-host-tools")
+                        .about("The LLVM tablegen programs a cross build of clang runs on the host"),
+                )
+                .subcommand(
+                    clap::Command::new("llvm-minix")
+                        .about("Cross-build clang and lld for a minix target and stage the toolchain root")
                         .arg(target_arg("x86")),
                 )
                 .subcommand(
@@ -536,6 +589,29 @@ fn command() -> clap::Command {
                         .arg(dry_run_arg())
                         .arg(cc_args()),
                 ),
+        )
+        .subcommand(
+            clap::Command::new("minix-ld")
+                .about("A CMake link rule's driver: LLD + crt0 + libc.a + libstdc++.a")
+                .arg(
+                    clap::Arg::new("arch")
+                        .long("arch")
+                        .value_name("ARCH")
+                        .value_parser(["x86", "riscv64", "aarch64"])
+                        .default_value("x86"),
+                )
+                .arg(clap::Arg::new("out").long("out").value_name("FILE").required(true))
+                .arg(clap::Arg::new("crt0").long("crt0").value_name("FILE").required(true))
+                .arg(clap::Arg::new("libc").long("libc").value_name("FILE").required(true))
+                .arg(
+                    clap::Arg::new("libstdcxx")
+                        .long("libstdcxx")
+                        .value_name("FILE")
+                        .required(true),
+                )
+                .arg(clap::Arg::new("script").long("script").value_name("FILE").required(true))
+                .arg(clap::Arg::new("lld").long("lld").value_name("FILE").required(true))
+                .arg(cc_args()),
         )
         .subcommand(
             clap::Command::new("image")

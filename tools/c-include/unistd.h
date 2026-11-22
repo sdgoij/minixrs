@@ -62,6 +62,7 @@ int faccessat(int dirfd, const char *path, int mode, int flags);
 int fchmodat(int dirfd, const char *path, mode_t mode, int flags);
 int fchownat(int dirfd, const char *path, uid_t owner, gid_t group, int flags);
 int ftruncate(int fd, off_t length);
+int truncate(const char *path, off_t length);
 int access(const char *path, int mode);
 int chown(const char *path, uid_t owner, gid_t group);
 int lchown(const char *path, uid_t owner, gid_t group);
@@ -75,6 +76,22 @@ int usleep(unsigned int usec);
 #define R_OK 4
 
 #define PATH_MAX 4096
+
+/* `pathconf` names (`sys/sys/unistd.h` in the reference). */
+#define _PC_LINK_MAX 1
+#define _PC_MAX_CANON 2
+#define _PC_MAX_INPUT 3
+#define _PC_NAME_MAX 4
+#define _PC_PATH_MAX 5
+#define _PC_PIPE_BUF 6
+#define _PC_CHOWN_RESTRICTED 7
+#define _PC_NO_TRUNC 8
+#define _PC_VDISABLE 9
+#define _PC_SYNC_IO 10
+#define _PC_FILESIZEBITS 11
+#define _PC_SYMLINK_MAX 12
+#define _PC_2_SYMLINKS 13
+long pathconf(const char *path, int name);
 
 /* The process environment, which this port publishes from the `envp` the kernel
  * hands `main` (`__minix_set_environ`, called by crt0). POSIX declares it here,

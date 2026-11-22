@@ -38,13 +38,13 @@ mod c_unwind;
 mod c_utmpx;
 mod c_wchar;
 
-/// The `panic` lang item for the shared-object build (`libc.so`).
+/// The `panic` lang item for a final-artifact build (`libc.so`, `libc.a`).
 ///
 /// The rlib that the port's binaries link against leaves this to the program
-/// that links it, but a `cdylib` is a final artifact and nothing downstream can
-/// supply it. The target's panic strategy is `abort`, and a shared library has
-/// no unwinder, so a panic stops the program.
-#[cfg(feature = "so")]
+/// that links it, but a `cdylib` or a `staticlib` is a final artifact and
+/// nothing downstream can supply it. The target's panic strategy is `abort`,
+/// so a panic stops the program.
+#[cfg(any(feature = "so", feature = "staticlib"))]
 #[panic_handler]
 fn panic(_info: &core::panic::PanicInfo) -> ! {
     minix_rt::exit(101)
@@ -942,7 +942,10 @@ pub unsafe extern "C" fn waitid(
 #[cfg(target_os = "minix")]
 #[unsafe(no_mangle)]
 pub extern "C" fn exit(status: c_int) -> ! {
-    // Run the C++/atexit destructors before the process actually exits.
+    // Thread-local destructors run before the process's static ones
+    // ([basic.start.term]), and the key destructors are the hook the C++ ABI
+    // uses for them.
+    unsafe { crate::pthread::run_key_dtors() };
     unsafe { __cxa_finalize(core::ptr::null_mut()) };
     minix_std::process::exit(status);
 }
@@ -991,6 +994,93 @@ pub extern "C" fn __cxa_atexit(
             dso,
         };
         ATEXIT_N.store(n + 1, core::sync::atomic::Ordering::Relaxed);
+    }
+    0
+}
+
+/// Itanium ABI `__cxa_thread_atexit`: register a destructor for a thread-local
+/// object.
+///
+/// The list is per thread and is run by a pthread key destructor, which
+/// [`crate::pthread::run_key_dtors`] calls at thread exit (and `exit` calls for
+/// the main thread). The table is fixed at [`THREAD_ATEXIT_MAX`] because the C
+/// heap is not thread-safe yet (THREADS.md); a full table returns -1, the ABI's
+/// failure return. `dso` is ignored, exactly as the static registry ignores it.
+#[cfg(target_os = "minix")]
+const THREAD_ATEXIT_MAX: usize = 16;
+
+#[cfg(target_os = "minix")]
+#[thread_local]
+static mut THREAD_ATEXIT_N: usize = 0;
+
+#[cfg(target_os = "minix")]
+#[thread_local]
+static mut THREAD_ATEXIT: [AtExitEntry; THREAD_ATEXIT_MAX] = [AtExitEntry {
+    func: None,
+    arg: core::ptr::null_mut(),
+    dso: core::ptr::null_mut(),
+}; THREAD_ATEXIT_MAX];
+
+#[cfg(target_os = "minix")]
+static THREAD_ATEXIT_KEY: core::sync::atomic::AtomicU32 =
+    core::sync::atomic::AtomicU32::new(0);
+#[cfg(target_os = "minix")]
+static mut THREAD_ATEXIT_ONCE: u32 = 0;
+
+#[cfg(target_os = "minix")]
+unsafe extern "C" fn run_thread_atexit(_: *mut c_void) {
+    unsafe {
+        while THREAD_ATEXIT_N > 0 {
+            THREAD_ATEXIT_N -= 1;
+            let entry = &mut THREAD_ATEXIT[THREAD_ATEXIT_N];
+            if let Some(func) = entry.func.take() {
+                func(entry.arg);
+            }
+        }
+    }
+}
+
+#[cfg(target_os = "minix")]
+unsafe extern "C" fn init_thread_atexit_key() {
+    let mut key = 0u32;
+    if unsafe {
+        crate::pthread::pthread_key_create(
+            &mut key,
+            run_thread_atexit as *const () as usize,
+        )
+    } == 0
+    {
+        THREAD_ATEXIT_KEY.store(key, core::sync::atomic::Ordering::Release);
+    }
+}
+
+#[cfg(target_os = "minix")]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn __cxa_thread_atexit(
+    func: extern "C" fn(*mut c_void),
+    arg: *mut c_void,
+    _dso: *mut c_void,
+) -> c_int {
+    unsafe {
+        crate::pthread::pthread_once(
+            core::ptr::addr_of_mut!(THREAD_ATEXIT_ONCE),
+            init_thread_atexit_key,
+        );
+        let n = THREAD_ATEXIT_N;
+        if n >= THREAD_ATEXIT_MAX {
+            return -1;
+        }
+        THREAD_ATEXIT[n] = AtExitEntry {
+            func: Some(func),
+            arg,
+            dso: core::ptr::null_mut(),
+        };
+        THREAD_ATEXIT_N = n + 1;
+        // A key destructor only runs for a non-null value.
+        crate::pthread::pthread_setspecific(
+            THREAD_ATEXIT_KEY.load(core::sync::atomic::Ordering::Acquire),
+            core::ptr::without_provenance(1),
+        );
     }
     0
 }
@@ -1277,22 +1367,93 @@ pub(crate) unsafe fn stat_path_impl(
     }
 }
 
+/// A C `struct timespec` (`tools/c-include/time.h`): `long`/`long`.
+#[repr(C)]
+#[derive(Clone, Copy)]
+#[allow(dead_code)] // constructed on the minix builds; the layout test is host-side
+struct CTimespec {
+    tv_sec: i64,
+    tv_nsec: i64,
+}
+
+/// The C `struct stat` (`tools/c-include/sys/stat.h`). It mirrors the header's
+/// field types, padding included: `dev_t` is 32-bit, `ino_t`/`off_t` are 64-bit,
+/// and the three timespecs start at offset 64. `st_atime` and friends are member
+/// macros in the header and are not stored separately.
+#[repr(C)]
+#[derive(Clone, Copy)]
+#[allow(dead_code)] // constructed on the minix builds; the layout test is host-side
+struct CStat {
+    st_dev: u32,
+    st_ino: u64,
+    st_mode: u32,
+    st_nlink: u32,
+    st_uid: u32,
+    st_gid: u32,
+    st_rdev: u32,
+    st_size: i64,
+    st_blksize: i64,
+    st_blocks: i64,
+    st_atim: CTimespec,
+    st_mtim: CTimespec,
+    st_ctim: CTimespec,
+}
+
+#[cfg(test)]
+mod c_stat_layout {
+    use super::*;
+
+    /// The C header's field types put `ino_t` at 8, `st_size` at 40 and the
+    /// timespecs at 64, 80 and 96; the struct is 112 bytes. A drift here is a
+    /// C caller reading the wrong field.
+    #[test]
+    fn the_c_stat_matches_the_header() {
+        assert_eq!(core::mem::size_of::<CTimespec>(), 16);
+        assert_eq!(core::mem::size_of::<CStat>(), 112);
+        assert_eq!(core::mem::offset_of!(CStat, st_ino), 8);
+        assert_eq!(core::mem::offset_of!(CStat, st_size), 40);
+        assert_eq!(core::mem::offset_of!(CStat, st_atim), 64);
+        assert_eq!(core::mem::offset_of!(CStat, st_mtim), 80);
+        assert_eq!(core::mem::offset_of!(CStat, st_ctim), 96);
+    }
+}
+
 /// Copy a `minix_std::fs::Stat` (repr(C), 88 bytes) into a C `struct stat`.
-/// The layouts are field-for-field identical (offsets 0, 8, 16, 20, 24, 28,
-/// 32, 40, 48, 56, 64, 72, 80), so one byte copy suffices.
+///
+/// The filesystem keeps seconds, so each `tv_nsec` is zero. The first 64 bytes
+/// are the same fields as the VFS's struct; the timespecs are the C header's
+/// POSIX shape, which the filesystem's `std::filesystem` needs.
 ///
 /// # Safety
 ///
-/// `buf` must point to at least `size_of::<Stat>()` writable bytes.
+/// `buf` must point to at least `size_of::<CStat>()` writable bytes.
 #[cfg(target_os = "minix")]
 unsafe fn fill_c_stat(buf: *mut c_void, st: &minix_std::fs::Stat) {
-    unsafe {
-        core::ptr::copy_nonoverlapping(
-            st as *const minix_std::fs::Stat as *const u8,
-            buf as *mut u8,
-            core::mem::size_of::<minix_std::fs::Stat>(),
-        );
-    }
+    let c = CStat {
+        st_dev: st.st_dev as u32,
+        st_ino: st.st_ino,
+        st_mode: st.st_mode,
+        st_nlink: st.st_nlink,
+        st_uid: st.st_uid,
+        st_gid: st.st_gid,
+        st_rdev: st.st_rdev as u32,
+        st_size: st.st_size,
+        st_blksize: st.st_blksize,
+        st_blocks: st.st_blocks,
+        st_atim: CTimespec {
+            tv_sec: st.st_atime,
+            tv_nsec: 0,
+        },
+        st_mtim: CTimespec {
+            tv_sec: st.st_mtime,
+            tv_nsec: 0,
+        },
+        st_ctim: CTimespec {
+            tv_sec: st.st_ctime,
+            tv_nsec: 0,
+        },
+    };
+    unsafe { core::ptr::write(buf as *mut CStat, c) };
 }
 
 // Memory management

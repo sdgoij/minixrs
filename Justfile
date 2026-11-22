@@ -53,7 +53,7 @@ export CARGO_TARGET_AARCH64_UNKNOWN_MINIX_LINKER := minix-lld
 # when the inner `just.exe` starts, before any line of the inner recipe runs.
 # The list is semicolon-separated; `DYNLINK_BINS` has the same hazard as
 # `MINIXFS_EXTRA` (`/libexec/ld.so=<path>;...` is a POSIX-style value too).
-export MSYS2_ENV_CONV_EXCL := "MINIXFS_EXTRA;DYNLINK_BINS"
+export MSYS2_ENV_CONV_EXCL := "MINIXFS_EXTRA;DYNLINK_BINS;MINIXFS_ROOT"
 
 # Repo root with forward slashes (the recipe shell mangles backslashes).
 ROOT := replace(justfile_directory(), "\\", "/")
@@ -1727,6 +1727,7 @@ test-arches:
     @just test-read-cost x86
     @just test-coreutils-minix x86
     @just test-fileread x86
+    @just test-cdirect-x86
     @just test-qemu riscv64
     @just test-boot riscv64
     @just test-fork riscv64
@@ -1740,6 +1741,7 @@ test-arches:
     @just test-threads riscv64
     @just test-coreutils-minix riscv64
     @just test-fileread riscv64
+    @just test-cdirect-riscv64
     @just test-qemu aarch64
     @just test-boot aarch64
     @just test-fork aarch64
@@ -1754,6 +1756,7 @@ test-arches:
     @just test-coreutils-wedge-aarch64
     @just test-coreutils-minix aarch64
     @just test-fileread aarch64
+    @just test-cdirect-aarch64
 
 # Fork isolation, per arch: `tools/smoke/fork.tsv` runs `/bin/forktest`, which forks and checks
 # all three directions of the copy - the child's write must not reach the parent, the parent's
@@ -1890,6 +1893,72 @@ build-c-hello arch="x86":
     if [ "{{arch}}" != x86 ]; then exit 0; fi
     cargo xtask image mkboot embed_initramfs,embed_minixfs
     cargo xtask image mkfs x86
+
+# The C library as `libc.a`: the archive a C toolchain's own linker driver consumes,
+# with no rustc in the link. It is the shape an in-guest clang/ld.lld needs, and it is
+# also what LLVM's CMake links its try-compile and final executables against.
+libc-static arch="x86":
+    cargo xtask build libc-static {{arch}}
+
+# A C program linked by clang and LLD alone, against `libc.a` and the arch's `crt0`.
+# `just test-cdirect-<arch>` boots it; the image base and `BASE_ADDRESS`/`LOADER_BASE`
+# come from `Arch`, mirroring the fork target spec's `pre_link_args`.
+c-direct arch="x86":
+    @just libc-static {{arch}}
+    cargo xtask build c-direct {{arch}}
+
+# The gate on the direct link: `/bin/cdirect` is `tools/hello.c` compiled by clang and
+# linked by LLD against `libc.a`, with no rustc anywhere in the line. The scenario's
+# line can only be produced by running it.
+test-cdirect-x86 boot-timeout="40": build-x86 (c-direct "x86")
+    MINIXFS_EXTRA='/bin/cdirect=target/x86_64-pc-minix/release/cdirect' just build-x86
+    mkdir -p target/images/x86_64-pc-minix
+    cp target/trampoline.elf target/images/x86_64-pc-minix/minix-x86.elf
+    @just _assert-qemu-version qemu-system-x86_64
+    FEED_SCENARIO=tools/smoke/cdirect.tsv cargo xtask smoke target/test-cdirect-x86.log {{boot-timeout}} qemu-system-x86_64 -nographic -m 256M -no-reboot -vga none -device bochs-display,id=fb0 -kernel target/images/x86_64-pc-minix/minix-x86.elf -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0 -device virtio-tablet-pci,display=fb0
+    @echo "c-direct: clang + LLD linked /bin/cdirect against libc.a with no rustc, and it ran (x86_64)"
+
+test-cdirect-riscv64 boot-timeout="60": build-riscv64 (c-direct "riscv64")
+    MINIXFS_EXTRA='/bin/cdirect=target/riscv64gc-unknown-minix/release/cdirect' just build-riscv64
+    @just _assert-qemu-version qemu-system-riscv64
+    FEED_SCENARIO=tools/smoke/cdirect.tsv cargo xtask smoke target/test-cdirect-riscv64.log {{boot-timeout}} qemu-system-riscv64 -machine virt -m 256M -nographic -global virtio-mmio.force-legacy=off -netdev user,id=net0 -device virtio-net-device,netdev=net0 -device virtio-gpu-device -device virtio-keyboard-device -kernel target/riscv64gc-unknown-minix/release/kernel-boot-riscv64
+    @echo "c-direct: clang + LLD linked /bin/cdirect against libc.a with no rustc, and it ran (riscv64)"
+
+test-cdirect-aarch64 boot-timeout="60": build-aarch64 (c-direct "aarch64")
+    MINIXFS_EXTRA='/bin/cdirect=target/aarch64-unknown-minix/release/cdirect' just build-aarch64
+    @just _assert-qemu-version qemu-system-aarch64
+    FEED_SCENARIO=tools/smoke/cdirect.tsv cargo xtask smoke target/test-cdirect-aarch64.log {{boot-timeout}} qemu-system-aarch64 -machine virt -cpu cortex-a57 -m 256M -nographic -no-reboot -global virtio-mmio.force-legacy=off -netdev user,id=net0 -device virtio-net-device,netdev=net0 -device virtio-gpu-device -device virtio-keyboard-device -kernel target/aarch64-unknown-minix/release/kernel-boot-aarch64
+    @echo "c-direct: clang + LLD linked /bin/cdirect against libc.a with no rustc, and it ran (aarch64)"
+
+# The host tablegen programs a cross build of clang needs. The fork's LLVM build
+# tree carries `llvm-tblgen` only; `clang-tblgen` and `llvm-min-tblgen` come from
+# this build. Artifact: `target/llvm/host/{Release/,}bin`.
+llvm-host-tools:
+    cargo xtask build llvm-host-tools
+
+# Cross-build clang and LLD for a minix target and stage the guest's toolchain root
+# (`.notes/toolchain_in_os.md` Phases 2 and 3). Needs `just llvm-host-tools` and
+# the C++ runtime (`target/cxx/<machine>-toolchain/minix-runtime/libstdc++.a`);
+# both are named in the error when missing. Artifacts: `target/llvm-<arch>/{build,
+# toolchain.cmake}` and `target/toolchain/<arch>/root`, which is a *disk* image's
+# root: 199 MiB, far past the embedded ramdisk's 16 MiB window.
+llvm-minix arch="x86":
+    cargo xtask build llvm-minix {{arch}}
+
+# The in-guest toolchain gate: the guest's own clang compiles `tools/hello.c` and
+# links it with the guest's ld.lld against `libc.a`, and the program runs. The
+# staged root is required (there is no build of it in CI: it costs an LLVM cross
+# build), and a missing root is refused by name rather than booted as a failure.
+test-toolchain arch="x86":
+    @just test-toolchain-{{arch}}
+
+test-toolchain-x86 boot-timeout="240": boot-image-x86
+    @test -d target/toolchain/x86/root || (echo "test-toolchain: no staged toolchain root; run 'just llvm-minix x86'" && exit 1)
+    @just _assert-qemu-version qemu-system-x86_64
+    MINIXFS_ROOT=target/toolchain/x86/root MINIXFS_BLOCKS=73728 MINIXFS_INODES=4096 cargo run -q -p boot-image --bin mkminixfs --release -- x86_64
+    cargo xtask image mkfs x86
+    FEED_PACE=0.003 FEED_SCENARIO=tools/smoke/toolchain.tsv cargo xtask smoke target/test-toolchain-x86.log {{boot-timeout}} qemu-system-x86_64 -nographic -m 512M -no-reboot -vga none -device bochs-display,id=fb0 -kernel target/images/x86_64-pc-minix/minix-x86-boot.elf -drive if=none,id=disk0,file=target/images/x86_64-pc-minix/disk.img,format=raw,cache=writethrough -device virtio-blk-pci,disable-legacy=on,drive=disk0 -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0 -device virtio-tablet-pci,display=fb0
+    @echo "toolchain: the guest's clang compiled and the guest's lld linked hello.c, and it ran (x86_64)"
 
 # GNU bash for a minix target, from the upstream commit `tools/pins.ini` pins:
 # fetched, configured against `tools/c-include` and linked against minix-libc by

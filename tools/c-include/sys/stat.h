@@ -52,10 +52,16 @@ struct stat {
     off_t st_size;
     long st_blksize;
     long st_blocks;
-    time_t st_atime;
-    time_t st_mtime;
-    time_t st_ctime;
+    struct timespec st_atim;
+    struct timespec st_mtim;
+    struct timespec st_ctim;
 };
+
+/* POSIX exposes the seconds through these names; the storage is the timespec,
+ * whose nanosecond half is zero because the VFS keeps seconds. */
+#define st_atime st_atim.tv_sec
+#define st_mtime st_mtim.tv_sec
+#define st_ctime st_ctim.tv_sec
 
 /* UTIMENS sentinels, MINIX 3.3.0 `sys/sys/stat.h`'s values. VFS's
  * `do_utimens` and `minix_std::fs` compare against these, so a caller passing
@@ -78,6 +84,7 @@ int mkfifo(const char *path, mode_t mode);
 int chmod(const char *path, mode_t mode);
 int fchmod(int fd, mode_t mode);
 mode_t umask(mode_t mask);
+int utimensat(int dirfd, const char *path, const struct timespec times[2], int flags);
 
 #ifdef __cplusplus
 }

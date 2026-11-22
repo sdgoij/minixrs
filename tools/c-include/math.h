@@ -20,6 +20,11 @@
 #define FP_SUBNORMAL 3
 #define FP_NORMAL 4
 
+/* What `ilogb` returns for zero and for NaN. The values are glibc's; LLVM's
+ * bundled libc-math headers require both to be constants. */
+#define FP_ILOGB0 (-2147483647 - 1)
+#define FP_ILOGBNAN 2147483647
+
 /* The X/Open math constants. glibc exposes them under _DEFAULT_SOURCE; Mesa's
  * util and the GLSL compiler use M_PI and M_LOG2E unconditionally. */
 #define M_E 2.7182818284590452354
@@ -36,9 +41,8 @@
 #define M_SQRT2 1.41421356237309504880
 #define M_SQRT1_2 0.70710678118654752440
 
-/* Radix-independent exponent, by IEEE bit extraction rather than `log()` —
+/* Radix-independent exponent, by IEEE bit extraction rather than `log()`:
  * `no_std` has no logarithm. */
-double logb(double x);
 
 /* The C99 classification macros, over clang's builtins so no libm entry point is
  * needed. `fpclassify` reuses the `FP_*` values above. */
@@ -52,6 +56,10 @@ double logb(double x);
 #ifdef __cplusplus
 extern "C" {
 #endif
+
+double logb(double x);
+double erf(double x);
+double erfc(double x);
 
 double fabs(double x);
 float fabsf(float x);

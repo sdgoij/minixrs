@@ -1,0 +1,19 @@
+# The in-guest toolchain scenario (`.notes/toolchain_in_os.md` Phases 2 and 3).
+#
+#   FEED_PACE=0.003 FEED_SCENARIO=tools/smoke/toolchain.tsv cargo xtask smoke <log> <seconds> <qemu…>
+#
+# Driven by `just test-toolchain-<arch>`, on a disk image whose root is the staged
+# tree from `cargo xtask build llvm-minix`. `/usr/bin/clang` is a wrapper: the
+# driver is `/usr/libexec/clang-driver`, and the wrapper is what knows the headers,
+# the linker, the script, `crt0.o`, the archives and the image bases. So a `-c`
+# line and a link line are both exercised, and the last step can only pass if the
+# linked program is a working one (the wrapper also makes it executable, which is
+# why there is no `chmod` step).
+#
+# `--version` answers with the driver's banner, whose first line carries the
+# version; the rest of the line is the build's own (a packaged clang prints its
+# repository and date there).
+/usr/bin/clang --version	^clang version 23\..*
+/usr/bin/clang -c /usr/src/hello.c -o /tmp/hello.o	^$
+/usr/bin/clang /usr/src/hello.c -o /tmp/hello	^$
+/tmp/hello	^hello from C$

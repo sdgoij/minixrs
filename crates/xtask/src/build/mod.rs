@@ -5,11 +5,15 @@
 //! against. The argv is the contract, so every command is echoed before it runs.
 
 pub mod bash;
+pub mod c_direct;
 pub mod c_hello;
 pub mod cdyn;
 pub mod dynlibc;
 pub mod dynlink;
+pub mod libc_static;
 pub mod libcxx;
+pub mod llvm_host;
+pub mod llvm_minix;
 pub mod mesa;
 pub mod mesa_tree;
 pub mod std_hello;

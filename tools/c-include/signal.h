@@ -77,6 +77,11 @@ typedef struct {
     };
 } siginfo_t;
 
+/* POSIX exposes the SIGCHLD members without the `_sigchld` prefix. */
+#define si_pid _sigchld.si_pid
+#define si_uid _sigchld.si_uid
+#define si_status _sigchld.si_status
+
 /* ABI match for minix-libc's sigaction: handler u64@0, mask 16 bytes@8,
  * flags i32@24 (28 bytes). The handler/sigaction union keeps the ABI. */
 struct sigaction {

@@ -1235,6 +1235,13 @@ pub unsafe extern "C" fn setvbuf(
     0
 }
 
+/// C `setbuf`: the streams are unbuffered, so the request is accepted and
+/// nothing changes. It exists because libc++'s `<cstdio>` imports it with
+/// `using_if_exists`, and `<fstream>` calls it.
+#[cfg(target_os = "minix")]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn setbuf(_stream: *mut FILE, _buf: *mut c_char) {}
+
 /// POSIX `openlog()`: the identity and facility for later `syslog` calls. There
 /// is no syslog service, so the settings are dropped; `syslog` writes to stderr.
 #[cfg(target_os = "minix")]
@@ -2412,6 +2419,20 @@ pub unsafe extern "C" fn ftell(stream: *mut FILE) -> i64 {
         return -1;
     }
     unsafe { crate::lseek((*stream).fd, 0, SEEK_CUR) }
+}
+
+/// POSIX `fseeko()`: the `off_t` form of [`fseek`].
+#[cfg(target_os = "minix")]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn fseeko(stream: *mut FILE, offset: i64, whence: c_int) -> c_int {
+    unsafe { fseek(stream, offset, whence) }
+}
+
+/// POSIX `ftello()`: the `off_t` form of [`ftell`].
+#[cfg(target_os = "minix")]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ftello(stream: *mut FILE) -> i64 {
+    unsafe { ftell(stream) }
 }
 
 /// POSIX `rewind()`: seek to the start, then clear the error indicators.

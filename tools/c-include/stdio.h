@@ -3,6 +3,7 @@
 #define _STDIO_H
 
 #include <stddef.h>
+#include <sys/types.h>
 
 typedef __builtin_va_list va_list;
 #define va_start(ap, last) __builtin_va_start(ap, last)
@@ -59,6 +60,7 @@ int fflush(FILE *stream);
 int fclose(FILE *stream);
 int fileno(FILE *stream);
 int setvbuf(FILE *stream, char *buf, int mode, size_t size);
+void setbuf(FILE *stream, char *buf);
 
 FILE *fopen(const char *path, const char *mode);
 FILE *fdopen(int fd, const char *mode);
@@ -67,6 +69,8 @@ size_t fread(void *ptr, size_t size, size_t nmemb, FILE *stream);
 size_t fwrite(const void *ptr, size_t size, size_t nmemb, FILE *stream);
 int fseek(FILE *stream, long offset, int whence);
 long ftell(FILE *stream);
+int fseeko(FILE *stream, off_t offset, int whence);
+off_t ftello(FILE *stream);
 void rewind(FILE *stream);
 int feof(FILE *stream);
 int ferror(FILE *stream);

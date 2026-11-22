@@ -28,3 +28,8 @@ workspace = true
 # shared object is a final artifact, so it has to supply the `panic` lang
 # item itself; the rlib build leaves that to the program that links it.
 so = []
+# Build the C library as a plain `libc.a` (`cargo rustc --crate-type
+# staticlib`), the form a C toolchain's own linker driver consumes. A static
+# archive is a final artifact too, so it needs the same `panic` lang item the
+# shared object supplies; the TLS path stays the static one.
+staticlib = []

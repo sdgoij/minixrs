@@ -1,0 +1,346 @@
+# A development toolchain inside minixrs
+
+Status: **Phase 0 landed** (`libc.a` and a clang+LLD link with no rustc, gated on
+all three arches), **Phase 1 landed** (`just llvm-host-tools` builds LLVM 23's
+`llvm-tblgen`, `clang-tblgen` and `llvm-min-tblgen` for the host), and **Phase 2 is
+built and running**: `clang` 23 and `ld.lld` are minix ELFs, `clang --version` and
+`clang -c` work in the guest, and the in-guest LLD's output currently hangs
+(`KNOWN_ISSUES.md` item 83). Phases 3 to 5 are the design.
+
+Related: [`c_build.md`](c_build.md) (the host rule this has to extend),
+[`dynamic_linking.md`](dynamic_linking.md) (the DSO and loader the in-guest
+linker will target), [`memory_budget.md`](memory_budget.md) (the guest's RAM),
+`.agents/skills/mesa-port` (the libc++ runtime this reuses) and
+`.agents/skills/minix-boot-process`.
+
+## 1. Goal, and what "done" means
+
+A compiler that runs **inside** a minix guest and produces programs for that
+guest: `clang`/`clang++` for C and C++, and `rustc` for Rust. Not a
+cross-compiler on the host. Concretely, on x86_64 first and then the other two
+arches:
+
+- `/usr/bin/clang --version` answers in the guest.
+- `/usr/bin/clang -c hello.c` produces an object in the guest, and
+  `/usr/bin/ld.lld` links it against the guest's `libc.a` into a program that
+  runs, all with no host involved after boot.
+- `/usr/bin/rustc hello.rs` does the same for Rust.
+- The toolchain can rebuild itself: the guest's clang compiles LLVM, and the
+  guest's rustc is what `x.py` uses as `stage0` for a minix host.
+
+Non-goals for the first pass: every LLVM target (the guest needs its own, the
+cross target it will compile for, and nothing else), shared LLVM (`libLLVM.so`),
+tests, docs, sanitizers, and a package manager.
+
+## 2. What the tree already has
+
+The hard half of a C toolchain exists; what is missing is the compiler and the
+linker as guest programs.
+
+- **A real C library with a C ABI.** `minix-libc` exports the POSIX surface
+  (`stdio`, `stdlib`, `string`, `wchar`, `locale`, `time`, sockets, termios,
+  pthreads over kernel threads, `mmap`, `dlopen`) over `minix-std`. `tools/c-include`
+  is the matching header set and `cargo xtask check headers` keeps the two sides
+  in step.
+- **The runtime as an archive a foreign linker understands.** `cargo xtask build
+  libc-static <arch>` builds `libminix_libc.a` with
+  `--crate-type staticlib --features staticlib` and copies it to
+  `target/<triple>/release/libc.a`. The `staticlib` feature supplies only the
+  `panic` lang item a final artifact needs; the static TLS path is unchanged.
+- **A C++ runtime.** `just libcxx <arch>` builds libc++ and libc++abi into
+  `target/cxx/<arch>/minix-runtime/libstdc++.a` (no exceptions, no RTTI, no
+  localization, no `<filesystem>`). Mesa is already built and shipped on it.
+- **The start-up and layout.** `tools/crt0-<arch>.S` takes the SysV initial
+  stack, initialises TLS, runs `.init_array` and calls `main`;
+  `tools/minix-user.ld` page-aligns every section and carries the TLS bounds. The
+  per-arch base (`0x4000000` on x86_64, `0x1000000` elsewhere) and the loader
+  base now live in `crates/xtask/src/arch.rs`, mirroring the fork target spec's
+  `pre_link_args`.
+- **A linker that runs where the compiler does.** `toolchain::find_lld` resolves
+  the fork's `rust-lld`/`lld`, and LLD's GNU flavor links the port's ELFs. The
+  guest will need a copy of the same LLD as a program.
+- **A disk-root boot.** The embedded root is a 16 MiB ramdisk window
+  (`RAMDISK_IMAGE_SIZE`); the disk path (`just run-x86`, virtio-blk +
+  `target/images/<triple>/disk.img`) has no such limit because MinixFS V3 uses
+  4 KiB blocks and 32-bit zone numbers.
+- **The fork's LLVM sources, and one host tablegen.** `rust/src/llvm-project` is
+  LLVM 23.1.1. `rust/build/x86_64-pc-windows-msvc/llvm/bin/llvm-tblgen.exe` is a
+  matching native tool; `clang-tblgen` and `llvm-min-tblgen` are **not** there.
+- **Phase 0 is gated.** `just test-cdirect-<arch>` compiles `tools/hello.c` with
+  clang, links it with LLD against `libc.a`, `crt0` and `minix-user.ld` (no
+  rustc in the line), boots it as `/bin/cdirect` and asserts its line. Passes on
+  x86_64, riscv64 and aarch64.
+
+## 3. Why the two toolchains are separate problems
+
+**Clang is a one-shot cross-build, then self-hosting.** LLVM is C++ and its
+CMake build is self-contained: host tablegen programs can be supplied
+(`LLVM_NATIVE_TOOL_DIR`), the target compilers are the host's clang, and the
+final link is a program's link, not the host's. Once `clang` runs in the guest,
+a second build in the guest is evidence (and the reproduction the goal asks
+for), not the only route.
+
+**rustc is a bootstrap.** `x.py` runs `stage0` on the build host, so
+`--host x86_64-pc-minix` needs a minix rustc before x.py can start. The
+pragmatic route is a one-off cross-build of `rustc_driver` + `rustc` for the
+minix target with the existing stage1 (a `cargo build`, not a bootstrap), then
+wiring that binary in as the stage0 for `--host x86_64-pc-minix`. That binary
+also has to run in the guest, which is why it comes after clang: the same libc
+and linker surface must be known good first.
+
+## 4. Phases
+
+### Phase 0: the C link without rustc (done)
+
+`cargo xtask build libc-static` and `cargo xtask build c-direct`, plus
+`just test-cdirect-<arch>`. Two things this settled:
+
+- A `staticlib` of `minix-libc` is a sound `libc.a`: `core` and
+  `compiler_builtins` travel in it, and LLD pulls only the members it needs.
+- LLD's GNU flavor links the result with the same script and bases the rustc
+  link uses, so a non-Rust driver can produce a working program.
+
+### Phase 1: host tablegen for LLVM 23 (done)
+
+A cross build of clang needs `clang-tblgen` for the build host, and LLVM 23's
+build also asks for `llvm-min-tblgen`; only `llvm-tblgen` exists in the fork's
+build tree. `just llvm-host-tools` (`cargo xtask build llvm-host-tools`)
+configures a native build of `rust/src/llvm-project/llvm` with clang enabled and
+builds all three into `target/llvm/host/Release/bin` (MSVC and the Visual Studio
+generator on Windows, Ninja elsewhere). The tools report `23.1.1`, which is the
+source in the tree.
+
+A tablegen from an older LLVM is not interchangeable: the `.td` files use records
+and features the older tool does not know, so the system's LLVM 22 tablegen is
+not a substitute. Point a cross build at the directory with
+`-DLLVM_NATIVE_TOOL_DIR=target/llvm/host/Release/bin`.
+
+### Phase 2: cross-build clang and lld for minix
+
+One CMake configure per arch, against `rust/src/llvm-project/llvm`, with
+`-DLLVM_ENABLE_PROJECTS="clang;lld"` and:
+
+- `LLVM_TARGETS_TO_BUILD` = the guest's own target plus the one it will compile
+  for (x86_64 first, so `X86`).
+- `LLVM_NATIVE_TOOL_DIR` = the directory `just llvm-host-tools` printed
+  (`target/llvm/host/Release/bin` on Windows, `target/llvm/host/bin` elsewhere),
+  `CMAKE_CROSSCOMPILING=ON`, `CMAKE_SYSTEM_NAME=Generic`,
+  `CMAKE_SYSTEM_PROCESSOR=<machine>`, and the existing
+  `target/cxx/toolchain-*.cmake` flags (`-nostdinc`, the clang resource dir,
+  `tools/c-include`, libc++ headers, `-fno-stack-protector`, `-fPIC`).
+- `LLVM_DEFAULT_TARGET_TRIPLE` = the arch's LLVM triple (`x86_64-unknown-none`),
+  so the guest's clang needs no `--target` for its own programs.
+- `LLVM_ENABLE_THREADS=OFF` (the port's C heap is not thread-safe),
+  `LLVM_ENABLE_EH=OFF`, `LLVM_ENABLE_RTTI=OFF`, `LLVM_ENABLE_ZLIB=OFF`,
+  `LLVM_ENABLE_ZSTD=OFF`, `LLVM_ENABLE_TERMINFO=OFF`,
+  `LLVM_ENABLE_LIBXML2=OFF`, `LLVM_ENABLE_LIBEDIT=OFF`, `BUILD_SHARED_LIBS=OFF`,
+  `LLVM_BUILD_LLVM_DYLIB=OFF`, `LLVM_INCLUDE_TESTS=OFF`,
+  `CLANG_ENABLE_ARCMT=OFF`, `CLANG_ENABLE_STATIC_ANALYZER=OFF`,
+  `LLVM_INCLUDE_BENCHMARKS=OFF`.
+- A **link driver** that is not clang's own: CMake's `Generic_GCC` toolchain
+  falls back to `gcc` for this triple on Windows, and on either host it would
+  search for a libc it must not find. `CMAKE_CXX_LINK_EXECUTABLE` is overridden
+  to invoke LLD with `crt0.o`, `libc.a`, `libstdc++.a`, `-T tools/minix-user.ld`
+  and the arch bases, which is exactly the Phase 0 line.
+- `CMAKE_TRY_COMPILE_TARGET_TYPE=STATIC_LIBRARY` for the configure probes (they
+  must not need a runnable guest), with `CMAKE_C_COMPILER_WORKS=1` and
+  `CMAKE_CXX_COMPILER_WORKS=1`.
+
+Output: `target/toolchain/<arch>/bin/clang`, `clang++`, `ld.lld` (stripped), and
+the C++/C headers the compiler searches. The gate is `clang --version` **on the
+host** first (the ELF's `e_machine` and entry are checked), then in the guest in
+Phase 3.
+
+Known unknowns this phase exists to discover: which `tools/c-include` entries
+LLVM's `Support`/`ADT` need and the port does not provide; whether libc++'s
+`<filesystem>`-off configuration is enough (LLVM's `Support` has its own
+filesystem layer); and whether `Execute`/`Process` need `posix_spawn`, which the
+port does not export (LLVM falls back to `fork`+`exec` when the configure test
+says so, and those the port has).
+
+#### Phase 2 progress: what compiled, and the one ABI gap
+
+The cross configure is clean on the Windows host with MSVC and the fork's stage1.
+`LLVMSupport`, the X86 backend and the whole of `lld` compile, and `bin/lld`
+links to a 67 MiB minix ELF at `0x4000000`. The gaps the build found, and the
+fixes that landed, are all in `tools/c-include` and `minix-libc`:
+
+- the full POSIX errno set (`errc.h` maps `std::errc` onto it unguarded);
+- `fegetexceptflag`/`fesetexceptflag`, `FP_ILOGB0`/`FP_ILOGBNAN`, `erf`/`erfc`;
+- `sigismember`'s `si_pid`/`si_uid`/`si_status` member aliases;
+- `langinfo.h` and `nl_langinfo_l(CODESET)`, which libc++'s Linux-less locale
+  fallback calls;
+- `__cxa_thread_atexit`, with per-thread key destructors now run by the thread
+  trampoline, `pthread_exit` and `exit`;
+- a `PROVIDE(main = _Z4mainiPPc)` in `tools/minix-user.ld`: a freestanding C++
+  target mangles `main`, and `crt0` calls the C name.
+
+The link itself needs a driver, because CMake's rule hands the line to clang,
+which on Windows falls back to Strawberry GCC for this triple. `cargo xtask
+minix-ld` reads the response file and translates `-Wl,...`, `-lpthreads` and
+`-static` into the Phase 0 LLD line; `--no-dependent-libraries` is what makes
+libc++'s `.deplibs` names (`pthread`, `rt`) harmless.
+
+**The one remaining blocker is `struct stat`.** libc++'s `<fstream>` is entirely
+inside `#if _LIBCPP_HAS_FILESYSTEM && _LIBCPP_HAS_LOCALIZATION`, and
+`std::filesystem` reads `st_atim`/`st_mtim` (a `timespec`, for the nanosecond
+fields). The port's `struct stat` carried only `st_atime`/`st_mtime`/`st_ctime`
+as `time_t`, matching the 88-byte VFS `Stat`. That gap is now closed: the C
+`struct stat` has the POSIX shape (three `struct timespec`s with `st_atime` etc.
+as member macros; the first 64 bytes keep their offsets, the struct grows from 88
+to 112 bytes), and the libc `stat` wrappers fill `tv_nsec = 0` because the VFS
+keeps seconds. `fseeko`/`ftello`, `truncate`, `utimensat`, `pathconf`,
+`setbuf`, `O_DIRECTORY`, `O_NOFOLLOW` and `AT_REMOVEDIR` came with it.
+
+With that, the whole of clang and LLD builds and links. The toolchain root is
+staged under `target/toolchain/x86/root` (clang 87 MiB and ld.lld 54 MiB stripped,
+the C and C++ headers, clang's resource headers, `libc.a`, `libstdc++.a`,
+`crt0.o`, `minix-user.ld`). `crates/boot-image` now reads `MINIXFS_ROOT` (a whole
+tree, not the one-file `MINIXFS_EXTRA`) and creates nested directories, and
+`MINIXFS_INODES` overrides the default 512 inode table; the 288 MiB image holds
+2142 files. In the guest, `clang --version` answers `clang version 23.1.1` and
+`clang -c hello.c` writes `/tmp/hello.o`.
+
+The defect, found and fixed: the in-guest LLD's output had the same size, ELF header and
+program headers as the host LLD's, but only the first 19 pages and the last page of the file
+held the linker's bytes. It was not the linker. VM's writeback of a writable `MAP_SHARED`
+region scans the file-page cache, and an entry that cannot be admitted to the 4096-page
+(16 MiB) table is never written back; `ld.lld`'s own 54 MiB image filled it, so the output
+mapping's later pages stayed private and the file kept zeros. The cache is now 32768 pages
+(128 MiB) and an admission that cannot be satisfied is reported once. The same objects and
+link line now produce a byte-identical binary, and it prints `hello from C` in the guest.
+`KNOWN_ISSUES.md` item 83 has the measurements and the remaining risk (a working set larger
+than the ceiling loses the same way, visibly).
+
+### Phase 3: the toolchain root and a bootable disk image
+
+`cargo xtask build llvm-minix <arch>` is the whole phase: one CMake build per arch
+against `rust/src/llvm-project/llvm`, a generated toolchain file, `cargo xtask
+minix-ld` as the link rule, and then the staged root. It needs three things that
+are built elsewhere and reports each by name when it is missing: the build host's
+tablegen (`just llvm-host-tools`), the C++ runtime
+(`target/cxx/<machine>-toolchain/minix-runtime/libstdc++.a`), and `libc.a`
+(`cargo xtask build libc-static <arch>`). Artifacts: `target/llvm-<arch>/{build,
+toolchain.cmake}` and `target/toolchain/<arch>/root`.
+
+A staged root under `target/toolchain/<arch>/root`:
+
+```
+/usr/bin/clang, clang++, ld.lld
+/usr/libexec/clang  the real driver
+/usr/include        tools/c-include
+/usr/include/c++/v1 libc++ headers
+/usr/lib/clang/<n>  clang's resource headers
+/usr/lib/libc.a, libstdc++.a, crt0.o
+/usr/lib/minix-user.ld
+/usr/src/hello.c
+```
+
+Ship it on the **disk** path only (never the embedded ramdisk): a recipe that
+runs `mkminixfs` with `MINIXFS_BLOCKS` large enough for the staged root and
+boots `just run-x86` with more RAM. The x86 root is 199 MiB unstripped.
+
+`/usr/bin/clang` is `tools/clang-wrapper.c`, not the driver renamed: it execs
+`/usr/libexec/clang` with the sysroot flags, and adds the link inputs (`crt0.o`,
+the archives, the script, the image bases) only when the line is not `-c`, `-S`,
+`-E` or a query. A link runs as a child so the output can be made executable.
+Four things about the *driver* had to be stated explicitly, and each cost a
+failed gate to find:
+
+- **`--target=<machine>-unknown-none-elf`.** The `-elf` environment is what
+  selects clang's bare-metal toolchain (`isX86BareMetal` wants `UnknownOS`
+  *and* environment `elf`). Without it the driver picks `Generic_ELF`, whose
+  linker step is a `gcc` this system does not have. BareMetal's linker step is
+  `ld.lld` itself.
+- **`-no-canonical-prefixes`.** With canonical prefixes the driver calls
+  `llvm::sys::fs::getMainExecutable`, and LLVM's Unix implementation has no
+  minix branch: the `/proc/self/exe` read is under `__linux__`, which the
+  `-none-elf` triple does not define, and its `dladdr` fallback has no answer
+  for a static executable. It returns `""`, so the `-cc1` program name is empty
+  and every compile fails with `ENOENT`; `-ccc-install-dir` does not fill
+  `ClangExecutable` either (measured with `-###`: `"" "-cc1" …`). `argv[0]` is
+  the driver and is under the wrapper's control. `/proc/self/exe` and
+  `/proc/<pid>/exe` now exist (`KNOWN_ISSUES.md` item 85), so the gap that
+  remains is LLVM's probe alone (item 86).
+- **`-ccc-install-dir /usr/libexec`** makes `InstalledDir` and the resource
+  lookup independent of the above.
+- **`-nostdlib -nostartfiles`**, then the driver would otherwise look for a
+  `crt1.o` and a `-lc` that do not exist.
+
+`cargo xtask minix-ld` passes `-flavor gnu`: the host `lld` it names is the
+generic driver (`lld.exe`), not a flavour-named copy, and it refuses to link
+ELF without that first argument.
+
+Gate (`just test-toolchain-x86`, `tools/smoke/toolchain.tsv`): boot the image,
+then in the guest `clang --version`, `clang -c /usr/src/hello.c`, `clang
+/usr/src/hello.c -o /tmp/hello` and run it. The wrapper's own link line is what
+step 3 exercises, and step 4 can only pass if the linked program is a working
+one. `hello.c` ships in the image under `/usr/src` rather than being typed.
+The gate is not in `test-arches`: the staged root costs an LLVM cross build, so
+a missing root is refused by name instead.
+
+### Phase 4: self-hosting clang
+
+Use the guest's clang, in the guest, to compile a component of LLVM and link it
+with the guest's LLD. Start with `llvm-tblgen` or `llvm-min-tblgen` (small, and
+a real generator), then a full clang if the RAM budget allows. This is the
+reproducibility half of the goal, and where the guest's RAM and time budget get
+measured rather than guessed. `just run-x86` already takes a `memory` argument;
+the default 256M will not build LLVM, and the measurement decides what the
+recipe documents.
+
+### Phase 5: rustc for minix
+
+Cross-build `rustc_driver` and `rustc` for `x86_64-pc-minix` with the existing
+stage1 (the same shape `cargo xtask build dynlibc` uses, but for a host target).
+Two pieces are specific:
+
+- `rustc_llvm`'s build script needs a **runnable** `llvm-config` that reports
+  the minix LLVM build's libraries and `--cxxflags`. The generated
+  `llvm-config` is a minix ELF and cannot run on the build host.
+  `tools/llvm-config-minix.rs` is an earlier, uncalled attempt: it hardcodes this
+  machine's paths. Rewrite it as `cargo xtask llvm-config --build-root <dir>`
+  (or delete it and let Phase 5 write the parameterized form) when this phase
+  starts.
+- `rustc` needs its sysroot (the minix `std`/`core`/`alloc`) staged into the
+  guest, which is the same root tree as Phase 3 plus `target/<triple>/release/libstd*.rlib`.
+
+Gate: `/usr/bin/rustc --version` in the guest, `rustc /usr/src/hello.rs`, and
+the program runs. Then a bootstrap: `x.py` with that binary as stage0,
+`--host x86_64-pc-minix`.
+
+## 5. Constraints and traps
+
+- **Not the embedded root.** `RAMDISK_IMAGE_SIZE` is 16 MiB. A toolchain image
+  is the disk path or it is nothing.
+- **The inode table is a fixed 512** until `MINIXFS_INODES` lands. This is why
+  Phase 3 changes the builder before the first toolchain image.
+- **Guest RAM.** `run` defaults to 256M. LLVM's compile of a single translation
+  unit is fine in that; linking clang, or self-hosting, is not. Measure and then
+  name a bigger `-m` in the recipe; do not quietly raise the default.
+- **Host choice.** Phase 1 was built on the Windows host with MSVC 2022: the
+  fork's build tree and the stage1 are both here, and MSVC is present. LLVM's
+  CMake build is self-contained enough for that (unlike a `configure`/`make`
+  third-party tree, see `c_build.md`). The Phase 2 cross build should use the
+  same host for the same reason; WSL remains the alternate and already builds
+  libc++/Mesa, but its `llvm-tblgen` is 22 and would have to rebuild the host
+  tools first.
+- **Tablegen version.** Host `llvm-tblgen` must be LLVM 23, the source in
+  `rust/src/llvm-project`. The system LLVM 22's tablegen is not a substitute.
+- **No exceptions, no RTTI, no threads.** LLVM's build options and the libc++
+  runtime already agree on this. A library that assumes otherwise will fail at
+  link, not at compile.
+- **`posix_spawn` is absent.** If LLVM's configure detects it, the guest's clang
+  can spawn the linker. Check the configure answer rather than adding a stub:
+  `fork`/`execvp`/`waitpid` exist and are the fallback.
+- **`sched_getaffinity` is absent**, which is fine with `LLVM_ENABLE_THREADS=OFF`
+  but is a feature test to read, not to guess.
+- **Do not ship a `libLLVM.so`.** Static archives keep the image smaller and the
+  loader out of the compiler's start-up.
+- **A toolchain image is not a release artifact.** `just image <arch>` stays the
+  16 MiB system; the toolchain image is a separate recipe and a separate gate.
+- **No debug prints in the kernel or servers.** A bring-up that hangs is a
+  `bare-metal-debug` problem (LLDB + QEMU `-s`), not a `serial_write` problem.
+- **`cargo xtask build c-direct` is a canary.** If it breaks, the `libc.a`
+  interface LLVM's build and the guest's linker depend on has broken, even if
+  every rustc-linked binary still works.

@@ -21,6 +21,8 @@
 #define O_EXCL 04000
 #define O_NOCTTY 0100000
 #define O_CLOEXEC 020000000
+#define O_NOFOLLOW 0x00000100
+#define O_DIRECTORY 0x00200000
 
 /* fcntl commands (minix/include/fcntl.h). */
 #define F_DUPFD 0
@@ -37,6 +39,12 @@
 #define F_UNLCK 2
 
 #define FD_CLOEXEC 1
+
+/* The `*at` family's directory handles (`minix_std::fs` uses the same
+ * values). `utimensat` is the caller libc++'s filesystem routes through. */
+#define AT_FDCWD (-100)
+#define AT_SYMLINK_NOFOLLOW 0x200
+#define AT_REMOVEDIR 0x800
 
 /* Advisory record locks — declared for ABI compatibility; minix has no
  * file locking, so F_SETLK/F_GETLK fail at runtime. */

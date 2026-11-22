@@ -32,6 +32,20 @@ pub struct Arch {
     /// flag; RISC-V has no red zone, and clang only warns that it is unused.
     red_zone: bool,
 
+    /// Where an unlinked binary's headers go, and the value `BASE_ADDRESS` takes
+    /// in `tools/minix-user.ld`.
+    ///
+    /// The fork's target spec carries the same two values in `pre_link_args`
+    /// (`--image-base` and `--defsym`); a link that does not go through rustc, such
+    /// as a C toolchain's own linker driver, has to supply them itself. They are
+    /// per-arch because the base has to clear the kernel image: x86_64's reaches
+    /// 34 MiB, so its userland starts at 64 MiB.
+    pub image_base: &'static str,
+
+    /// The loader's base, one step above the shared-object region
+    /// (`--defsym=LOADER_BASE`).
+    pub loader_base: &'static str,
+
     /// Flags this machine needs beyond the common set, where clang's own default
     /// disagrees with what the minix target's rustc emits.
     ///
@@ -97,6 +111,8 @@ pub static X86_64: Arch = Arch {
     triple: "x86_64-pc-minix",
     machine: "x86_64",
     e_machine: 0x3e,
+    image_base: "0x4000000",
+    loader_base: "0x8000000",
     red_zone: true,
     extra_cflags: &[],
 };
@@ -106,6 +122,8 @@ pub static RISCV64: Arch = Arch {
     triple: "riscv64gc-unknown-minix",
     machine: "riscv64",
     e_machine: 0xf3,
+    image_base: "0x1000000",
+    loader_base: "0x4000000",
     red_zone: false,
     extra_cflags: &["-march=rv64gc", "-mabi=lp64d"],
 };
@@ -115,6 +133,8 @@ pub static AARCH64: Arch = Arch {
     triple: "aarch64-unknown-minix",
     machine: "aarch64",
     e_machine: 0xb7,
+    image_base: "0x1000000",
+    loader_base: "0x4000000",
     red_zone: true,
     extra_cflags: &[],
 };
@@ -179,6 +199,18 @@ mod tests {
         assert!(flags.iter().any(|flag| flag == "-march=rv64gc"));
         assert!(flags.iter().any(|flag| flag == "-mabi=lp64d"));
         assert!(!flags.iter().any(|flag| flag == "-mno-red-zone"));
+    }
+
+    /// These are the fork spec's `pre_link_args`. A link that bypasses rustc has no
+    /// other source for them, so a drift here is a binary that faults at `_start`.
+    #[test]
+    fn the_linker_bases_match_the_fork_spec() {
+        assert_eq!(X86_64.image_base, "0x4000000");
+        assert_eq!(X86_64.loader_base, "0x8000000");
+        assert_eq!(RISCV64.image_base, "0x1000000");
+        assert_eq!(RISCV64.loader_base, "0x4000000");
+        assert_eq!(AARCH64.image_base, "0x1000000");
+        assert_eq!(AARCH64.loader_base, "0x4000000");
     }
 
     #[test]

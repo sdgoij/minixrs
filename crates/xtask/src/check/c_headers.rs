@@ -24,9 +24,10 @@ use super::{files_with_extension, read_lossy, relative_posix};
 /// them, and no C library is expected to. Everything else the libc exports is
 /// meant to be callable from C, and an export with no declaration gives the
 /// caller the implicit `int` return type.
-const INTERNALS: [&str; 4] = [
+const INTERNALS: [&str; 5] = [
     "__cxa_atexit",
     "__cxa_finalize",
+    "__cxa_thread_atexit",
     "__minix_set_environ",
     "minix_libc_tls_init",
 ];

@@ -22,6 +22,16 @@ pub extern "C" fn fabsf(x: f32) -> f32 {
 }
 
 #[unsafe(no_mangle)]
+pub extern "C" fn erf(x: f64) -> f64 {
+    libm::erf(x)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn erfc(x: f64) -> f64 {
+    libm::erfc(x)
+}
+
+#[unsafe(no_mangle)]
 pub extern "C" fn fmin(x: f64, y: f64) -> f64 {
     libm::fmin(x, y)
 }
@@ -485,6 +495,22 @@ pub extern "C" fn fetestexcept(_excepts: c_int) -> c_int {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn feraiseexcept(_excepts: c_int) -> c_int {
+    0
+}
+
+/// `fexcept_t` is `unsigned short` in `tools/c-include/fenv.h`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn fegetexceptflag(flagp: *mut u16, _excepts: c_int) -> c_int {
+    if flagp.is_null() {
+        return 1;
+    }
+    // Nothing is ever raised, so the saved set is empty.
+    unsafe { *flagp = 0 };
+    0
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn fesetexceptflag(_flagp: *const u16, _excepts: c_int) -> c_int {
     0
 }
 

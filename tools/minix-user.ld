@@ -15,6 +15,11 @@ SECTIONS
 {
     . = BASE_ADDRESS;
 
+    /* A freestanding C++ target mangles `main` (`_Z4mainiPPc`), while `crt0`
+       calls the C name. A C program defines `main` itself, so this alias is only
+       used by a C++ program, and only for the standard two-argument form. */
+    PROVIDE(main = _Z4mainiPPc);
+
     .text : ALIGN(0x1000) {
         KEEP(*(.text._start))
         *(.text .text.*)

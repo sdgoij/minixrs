@@ -69,6 +69,7 @@ unsafe extern "C" fn pthread_trampoline(data: usize) -> ! {
         CURRENT_PTHREAD.set(start.pth);
         let ret = (start.start)(start.arg);
         (*start.pth).retval = ret;
+        run_key_dtors();
         minix_rt::thread_exit(0);
     }
 }
@@ -160,6 +161,7 @@ pub unsafe extern "C" fn pthread_exit(retval: *mut c_void) -> ! {
         if !pth.is_null() {
             (*pth).retval = retval;
         }
+        run_key_dtors();
         minix_rt::thread_exit(0);
     }
 }
@@ -822,6 +824,33 @@ pub unsafe extern "C" fn pthread_getspecific(key: u32) -> *mut c_void {
         return core::ptr::null_mut();
     }
     KEY_VALUES[key as usize].get()
+}
+
+/// Run the calling thread's key destructors, in key order, up to the POSIX
+/// four-iteration bound (a destructor may set another key).
+///
+/// The thread trampoline, `pthread_exit` and `exit` all call this: the port has
+/// no other place where a thread's destructors run.
+pub(crate) unsafe fn run_key_dtors() {
+    for _ in 0..4 {
+        let mut ran = false;
+        for key in 0..MAX_KEYS {
+            let value = KEY_VALUES[key].replace(core::ptr::null_mut());
+            if value.is_null() {
+                continue;
+            }
+            let dtor = KEY_DTORS[key].load(Ordering::Acquire);
+            if dtor == 0 {
+                continue;
+            }
+            ran = true;
+            let f: unsafe extern "C" fn(*mut c_void) = unsafe { core::mem::transmute(dtor) };
+            unsafe { f(value) };
+        }
+        if !ran {
+            break;
+        }
+    }
 }
 
 /// `minix_std`'s monotonic clock in microseconds since boot (0 if unavailable).

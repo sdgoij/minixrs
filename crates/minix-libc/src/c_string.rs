@@ -527,13 +527,13 @@ const ERRNO_NAMES: &[&[u8]] = &[
     b"Numerical result out of range",                     // 34 ERANGE
     b"Resource deadlock avoided",                         // 35 EDEADLK
     b"File name too long",                                // 36 ENAMETOOLONG
-    b"",                                                  // 37
+    b"No locks available",                                // 37 ENOLCK
     b"",                                                  // 38
-    b"",                                                  // 39
+    b"Directory not empty",                               // 39 ENOTEMPTY
     b"Too many levels of symbolic links",                 // 40 ELOOP
     b"",                                                  // 41
-    b"",                                                  // 42
-    b"",                                                  // 43
+    b"No message of desired type",                        // 42 ENOMSG
+    b"Identifier removed",                                // 43 EIDRM
     b"",                                                  // 44
     b"",                                                  // 45
     b"",                                                  // 46
@@ -550,21 +550,21 @@ const ERRNO_NAMES: &[&[u8]] = &[
     b"",                                                  // 57
     b"",                                                  // 58
     b"",                                                  // 59
-    b"",                                                  // 60
-    b"",                                                  // 61
-    b"",                                                  // 62
-    b"",                                                  // 63
+    b"Device not a stream",                               // 60 ENOSTR
+    b"No data available",                                 // 61 ENODATA
+    b"Timer expired",                                     // 62 ETIME
+    b"Out of streams resources",                          // 63 ENOSR
     b"",                                                  // 64
     b"",                                                  // 65
     b"",                                                  // 66
-    b"",                                                  // 67
+    b"Link has been severed",                             // 67 ENOLINK
     b"",                                                  // 68
     b"",                                                  // 69
     b"",                                                  // 70
-    b"",                                                  // 71
+    b"Protocol error",                                    // 71 EPROTO
     b"",                                                  // 72
     b"",                                                  // 73
-    b"",                                                  // 74
+    b"Bad message",                                       // 74 EBADMSG
     b"Value too large for defined data type",             // 75 EOVERFLOW
     b"",                                                  // 76
     b"",                                                  // 77
@@ -581,7 +581,7 @@ const ERRNO_NAMES: &[&[u8]] = &[
     b"Socket operation on non-socket",                    // 88 ENOTSOCK
     b"Destination address required",                      // 89 EDESTADDRREQ
     b"Message too long",                                  // 90 EMSGSIZE
-    b"",                                                  // 91
+    b"Protocol wrong type for socket",                    // 91 EPROTOTYPE
     b"Protocol not available",                            // 92 ENOPROTOOPT
     b"Protocol not supported",                            // 93 EPROTONOSUPPORT
     b"",                                                  // 94
@@ -606,6 +606,22 @@ const ERRNO_NAMES: &[&[u8]] = &[
     b"No route to host",                                  // 113 EHOSTUNREACH
     b"Operation already in progress",                     // 114 EALREADY
     b"Operation now in progress",                         // 115 EINPROGRESS
+    b"",                                                  // 116
+    b"",                                                  // 117
+    b"",                                                  // 118
+    b"",                                                  // 119
+    b"",                                                  // 120
+    b"",                                                  // 121
+    b"",                                                  // 122
+    b"",                                                  // 123
+    b"",                                                  // 124
+    b"Operation canceled",                                // 125 ECANCELED
+    b"",                                                  // 126
+    b"",                                                  // 127
+    b"",                                                  // 128
+    b"",                                                  // 129
+    b"Owner died",                                        // 130 EOWNERDEAD
+    b"State not recoverable",                             // 131 ENOTRECOVERABLE
 ];
 
 #[cfg(target_os = "minix")]

@@ -63,6 +63,28 @@ extern int *__errno_location(void);
 #define EILSEQ 84
 #define EWOULDBLOCK EAGAIN
 
+/* The rest of the names POSIX C++ needs to exist: libc++'s generated
+ * `<system_error>` maps `std::errc` onto these unguarded, so a header set
+ * without them cannot compile any C++ program that includes `<system_error>`
+ * (LLVM's `Support` does). The port keeps the Linux numbering it already
+ * chose for the values it returns. */
+#define EBADMSG 74
+#define ECANCELED 125
+#define EIDRM 43
+#define ENODATA 61
+#define ENOLCK 37
+#define ENOLINK 67
+#define ENOMSG 42
+#define ENOSR 63
+#define ENOSTR 60
+#define ENOTEMPTY 39
+#define ENOTRECOVERABLE 131
+#define ENOTSUP EOPNOTSUPP
+#define EOWNERDEAD 130
+#define EPROTO 71
+#define EPROTOTYPE 91
+#define ETIME 62
+
 /* The socket and process families, in the same Linux numbering: the port
  * exports socket/sendto/recvfrom, so these are values C code will compare
  * against rather than names it merely needs to exist. */

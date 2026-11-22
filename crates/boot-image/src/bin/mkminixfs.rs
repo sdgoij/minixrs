@@ -21,6 +21,31 @@ use std::process::ExitCode;
 
 use boot_image::{manifest, minixfs, targets};
 
+/// Add every file under `dir` as an absolute destination, keeping its relative
+/// path. This is what stages a whole tree (a toolchain's headers) into the image;
+/// `MINIXFS_EXTRA` names one file at a time and cannot.
+fn add_tree(base: &Path, dir: &Path, files: &mut Vec<(&'static str, Vec<u8>)>) {
+    let entries = std::fs::read_dir(dir)
+        .unwrap_or_else(|e| panic!("mkminixfs: reading {}: {e}", dir.display()));
+    for entry in entries {
+        let path = entry.expect("mkminixfs: directory entry").path();
+        if path.is_dir() {
+            add_tree(base, &path, files);
+            continue;
+        }
+        let relative = path
+            .strip_prefix(base)
+            .expect("a walked path is under the root")
+            .to_string_lossy()
+            .replace('\\', "/");
+        let dest = format!("/{relative}");
+        let dest: &'static str = Box::leak(dest.into_boxed_str());
+        let data = std::fs::read(&path)
+            .unwrap_or_else(|e| panic!("mkminixfs: reading {}: {e}", path.display()));
+        files.push((dest, data));
+    }
+}
+
 fn main() -> ExitCode {
     let arch = std::env::args()
         .nth(1)
@@ -127,6 +152,13 @@ fn main() -> ExitCode {
         }
     }
 
+    if t.arch != "wasm32"
+        && let Ok(root) = std::env::var("MINIXFS_ROOT")
+    {
+        let root = Path::new(&root);
+        add_tree(root, root, &mut files);
+    }
+
     let image = minixfs::build_minixfs(&files);
 
     let img_path = workspace
@@ -152,4 +184,22 @@ fn write_if_changed(path: &Path, data: &[u8]) -> std::io::Result<()> {
         return Ok(());
     }
     std::fs::write(path, data)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_tree_walks_to_absolute_destinations() {
+        let base = std::env::temp_dir().join("minixrs-mkminixfs-tree");
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(base.join("usr/include")).unwrap();
+        std::fs::write(base.join("usr/include/stdio.h"), b"x").unwrap();
+        let mut files = Vec::new();
+        add_tree(&base, &base, &mut files);
+        let dests: Vec<&str> = files.iter().map(|(dest, _)| *dest).collect();
+        assert_eq!(dests, vec!["/usr/include/stdio.h"]);
+        let _ = std::fs::remove_dir_all(&base);
+    }
 }

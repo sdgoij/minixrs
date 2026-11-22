@@ -1,0 +1,9 @@
+# The direct-link scenario.
+#
+#   FEED_SCENARIO=tools/smoke/cdirect.tsv cargo xtask smoke <log> <seconds> <qemu command…>
+#
+# Driven by `just test-cdirect-<arch>`, which injects `/bin/cdirect`. The binary is
+# `tools/hello.c` compiled by clang and linked by LLD against `libc.a`, the arch's
+# `crt0` and `tools/minix-user.ld`; the fork's rustc is not in the link line. The
+# expectation is a whole line, so it cannot be satisfied by the echoed command.
+/bin/cdirect	hello from C

@@ -33,6 +33,8 @@ typedef unsigned short fexcept_t;
 int feclearexcept(int excepts);
 int fetestexcept(int excepts);
 int feraiseexcept(int excepts);
+int fegetexceptflag(fexcept_t *flagp, int excepts);
+int fesetexceptflag(const fexcept_t *flagp, int excepts);
 int fegetround(void);
 int fesetround(int rounding_mode);
 

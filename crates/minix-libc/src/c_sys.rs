@@ -1093,6 +1093,35 @@ pub unsafe extern "C" fn symlinkat(
     }
 }
 
+/// POSIX `pathconf(2)`: a limit for `path`'s filesystem.
+///
+/// The port has one filesystem family, so every answer is the fixed limit the
+/// walker and the pipe code use, and an unknown name is `EINVAL`.
+#[cfg(target_os = "minix")]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn pathconf(path: *const c_char, name: c_int) -> c_long {
+    if path.is_null() {
+        return crate::fail(EINVAL) as c_long;
+    }
+    let value = match name {
+        1 => 32000,   // _PC_LINK_MAX
+        2 => 255,     // _PC_MAX_CANON
+        3 => 255,     // _PC_MAX_INPUT
+        4 => 255,     // _PC_NAME_MAX
+        5 => minix_std::fs::PATH_MAX as c_long, // _PC_PATH_MAX
+        6 => 4096,    // _PC_PIPE_BUF
+        7 => 1,       // _PC_CHOWN_RESTRICTED
+        8 => 1,       // _PC_NO_TRUNC
+        9 => 0,       // _PC_VDISABLE
+        10 => 0,      // _PC_SYNC_IO
+        11 => 64,     // _PC_FILESIZEBITS
+        12 => 0,      // _PC_SYMLINK_MAX
+        13 => 1,      // _PC_2_SYMLINKS
+        _ => return crate::fail(EINVAL) as c_long,
+    };
+    value
+}
+
 /// Truncate an open file (VFS truncate).
 #[cfg(target_os = "minix")]
 #[unsafe(no_mangle)]
@@ -1101,6 +1130,25 @@ pub unsafe extern "C" fn ftruncate(fd: c_int, length: c_long) -> c_int {
         Ok(()) => 0,
         Err(e) => crate::fail(e.0),
     }
+}
+
+/// POSIX `truncate()`: change a named file's length.
+///
+/// There is no path-based truncate syscall, so this opens the file for writing
+/// and truncates the descriptor.
+#[cfg(target_os = "minix")]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn truncate(path: *const c_char, length: c_long) -> c_int {
+    if path.is_null() {
+        return crate::fail(EINVAL);
+    }
+    let fd = unsafe { crate::open(path, minix_std::fs::O_WRONLY, 0) };
+    if fd < 0 {
+        return -1;
+    }
+    let truncated = unsafe { ftruncate(fd, length) };
+    let closed = crate::close(fd);
+    if truncated < 0 { truncated } else { closed }
 }
 
 /// `openat(2)`: `path` is resolved against `dirfd` when it is relative.
@@ -1929,6 +1977,59 @@ unsafe fn utimes_common(
         )
     };
     match unsafe { minix_std::fs::utime_flags(path_bytes, actime, modtime, acnsec, mnsec, flags) } {
+        Ok(()) => 0,
+        Err(e) => crate::fail(e.0),
+    }
+}
+
+/// POSIX `utimensat(2)`: set a file's timestamps from `timespec`s.
+///
+/// The filesystem keeps seconds, so a `tv_nsec` other than `UTIME_NOW` or
+/// `UTIME_OMIT` is truncated. A relative path under a real `dirfd` is resolved
+/// by changing directory for the call, the same way `openat` is.
+#[cfg(target_os = "minix")]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn utimensat(
+    dirfd: c_int,
+    path: *const c_char,
+    times: *const [crate::c_time::TimeSpec; 2],
+    flags: c_int,
+) -> c_int {
+    if path.is_null() {
+        return crate::fail(EINVAL);
+    }
+    if flags & !AT_SYMLINK_NOFOLLOW != 0 {
+        return crate::fail(EINVAL);
+    }
+    let path_bytes = unsafe { core::ffi::CStr::from_ptr(path) }.to_bytes();
+    if path_bytes.is_empty() {
+        return crate::fail(ENOENT);
+    }
+    let now = minix_std::fs::UTIME_NOW;
+    let omit = minix_std::fs::UTIME_OMIT;
+    let (actime, acnsec, modtime, mnsec) = if times.is_null() {
+        (0, now, 0, now)
+    } else {
+        let t = unsafe { &*times };
+        let convert = |ts: &crate::c_time::TimeSpec| {
+            if ts.tv_nsec == now {
+                (0, now)
+            } else if ts.tv_nsec == omit {
+                (0, omit)
+            } else {
+                (ts.tv_sec as i64, ts.tv_nsec as i64)
+            }
+        };
+        let (asec, ansec) = convert(&t[0]);
+        let (msec, mnsec) = convert(&t[1]);
+        (asec, ansec, msec, mnsec)
+    };
+    let result = unsafe {
+        with_dirfd(dirfd, path_bytes, || {
+            minix_std::fs::utime_flags(path_bytes, actime, modtime, acnsec, mnsec, flags)
+        })
+    };
+    match result {
         Ok(()) => 0,
         Err(e) => crate::fail(e.0),
     }

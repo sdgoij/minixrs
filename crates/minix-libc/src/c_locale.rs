@@ -7,8 +7,8 @@
 //! char, collation == comparison, no currency formatting.
 
 #[cfg(target_os = "minix")]
-use core::ffi::{VaList, c_int};
-use core::ffi::{c_char, c_uint, c_void};
+use core::ffi::VaList;
+use core::ffi::{c_char, c_int, c_uint, c_void};
 
 /// C `locale_t` — an opaque handle; any non-null value is the "C" locale.
 pub type LocaleT = *mut c_void;
@@ -135,6 +135,29 @@ pub unsafe extern "C" fn uselocale(newloc: LocaleT) -> LocaleT {
 #[cfg(target_os = "minix")]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn freelocale(_loc: LocaleT) {}
+
+// ---- nl_langinfo ----
+
+/// The `CODESET` item `tools/c-include/langinfo.h` names.
+const CODESET: c_int = 14;
+
+static ASCII: [c_char; 6] = [b'A' as c_char, b'S' as c_char, b'C' as c_char, b'I' as c_char, b'I' as c_char, 0];
+
+#[cfg(target_os = "minix")]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nl_langinfo(item: c_int) -> *mut c_char {
+    if item == CODESET {
+        ASCII.as_ptr() as *mut c_char
+    } else {
+        EMPTY_STR.as_ptr() as *mut c_char
+    }
+}
+
+#[cfg(target_os = "minix")]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nl_langinfo_l(item: c_int, _loc: LocaleT) -> *mut c_char {
+    unsafe { nl_langinfo(item) }
+}
 
 // ---- strto*_l / strcoll_l / strxfrm_l ----
 

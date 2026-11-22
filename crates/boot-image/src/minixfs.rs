@@ -4,6 +4,7 @@
 //! `build_minixfs` helper assembles the standard root image (/, /bin,
 //! /sbin, /etc, /tmp + the boot binaries) that MFS mounts at boot.
 
+use std::collections::HashMap;
 use std::path::Path;
 
 use crate::manifest::{self, DEVICES};
@@ -540,19 +541,50 @@ impl MinixFs {
     }
 }
 
+/// The zone for `path` under `root_zone`, creating each missing directory once.
+fn ensure_dir(
+    fs: &mut MinixFs,
+    root_zone: u32,
+    dirs: &mut HashMap<String, u32>,
+    path: &[&str],
+) -> u32 {
+    let mut zone = root_zone;
+    let mut key = String::new();
+    for component in path {
+        key.push('/');
+        key.push_str(component);
+        zone = match dirs.get(&key) {
+            Some(zone) => *zone,
+            None => {
+                let created = fs.add_directory(zone, component);
+                dirs.insert(key.clone(), created);
+                created
+            }
+        };
+    }
+    zone
+}
+
+fn inode_count(value: Option<&str>) -> u32 {
+    value.and_then(|s| s.parse().ok()).unwrap_or(INODES)
+}
+
 /// Build the standard root filesystem image containing `files` (destination
 /// path → content). The parent directories /bin, /sbin and /etc are created
 /// automatically, and /lib and /libexec when a file is going into them;
 /// anything else lands in the root. Sized by
 /// [`DEFAULT_BLOCKS`] unless the `MINIXFS_BLOCKS` env var overrides it
 /// (used by the large-binary verification, which needs a filesystem big
-/// enough for a ≥32 MiB executable).
+/// enough for a ≥32 MiB executable). `MINIXFS_INODES` overrides [`INODES`]
+/// for a payload with more files (a toolchain's headers do not fit in 512).
 pub fn build_minixfs(files: &[(&'static str, Vec<u8>)]) -> Vec<u8> {
     let total_blocks = std::env::var("MINIXFS_BLOCKS")
         .ok()
         .and_then(|s| s.parse::<u32>().ok())
         .unwrap_or(DEFAULT_BLOCKS);
-    let mut fs = MinixFs::new(total_blocks, INODES);
+    let inodes_env = std::env::var("MINIXFS_INODES").ok();
+    let inodes = inode_count(inodes_env.as_deref());
+    let mut fs = MinixFs::new(total_blocks, inodes);
 
     let root_zone = fs.create_directory(ROOT_INODE, ROOT_INODE);
     let bin_zone = fs.add_directory(root_zone, "bin");
@@ -581,28 +613,32 @@ pub fn build_minixfs(files: &[(&'static str, Vec<u8>)]) -> Vec<u8> {
         0
     };
 
+    // Directories a file may name beyond the fixed set above. The standard image
+    // never needs one, so its layout and inode numbers are unchanged; a toolchain
+    // tree (`/usr/include/...`) does.
+    let mut dirs: HashMap<String, u32> = HashMap::new();
+    for (name, zone) in [
+        ("bin", bin_zone),
+        ("sbin", sbin_zone),
+        ("etc", etc_zone),
+        ("lib", lib_zone),
+        ("libexec", libexec_zone),
+    ] {
+        if zone != 0 {
+            dirs.insert(format!("/{name}"), zone);
+        }
+    }
+
     for (dest, data) in files {
         if data.is_empty() {
             continue;
         }
-        let bin_name = Path::new(dest).file_name().unwrap().to_str().unwrap();
-        // String match, not Path::parent(): on Windows a POSIX-style dest
-        // ("MINIXFS_EXTRA=/bin/big=..." through MSYS) can parse to a
-        // Windows root-relative path whose parent() is not "/bin".
-        let parent_zone = if dest.starts_with("/bin/") {
-            bin_zone
-        } else if dest.starts_with("/sbin/") {
-            sbin_zone
-        } else if dest.starts_with("/etc/") {
-            etc_zone
-        } else if dest.starts_with("/lib/") {
-            lib_zone
-        } else if dest.starts_with("/libexec/") {
-            libexec_zone
-        } else {
-            root_zone
+        let components: Vec<&str> = dest.split('/').filter(|s| !s.is_empty()).collect();
+        let Some((name, parents)) = components.split_last() else {
+            continue;
         };
-        fs.add_file(parent_zone, bin_name, data);
+        let parent_zone = ensure_dir(&mut fs, root_zone, &mut dirs, parents);
+        fs.add_file(parent_zone, name, data);
     }
 
     // Data files (passwd, root-only secret) with explicit mode/owner.
@@ -726,6 +762,26 @@ mod tests {
     fn a_payload_bigger_than_the_inode_table_is_refused() {
         let files = named_files(INODES as usize + 8);
         let _ = build_minixfs(&files);
+    }
+
+    #[test]
+    fn a_nested_destination_creates_each_parent_once() {
+        let mut fs = MinixFs::new(2048, INODES);
+        let root = fs.create_directory(ROOT_INODE, ROOT_INODE);
+        let mut dirs = HashMap::new();
+        let usr = ensure_dir(&mut fs, root, &mut dirs, &["usr"]);
+        let include = ensure_dir(&mut fs, root, &mut dirs, &["usr", "include"]);
+        let again = ensure_dir(&mut fs, root, &mut dirs, &["usr"]);
+        assert_eq!(usr, again);
+        assert_ne!(usr, include);
+        assert_eq!(dirs.len(), 2);
+    }
+
+    #[test]
+    fn the_inode_count_defaults_and_parses() {
+        assert_eq!(inode_count(None), INODES);
+        assert_eq!(inode_count(Some("4096")), 4096);
+        assert_eq!(inode_count(Some("nonsense")), INODES);
     }
 
     #[test]
