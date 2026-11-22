@@ -22,12 +22,16 @@ toolchain. `.notes/wayland.md` §6.10 is the design; these are the recipes and t
   headers the client compiles against) from the `mesa-<pin>` release instead of
   building them, the way `just fetch-stage1` installs the toolchain. This is the
   cheap path CI and dev machines use; `just build-mesa` stays authoritative.
-- **The pin is `tools/mesa_pin.py`.** It holds the Mesa and libdrm tags/commits;
-  the release tag is derived from the commit pair, so an artifact can only match
-  the pinned sources. `.github/workflows/mesa-release.yml` builds and publishes a
-  pin's nine DSOs per arch once, `ci.yml`'s `mesa-pin` job decides whether that
-  is needed, and only a pin bump (or a `cc-dso-minix.py` change) triggers a
-  rebuild — same shape as the stage1/toolchain-release pair.
+- **The pin is `tools/pins.ini`.** The Mesa and libdrm tags/commits and the
+  build config live there, and `crates/xtask/src/pin.rs` (with the same format in
+  `tools/pin.sh`) derives the release tag from them, the `rust` gitlink and the
+  committed `tools/c-include` tree, so an artifact can only match the sources and
+  the headers its DSOs were compiled against. A `struct` whose shape changes in
+  `tools/c-include` is therefore an ABI change that rebuilds the DSOs by itself.
+  `.github/workflows/mesa-release.yml` builds and publishes a pin's nine DSOs per
+  arch once, and `ci.yml`'s `mesa-pin` job decides whether that is needed, so only
+  a tag that has no release yet triggers a rebuild, the same shape as the
+  stage1/toolchain-release pair.
 - `just libcxx <arch>` — builds libc++/libc++abi as one static `libstdc++.a`
   (`target/cxx/<arch>/minix-runtime/`), from `cargo xtask build libcxx` and the
   cross file `cargo xtask build libcxx-toolchain` writes. Mesa is C++ (its GLSL

@@ -3,7 +3,10 @@
 //! The values live in `tools/pins.ini`, and the release tag includes the `rust`
 //! gitlink (`git rev-parse HEAD:rust`): a fork bump can change the target ABI, so an
 //! artifact built before it must not be handed out for the new one. That is what
-//! makes a fork bump rebuild rather than ship a stale binary.
+//! makes a fork bump rebuild rather than ship a stale binary. The Mesa tag also
+//! includes the `tools/c-include` tree its DSOs compile against, for the same reason:
+//! a struct whose shape changes there changes the ABI of every shared object that
+//! includes the header.
 //!
 //! `tools/pin.sh` prints the same fields for the CI jobs that only decide whether a
 //! release has to be built. Those jobs check out with `submodules: false`, and
@@ -52,36 +55,49 @@ impl Pins {
     }
 }
 
-/// The commit the `rust` submodule pins, or an error naming the failure.
+/// `git rev-parse <spec>` in `root`, as a full object id.
 ///
-/// Reading the gitlink rather than `git -C rust rev-parse HEAD` works whether or
-/// not the submodule is checked out, which is what lets a read-only `*-pin` job
-/// resolve a tag without fetching its history.
-pub fn rust_gitlink(root: &Path) -> io::Result<String> {
+/// Reading a gitlink rather than the checkout works whether or not a submodule is
+/// present, which is what lets a read-only `*-pin` job resolve a tag without
+/// fetching history. Reading a *committed* tree rather than the working files
+/// also keeps the id identical in every checkout, whatever its line endings.
+fn rev_parse(root: &Path, spec: &str, what: &str) -> io::Result<String> {
     let output = Command::new("git")
-        .args(["rev-parse", "HEAD:rust"])
+        .args(["rev-parse", spec])
         .current_dir(root)
         .output()
         .map_err(|error| {
-            io::Error::new(
-                error.kind(),
-                format!("cannot read the pinned `rust` commit: {error}"),
-            )
+            io::Error::new(error.kind(), format!("cannot read the {what}: {error}"))
         })?;
     if !output.status.success() {
         return Err(io::Error::other(format!(
-            "`git rev-parse HEAD:rust` failed: {}",
+            "`git rev-parse {spec}` failed: {}",
             String::from_utf8_lossy(&output.stderr).trim()
         )));
     }
-    let commit = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    if commit.len() < 12 {
+    let id = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if id.len() < 12 {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
-            format!("`HEAD:rust` is not a commit: {commit:?}"),
+            format!("`{spec}` is not an object id: {id:?}"),
         ));
     }
-    Ok(commit)
+    Ok(id)
+}
+
+/// The commit the `rust` submodule pins, or an error naming the failure.
+pub fn rust_gitlink(root: &Path) -> io::Result<String> {
+    rev_parse(root, "HEAD:rust", "pinned `rust` commit")
+}
+
+/// The `tools/c-include` tree the Mesa DSOs are compiled against.
+///
+/// The DSOs include these headers and link the dynamic `libc.so`, so one field's
+/// shape in a struct they use is an ABI for them: the pinned artifact has to be
+/// rebuilt when this tree moves, or it agrees with a libc it was not built for
+/// (the 112-byte `struct stat` overflowed a pinned Mesa's 88-byte one).
+pub fn headers_gitlink(root: &Path) -> io::Result<String> {
+    rev_parse(root, "HEAD:tools/c-include", "pinned C headers tree")
 }
 
 /// The bash release tag: the bash commit and the toolchain pin.
@@ -90,13 +106,15 @@ pub fn bash_tag(root: &Path) -> io::Result<String> {
     Ok(bash_tag_for(pins.get("bash.commit")?, &rust_gitlink(root)?))
 }
 
-/// The Mesa release tag: both commits, the build config and the toolchain pin.
+/// The Mesa release tag: both commits, the build config, the C header tree its
+/// DSOs compile against, and the toolchain pin.
 pub fn mesa_tag(root: &Path) -> io::Result<String> {
     let pins = load(root)?;
     Ok(mesa_tag_for(
         pins.get("mesa.commit")?,
         pins.get("drm.commit")?,
         pins.get("mesa.build_config")?,
+        &headers_gitlink(root)?,
         &rust_gitlink(root)?,
     ))
 }
@@ -105,13 +123,20 @@ pub(crate) fn bash_tag_for(bash: &str, rust: &str) -> String {
     format!("bash-{}-r{}", short(bash), short(rust))
 }
 
-pub(crate) fn mesa_tag_for(mesa: &str, drm: &str, config: &str, rust: &str) -> String {
+pub(crate) fn mesa_tag_for(
+    mesa: &str,
+    drm: &str,
+    config: &str,
+    headers: &str,
+    rust: &str,
+) -> String {
     format!(
-        "mesa-{}-{}-r{}-c{}",
+        "mesa-{}-{}-r{}-c{}-h{}",
         short(mesa),
         short(drm),
         short(rust),
-        config
+        config,
+        short(headers)
     )
 }
 
@@ -167,10 +192,20 @@ mod tests {
                 "06f9e28304d5d3f109c33535c1c25b9df5769af2",
                 "a8e5e10a873f67f557dc70e5407af4553f35edd9",
                 "gbm",
+                "9f1c0f6b2a4d8e3a6c5b1d7f0e2a9c4b6d8e0f1a",
                 "0123456789abcdef"
             ),
-            "mesa-06f9e28304d5-a8e5e10a873f-r0123456789ab-cgbm"
+            "mesa-06f9e28304d5-a8e5e10a873f-r0123456789ab-cgbm-h9f1c0f6b2a4d"
         );
+    }
+
+    /// A header whose struct changes shape is an ABI change for every DSO that
+    /// includes it, so the tag has to separate the artifacts on either side.
+    #[test]
+    fn a_mesa_tag_moves_with_the_c_header_tree() {
+        let before = mesa_tag_for("m", "d", "gbm", "1111111111111111", "r");
+        let after = mesa_tag_for("m", "d", "gbm", "2222222222222222", "r");
+        assert_ne!(before, after);
     }
 
     #[test]

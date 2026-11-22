@@ -30,8 +30,10 @@
 # `mesa-<pin>` release `mesa-release.yml` publishes for the pair
 # `tools/pins.ini` pins. Its `mesa-pin`/`mesa` pair is the `rust-pin`/`stage1`
 # pattern again: `just fetch-mesa <arch>` downloads the arch's DSOs, and a Mesa
-# build runs only when the pin has no release yet (a pin bump, a new
-# `cargo xtask cc dso` feature, or a manual `mesa release` run).
+# build runs only when the tag has no release yet. The tag covers the Mesa and
+# libdrm commits, the toolchain pin, the build config and the `tools/c-include`
+# tree the DSOs compile against, so a pin bump, a header ABI change or a manual
+# `mesa release` run rebuilds them.
 #
 # The `bash` job follows the same shape for the shell, from the `bash-<pin>`
 # release `bash-release.yml` publishes for the commit `tools/pins.ini` pins

@@ -13,6 +13,10 @@
 # `crates/xtask` cannot compare them, because `sh` is not on a Windows runner's
 # PATH.
 #
+# The Mesa tag carries the `tools/c-include` tree as well as the pin: its DSOs
+# compile against those headers and link `libc.so` dynamically, so a struct whose
+# shape changes there is an ABI change and the pinned artifact must be rebuilt.
+#
 #   tools/pin.sh bash [tag|describe|commit]
 #   tools/pin.sh mesa [tag|mesa-tag|mesa-commit|drm-tag|drm-commit|build-config]
 
@@ -37,6 +41,9 @@ short() {
 # The commit the `rust` submodule pins. Read from the tree, not from the submodule,
 # so it works in a checkout that never fetched it.
 rust=$(git -C "$root" rev-parse HEAD:rust | short)
+# The C headers the Mesa DSOs are compiled against, from the committed tree so the
+# id does not depend on a checkout's line endings.
+headers=$(git -C "$root" rev-parse HEAD:tools/c-include | short)
 
 kind=${1:-}
 field=${2:-tag}
@@ -46,11 +53,12 @@ case "$kind:$field" in
     bash:describe) pin bash.describe ;;
     bash:commit) pin bash.commit ;;
     mesa:tag)
-        printf 'mesa-%s-%s-r%s-c%s\n' \
+        printf 'mesa-%s-%s-r%s-c%s-h%s\n' \
             "$(pin mesa.commit | short)" \
             "$(pin drm.commit | short)" \
             "$rust" \
-            "$(pin mesa.build_config)"
+            "$(pin mesa.build_config)" \
+            "$headers"
         ;;
     mesa:mesa-tag) pin mesa.tag ;;
     mesa:mesa-commit) pin mesa.commit ;;
