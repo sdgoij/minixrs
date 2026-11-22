@@ -152,6 +152,24 @@ are arch-specific, `[env]` is tooling/platform, not kernel.
     needs (a second VFS thread, or VFS answering the ioctl itself as it does for the socket ones)
     is a decision for whoever first needs a file-backed block device.
 
+86. **The in-guest clang cannot find its own executable with canonical prefixes (found
+    2026-11-22, separated from item 85).** `/proc/self/exe` now exists, but with canonical
+    prefixes (the default) clang's driver calls `llvm::sys::fs::getMainExecutable`, and LLVM's
+    Unix implementation answers only for hosts it has a branch for: the `/proc/self/exe` read
+    sits under `__linux__`, which the `-none-elf` triple does not define, and the `dladdr`
+    fallback has no static-executable answer. It therefore returns `""`, the cc1 program name
+    comes out empty, and every external compile fails with ENOENT. Measured in the guest with
+    `-###`: the cc1 job is `"" -cc1 …`, and `-ccc-install-dir` does not fill
+    `ClangExecutable`, so it cannot repair that name either.
+
+    `tools/clang-wrapper.c` therefore passes `-no-canonical-prefixes`, which takes `argv[0]`
+    verbatim; with that the toolchain works end to end (`just test-toolchain-x86`). Next: a
+    driver built with a minix branch (an `#elif` reading `/proc/self/exe` in
+    `llvm/lib/Support/Unix/Path.inc`, keyed on a macro the toolchain build sets), or a
+    `realpath(argv[0])` fallback this port satisfies. Until then any other program that
+    canonicalizes its own path through LLVM's helper is exposed.
+    (`.notes/toolchain_in_os.md`, `tools/clang-wrapper.c`)
+
 ---
 
 ## RISC-V (`[riscv]`)
@@ -247,6 +265,34 @@ are arch-specific, `[env]` is tooling/platform, not kernel.
     to be the wrong pipe end (the first stage's, not the middle stage's), which would make `cat`
     in the middle pass because its write happens before the mix-up can be observed. The fd dump
     above refutes that: the last stage's stdin is the second pipe's read end.
+
+84. **`chmod -R` cannot reach the entries of the directory it just changed (riscv64 only, found
+    2026-11-22).** In the guest, as `uid=0(root)` and owner of the tree:
+
+    ```
+    coreutils mkdir d4
+    coreutils touch d4/f4
+    coreutils chmod 700 d4
+    coreutils stat d4/f4          # works
+    coreutils chmod 700 d4/f4     # works
+    coreutils chmod -R 700 d4     # chmod: cannot access 'd4/f4': Permission denied
+    ```
+
+    So resolving a path through the 0700 directory, `stat`ting the child, and a non-recursive
+    `chmod` on it all work; only the recursive walk fails. `coreutils ls d3` after
+    `chmod 700 d3` works too, so the `x` bit is not being ignored. The same steps pass in
+    `test-coreutils-minix` on x86_64 and aarch64, so whatever differs is in the riscv64 VFS
+    path the walker uses rather than in the mode check itself. The first thing to compare is
+    how the walk reaches each entry: uutils' recursive `chmod` descends through a directory
+    handle (`openat`/`fstatat`, with `AT_SYMLINK_NOFOLLOW`), which a plain path lookup does
+    not, and that is the difference the three commands above already isolate.
+
+    Found while validating item 83, and it predates that fix: the same failure occurs with the
+    old 4096-page cache. It blocks `just test-coreutils-minix riscv64` at step 45, and so
+    `just test-arches`, on riscv64. The same gate can also fail earlier at the `tee` step with
+    item 79's `EPIPE`.
+    (`crates/servers/src/vfs/call.rs`, `crates/userland/src/bin/coreutils*`,
+    `tools/smoke/coreutils-minix.tsv`)
 
 ---
 
@@ -3022,6 +3068,70 @@ from resolving, is under `# Resolved issues`.
     `just test-qemu` and `just test-procfs` on x86_64.
     (`crates/fs/src/mfs/path.rs`, `crates/boot-image/src/minixfs.rs`,
     `tools/smoke/coreutils-minix.tsv`)
+
+83. **~~The cross-built LLD links a program whose loadable text differs from the host LLD's, and
+    the result hangs~~**: FIXED (2026-11-22). The guest's `ld.lld` 23 produced a file with the same
+    size, ELF header and program headers as the host's link of the same four inputs, but only the
+    first 19 pages (`0x13000`) and the final page of the file held the linker's bytes; the 126
+    pages between them were zeros. The program therefore hung in `_start`.
+
+    The loss was not in the link. The guest's `/tmp/a` was extracted over the console as base64
+    (md5 verified on both sides) and diffed against the host link, which reproduces the cited
+    `20b86186…` for the first segment byte for byte. In the same image, `write(2)` of the whole
+    596,536 bytes round-trips, a `MAP_SHARED` mapping filled with those exact bytes by `memcpy`
+    round-trips, a 3.6 MiB read-only mapping of `libc.a` matches `read()` page for page, and the
+    result does not depend on `close`/`rename` ordering, on `-m 512M` versus `-m 1024M`, or on the
+    run (two links in one boot are identical). So the primitive was sound and the linker's output
+    mapping was not reaching the file.
+
+    The cause is VM's file-page cache. `vm/writeback.rs` writes a released writable `MAP_SHARED`
+    region back by scanning the *cache*, and `vm/cache.rs` was a fixed 4096-entry (16 MiB) table
+    whose entries are evictable only when `pb_count <= 1 && !dirty`, i.e. never while a process
+    maps them. When the table is full of such pages, `insert_entry` returns without caching the
+    new page at all, and the fault path maps it privately: the stores land in a frame no writeback
+    can find, and the file keeps its old (zero) bytes with no error. `ld.lld` is a 54 MiB binary
+    that also reads a 3.6 MiB `libc.a`, so its own exec pages filled the table and the output
+    mapping's pages beyond the first 19 could not be admitted. That is exactly the observed
+    shape: a correct prefix, zeros after it, and a final page that got in when a slot freed.
+
+    Raising `CACHE_CAPACITY` to 32768 (128 MiB) makes the guest link byte-identical to the host's
+    (`c8047eec200383090e3cf5479b981f63`) and `/tmp/hello` prints `hello from C`. MINIX C has no
+    ceiling here at all: its cache entries come from `malloc` and are bounded only by memory. The
+    invariant is now written down at the constant, and an admission that cannot be satisfied is
+    reported once (`VM: cache is full, a file page is not cached`) instead of silently dropping a
+    write, which is what let this look like a linker bug.
+
+    Remaining risk, deliberately recorded: the writeback still enumerates only cached pages, so a
+    working set that exhausts even this ceiling loses the same way, now visibly. The end state is
+    a cache that grows with demand, or a writeback that enumerates the retiring region's page
+    tables instead of the cache. (`crates/servers/src/vm/{cache,writeback}.rs`,
+    `.notes/toolchain_in_os.md`, `target/toolchain/x86` for the staged root.)
+
+85. **~~A program cannot learn its own executable's path~~**: `/proc/self/exe` and
+    `/proc/<pid>/exe` exist (2026-11-22). PM copies the path `execve` was given into
+    `MProc.mp_exec` (via `sys_vircopy` from the caller, before the exec commits) and hands it
+    out in the `SI_PROC_TAB` record as `ProcTabEntry.exec`. procfs serves
+    `/proc/<pid>/exe` as a symlink to it, answering `ENOENT` when PM has none (a boot
+    process), and `/proc/self` as a symlink to the caller's own `/proc/<pid>`, built from the
+    endpoint VFS passes with each lookup and readlink. VFS now carries that endpoint in
+    `REQ_LOOKUP` (payload[28]) and `REQ_RDLINK` (payload[24]).
+
+    Two pieces of vtreefs were needed and are general, not procfs-specific. An absolute
+    symlink target found *mid-path* now writes the expanded path back through the lookup
+    grant and answers `ESYMLINK` with the resume offset and the symlink count, which is what
+    lets `/proc/self/exe` restart from the root; and the hook's own errno is propagated
+    instead of every failure being folded into `EINVAL`. The rdlink hook also refreshes PM's
+    process table first, because `self` is a static root entry: its lookup is a hit, so no
+    lookup miss would ever have fetched the table the target depends on.
+
+    Gate: `just test-procfs <arch>` now requires `self=ok exe=ok name=ok` (the probe reads
+    `/proc/self`, `/proc/self/exe` and `/proc/self/status`), and the guest toolchain reads
+    `/proc/self/exe` in `just test-toolchain-x86`. PM also sets `mp_name` from the recorded
+    path, as C takes it from VFS's `progname`, so `status`'s `Name:` follows the program instead
+    of the name inherited at fork. What this does *not* fix is clang's own lookup: LLVM's
+    `getMainExecutable` does not consult `/proc/self/exe` for this target, which item 86
+    records. (`crates/servers/src/{pm.rs,vfs/request.rs}`, `crates/fs/src/procfs/`,
+    `crates/libs/src/vtreefs/mod.rs`, `.notes/procfs.md`)
 
 ---
 
