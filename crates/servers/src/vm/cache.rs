@@ -29,9 +29,19 @@ use core::cell::UnsafeCell;
 
 use crate::vm::pb;
 
-/// Number of cached 4 KiB pages (16 MiB of file data). Sized from available
-/// RAM; the exec working set (a few MiB of binaries) fits comfortably.
-pub const CACHE_CAPACITY: usize = 4096;
+/// Number of cached 4 KiB pages (128 MiB of file data).
+///
+/// This is not a performance knob. A writable `MAP_SHARED` page is written back to
+/// its file by scanning the cache (`vm/writeback.rs`), and an entry is only evictable
+/// once no mapping holds its frame. So a file page a process maps and writes must fit
+/// here: if the table is full of pages that cannot be evicted, the new page is not
+/// cached at all, its stores stay in a frame nothing can find, and the file keeps its
+/// old bytes with no error anywhere. 16 MiB was small enough that the in-guest `ld.lld`
+/// (a 54 MiB binary that also reads a 3.6 MiB `libc.a`) filled the table before it
+/// reached its output file, so the linked program was mostly zeros (KNOWN_ISSUES.md
+/// item 83). MINIX C has no ceiling of its own here: its cache entries come from
+/// `malloc` and are bounded only by memory. Sized for a toolchain's mapped working set.
+pub const CACHE_CAPACITY: usize = 32768;
 
 /// The port's "no device" sentinel, which is **not** 0. C's `NO_DEV` is `0` (`cache.c`),
 /// so a guard copied from C's value is wrong here: the port's sentinel is `0xffff`
@@ -338,6 +348,7 @@ impl<const N: usize> CacheTable<N> {
         // its own reference on the frame.
         if self.count == N {
             let Some(victim) = self.lru_oldest_evictable() else {
+                Self::report_uncached();
                 return;
             };
             let victim_pb = self.slots[victim].as_ref().expect("victim slot live").pb;
@@ -355,6 +366,23 @@ impl<const N: usize> CacheTable<N> {
         self.slots[slot] = Some(e);
         self.count += 1;
         self.lru_push(slot);
+    }
+
+    /// A page that cannot enter the cache is reported once.
+    ///
+    /// For an ordinary read-only page this is a performance loss only, but for a
+    /// writable `MAP_SHARED` page it is a correctness failure: the writeback scans the
+    /// cache, so the store never reaches the file and nothing else records an error.
+    /// Staying silent is what let `KNOWN_ISSUES.md` item 83 look like a linker bug.
+    fn report_uncached() {
+        #[cfg(target_os = "minix")]
+        {
+            use core::sync::atomic::{AtomicBool, Ordering};
+            static REPORTED: AtomicBool = AtomicBool::new(false);
+            if !REPORTED.swap(true, Ordering::Relaxed) {
+                minix_rt::diag_write(b"VM: cache is full, a file page is not cached\n");
+            }
+        }
     }
 
     /// Mark every cached file page of `(dev, ino)` whose offset lies in
@@ -567,6 +595,25 @@ pub fn cache_len() -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The ceiling is a correctness bound, not a tuning knob.
+    ///
+    /// A writable `MAP_SHARED` page only reaches its file through this table, and an
+    /// entry that is mapped cannot be evicted, so the table has to hold a process's
+    /// whole mapped file working set. The in-guest toolchain is the largest case in
+    /// the tree: an 87 MiB `clang` or a 54 MiB `ld.lld`, plus a 3.6 MiB `libc.a` and
+    /// libc++, is 20,000 to 25,000 pages. At 4096 (16 MiB) the linker's output lands
+    /// in frames no writeback can find (`KNOWN_ISSUES.md` item 83).
+    #[test]
+    fn the_file_cache_holds_a_toolchains_working_set() {
+        const PAGE_SIZE: usize = 4096;
+        const LARGEST_TOOL: usize = 87 * 1024 * 1024;
+        let cached = CACHE_CAPACITY * PAGE_SIZE;
+        assert!(
+            cached >= LARGEST_TOOL,
+            "the cache is {cached} bytes of file pages; the toolchain's largest binary alone is {LARGEST_TOOL}"
+        );
+    }
 
     /// A frame no other test uses. The refcount table is global and the suites
     /// run in parallel, so the tests cannot share a frame.
