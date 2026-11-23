@@ -173,6 +173,13 @@ struct Driver<'a> {
     pace: Duration,
 }
 
+/// What a poll of the transcript says about the step in flight.
+enum Answer {
+    Matched,
+    Finished,
+    Waiting,
+}
+
 impl Driver<'_> {
     fn drive(&mut self, steps: &[Step]) -> Verdict {
         if !self.wait_prompt(0) {
@@ -210,9 +217,9 @@ impl Driver<'_> {
             // No read-back, so the echoed command is the evidence. It is matched
             // at the end of its line: the prompt in front of the echo was printed
             // before this step's anchor.
-            let pattern = format!("{}[[:space:]]*$", step.send);
+            let pattern = format!("{}[[:space:]]*$", regex_lite::escape(&step.send));
             let re = compile(&pattern)?;
-            if !self.wait_lines(at, &re) {
+            if !self.wait_answer(at, &re, &step.send, false) {
                 return Err(format!("was not accepted: sent '{}'", step.send));
             }
         } else {
@@ -220,7 +227,7 @@ impl Driver<'_> {
             // and the echoed text contains the expectation for many steps.
             let pattern = format!("^{}[[:space:]]*$", step.expect);
             let re = compile(&pattern)?;
-            if !self.wait_lines(at, &re) {
+            if !self.wait_answer(at, &re, &step.send, true) {
                 return Err(format!(
                     "did not answer: sent '{}', expected the line '{}'",
                     step.send, step.expect
@@ -230,8 +237,10 @@ impl Driver<'_> {
         eprintln!("  ok  {}", step.send);
 
         // A step that answered is not yet proof the next one will be read: input
-        // sent before the shell is back at its prompt is dropped.
-        if !self.wait_prompt(at) {
+        // sent before the shell is back at its prompt is dropped. The prompt has
+        // to be after this command's echo: the prompt in front of it was printed
+        // before the step and accepting it lets the next step race the command.
+        if !self.wait_prompt_after(at, &step.send) {
             return Err("answered, but the shell did not come back to a prompt".to_string());
         }
         Ok(())
@@ -279,6 +288,19 @@ impl Driver<'_> {
     /// deadline with nothing to show. A submitted line has a newline after its
     /// echo, so resend the terminator for one that does not.
     fn ensure_submitted(&mut self, anchor: usize, sent: &str) {
+        // Wait for the echo before touching the terminator. A newline sent
+        // while the shell is still printing the line is an empty command, and
+        // four of them can be consumed before the echo even arrives.
+        let echoed_by = Instant::now() + Duration::from_secs(2);
+        while Instant::now() < echoed_by {
+            if self
+                .guest
+                .with_transcript(|out| contains(window(out, anchor), sent.as_bytes()))
+            {
+                break;
+            }
+            thread::sleep(POLL);
+        }
         for _ in 0..ATTEMPTS {
             let submitted = self
                 .guest
@@ -291,8 +313,63 @@ impl Driver<'_> {
         }
     }
 
+    /// Wait for `pattern`, but stop when the shell's prompt comes back first.
+    ///
+    /// A command's output precedes the prompt, so a prompt with no matching line
+    /// means the command finished without producing what the step asked for. The
+    /// step used to wait out the whole scenario budget in that case, which made a
+    /// one-line diagnostic look like a two-hour hang.
+    fn wait_answer(&self, from: usize, pattern: &Regex, sent: &str, after_echo: bool) -> bool {
+        loop {
+            let answer = self.guest.with_transcript(|out| {
+                let window = window(out, from);
+                let answered = if after_echo {
+                    line_matches(output_window(out, from, sent), pattern)
+                } else {
+                    line_matches(window, pattern)
+                };
+                if answered {
+                    Answer::Matched
+                } else if prompt_after(window, sent.as_bytes()) {
+                    Answer::Finished
+                } else {
+                    Answer::Waiting
+                }
+            });
+            match answer {
+                Answer::Matched => return true,
+                Answer::Finished => return false,
+                Answer::Waiting => {}
+            }
+            if Instant::now() >= self.deadline {
+                return self
+                    .guest
+                    .with_transcript(|out| line_matches(window(out, from), pattern));
+            }
+            thread::sleep(POLL);
+        }
+    }
+
     fn wait_prompt(&self, from: usize) -> bool {
         self.wait_lines(from, prompt())
+    }
+
+    /// Wait for the prompt that follows this step's command echo.
+    fn wait_prompt_after(&self, from: usize, sent: &str) -> bool {
+        loop {
+            if self
+                .guest
+                .with_transcript(|out| prompt_after(window(out, from), sent.as_bytes()))
+            {
+                return true;
+            }
+            if Instant::now() >= self.deadline {
+                return self
+                    .guest
+                    .with_transcript(|out| prompt_after(window(out, from), sent.as_bytes()));
+            }
+            thread::sleep(POLL);
+        }
     }
 
     fn wait_lines(&self, from: usize, pattern: &Regex) -> bool {
@@ -361,8 +438,44 @@ fn line_submitted(window: &[u8], sent: &[u8]) -> bool {
     }
 }
 
+/// Whether the shell's prompt appears after the last echo of `sent`.
+///
+/// The prompt is printed after the command's output, so it marks the command as
+/// finished even when no line matched the step's expectation. A `#` line before
+/// the echo is the previous prompt and is not part of the answer. Later output
+/// (a server's start-up line, for example) does not undo a prompt that already
+/// appeared, so this is any matching line, not the last one.
+fn prompt_after(window: &[u8], sent: &[u8]) -> bool {
+    if sent.is_empty() {
+        return false;
+    }
+    let Some(at) = window.windows(sent.len()).rposition(|window| window == sent) else {
+        return false;
+    };
+    window[at + sent.len()..]
+        .split(|&byte| byte == b'\n')
+        .any(|line| line_matches(line, prompt()))
+}
+
 fn window(out: &[u8], from: usize) -> &[u8] {
     &out[from.min(out.len())..]
+}
+
+/// What the command printed, after its echo.
+///
+/// Anchoring the expectation at the echo keeps the previous prompt out of the
+/// window: the shell can still be writing that prompt's terminator when the
+/// step starts, and a blank line from it satisfies a `^$` expectation before
+/// the command has run.
+fn output_window<'a>(out: &'a [u8], from: usize, sent: &str) -> &'a [u8] {
+    let rest = window(out, from);
+    match rest
+        .windows(sent.len())
+        .rposition(|window| window == sent.as_bytes())
+    {
+        Some(at) => &rest[at + sent.len()..],
+        None => rest,
+    }
 }
 
 fn report(log: &Path, verdict: &str, detail: &str, transcript: &[u8]) {
@@ -394,6 +507,43 @@ mod tests {
         );
         assert!(!line_submitted(b"# other", b"echo hi"));
         assert!(!line_submitted(b"anything", b""), "an empty send is never submitted");
+    }
+
+    #[test]
+    fn a_write_ignores_regex_syntax_in_the_command() {
+        let re = compile(&format!(
+            "{}[[:space:]]*$",
+            regex_lite::escape("clang++ -c x.cpp")
+        ))
+        .expect("the escaped echo is a valid pattern");
+        assert!(line_matches(b"# clang++ -c x.cpp\r\n", &re));
+    }
+
+    #[test]
+    fn an_expectation_is_read_after_the_echo() {
+        let transcript = b"#\r\n# cmd\r\noutput\r\n# ";
+        assert_eq!(output_window(transcript, 0, "cmd"), b"\r\noutput\r\n# ");
+        assert_eq!(
+            output_window(b"# cmd\r\n", 0, "missing"),
+            b"# cmd\r\n",
+            "a command that was not echoed keeps the whole window"
+        );
+    }
+
+    #[test]
+    fn a_prompt_after_the_echo_finishes_the_step() {
+        assert!(prompt_after(b"# echo hi\r\noutput\r\n# ", b"echo hi"));
+        assert!(prompt_after(b"# echo hi\r\n#", b"echo hi"));
+        assert!(!prompt_after(b"# echo hi\r\noutput\r\n", b"echo hi"));
+        assert!(
+            !prompt_after(b"# \r\n# echo hi\r\noutput\r\n", b"echo hi"),
+            "the prompt before the echo is not the answer"
+        );
+        assert!(
+            prompt_after(b"# echo hi\r\n# \r\nlater output\r\n", b"echo hi"),
+            "output after the prompt does not take the prompt back"
+        );
+        assert!(!prompt_after(b"# echo hi", b"echo hi"));
     }
 
     #[test]
