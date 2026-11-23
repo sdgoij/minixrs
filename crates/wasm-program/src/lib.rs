@@ -214,7 +214,7 @@ fn forktest() -> i32 {
 pub extern "C" fn minix_program_main(argc: i32, argv: u32) {
     let base = argv_area_ptr();
     if argc < 0 || argv != base + 4 || !blob_is_sane(base, argc as u32) {
-        userland::write_err(b"program: malformed argv blob\r\n");
+        userland::write_err(b"program: malformed argv blob\n");
         minix_rt::exit(126);
     }
 
@@ -247,14 +247,14 @@ pub extern "C" fn minix_program_main(argc: i32, argv: u32) {
         Some(name) => {
             userland::write_err(b"program: no such command: ");
             userland::write_err(name.as_bytes());
-            userland::write_err(b"\r\n");
+            userland::write_err(b"\n");
             127
         }
         // Unreachable while `blob_is_sane` refuses an empty blob, and handled anyway:
         // indexing `args[0]` here would be a panic on wasm, which is a trap the harness
         // would report as this program faulting.
         None => {
-            userland::write_err(b"program: empty argv\r\n");
+            userland::write_err(b"program: empty argv\n");
             127
         }
     };

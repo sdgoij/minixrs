@@ -1808,7 +1808,7 @@ check(
 // and the tty wrote them with its own write(1) -- so both the count and the line are
 // evidence, and neither alone would be.
 const VFS_LINE = 'init: stdio is VFS-routed';
-const VFS_LINE_BYTES = VFS_LINE.length + 2; // + CRLF
+const VFS_LINE_BYTES = VFS_LINE.length + 1; // + LF
 const sawVfsLine = timeline.some((l) => l.includes(VFS_LINE));
 check(
   'a write from INIT reached the console through VFS and the tty',

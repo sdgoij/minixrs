@@ -572,7 +572,7 @@ fn init_report(idx: usize, value: i64) {
 /// is what the harness checks.
 #[unsafe(no_mangle)]
 pub extern "C" fn minix_init() {
-    userland::write_out(b"init: booting MINIX/Rust\r\n");
+    userland::write_out(b"init: booting MINIX/Rust\n");
     // The pid line in one write, and `getpid` *before* it: the console is shared, and a line whose
     // pieces straddle a blocking syscall can be split by whoever else runs while it waits. `getpid`
     // is a SENDREC to PM, so this is exactly such a wait — and when the input server joined the boot
@@ -600,9 +600,9 @@ pub extern "C" fn minix_init() {
     init_report(0, fd);
     userland::write_out(b"init: open(/dev/console) -> ");
     write_i32(fd as i32);
-    userland::write_out(b"\r\n");
+    userland::write_out(b"\n");
     if fd < 0 {
-        userland::write_out(b"init: no console, exiting\r\n");
+        userland::write_out(b"init: no console, exiting\n");
         minix_rt::exit(1);
     }
     let fd = fd as i32;
@@ -616,9 +616,9 @@ pub extern "C" fn minix_init() {
     init_report(1, -dup_err as i64);
     userland::write_out(b"init: dup2 onto 0..2 -> ");
     write_i32(-dup_err);
-    userland::write_out(b"\r\n");
+    userland::write_out(b"\n");
     if dup_err != 0 {
-        userland::write_out(b"init: stdio not routed, exiting\r\n");
+        userland::write_out(b"init: stdio not routed, exiting\n");
         minix_rt::exit(1);
     }
 
@@ -634,12 +634,12 @@ pub extern "C" fn minix_init() {
     // process: it can only appear on the console if VFS routed it to the tty and the tty
     // wrote it. The explicit `write` is what puts a number in the report; `write_out`
     // after it is the same call a shell would make.
-    const VFS_LINE: &[u8] = b"init: stdio is VFS-routed\r\n";
+    const VFS_LINE: &[u8] = b"init: stdio is VFS-routed\n";
     let n = unsafe { minix_rt::write(1, VFS_LINE.as_ptr(), VFS_LINE.len()) };
     init_report(2, n);
     userland::write_out(b"init: VFS-routed write -> ");
     write_i32(n as i32);
-    userland::write_out(b"\r\n");
+    userland::write_out(b"\n");
 
     // init's last step is `exec("/bin/sh")`, and this is where M7a earns its keep: the
     // shell is a *module* the host instantiates into this slot, not a call to
@@ -666,6 +666,6 @@ pub extern "C" fn minix_init() {
     // hangs the host rather than failing (finding 12).
     userland::write_out(b"init: exec failed: err=");
     write_i32(ret);
-    userland::write_out(b"\r\n");
+    userland::write_out(b"\n");
     minix_rt::exit(1);
 }

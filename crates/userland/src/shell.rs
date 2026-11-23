@@ -131,7 +131,7 @@ fn sh_loop(_args: &[&str]) -> i32 {
                 Err(TokenizeError::UnmatchedQuote(q)) => {
                     write_err(b"sh: unexpected EOF while looking for matching `");
                     write_err(&[q]);
-                    write_err(b"'\r\n");
+                    write_err(b"'\n");
                     if editor_ok {
                         tty_set_raw(true);
                     }
@@ -247,7 +247,7 @@ fn write_dec(mut n: u32) {
 fn run_background(tokens: &[&str]) {
     let pid = minix_rt::fork();
     if pid < 0 {
-        write_err(b"sh: fork failed\r\n");
+        write_err(b"sh: fork failed\n");
         return;
     }
     if pid == 0 {
@@ -260,7 +260,7 @@ fn run_background(tokens: &[&str]) {
     add_job(pid);
     write_out(b"[");
     write_dec(pid as u32);
-    write_out(b"]\r\n");
+    write_out(b"]\n");
 }
 
 /// Like `run_segment`, but a single command runs in place (exec for
@@ -319,9 +319,9 @@ fn reap_jobs() {
             if status >= 128 && status < 256 {
                 write_out(b"terminated (signal ");
                 write_dec((status - 128) as u32);
-                write_out(b")\r\n");
+                write_out(b")\n");
             } else {
-                write_out(b"done\r\n");
+                write_out(b"done\n");
             }
         }
     }
@@ -1545,7 +1545,7 @@ fn run_pipeline(commands: &[ParsedCommand]) -> i32 {
         match minix_std::fs::pipe() {
             Ok((r, w)) => pipes[i] = lift_pipe_fds(r, w, i),
             Err(_) => {
-                write_err(b"sh: pipe failed\r\n");
+                write_err(b"sh: pipe failed\n");
                 return 1;
             }
         }
@@ -1555,7 +1555,7 @@ fn run_pipeline(commands: &[ParsedCommand]) -> i32 {
     for i in 0..n {
         let pid = minix_rt::fork();
         if pid < 0 {
-            write_err(b"sh: fork failed\r\n");
+            write_err(b"sh: fork failed\n");
             for &(r, w) in &pipes[..npipes] {
                 let _ = minix_std::fs::close(r);
                 let _ = minix_std::fs::close(w);
@@ -1568,7 +1568,7 @@ fn run_pipeline(commands: &[ParsedCommand]) -> i32 {
             if i > 0 {
                 let (r, _w) = pipes[i - 1];
                 if minix_std::fs::dup2(r, 0).is_err() {
-                    write_err(b"sh: dup2 failed\r\n");
+                    write_err(b"sh: dup2 failed\n");
                     minix_rt::exit(1);
                 }
                 unsafe { minix_rt::set_fd_vfs(0, 1) };
@@ -1576,7 +1576,7 @@ fn run_pipeline(commands: &[ParsedCommand]) -> i32 {
             if i + 1 < n {
                 let (_r, w) = pipes[i];
                 if minix_std::fs::dup2(w, 1).is_err() {
-                    write_err(b"sh: dup2 failed\r\n");
+                    write_err(b"sh: dup2 failed\n");
                     minix_rt::exit(1);
                 }
                 unsafe { minix_rt::set_fd_vfs(1, 1) };
@@ -1631,7 +1631,7 @@ fn run_command_inline(parsed: &ParsedCommand) -> i32 {
         set_redirect_fd(fd);
         if !is_builtin {
             if minix_std::fs::dup2(fd, 1).is_err() {
-                write_err(b"sh: dup2 failed\r\n");
+                write_err(b"sh: dup2 failed\n");
                 return 1;
             }
             unsafe { minix_rt::set_fd_vfs(1, 1) };
@@ -1648,7 +1648,7 @@ fn run_command_inline(parsed: &ParsedCommand) -> i32 {
     if path_len == 0 {
         write_err(b"sh: '");
         write_err(cmd.as_bytes());
-        write_err(b"' not found\r\n");
+        write_err(b"' not found\n");
         return 1;
     }
     // If this returns, exec failed; say what the kernel said.
@@ -1680,7 +1680,7 @@ fn run_parsed_command(parsed: &ParsedCommand) -> i32 {
 
     // `exit` returns a sentinel so the main loop can break out.
     if cmd == "exit" {
-        write_out(b"\r\n");
+        write_out(b"\n");
         return SH_EXIT;
     }
 
@@ -1692,7 +1692,7 @@ fn run_parsed_command(parsed: &ParsedCommand) -> i32 {
             // is never affected.
             let pid = minix_rt::fork();
             if pid < 0 {
-                write_err(b"sh: fork failed\r\n");
+                write_err(b"sh: fork failed\n");
                 return 1;
             }
             if pid == 0 {
@@ -1710,7 +1710,7 @@ fn run_parsed_command(parsed: &ParsedCommand) -> i32 {
                     // second fork is needed (and the exec'd image inherits
                     // both the fd table and the kernel flag).
                     if let Err(_) = minix_std::fs::dup2(redirect_fd, 1) {
-                        write_err(b"sh: dup2 failed\r\n");
+                        write_err(b"sh: dup2 failed\n");
                         minix_rt::exit(1);
                     }
                     unsafe { minix_rt::set_fd_vfs(1, 1) };
@@ -1719,7 +1719,7 @@ fn run_parsed_command(parsed: &ParsedCommand) -> i32 {
                     if path_len == 0 {
                         write_err(b"sh: '");
                         write_err(cmd.as_bytes());
-                        write_err(b"' not found\r\n");
+                        write_err(b"' not found\n");
                         minix_rt::exit(1);
                     }
                     // If this returns, exec failed; say what the kernel said.
@@ -1732,7 +1732,7 @@ fn run_parsed_command(parsed: &ParsedCommand) -> i32 {
             // Parent: wait.
             let status = minix_rt::waitpid_status(pid);
             if status < 0 {
-                write_err(b"sh: waitpid failed\r\n");
+                write_err(b"sh: waitpid failed\n");
                 1
             } else {
                 status
@@ -1757,7 +1757,7 @@ fn run_parsed_command(parsed: &ParsedCommand) -> i32 {
 #[cfg(target_os = "minix")]
 fn run_cd(args: &[&str]) -> i32 {
     if args.len() < 2 {
-        write_err(b"sh: cd: missing argument\r\n");
+        write_err(b"sh: cd: missing argument\n");
         return 1;
     }
     let path = args[1].as_bytes();
@@ -1767,7 +1767,7 @@ fn run_cd(args: &[&str]) -> i32 {
         write_err(path);
         write_err(b": ");
         write_err(errstr(r as i32));
-        write_err(b"\r\n");
+        write_err(b"\n");
         1
     } else {
         0
@@ -1799,7 +1799,7 @@ fn run_builtin(cmd: &str, args: &[&str]) -> i32 {
         "hangdump" => hangdump(args),
         "help" => {
             write_out(b"available commands: echo cat cp ls mkdir rm ln");
-            write_out(b" chmod chown sync mknod reboot fsck memstat regions help clear\r\n");
+            write_out(b" chmod chown sync mknod reboot fsck memstat regions help clear\n");
             0
         }
         "clear" => {
@@ -1825,13 +1825,13 @@ fn run_external(cmd: &str, args: &[&str]) -> i32 {
     if path_len == 0 {
         write_err(b"sh: '");
         write_err(cmd.as_bytes());
-        write_err(b"' not found\r\n");
+        write_err(b"' not found\n");
         return 1;
     }
 
     let pid = minix_rt::fork();
     if pid < 0 {
-        write_err(b"sh: fork failed\r\n");
+        write_err(b"sh: fork failed\n");
         return 1;
     }
     if pid == 0 {
@@ -1844,7 +1844,7 @@ fn run_external(cmd: &str, args: &[&str]) -> i32 {
     // Parent: wait.
     let status = minix_rt::waitpid_status(pid);
     if status < 0 {
-        write_err(b"sh: waitpid failed\r\n");
+        write_err(b"sh: waitpid failed\n");
         1
     } else {
         status
@@ -2045,7 +2045,7 @@ fn report_exec_failure(cmd: &str, cmd_path: &[u8; 256], error: Option<i32>) {
     write_err(cmd.as_bytes());
     write_err(b"' not found");
     match error {
-        None => write_err(b" (the arguments did not fit)\r\n"),
+        None => write_err(b" (the arguments did not fit)\n"),
         Some(errno) => {
             let path_end = cmd_path.iter().position(|&b| b == 0).unwrap_or(0);
             write_err(b" (");
@@ -2053,7 +2053,7 @@ fn report_exec_failure(cmd: &str, cmd_path: &[u8; 256], error: Option<i32>) {
             write_err(b": ");
             let mut buf = [0u8; 12];
             write_err(format_errno(&mut buf, errno));
-            write_err(b")\r\n");
+            write_err(b")\n");
         }
     }
 }
@@ -2106,7 +2106,7 @@ fn setup_redirect(outfile: &str) -> i32 {
             write_err(outfile.as_bytes());
             write_err(b": err=");
             write_err(&[b'0' + (pos / 10) as u8, b'0' + (pos % 10) as u8]);
-            write_err(b"\r\n");
+            write_err(b"\n");
             minix_rt::exit(1);
         }
     }

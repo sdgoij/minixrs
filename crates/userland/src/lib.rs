@@ -1589,7 +1589,7 @@ pub fn ls(args: &[&str]) -> i32 {
                 write_err(&[b'0' + ((code / 10) % 10) as u8]);
             }
             write_err(&[b'0' + (code % 10) as u8]);
-            write_err(b"\r\n");
+            write_err(b"\n");
             return 1;
         }
     };
@@ -1645,7 +1645,7 @@ pub fn ls(args: &[&str]) -> i32 {
     if read_error {
         write_err(b"ls: ");
         write_err(dir.as_bytes());
-        write_err(b": cannot read directory\r\n");
+        write_err(b": cannot read directory\n");
         if count == 0 {
             return 1;
         }
@@ -1653,7 +1653,7 @@ pub fn ls(args: &[&str]) -> i32 {
     if truncated {
         write_err(b"ls: ");
         write_err(dir.as_bytes());
-        write_err(b": listing truncated\r\n");
+        write_err(b": listing truncated\n");
     }
     if count == 0 {
         return if read_error { 1 } else { 0 };
@@ -2326,13 +2326,13 @@ pub fn memstat(_args: &[&str]) -> i32 {
                 print_dec_u32(free);
                 write_out(b" (");
                 print_dec_u32(free * 4 / 1024); // MiB (4 KiB pages)
-                write_out(b" MiB)\r\n");
+                write_out(b" MiB)\n");
                 0
             }
             Err(e) => {
                 write_err(b"memstat: VM info failed: ");
                 write_err(&[b'0' + ((-e.0) % 10) as u8]);
-                write_err(b"\r\n");
+                write_err(b"\n");
                 1
             }
         }
@@ -2355,13 +2355,13 @@ pub fn regions(_args: &[&str]) -> i32 {
                 print_dec_u32(count);
                 write_out(b" pages ");
                 print_dec_u32(pages);
-                write_out(b"\r\n");
+                write_out(b"\n");
                 0
             }
             Err(e) => {
                 write_err(b"regions: VM info failed: ");
                 write_err(&[b'0' + ((-e.0) % 10) as u8]);
-                write_err(b"\r\n");
+                write_err(b"\n");
                 1
             }
         }
@@ -2495,7 +2495,7 @@ pub fn allocprobe(_args: &[&str]) -> i32 {
         if ok {
             write_out(b"allocprobe: PASS regions flat at ");
             print_dec_u32(baseline as u32);
-            write_out(b"\r\n");
+            write_out(b"\n");
             0
         } else {
             1
@@ -2584,30 +2584,30 @@ pub fn seltest(_args: &[&str]) -> i32 {
 
     let (rd, wr) = match minix_std::fs::pipe() {
         Ok(p) => p,
-        Err(_) => return fail(b"seltest: pipe failed\r\n"),
+        Err(_) => return fail(b"seltest: pipe failed\n"),
     };
 
     // A pipe with one byte in it is immediately readable.
     match unsafe { minix_std::fs::write(wr, b"x") } {
         Ok(1) => {}
-        _ => return fail(b"seltest: pipe write failed\r\n"),
+        _ => return fail(b"seltest: pipe write failed\n"),
     }
     let mut rdf = 1u64 << rd;
     match minix_std::fs::select(rd + 1, Some(&mut rdf), None, None, Some((0, 0))) {
-        Ok(1) if rdf & (1u64 << rd) != 0 => write_out(b"seltest: select-pipe-ready=1\r\n"),
-        _ => return fail(b"seltest: select-pipe-ready FAIL\r\n"),
+        Ok(1) if rdf & (1u64 << rd) != 0 => write_out(b"seltest: select-pipe-ready=1\n"),
+        _ => return fail(b"seltest: select-pipe-ready FAIL\n"),
     }
 
     // Drain it: an empty pipe with the writer still open is not readable.
     let mut b = [0u8; 1];
     match unsafe { minix_std::fs::read(rd, &mut b) } {
         Ok(1) if b[0] == b'x' => {}
-        _ => return fail(b"seltest: pipe read failed\r\n"),
+        _ => return fail(b"seltest: pipe read failed\n"),
     }
     let mut rdf = 1u64 << rd;
     match minix_std::fs::select(rd + 1, Some(&mut rdf), None, None, Some((0, 0))) {
-        Ok(0) => write_out(b"seltest: select-pipe-empty=0\r\n"),
-        _ => return fail(b"seltest: select-pipe-empty FAIL\r\n"),
+        Ok(0) => write_out(b"seltest: select-pipe-empty=0\n"),
+        _ => return fail(b"seltest: select-pipe-empty FAIL\n"),
     }
 
     // A blocking select on the empty pipe with a 200 ms timeout returns 0 after
@@ -2616,21 +2616,21 @@ pub fn seltest(_args: &[&str]) -> i32 {
     let mut rdf = 1u64 << rd;
     match minix_std::fs::select(rd + 1, Some(&mut rdf), None, None, Some((0, 200_000))) {
         Ok(0) => {}
-        _ => return fail(b"seltest: select-timeout FAIL\r\n"),
+        _ => return fail(b"seltest: select-timeout FAIL\n"),
     }
     let dt = uptime_ms() - t0;
     if !(100..2000).contains(&dt) {
         write_err(b"seltest: select-timeout returned out of range ");
         print_dec(dt as u32);
-        write_err(b" ms\r\n");
+        write_err(b" ms\n");
         return 1;
     }
-    write_out(b"seltest: select-timeout=0\r\n");
+    write_out(b"seltest: select-timeout=0\n");
 
     // poll(2): the same readiness on a `struct pollfd` array.
     match unsafe { minix_std::fs::write(wr, b"y") } {
         Ok(1) => {}
-        _ => return fail(b"seltest: pipe write 2 failed\r\n"),
+        _ => return fail(b"seltest: pipe write 2 failed\n"),
     }
     let mut pf = [minix_std::fs::PollFd {
         fd: rd,
@@ -2638,12 +2638,12 @@ pub fn seltest(_args: &[&str]) -> i32 {
         revents: 0,
     }];
     match minix_std::fs::poll(&mut pf, 0) {
-        Ok(1) if pf[0].revents & POLLIN != 0 => write_out(b"seltest: poll-ready=1\r\n"),
-        _ => return fail(b"seltest: poll-ready FAIL\r\n"),
+        Ok(1) if pf[0].revents & POLLIN != 0 => write_out(b"seltest: poll-ready=1\n"),
+        _ => return fail(b"seltest: poll-ready FAIL\n"),
     }
     match unsafe { minix_std::fs::read(rd, &mut b) } {
         Ok(1) => {}
-        _ => return fail(b"seltest: pipe read 2 failed\r\n"),
+        _ => return fail(b"seltest: pipe read 2 failed\n"),
     }
     let mut pf = [minix_std::fs::PollFd {
         fd: rd,
@@ -2651,8 +2651,8 @@ pub fn seltest(_args: &[&str]) -> i32 {
         revents: 0,
     }];
     match minix_std::fs::poll(&mut pf, 0) {
-        Ok(0) => write_out(b"seltest: poll-empty=0\r\n"),
-        _ => return fail(b"seltest: poll-empty FAIL\r\n"),
+        Ok(0) => write_out(b"seltest: poll-empty=0\n"),
+        _ => return fail(b"seltest: poll-empty FAIL\n"),
     }
 
     // And a poll timeout (milliseconds).
@@ -2664,16 +2664,16 @@ pub fn seltest(_args: &[&str]) -> i32 {
     }];
     match minix_std::fs::poll(&mut pf, 200) {
         Ok(0) => {}
-        _ => return fail(b"seltest: poll-timeout FAIL\r\n"),
+        _ => return fail(b"seltest: poll-timeout FAIL\n"),
     }
     let dt = uptime_ms() - t0;
     if !(100..2000).contains(&dt) {
         write_err(b"seltest: poll-timeout returned out of range ");
         print_dec(dt as u32);
-        write_err(b" ms\r\n");
+        write_err(b" ms\n");
         return 1;
     }
-    write_out(b"seltest: poll-timeout=0\r\n");
+    write_out(b"seltest: poll-timeout=0\n");
 
     // The property an event loop needs from a pipe, and the one this port lacked: a
     // poll with no deadline must come back when *another* process writes. A pipe
@@ -2681,7 +2681,7 @@ pub fn seltest(_args: &[&str]) -> i32 {
     // with none, forever (`KNOWN_ISSUES` 31).
     let (br, bwr) = match minix_std::fs::pipe() {
         Ok(p) => p,
-        Err(_) => return fail(b"seltest: blocking-pipe failed\r\n"),
+        Err(_) => return fail(b"seltest: blocking-pipe failed\n"),
     };
     let pid = match unsafe { minix_std::process::fork() } {
         Ok(0) => {
@@ -2693,7 +2693,7 @@ pub fn seltest(_args: &[&str]) -> i32 {
             minix_std::process::exit(0);
         }
         Ok(p) => p,
-        Err(_) => return fail(b"seltest: blocking-pipe fork failed\r\n"),
+        Err(_) => return fail(b"seltest: blocking-pipe fork failed\n"),
     };
     let _ = minix_std::fs::close(bwr);
 
@@ -2706,20 +2706,20 @@ pub fn seltest(_args: &[&str]) -> i32 {
     // instead of hanging it. A real wake returns long before it does.
     match minix_std::fs::poll(&mut pf, 5000) {
         Ok(n) if n > 0 && pf[0].revents & POLLIN != 0 => {}
-        _ => return fail(b"seltest: blocking poll was never woken FAIL\r\n"),
+        _ => return fail(b"seltest: blocking poll was never woken FAIL\n"),
     }
     let mut b = [0u8; 1];
     match unsafe { minix_std::fs::read(br, &mut b) } {
         Ok(1) if b[0] == b'z' => {}
-        _ => return fail(b"seltest: blocking poll read FAIL\r\n"),
+        _ => return fail(b"seltest: blocking poll read FAIL\n"),
     }
     let _ = minix_std::process::waitpid(pid, 0);
     let _ = minix_std::fs::close(br);
-    write_out(b"seltest: blocking-poll-woken=1\r\n");
+    write_out(b"seltest: blocking-poll-woken=1\n");
 
     let _ = minix_std::fs::close(rd);
     let _ = minix_std::fs::close(wr);
-    write_out(b"seltest: PASS\r\n");
+    write_out(b"seltest: PASS\n");
     0
 }
 
@@ -2797,57 +2797,57 @@ pub fn eventfd_test(_args: &[&str]) -> i32 {
     // A fresh counter is zero: not readable.
     let fd = match minix_std::fs::eventfd(0, 0) {
         Ok(f) => f,
-        Err(_) => return fail(b"eventfdtest: eventfd failed\r\n"),
+        Err(_) => return fail(b"eventfdtest: eventfd failed\n"),
     };
     match pollin(fd, 0) {
         Ok(0) => {}
-        _ => return fail(b"eventfdtest: a fresh eventfd is not empty\r\n"),
+        _ => return fail(b"eventfdtest: a fresh eventfd is not empty\n"),
     }
 
     // After a write it is readable, and read returns the value and resets it.
     if !write_u64(fd, 5) {
-        return fail(b"eventfdtest: write failed\r\n");
+        return fail(b"eventfdtest: write failed\n");
     }
     match pollin(fd, 0) {
         Ok(r) if r & POLLIN != 0 => {}
-        _ => return fail(b"eventfdtest: written eventfd is not readable\r\n"),
+        _ => return fail(b"eventfdtest: written eventfd is not readable\n"),
     }
     let mut raw = [0u8; 8];
     match unsafe { minix_std::fs::read(fd, &mut raw) } {
         Ok(8) => {}
-        _ => return fail(b"eventfdtest: read failed\r\n"),
+        _ => return fail(b"eventfdtest: read failed\n"),
     }
     if u64::from_ne_bytes(raw) != 5 {
-        return fail(b"eventfdtest: read returned the wrong value\r\n");
+        return fail(b"eventfdtest: read returned the wrong value\n");
     }
     match pollin(fd, 0) {
         Ok(0) => {}
-        _ => return fail(b"eventfdtest: read did not drain the counter\r\n"),
+        _ => return fail(b"eventfdtest: read did not drain the counter\n"),
     }
 
     // A value of u64::MAX is rejected.
     if write_u64(fd, u64::MAX) {
-        return fail(b"eventfdtest: u64::MAX was accepted\r\n");
+        return fail(b"eventfdtest: u64::MAX was accepted\n");
     }
 
     // EFD_SEMAPHORE: each read returns 1 and decrements.
     let sfd = match minix_std::fs::eventfd(0, EFD_SEMAPHORE) {
         Ok(f) => f,
-        Err(_) => return fail(b"eventfdtest: semaphore eventfd failed\r\n"),
+        Err(_) => return fail(b"eventfdtest: semaphore eventfd failed\n"),
     };
     if !write_u64(sfd, 3) {
-        return fail(b"eventfdtest: semaphore write failed\r\n");
+        return fail(b"eventfdtest: semaphore write failed\n");
     }
     for _ in 0..3 {
         let mut r = [0u8; 8];
         match unsafe { minix_std::fs::read(sfd, &mut r) } {
             Ok(8) if u64::from_ne_bytes(r) == 1 => {}
-            _ => return fail(b"eventfdtest: semaphore read did not return 1\r\n"),
+            _ => return fail(b"eventfdtest: semaphore read did not return 1\n"),
         }
     }
     match pollin(sfd, 0) {
         Ok(0) => {}
-        _ => return fail(b"eventfdtest: semaphore counter not drained\r\n"),
+        _ => return fail(b"eventfdtest: semaphore counter not drained\n"),
     }
     let _ = minix_std::fs::close(sfd);
 
@@ -2855,7 +2855,7 @@ pub fn eventfd_test(_args: &[&str]) -> i32 {
     // process writes. The child waits so the parent is certainly suspended.
     let pid = match unsafe { minix_std::process::fork() } {
         Ok(p) => p,
-        Err(_) => return fail(b"eventfdtest: fork failed\r\n"),
+        Err(_) => return fail(b"eventfdtest: fork failed\n"),
     };
     if pid == 0 {
         #[cfg(target_os = "minix")]
@@ -2870,15 +2870,15 @@ pub fn eventfd_test(_args: &[&str]) -> i32 {
     let t0 = uptime_ms();
     match pollin(fd, -1) {
         Ok(r) if r & POLLIN != 0 => {}
-        _ => return fail(b"eventfdtest: a blocked poll did not wake\r\n"),
+        _ => return fail(b"eventfdtest: a blocked poll did not wake\n"),
     }
     if uptime_ms() - t0 > 5000 {
-        return fail(b"eventfdtest: the blocked poll woke far too late\r\n");
+        return fail(b"eventfdtest: the blocked poll woke far too late\n");
     }
     let mut r = [0u8; 8];
     match unsafe { minix_std::fs::read(fd, &mut r) } {
         Ok(8) if u64::from_ne_bytes(r) == 1 => {}
-        _ => return fail(b"eventfdtest: the wake value is wrong\r\n"),
+        _ => return fail(b"eventfdtest: the wake value is wrong\n"),
     }
     let _ = minix_std::process::waitpid(pid, 0);
     // A *read* of a zero counter waits too, rather than answering EAGAIN: the child stands
@@ -2886,7 +2886,7 @@ pub fn eventfd_test(_args: &[&str]) -> i32 {
     // deferred-read path (`vfs::blocked`), which the pipe gate covers from the other side.
     let pid = match unsafe { minix_std::process::fork() } {
         Ok(p) => p,
-        Err(_) => return fail(b"eventfdtest: fork failed\r\n"),
+        Err(_) => return fail(b"eventfdtest: fork failed\n"),
     };
     if pid == 0 {
         #[cfg(target_os = "minix")]
@@ -2903,15 +2903,15 @@ pub fn eventfd_test(_args: &[&str]) -> i32 {
     let mut r = [0u8; 8];
     match unsafe { minix_std::fs::read(fd, &mut r) } {
         Ok(8) if u64::from_ne_bytes(r) == 9 => {}
-        _ => return fail(b"eventfdtest: a blocking read did not wait for its writer\r\n"),
+        _ => return fail(b"eventfdtest: a blocking read did not wait for its writer\n"),
     }
     match minix_std::process::waitpid(pid, 0) {
         Ok((_, 0)) => {}
-        _ => return fail(b"eventfdtest: the writer could not stand still first\r\n"),
+        _ => return fail(b"eventfdtest: the writer could not stand still first\n"),
     }
     let _ = minix_std::fs::close(fd);
 
-    write_out(b"eventfdtest: PASS\r\n");
+    write_out(b"eventfdtest: PASS\n");
     0
 }
 
@@ -2964,64 +2964,64 @@ pub fn timerfd_test(_args: &[&str]) -> i32 {
 
     let fd = match minix_std::fs::timerfd_create(CLOCK_MONOTONIC, 0) {
         Ok(f) => f,
-        Err(_) => return fail(b"timerfdtest: timerfd_create failed\r\n"),
+        Err(_) => return fail(b"timerfdtest: timerfd_create failed\n"),
     };
 
     // Fresh and disarmed: not readable, no time set.
     if pollin(fd, 0) != 0 {
-        return fail(b"timerfdtest: a fresh timerfd is readable\r\n");
+        return fail(b"timerfdtest: a fresh timerfd is readable\n");
     }
     match minix_std::fs::timerfd_gettime(fd) {
         Ok(s) if s.it_value.tv_sec == 0 && s.it_value.tv_nsec == 0 => {}
-        _ => return fail(b"timerfdtest: a fresh timerfd reports time set\r\n"),
+        _ => return fail(b"timerfdtest: a fresh timerfd reports time set\n"),
     }
 
     // One-shot 100 ms: a blocking poll with no deadline must be woken by it.
     let one_shot = its((0, 0), (0, 100_000_000));
     if minix_std::fs::timerfd_settime(fd, 0, &one_shot, None).is_err() {
-        return fail(b"timerfdtest: settime (one-shot) failed\r\n");
+        return fail(b"timerfdtest: settime (one-shot) failed\n");
     }
     let t0 = uptime_ms();
     if pollin(fd, -1) & POLLIN == 0 {
-        return fail(b"timerfdtest: the one-shot did not fire\r\n");
+        return fail(b"timerfdtest: the one-shot did not fire\n");
     }
     let dt = uptime_ms() - t0;
     if !(50..2000).contains(&dt) {
         write_err(b"timerfdtest: one-shot fired out of range ");
         print_dec(dt as u32);
-        write_err(b" ms\r\n");
+        write_err(b" ms\n");
         return 1;
     }
     if read_count(fd) < 1 {
-        return fail(b"timerfdtest: read did not report the expiry\r\n");
+        return fail(b"timerfdtest: read did not report the expiry\n");
     }
     if pollin(fd, 0) != 0 {
-        return fail(b"timerfdtest: still readable after read\r\n");
+        return fail(b"timerfdtest: still readable after read\n");
     }
 
     // Periodic 50 ms: fires again without being re-armed.
     let periodic = its((0, 50_000_000), (0, 50_000_000));
     if minix_std::fs::timerfd_settime(fd, 0, &periodic, None).is_err() {
-        return fail(b"timerfdtest: settime (periodic) failed\r\n");
+        return fail(b"timerfdtest: settime (periodic) failed\n");
     }
     if pollin(fd, -1) & POLLIN == 0 || read_count(fd) < 1 {
-        return fail(b"timerfdtest: the periodic timer did not fire\r\n");
+        return fail(b"timerfdtest: the periodic timer did not fire\n");
     }
     if pollin(fd, -1) & POLLIN == 0 || read_count(fd) < 1 {
-        return fail(b"timerfdtest: the periodic timer did not fire again\r\n");
+        return fail(b"timerfdtest: the periodic timer did not fire again\n");
     }
 
     // Disarm with a zero value.
     let disarmed = its((0, 0), (0, 0));
     if minix_std::fs::timerfd_settime(fd, 0, &disarmed, None).is_err() {
-        return fail(b"timerfdtest: settime (disarm) failed\r\n");
+        return fail(b"timerfdtest: settime (disarm) failed\n");
     }
     if pollin(fd, 0) != 0 {
-        return fail(b"timerfdtest: a disarmed timerfd is readable\r\n");
+        return fail(b"timerfdtest: a disarmed timerfd is readable\n");
     }
     match minix_std::fs::timerfd_gettime(fd) {
         Ok(s) if s.it_value.tv_sec == 0 && s.it_value.tv_nsec == 0 => {}
-        _ => return fail(b"timerfdtest: a disarmed timerfd reports time set\r\n"),
+        _ => return fail(b"timerfdtest: a disarmed timerfd reports time set\n"),
     }
 
     // Absolute `CLOCK_MONOTONIC` deadline 100 ms out.
@@ -3034,19 +3034,19 @@ pub fn timerfd_test(_args: &[&str]) -> i32 {
             }
             let abs = its((0, 0), (sec, nsec));
             if minix_std::fs::timerfd_settime(fd, TFD_TIMER_ABSTIME, &abs, None).is_err() {
-                return fail(b"timerfdtest: settime (absolute) failed\r\n");
+                return fail(b"timerfdtest: settime (absolute) failed\n");
             }
             let t0 = uptime_ms();
             if pollin(fd, -1) & POLLIN == 0 {
-                return fail(b"timerfdtest: the absolute timer did not fire\r\n");
+                return fail(b"timerfdtest: the absolute timer did not fire\n");
             }
             let dt = uptime_ms() - t0;
             if !(50..2000).contains(&dt) {
-                return fail(b"timerfdtest: the absolute timer fired out of range\r\n");
+                return fail(b"timerfdtest: the absolute timer fired out of range\n");
             }
             let _ = read_count(fd);
         }
-        Err(_) => return fail(b"timerfdtest: clock_gettime failed\r\n"),
+        Err(_) => return fail(b"timerfdtest: clock_gettime failed\n"),
     }
 
     // A read with no expiry yet waits for the timer, rather than answering EAGAIN: the
@@ -3054,19 +3054,19 @@ pub fn timerfd_test(_args: &[&str]) -> i32 {
     // a read that raced the expiry.
     let one_shot = its((0, 0), (0, 100_000_000));
     if minix_std::fs::timerfd_settime(fd, 0, &one_shot, None).is_err() {
-        return fail(b"timerfdtest: settime before the blocking read failed\r\n");
+        return fail(b"timerfdtest: settime before the blocking read failed\n");
     }
     let t0 = uptime_ms();
     if read_count(fd) < 1 {
-        return fail(b"timerfdtest: a blocking read did not wait for the timer\r\n");
+        return fail(b"timerfdtest: a blocking read did not wait for the timer\n");
     }
     let dt = uptime_ms() - t0;
     if !(50..2000).contains(&dt) {
-        return fail(b"timerfdtest: the blocking read returned too soon\r\n");
+        return fail(b"timerfdtest: the blocking read returned too soon\n");
     }
 
     let _ = minix_std::fs::close(fd);
-    write_out(b"timerfdtest: PASS\r\n");
+    write_out(b"timerfdtest: PASS\n");
     0
 }
 
@@ -3095,20 +3095,20 @@ pub fn epoll_test(_args: &[&str]) -> i32 {
 
     let ep = match epoll_create1(0) {
         Ok(f) => f,
-        Err(_) => return fail(b"epolltest: epoll_create1 failed\r\n"),
+        Err(_) => return fail(b"epolltest: epoll_create1 failed\n"),
     };
     let mut events = [EpollEvent::default(); 8];
 
     // A fresh instance watches nothing.
     match epoll_wait(ep, &mut events, 0) {
         Ok(0) => {}
-        _ => return fail(b"epolltest: a fresh instance reported events\r\n"),
+        _ => return fail(b"epolltest: a fresh instance reported events\n"),
     }
 
     // Add an empty eventfd: registered, but not readable, so no event yet.
     let ev = match minix_std::fs::eventfd(0, 0) {
         Ok(f) => f,
-        Err(_) => return fail(b"epolltest: eventfd failed\r\n"),
+        Err(_) => return fail(b"epolltest: eventfd failed\n"),
     };
     let tag = 0xA1A1u64;
     let add = EpollEvent {
@@ -3116,28 +3116,28 @@ pub fn epoll_test(_args: &[&str]) -> i32 {
         data: tag,
     };
     if epoll_ctl(ep, EPOLL_CTL_ADD, ev, &add).is_err() {
-        return fail(b"epolltest: ADD failed\r\n");
+        return fail(b"epolltest: ADD failed\n");
     }
     match epoll_wait(ep, &mut events, 0) {
         Ok(0) => {}
-        _ => return fail(b"epolltest: an empty eventfd reported ready\r\n"),
+        _ => return fail(b"epolltest: an empty eventfd reported ready\n"),
     }
 
     // A second ADD of the same fd is refused.
     if epoll_ctl(ep, EPOLL_CTL_ADD, ev, &add).is_ok() {
-        return fail(b"epolltest: a duplicate ADD succeeded\r\n");
+        return fail(b"epolltest: a duplicate ADD succeeded\n");
     }
 
     // Make it readable; `epoll_wait` reports it and echoes `data`.
     if !write_u64(ev, 7) {
-        return fail(b"epolltest: eventfd write failed\r\n");
+        return fail(b"epolltest: eventfd write failed\n");
     }
     match epoll_wait(ep, &mut events, 0) {
         Ok(1) if events[0].events & EPOLLIN != 0 && events[0].data == tag => {}
-        _ => return fail(b"epolltest: the ready event was wrong\r\n"),
+        _ => return fail(b"epolltest: the ready event was wrong\n"),
     }
     if !drain_u64(ev) {
-        return fail(b"epolltest: eventfd read failed\r\n");
+        return fail(b"epolltest: eventfd read failed\n");
     }
 
     // MOD replaces `data`; the new value comes back.
@@ -3147,58 +3147,58 @@ pub fn epoll_test(_args: &[&str]) -> i32 {
         data: tag2,
     };
     if epoll_ctl(ep, EPOLL_CTL_MOD, ev, &modify).is_err() {
-        return fail(b"epolltest: MOD failed\r\n");
+        return fail(b"epolltest: MOD failed\n");
     }
     if !write_u64(ev, 9) {
-        return fail(b"epolltest: eventfd write (after MOD) failed\r\n");
+        return fail(b"epolltest: eventfd write (after MOD) failed\n");
     }
     match epoll_wait(ep, &mut events, 0) {
         Ok(1) if events[0].data == tag2 => {}
-        _ => return fail(b"epolltest: MOD did not change data\r\n"),
+        _ => return fail(b"epolltest: MOD did not change data\n"),
     }
     if !drain_u64(ev) {
-        return fail(b"epolltest: eventfd read (after MOD) failed\r\n");
+        return fail(b"epolltest: eventfd read (after MOD) failed\n");
     }
 
     // A pipe already holding a byte is level-ready (the FIFO scan path).
     let (pr, pw) = match minix_std::fs::pipe() {
         Ok(p) => p,
-        Err(_) => return fail(b"epolltest: pipe failed\r\n"),
+        Err(_) => return fail(b"epolltest: pipe failed\n"),
     };
     let pipe_ev = EpollEvent {
         events: EPOLLIN,
         data: 0xC3C3,
     };
     if epoll_ctl(ep, EPOLL_CTL_ADD, pr, &pipe_ev).is_err() {
-        return fail(b"epolltest: ADD (pipe) failed\r\n");
+        return fail(b"epolltest: ADD (pipe) failed\n");
     }
     if !matches!(unsafe { minix_std::fs::write(pw, b"x") }, Ok(1)) {
-        return fail(b"epolltest: pipe write failed\r\n");
+        return fail(b"epolltest: pipe write failed\n");
     }
     match epoll_wait(ep, &mut events, 0) {
         Ok(1) if events[0].events & EPOLLIN != 0 && events[0].data == 0xC3C3 => {}
-        _ => return fail(b"epolltest: the ready pipe was not reported\r\n"),
+        _ => return fail(b"epolltest: the ready pipe was not reported\n"),
     }
 
     // DEL removes it, and it stays removed.
     if epoll_ctl(ep, EPOLL_CTL_DEL, pr, &EpollEvent::default()).is_err() {
-        return fail(b"epolltest: DEL failed\r\n");
+        return fail(b"epolltest: DEL failed\n");
     }
     let mut one = [0u8; 1];
     if !matches!(unsafe { minix_std::fs::read(pr, &mut one) }, Ok(1)) {
-        return fail(b"epolltest: pipe read failed\r\n");
+        return fail(b"epolltest: pipe read failed\n");
     }
     match epoll_wait(ep, &mut events, 0) {
         Ok(0) => {}
-        _ => return fail(b"epolltest: DEL left the pipe watched\r\n"),
+        _ => return fail(b"epolltest: DEL left the pipe watched\n"),
     }
 
     // DEL of an unknown fd, and an unknown operation, are errors.
     if epoll_ctl(ep, EPOLL_CTL_DEL, pr, &EpollEvent::default()).is_ok() {
-        return fail(b"epolltest: DEL of an unknown fd succeeded\r\n");
+        return fail(b"epolltest: DEL of an unknown fd succeeded\n");
     }
     if epoll_ctl(ep, 99, ev, &EpollEvent::default()).is_ok() {
-        return fail(b"epolltest: an unknown op succeeded\r\n");
+        return fail(b"epolltest: an unknown op succeeded\n");
     }
 
     // EPOLLONESHOT reports an interest once and stops watching it until `MOD` re-arms it.
@@ -3206,40 +3206,40 @@ pub fn epoll_test(_args: &[&str]) -> i32 {
     // would be woken again by every level-triggered re-scan, forever.
     let os = match minix_std::fs::eventfd(0, 0) {
         Ok(f) => f,
-        Err(_) => return fail(b"epolltest: oneshot eventfd failed\r\n"),
+        Err(_) => return fail(b"epolltest: oneshot eventfd failed\n"),
     };
     if !write_u64(os, 5) {
-        return fail(b"epolltest: oneshot write failed\r\n");
+        return fail(b"epolltest: oneshot write failed\n");
     }
     let once = EpollEvent {
         events: EPOLLIN | EPOLLONESHOT,
         data: 0xD4D4,
     };
     if epoll_ctl(ep, EPOLL_CTL_ADD, os, &once).is_err() {
-        return fail(b"epolltest: ADD (oneshot) failed\r\n");
+        return fail(b"epolltest: ADD (oneshot) failed\n");
     }
     match epoll_wait(ep, &mut events, 0) {
         Ok(1) if events[0].data == 0xD4D4 && events[0].events & EPOLLIN != 0 => {}
-        _ => return fail(b"epolltest: the oneshot interest did not report\r\n"),
+        _ => return fail(b"epolltest: the oneshot interest did not report\n"),
     }
     // The counter is still nonzero, because a report is not a read: the disarmed interest
     // must not report it again.
     match epoll_wait(ep, &mut events, 0) {
         Ok(0) => {}
-        _ => return fail(b"epolltest: a disarmed oneshot interest reported again\r\n"),
+        _ => return fail(b"epolltest: a disarmed oneshot interest reported again\n"),
     }
     if epoll_ctl(ep, EPOLL_CTL_MOD, os, &once).is_err() {
-        return fail(b"epolltest: MOD (oneshot) failed\r\n");
+        return fail(b"epolltest: MOD (oneshot) failed\n");
     }
     match epoll_wait(ep, &mut events, 0) {
         Ok(1) if events[0].data == 0xD4D4 => {}
-        _ => return fail(b"epolltest: MOD did not re-arm the oneshot interest\r\n"),
+        _ => return fail(b"epolltest: MOD did not re-arm the oneshot interest\n"),
     }
     if !drain_u64(os) {
-        return fail(b"epolltest: oneshot read failed\r\n");
+        return fail(b"epolltest: oneshot read failed\n");
     }
     if epoll_ctl(ep, EPOLL_CTL_DEL, os, &EpollEvent::default()).is_err() {
-        return fail(b"epolltest: DEL (oneshot) failed\r\n");
+        return fail(b"epolltest: DEL (oneshot) failed\n");
     }
     let _ = minix_std::fs::close(os);
 
@@ -3248,7 +3248,7 @@ pub fn epoll_test(_args: &[&str]) -> i32 {
     // is certainly suspended.
     let pid = match unsafe { minix_std::process::fork() } {
         Ok(p) => p,
-        Err(_) => return fail(b"epolltest: fork failed\r\n"),
+        Err(_) => return fail(b"epolltest: fork failed\n"),
     };
     if pid == 0 {
         #[cfg(target_os = "minix")]
@@ -3262,10 +3262,10 @@ pub fn epoll_test(_args: &[&str]) -> i32 {
     let t0 = uptime_ms();
     match epoll_wait(ep, &mut events, -1) {
         Ok(1) if events[0].data == tag2 && events[0].events & EPOLLIN != 0 => {}
-        _ => return fail(b"epolltest: a blocked epoll_wait did not wake\r\n"),
+        _ => return fail(b"epolltest: a blocked epoll_wait did not wake\n"),
     }
     if uptime_ms() - t0 > 5000 {
-        return fail(b"epolltest: the blocked epoll_wait woke far too late\r\n");
+        return fail(b"epolltest: the blocked epoll_wait woke far too late\n");
     }
     let _ = minix_std::process::waitpid(pid, 0);
     let _ = drain_u64(ev);
@@ -3275,7 +3275,7 @@ pub fn epoll_test(_args: &[&str]) -> i32 {
     let _ = minix_std::fs::close(pr);
     let _ = minix_std::fs::close(pw);
 
-    write_out(b"epolltest: PASS\r\n");
+    write_out(b"epolltest: PASS\n");
     0
 }
 
@@ -3323,18 +3323,18 @@ pub fn wayland_test(_args: &[&str]) -> i32 {
     // connect at once; the child accepts the queued connection.
     let listen = match uds::socket() {
         Ok(fd) => fd,
-        Err(_) => return fail(b"waylandtest: socket failed\r\n"),
+        Err(_) => return fail(b"waylandtest: socket failed\n"),
     };
     if uds::bind(listen, SOCK_PATH).is_err() {
-        return fail(b"waylandtest: bind failed\r\n");
+        return fail(b"waylandtest: bind failed\n");
     }
     if uds::listen(listen, 1).is_err() {
-        return fail(b"waylandtest: listen failed\r\n");
+        return fail(b"waylandtest: listen failed\n");
     }
 
     let pid = match unsafe { minix_std::process::fork() } {
         Ok(p) => p,
-        Err(_) => return fail(b"waylandtest: fork failed\r\n"),
+        Err(_) => return fail(b"waylandtest: fork failed\n"),
     };
     if pid == 0 {
         // Child: serve the handshake, then exit. The test's client sends exactly
@@ -3398,7 +3398,7 @@ pub fn wayland_test(_args: &[&str]) -> i32 {
     // Parent: the client.
     let c = match uds::socket() {
         Ok(fd) => fd,
-        Err(_) => return fail(b"waylandtest: client socket failed\r\n"),
+        Err(_) => return fail(b"waylandtest: client socket failed\n"),
     };
     let mut connected = false;
     for _ in 0..100_000 {
@@ -3409,7 +3409,7 @@ pub fn wayland_test(_args: &[&str]) -> i32 {
         spin();
     }
     if !connected {
-        return fail(b"waylandtest: connect failed\r\n");
+        return fail(b"waylandtest: connect failed\n");
     }
 
     // get_registry(2), then sync(3).
@@ -3417,34 +3417,34 @@ pub fn wayland_test(_args: &[&str]) -> i32 {
     let n = {
         let mut w = match Writer::new(&mut req) {
             Ok(w) => w,
-            Err(_) => return fail(b"waylandtest: writer failed\r\n"),
+            Err(_) => return fail(b"waylandtest: writer failed\n"),
         };
         if w.new_id(2).is_err() {
-            return fail(b"waylandtest: encode failed\r\n");
+            return fail(b"waylandtest: encode failed\n");
         }
         match w.finish(1, protocol::display_req::GET_REGISTRY) {
             Ok(m) => m.len(),
-            Err(_) => return fail(b"waylandtest: frame failed\r\n"),
+            Err(_) => return fail(b"waylandtest: frame failed\n"),
         }
     };
     if uds::send(c, &req[..n]).is_err() {
-        return fail(b"waylandtest: send get_registry failed\r\n");
+        return fail(b"waylandtest: send get_registry failed\n");
     }
     let n = {
         let mut w = match Writer::new(&mut req) {
             Ok(w) => w,
-            Err(_) => return fail(b"waylandtest: writer failed\r\n"),
+            Err(_) => return fail(b"waylandtest: writer failed\n"),
         };
         if w.new_id(3).is_err() {
-            return fail(b"waylandtest: encode failed\r\n");
+            return fail(b"waylandtest: encode failed\n");
         }
         match w.finish(1, protocol::display_req::SYNC) {
             Ok(m) => m.len(),
-            Err(_) => return fail(b"waylandtest: frame failed\r\n"),
+            Err(_) => return fail(b"waylandtest: frame failed\n"),
         }
     };
     if uds::send(c, &req[..n]).is_err() {
-        return fail(b"waylandtest: send sync failed\r\n");
+        return fail(b"waylandtest: send sync failed\n");
     }
 
     // Read until the callback completes and every global has arrived.
@@ -3462,16 +3462,16 @@ pub fn wayland_test(_args: &[&str]) -> i32 {
             Ok(0) => break,
             Ok(n) => {
                 if inbuf.push(&chunk[..n as usize]).is_err() {
-                    return fail(b"waylandtest: receive buffer overflow\r\n");
+                    return fail(b"waylandtest: receive buffer overflow\n");
                 }
                 loop {
                     let msg = match inbuf.next() {
                         Ok(Some(m)) => m,
                         Ok(None) => break,
-                        Err(_) => return fail(b"waylandtest: bad frame\r\n"),
+                        Err(_) => return fail(b"waylandtest: bad frame\n"),
                     };
                     let Ok(h) = Header::parse(msg) else {
-                        return fail(b"waylandtest: bad header\r\n");
+                        return fail(b"waylandtest: bad header\n");
                     };
                     match (h.object_id, h.opcode) {
                         (2, protocol::registry_ev::GLOBAL) => globals += 1,
@@ -3490,33 +3490,33 @@ pub fn wayland_test(_args: &[&str]) -> i32 {
     let _ = minix_std::process::waitpid(pid, 0);
 
     if globals < want_globals {
-        return fail(b"waylandtest: not every global arrived\r\n");
+        return fail(b"waylandtest: not every global arrived\n");
     }
     if !done {
-        return fail(b"waylandtest: wl_display.sync never completed\r\n");
+        return fail(b"waylandtest: wl_display.sync never completed\n");
     }
     if !deleted {
-        return fail(b"waylandtest: the callback was not deleted\r\n");
+        return fail(b"waylandtest: the callback was not deleted\n");
     }
 
-    write_out(b"waylandtest: PASS\r\n");
+    write_out(b"waylandtest: PASS\n");
     0
 }
 
 pub fn kill(args: &[&str]) -> i32 {
     if args.len() < 2 {
-        write_err(b"usage: kill pid [sig]\r\n");
+        write_err(b"usage: kill pid [sig]\n");
         return 1;
     }
     let Some(pid) = parse_i32(args[1]) else {
-        write_err(b"kill: invalid pid\r\n");
+        write_err(b"kill: invalid pid\n");
         return 1;
     };
     let sig = if args.len() >= 3 {
         match parse_i32(args[2]) {
             Some(s) => s,
             None => {
-                write_err(b"kill: invalid signal\r\n");
+                write_err(b"kill: invalid signal\n");
                 return 1;
             }
         }
@@ -3528,7 +3528,7 @@ pub fn kill(args: &[&str]) -> i32 {
         Err(e) => {
             write_err(b"kill: ");
             write_err(errstr(e.0));
-            write_err(b"\r\n");
+            write_err(b"\n");
             1
         }
     }
