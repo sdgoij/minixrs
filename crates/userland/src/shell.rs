@@ -1895,7 +1895,7 @@ fn pack_args(buf: &mut [u8], args: &[&str], argv: &mut [*const u8]) -> bool {
 }
 
 /// The uutils multicall in every hardware image (`crates/boot-image/src/manifest.rs`). A bare
-/// name that `/bin` and `/sbin` both lack is looked up there as an applet.
+/// name that `/bin`, `/sbin` and `/usr/bin` all lack is looked up there as an applet.
 #[cfg(target_os = "minix")]
 const COREUTILS_PATH: &[u8] = b"/bin/coreutils";
 
@@ -1915,7 +1915,7 @@ fn try_exec(args: &[&str], cmd_path: &mut [u8; 256]) -> Option<i32> {
         .unwrap_or(0);
     let cmd_len = cmd_end - cmd_start;
 
-    // Save command name for the /sbin/ fallback.
+    // Save the command name for the directory fallbacks.
     let mut cmd_name = [0u8; 56];
     let cmd_name_len = cmd_len.min(56);
     cmd_name[..cmd_name_len].copy_from_slice(&cmd_path[cmd_start..cmd_start + cmd_name_len]);
@@ -1941,11 +1941,15 @@ fn try_exec(args: &[&str], cmd_path: &mut [u8; 256]) -> Option<i32> {
         )
     };
 
-    // Try /sbin/<cmd> as fallback, but only when /bin/<cmd> was simply not there. Any other
-    // error is about the command the user asked for, and retrying a path that cannot exist
-    // would replace it with the fallback's own ENOENT (item 50).
+    // Try /sbin/<cmd>, then /usr/bin/<cmd>, but only for a bare name and only when the
+    // previous path was simply not there. Any other error is about the command the user
+    // asked for, and retrying a path that cannot exist would replace it with the fallback's
+    // own ENOENT (item 50). `/usr/bin` is where the system image's toolchain lives (clang,
+    // clang++, ld.lld); the boot image's `/bin` and `/sbin` do not carry it.
+    let cmd = args.first().copied().unwrap_or("");
+    let bare = !cmd.contains('/');
     let mut error = r;
-    if should_try_sbin(error) && cmd_start > 1 && 6 + cmd_name_len < cmd_path.len() {
+    if bare && should_try_next_dir(error) && cmd_start > 1 && 6 + cmd_name_len < cmd_path.len() {
         cmd_path[..6].copy_from_slice(b"/sbin/");
         cmd_path[6..6 + cmd_name_len].copy_from_slice(&cmd_name[..cmd_name_len]);
         cmd_path[6 + cmd_name_len] = 0;
@@ -1958,12 +1962,24 @@ fn try_exec(args: &[&str], cmd_path: &mut [u8; 256]) -> Option<i32> {
             )
         };
     }
+    if bare && should_try_next_dir(error) && cmd_start > 1 && 9 + cmd_name_len < cmd_path.len() {
+        cmd_path[..9].copy_from_slice(b"/usr/bin/");
+        cmd_path[9..9 + cmd_name_len].copy_from_slice(&cmd_name[..cmd_name_len]);
+        cmd_path[9 + cmd_name_len] = 0;
+        error = unsafe {
+            minix_rt::execve(
+                cmd_path.as_ptr(),
+                9 + cmd_name_len + 1,
+                argv_buf.as_ptr(),
+                core::ptr::null(),
+            )
+        };
+    }
 
     // Try /bin/coreutils as the multicall. It selects its applet from `argv[0]`, so the
     // command name goes there and the arguments stay where `pack_args` put them. A name that
     // did not fit with a terminator cannot be an applet, and `should_try_multicall` refuses a
     // path or the multicall's own name.
-    let cmd = args.first().copied().unwrap_or("");
     if should_try_multicall(cmd, error) && cmd_name_len < cmd_name.len() {
         argv_buf[0] = cmd_name.as_ptr();
         let r2 = unsafe {
@@ -1991,19 +2007,20 @@ fn try_exec(args: &[&str], cmd_path: &mut [u8; 256]) -> Option<i32> {
 #[cfg(any(target_os = "minix", test))]
 const ENOENT: i32 = -2;
 
-/// Whether `/sbin/<cmd>` is worth trying after `/bin/<cmd>` failed with `primary`.
+/// Whether another search directory is worth trying after the previous one failed with
+/// `primary`.
 ///
-/// Only the file's absence from `/bin` makes a second directory meaningful. Every other error
-/// (the heap, the loader, a page it cannot read) is about the command the user asked for, and
-/// retrying a path that cannot exist replaced it with the fallback's own `ENOENT`: the random
-/// `/bin/bash` failure was reported as `/sbin/bash: -2` for exactly that reason, and the errno
-/// owed to item 50 was never the real one.
+/// Only the file's absence makes a second directory meaningful. Every other error (the heap,
+/// the loader, a page it cannot read) is about the command the user asked for, and retrying a
+/// path that cannot exist replaced it with the fallback's own `ENOENT`: the random `/bin/bash`
+/// failure was reported as `/sbin/bash: -2` for exactly that reason, and the errno owed to
+/// item 50 was never the real one.
 #[cfg(any(target_os = "minix", test))]
-fn should_try_sbin(primary: i32) -> bool {
+fn should_try_next_dir(primary: i32) -> bool {
     primary == ENOENT
 }
 
-/// Whether a command that `/bin` and `/sbin` both lack is an applet of `/bin/coreutils`.
+/// Whether a command that `/bin`, `/sbin` and `/usr/bin` all lack is an applet of `/bin/coreutils`.
 ///
 /// The multicall dispatches on `argv[0]`, so a bare name can be retried with that name as
 /// `argv[0]`. An explicit path names a file, and silently running a different program for it
@@ -2021,7 +2038,7 @@ fn should_try_multicall(cmd: &str, last_error: i32) -> bool {
 /// fail on the heap (`minix-rt` builds the argument frame with `sbrk` before the syscall), on an
 /// ELF the loader rejects, or on a page it cannot read, and a gate that cannot tell those apart
 /// cannot be chased: the aarch64 interactive-bash flake reported `not found` for a `/bin/bash`
-/// that was on the disk. The path is printed because the last thing tried may be `/sbin/<cmd>`.
+/// that was on the disk. The path is printed because the last thing tried may be `/usr/bin/<cmd>`.
 #[cfg(target_os = "minix")]
 fn report_exec_failure(cmd: &str, cmd_path: &[u8; 256], error: Option<i32>) {
     write_err(b"sh: '");
@@ -2352,16 +2369,16 @@ mod tests {
         assert_eq!(format_errno(&mut buf, i32::MIN), b"-2147483648");
     }
 
-    /// Only a missing file in `/bin` makes `/sbin` worth a second try. Every other error is the
+    /// Only a missing file makes another directory worth a try. Every other error is the
     /// command's own, and the fallback's `ENOENT` used to replace it in the message, which is why
     /// the intermittent `/bin/bash` failure was reported as a `/sbin/bash` that never existed.
     #[test]
-    fn only_a_missing_file_tries_sbin() {
-        assert!(should_try_sbin(ENOENT));
-        assert!(!should_try_sbin(-12), "ENOMEM from the argument frame is the command's");
-        assert!(!should_try_sbin(-13), "EACCES is the command's");
-        assert!(!should_try_sbin(-1), "the exec-never-returned sentinel is not an errno");
-        assert!(!should_try_sbin(0));
+    fn only_a_missing_file_tries_another_directory() {
+        assert!(should_try_next_dir(ENOENT));
+        assert!(!should_try_next_dir(-12), "ENOMEM from the argument frame is the command's");
+        assert!(!should_try_next_dir(-13), "EACCES is the command's");
+        assert!(!should_try_next_dir(-1), "the exec-never-returned sentinel is not an errno");
+        assert!(!should_try_next_dir(0));
     }
 
     /// A bare name in neither `/bin` nor `/sbin` is retried as a multicall applet with its own

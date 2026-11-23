@@ -236,12 +236,15 @@ A staged root under `target/toolchain/<arch>/root`:
 /usr/src/hello.c
 ```
 
-Ship it on the **disk** path only (never the embedded ramdisk): `system-image-x86`
-adds the staged root with `MINIXFS_ROOT` on top of the boot manifest, and
-`just run x86 2048M` boots the same minimal boot image against it. The root is
-about 250 MiB, so the system image is 384 MiB (98304 blocks) with 16384 inodes.
-There is no separate toolchain image type; the toolchain is part of the system
-image when it is staged.
+Ship it on the **disk** path only (never the embedded ramdisk):
+`system-image-x86` includes the staged root with `MINIXFS_ROOT` when it is
+there, the same way it includes `/bin/bash`, and skips it with a line when it is
+not. `toolchain-root-x86` is the explicit builder (`just llvm-minix x86`); the
+toolchain gates depend on it and then build the system image. `just run x86
+2048M` boots the same minimal boot image. The root is about 250 MiB, so the
+image is 384 MiB (98304 blocks) with 16384 inodes when included. The shell
+searches `/bin`, `/sbin` and then `/usr/bin` for a bare name, so `clang`,
+`clang++` and `ld.lld` work by name, not only by their full path.
 
 `/usr/bin/clang` is `tools/clang-wrapper.c`, not the driver renamed: it execs
 `/usr/libexec/clang` with the sysroot flags, and adds the link inputs (`crt0.o`,
@@ -390,9 +393,9 @@ the program runs. Then a bootstrap: `x.py` with that binary as stage0,
 - **Do not ship a `libLLVM.so`.** Static archives keep the image smaller and the
   loader out of the compiler's start-up.
 - **A toolchain boot is not a release artifact.** `just image <arch>` stays the
-  self-contained 16 MiB system. The disk system image includes the staged
-  toolchain when it exists, which is what `just run <arch> 2048M` boots; the
-  release artifact does not grow.
+  self-contained 16 MiB system. The disk system image includes the toolchain
+  when its root is present, built through `toolchain-root-<arch>`; `just run
+  <arch> 2048M` boots it, and the release artifact does not grow.
 - **No debug prints in the kernel or servers.** A bring-up that hangs is a
   `bare-metal-debug` problem (LLDB + QEMU `-s`), not a `serial_write` problem.
 - **`cargo xtask build c-direct` is a canary.** If it breaks, the `libc.a`

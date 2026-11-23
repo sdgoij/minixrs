@@ -241,17 +241,21 @@ boot-image-x86: userland-x86 coreutils-x86 dynlib-x86
 # `DYNLINK_BINS` / `MINIXFS_BLOCKS` itself, so a root larger than the 16 MiB embedded
 # window needs no kernel change.
 #
-# The staged toolchain root is part of the system image when it exists:
-# `mkminixfs` starts from the boot manifest and `MINIXFS_ROOT` adds that tree on
-# top of it. The 250 MiB root needs 98304 blocks and 16384 inodes, so those
-# replace the release-sized defaults in that case. `just run x86 2048M` then
-# reaches `/usr/bin/clang` in the same system image the gates boot.
+# The staged toolchain root follows the same rule as `/bin/bash`: include it if
+# the artifact is there, say so and skip it if not. `toolchain-root-x86` is the
+# explicit builder (`just llvm-minix x86`), not a dependency of this recipe. The
+# 250 MiB root needs 98304 blocks and 16384 inodes, so the image is 384 MiB when
+# it is included and the release-sized image otherwise.
+toolchain-root-x86:
+    @just llvm-minix x86
+
 system-image-x86: boot-image-x86
     extras=""; if [ -f target/bash/x86/bash ]; then extras=/bin/bash=target/bash/x86/bash; else echo "system-image: no /bin/bash (run 'just build-bash x86' to include it)"; fi; \
     if [ -d target/toolchain/x86/root ]; then \
-        echo "system-image: including the staged toolchain"; \
+        echo "system-image: including the toolchain"; \
         MINIXFS_ROOT=target/toolchain/x86/root MINIXFS_EXTRA="${extras}${MINIXFS_EXTRA:+;$MINIXFS_EXTRA}" MINIXFS_BLOCKS="${MINIXFS_BLOCKS:-98304}" MINIXFS_INODES="${MINIXFS_INODES:-16384}" cargo run -q -p boot-image --bin mkminixfs --release -- x86_64; \
     else \
+        echo "system-image: no toolchain root (run 'just llvm-minix x86' to include it)"; \
         MINIXFS_EXTRA="${extras}${MINIXFS_EXTRA:+;$MINIXFS_EXTRA}" MINIXFS_BLOCKS="${MINIXFS_BLOCKS:-8192}" cargo run -q -p boot-image --bin mkminixfs --release -- x86_64; \
     fi
     @just mkfs-x86
@@ -352,10 +356,11 @@ build-aarch64: userland-aarch64 coreutils-aarch64 dynlib-aarch64
 
 # ---------- run ----------
 
-# The system image, booted by the minimal boot image. If the staged toolchain
-# root exists, `system-image-<arch>` includes it, so `just run x86 2048M` reaches
-# `/usr/bin/clang`, `clang++` and `ld.lld`. Without that root it is the
-# release-sized system image.
+# The system image, booted by the minimal boot image. It includes the staged
+# toolchain if `target/toolchain/<arch>/root` is there, the same way it includes
+# `/bin/bash`, so `just llvm-minix x86` then `just run x86 2048M` reaches
+# `/usr/bin/clang`, `clang++` and `ld.lld`. Without the root it says so and boots
+# the release-sized system. `just image` stays the self-contained 16 MiB system.
 run target="x86" memory="256M":
     @just run-{{target}} {{memory}}
 
@@ -1970,8 +1975,8 @@ llvm-minix arch="x86":
 test-toolchain arch="x86":
     @just test-toolchain-{{arch}}
 
-test-toolchain-x86 boot-timeout="3600": system-image-x86
-    @test -d target/toolchain/x86/root || (echo "test-toolchain: no staged toolchain root; run 'just llvm-minix x86'" && exit 1)
+test-toolchain-x86 boot-timeout="3600": toolchain-root-x86
+    @just system-image-x86
     @just _assert-qemu-version qemu-system-x86_64
     FEED_PACE=0.01 FEED_SCENARIO=tools/smoke/toolchain.tsv cargo xtask smoke target/test-toolchain-x86.log {{boot-timeout}} qemu-system-x86_64 -nographic -m 1024M -no-reboot -vga none -device bochs-display,id=fb0 -kernel target/images/x86_64-pc-minix/minix-x86-boot.elf -drive if=none,id=disk0,file=target/images/x86_64-pc-minix/disk.img,format=raw,cache=writethrough -device virtio-blk-pci,disable-legacy=on,drive=disk0 -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0 -device virtio-tablet-pci,display=fb0
     @echo "toolchain: the guest's clang compiled and the guest's lld linked hello.c, and it ran (x86_64)"
@@ -1984,8 +1989,8 @@ test-toolchain-x86 boot-timeout="3600": system-image-x86
 # thirteenth unit before the cache and memory pressure stopped it. The second
 # boot is not a convenience: the binary runs on a fresh image but hangs when run
 # in the boot that compiled it (KNOWN_ISSUES.md item 89).
-test-tblgen-x86 boot-timeout="5400": system-image-x86
-    @test -d target/toolchain/x86/root || (echo "test-tblgen: no staged toolchain root; run 'just llvm-minix x86'" && exit 1)
+test-tblgen-x86 boot-timeout="5400": toolchain-root-x86
+    @just system-image-x86
     @just _assert-qemu-version qemu-system-x86_64
     FEED_PACE=0.01 FEED_SCENARIO=tools/smoke/tblgen-build.tsv cargo xtask smoke target/test-tblgen-build.log {{boot-timeout}} qemu-system-x86_64 -nographic -m 2048M -no-reboot -vga none -device bochs-display,id=fb0 -kernel target/images/x86_64-pc-minix/minix-x86-boot.elf -drive if=none,id=disk0,file=target/images/x86_64-pc-minix/disk.img,format=raw,cache=writethrough -device virtio-blk-pci,disable-legacy=on,drive=disk0 -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0 -device virtio-tablet-pci,display=fb0
     FEED_PACE=0.01 FEED_SCENARIO=tools/smoke/tblgen-run.tsv cargo xtask smoke target/test-tblgen-run.log 300 qemu-system-x86_64 -nographic -m 2048M -no-reboot -vga none -device bochs-display,id=fb0 -kernel target/images/x86_64-pc-minix/minix-x86-boot.elf -drive if=none,id=disk0,file=target/images/x86_64-pc-minix/disk.img,format=raw,cache=writethrough -device virtio-blk-pci,disable-legacy=on,drive=disk0 -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0 -device virtio-tablet-pci,display=fb0

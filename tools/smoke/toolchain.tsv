@@ -31,7 +31,10 @@
 # it on a check that must fail. The diagnostic is the evidence that it parsed the
 # directive and searched the input. The TableGen target has its own two-boot gate
 # (`tools/smoke/tblgen-build.tsv` and `tblgen-run.tsv`).
-/usr/bin/clang --version	^clang version 23\..*
+# The bare name is the shell's search: /bin, /sbin, then /usr/bin. The toolchain
+# is part of the system image and lives at /usr/bin, so this step is what proves
+# `just run x86 2048M` reaches it without an explicit path.
+clang --version	^clang version 23\..*
 /usr/bin/clang -c /usr/src/hello.c -o /tmp/hello.o	^$
 /bin/coreutils wc -c /tmp/hello.o	^ *[0-9]+ /tmp/hello.o$
 /usr/bin/clang /usr/src/hello.c -o /tmp/hello	^$
