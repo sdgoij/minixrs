@@ -278,7 +278,7 @@ VFS/serial, `process::id()` via PM, the mmap free-list allocator (4096 alignment
 per-thread TLS, `join`, and the futex-backed stdout lock. Grep the log for
 `panic|fail|error` and expect no matches.
 
-`just test-boot-x86` and `just test-qemu-x86` are the self-terminating suites (they exit QEMU
+`cargo xtask gate boot --arch x86` and `cargo xtask gate qemu --arch x86` are the self-terminating suites (they exit QEMU
 through isa-debug-exit) when pass/fail codes are more useful than a transcript.
 
 **Bound QEMU runs with SIGKILL.** MSYS `timeout`'s SIGTERM does not terminate a native Windows

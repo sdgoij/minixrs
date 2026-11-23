@@ -44,7 +44,7 @@ Checklist before declaring a change done:
       boot-image
 - [ ] `cargo clippy -- -D warnings` clean on the changed crates
 - [ ] Arch-gated change (VA layout, a HAL constant, anything under `arch-*/`, a
-      shared test that names an address)? Then `just test-arches` too — the host
+      shared test that names an address)? Then `cargo xtask gate-arches` too — the host
       suite cannot see the suite that runs those
 
 ## Grep for warnings — don't eyeball the tail
@@ -68,8 +68,8 @@ them before handing back — the tree must be shippable at every checkpoint
 | Domain | Runner | Best For | Cost |
 |--------|--------|----------|------|
 | **Host `cargo test`** | `#[test]` on host | Pure logic: parsing, math, struct layouts, constants, state machines. No hardware or syscall access. | Instant |
-| **QEMU integration** (`just test-qemu`) | `test_runner.rs` inside QEMU (ring 0) | Kernel internals: page tables, IPC, scheduler, timers, interrupts, ELF loading, grant tables, syscall dispatch. Compile with `features = ["qemu-tests"]`. | ~30s per cycle |
-| **Boot test** (`just test-boot`) | In-kernel after VFS mount_root | Multi-server IPC, filesystem reads, cross-process data transfer, VFS↔MFS protocol. Feature `boot-test`. | ~30s per cycle |
+| **QEMU integration** (`cargo xtask gate qemu --arch x86`) | `test_runner.rs` inside QEMU (ring 0) | Kernel internals: page tables, IPC, scheduler, timers, interrupts, ELF loading, grant tables, syscall dispatch. Compile with `features = ["qemu-tests"]`. | ~30s per cycle |
+| **Boot test** (`cargo xtask gate boot --arch x86`) | In-kernel after VFS mount_root | Multi-server IPC, filesystem reads, cross-process data transfer, VFS↔MFS protocol. Feature `boot-test`. | ~30s per cycle |
 | **Wasm harnesses** (`sh tools/wasm-verify.sh`) | `tools/wasm-servers/boot.cjs`, `tools/wasm-browser/run.js`, `page.test.js` | The real servers under the wasm host: boot at quiescence, a shell at a live prompt, and the page under a stub DOM. Catches a boot-process or VFS-mount change the host and QEMU gates cannot see. See the `wasm-testing` skill. | minutes |
 
 ## When to Use Each
@@ -85,12 +85,12 @@ Boot process or VFS mount? → also the wasm system (`wasm-testing`): BOOT_IMAGE
 
 ## Both suites, all three arches
 
-`just test-arches` runs all six QEMU gates — `test-qemu` and `test-boot` for
-x86, riscv64 and aarch64. Two separate reasons make that a routine step and not
-a rare one:
+`cargo xtask gate-arches` runs every arch-gated QEMU gate, including the
+`qemu` and `boot` suites on x86, riscv64 and aarch64. Two separate reasons make
+that a routine step and not a rare one:
 
-- **The suites are not nested.** `test-qemu` runs the in-kernel suite
-  (`crates/kernel/src/tests.rs`), `test-boot` runs `boot_test.rs`: the servers
+- **The suites are not nested.** The `qemu` gate runs the in-kernel suite
+  (`crates/kernel/src/tests.rs`), the `boot` gate runs `boot_test.rs`: the servers
   and `mount_root` first, then a userspace phase in which a test init execs a
   program from the image. It crosses that boundary but stops short of a shell —
   nothing types a command at it. Neither includes the other, and the host suite
@@ -98,19 +98,19 @@ a rare one:
 - **`cargo test` cannot see the first one.** `tests.rs` sits behind the
   kernel's `qemu-tests` feature and its checks are driven by its own runner, so
   the host suite neither compiles nor runs them. A test that exists only there
-  is compiled by `just test-qemu-<arch>` and nothing else.
+  is compiled by the `qemu` gate (`cargo xtask gate qemu --arch <arch>`) and
+  nothing else.
 
 `syscall_brk` is the worked example: it asserted x86_64's heap base
 (`0x3FE00000`) while aarch64's is `0x2000_0000`, so it passed on two arches and
-on the host while `test-qemu-aarch64` failed. Any change to a VA-layout
-constant, a HAL value, or per-arch code needs all six.
+on the host while `cargo xtask gate qemu --arch aarch64` failed. Any change to a
+VA-layout constant, a HAL value, or per-arch code needs the whole sweep.
 
 The host pin is still the pin (above) — this is the extra sweep for the
 arch-gated part, not a substitute for it.
 
-The six gates are not the same as `just test` (`test-<arch>` runs a *boot*, no
-assertions) or `just check` (host clippy + one riscv64 compile). Neither of
-those would have caught the example above.
+The sweep is not the same as `just check` (host clippy + one riscv64 compile),
+which would not have caught the example above.
 
 ## QEMU Integration Tests
 
@@ -138,7 +138,7 @@ Helpers:
 - `serial_putc()`, `serial_puts()` — raw serial output (use when TestCtx methods aren't enough)
 - `qemu_exit_success()` / `qemu_exit_failure()` — exit QEMU with result code via isa-debug-exit port `0x501`
 
-Gate with feature: `--features qemu-tests` (Cargo.toml feature, enabled by `just test-qemu`).
+Gate with feature: `--features qemu-tests` (Cargo.toml feature, enabled by `cargo xtask gate qemu --arch x86`).
 
 ## Boot Tests
 
@@ -182,7 +182,7 @@ for i in 8..16 {
 serial_write("\r\n");
 ```
 
-Gate with feature: `--features boot-test` (enabled by `just test-boot`).
+Gate with feature: `--features boot-test` (enabled by `cargo xtask gate boot --arch x86`).
 
 ## Host Test Isolation
 
@@ -201,16 +201,16 @@ cargo test -p kernel                # single crate
 cargo test my_test_name             # filtered
 
 # QEMU tests (kernel integration), per arch - x86 by default
-just test-qemu                      # 40 tests (phases A–O)
-just test-qemu aarch64
+cargo xtask gate qemu --arch x86                      # 40 tests (phases A–O)
+cargo xtask gate qemu --arch aarch64
 
 # Boot tests (multi-server, filesystem), per arch - x86 by default
-just test-boot                      # 12 tests after VFS mount_root
-just test-boot aarch64
+cargo xtask gate boot --arch x86                      # 12 tests after VFS mount_root
+cargo xtask gate boot --arch aarch64
 
 # All six QEMU gates (x86/riscv64/aarch64 x qemu+boot) - what an
 # arch-gated change needs
-just test-arches
+cargo xtask gate-arches
 
 # The wasm system (Linux/WSL; see `wasm-testing`)
 sh tools/wasm-verify.sh
@@ -221,26 +221,24 @@ just run                            # no tests, starts shell
 
 Pass/fail for the QEMU runners is decided from the guest's serial log, not from
 QEMU's exit status: the riscv64/aarch64 kernels cannot report one (SBI SRST /
-PSCI), so QEMU exits 0 whatever the guest did. Each `test-boot-*` / `test-qemu-*`
-recipe tees the serial output to `target/test-<kind>-<arch>.log` — visible on
-stdout while streaming, kept as the CI artifact — and then calls
-`just _assert-qemu-log <log> <marker>`; the marker is `ALL TESTS PASSED`, or
-`-- done --` for the x86 kernel suite, and the assert fails on a `FAILURES:` line
-or a missing summary. Read that log when a recipe fails: stderr goes through the
-same `tee`, so host-side failures (a missing `qemu-system-*`, a bad device) land
-in it too and fail the same assert.
+PSCI), so QEMU exits 0 whatever the guest did. `cargo xtask gate <name> --arch
+<arch>` owns the child, copies the console to `target/test-<gate>-<arch>.log` —
+the CI artifact — and asserts the completion marker (`ALL TESTS PASSED`, or
+`-- done --` for the x86 kernel suite) and the absence of a `FAILURES:` line.
+Read that log when a gate fails: the host-side stderr is in it too, so a missing
+`qemu-system-*` or a bad device fails the same assertion.
 
-Because the recipe is a pipeline, the line's exit status is `tee`'s, not QEMU's.
-The marker assert is the gate — do not add a `code=$?` check after the pipe and
-expect it to see QEMU's status.
+The gate returns its own verdict; there is no `timeout ... | tee` pipeline whose
+`tee` status could hide the guest's. Do not add a second log grep to a recipe
+that already calls the gate — the marker and the failure line are the gate's.
 
 ## The emulator version is a requirement
 
-`test-qemu-*` and `test-boot-*` check their emulator before booting a guest
-(`_assert-qemu-version`, floor in the `qemu-min-version` variable) and refuse
-anything older than QEMU 11. That is not tidiness: on the 8.2 that ubuntu-24.04
-ships, the aarch64 boot suite hangs forever at `scheduler starting...` behind a
-permanent IRQ storm (966k `Taking exception 5 [IRQ]` in 20 s, all from one ELR),
-so a stale emulator only looks like a slow suite until `qemu-timeout` kills it.
-No distribution packages QEMU 11 yet, which is why CI builds it
+`cargo xtask gate` checks its emulator before booting a guest (floor in
+`QEMU_MIN_VERSION` in `crates/xtask/src/gate.rs`) and refuses anything older than
+QEMU 11. That is not tidiness: on the 8.2 that ubuntu-24.04 ships, the aarch64
+boot suite hangs forever at `scheduler starting...` behind a permanent IRQ storm
+(966k `Taking exception 5 [IRQ]` in 20 s, all from one ELR), so a stale emulator
+only looks like a slow suite until the gate's own timeout kills it. No
+distribution packages QEMU 11 yet, which is why CI builds it
 (`.github/actions/install-qemu`, cached); a dev machine needs 11 or newer.

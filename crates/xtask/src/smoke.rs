@@ -40,9 +40,23 @@ const ATTEMPTS: usize = 4;
 pub fn run(root: &Path, log: &Path, seconds: u64, command: &mut Command) -> io::Result<bool> {
     let scenario = scenario_path(root);
     let pace = pace()?;
+    run_with(log, seconds, &scenario, pace, command)
+}
+
+/// Drive `command` through `scenario` with the pacing the caller chose.
+///
+/// This is the shape a gate uses: the scenario and its pace are part of the
+/// gate's definition, not of the process environment.
+pub fn run_with(
+    log: &Path,
+    seconds: u64,
+    scenario: &Path,
+    pace: Duration,
+    command: &mut Command,
+) -> io::Result<bool> {
     // Truncate before anything can fail, so a run never leaves an earlier log.
     fs::write(log, b"")?;
-    let steps = match parse_file(&scenario)? {
+    let steps = match parse_file(scenario)? {
         Ok(steps) => steps,
         Err((step, detail)) => {
             // The shell detected this after booting; failing before the guest is

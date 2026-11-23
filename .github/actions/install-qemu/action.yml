@@ -1,8 +1,8 @@
 # Builds the QEMU the recipes need and puts it on PATH, for the one target the
 # calling job runs.
 #
-# The recipes are pinned to a QEMU floor (11, see `qemu-min-version` in the
-# Justfile) and no runner image ships one that new: ubuntu-24.04 has 8.2, where the
+# The recipes are pinned to a QEMU floor (11, see `QEMU_MIN_VERSION` in
+# `crates/xtask/src/gate.rs`) and no runner image ships one that new: ubuntu-24.04 has 8.2, where the
 # aarch64 boot suite stops at "scheduler starting..." under a permanent IRQ storm
 # (966k taking-exception-5 in 20 s from a single ELR), and 26.04 has 10.2, which is
 # simply untested - every dev machine runs 11. No distribution package provides 11
@@ -109,7 +109,7 @@ runs:
         make install
 
     # The version goes to the log because running an old emulator is exactly what
-    # this action exists to prevent; `just test-boot-<arch>` then refuses anything
+    # this action exists to prevent; `cargo xtask gate boot --arch <arch>` then refuses anything
     # below the floor.
     - name: Put QEMU on PATH and report it
       shell: bash
@@ -138,7 +138,7 @@ runs:
         devices=$("$qemu" -device help 2>&1)
         netdevs=$("$qemu" -machine "$QEMU_MACHINE" -netdev help 2>&1)
 
-        # The virgl gates (`just test-gpu3d-x86`, `just test-drmgl-x86`) are the one
+        # The virgl gates (`cargo xtask gate gpu3d --arch x86`, `cargo xtask gate drmgl --arch x86`) are the one
         # place a recipe names a device this build does not carry: a GL device needs a
         # GL-capable host, which a CI runner is not, and this build deliberately has no
         # virglrenderer (`.notes/wayland.md` §6.10 D8 - the llvmpipe/softpipe branch is the

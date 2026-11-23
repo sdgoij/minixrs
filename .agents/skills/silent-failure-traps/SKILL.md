@@ -75,7 +75,7 @@ typed byte — came from the guest's own tty server, and looked identical from t
   calls `(tp.tty_devread)(tp, 0)` for a console line), the counterpart of the pty master's `select_wake`.
   A pty slave is unaffected because its input arrives by message, not from a ring the server must drain.
 - So a prompt that ignores input is *not* proof of a harness problem — read the tty server's own
-  read/select instrumentation before blaming the feeder. `just test-interactive-bash-<arch>`
+  read/select instrumentation before blaming the feeder. `cargo xtask gate interactive-bash --arch <arch>`
   (`cargo xtask probe interactive-bash`) is the gate that catches it: it types at `bash-5.3#`, which no
   `bash -c` scenario reaches.
 

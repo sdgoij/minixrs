@@ -36,11 +36,11 @@ just check
 
 # 4. Every QEMU gate on every arch: in-kernel suite, boot tests, fork, waitid,
 #    C ABI, winprobe and burst.
-just test-arches
+cargo xtask gate-arches
 
 # 5. The shipped artifact: build one ELF and type the userspace smoke scenario
 #    into the shell that comes up.
-just image <arch>
+cargo xtask gate image --arch <arch>
 ```
 
 ### What to run for what you changed
@@ -48,12 +48,12 @@ just image <arch>
 | Touched | Gate |
 |---|---|
 | Any Rust | steps 1 to 3 above, plus 4 when the change is arch-gated |
-| Kernel, `arch-*`, a HAL constant, a VA layout, IPC, a shared test that names an address | `just test-arches` |
-| Image assembly (`boot-image`, `crates/kernel/build.rs`, `crates/xtask/src/image.rs`, boot config, initramfs or minixfs contents) | `just image <arch>` and `just test-arches` |
+| Kernel, `arch-*`, a HAL constant, a VA layout, IPC, a shared test that names an address | `cargo xtask gate-arches` |
+| Image assembly (`boot-image`, `crates/kernel/build.rs`, `crates/xtask/src/image.rs`, boot config, initramfs or minixfs contents) | `cargo xtask gate image --arch <arch>` and `cargo xtask gate-arches` |
 | A server or userland path compiled only for minix | `just build-<arch>` and the matching smoke gate; host clippy cannot see the code |
-| Dynamic linking or `ldso` | `just test-dynlink-<arch>`, `cargo test -p ldso` |
-| Mesa, libdrm or the GL/EGL stack | `just test-gltriangle <arch>` (see `mesa-port`) |
-| bash or readline | `just test-interactive-bash <arch>` |
+| Dynamic linking or `ldso` | `cargo xtask gate dynlink --arch <arch>`, `cargo test -p ldso` |
+| Mesa, libdrm or the GL/EGL stack | `cargo xtask gate gltriangle --arch <arch>` (see `mesa-port`) |
+| bash or readline | `cargo xtask gate interactive-bash --arch <arch>` |
 | A boot process, `BOOT_IMAGE`/`BOOT_PROCS_ALL`, a `*_PROC_NR`, a boot-image manifest, or a mount VFS performs at init | `sh tools/wasm-verify.sh` (the wasm system shares the boot image and runs VFS's init unchanged; see `wasm-testing`) |
 | wasm front ends or the network link | `sh tools/wasm-verify.sh`, `node tools/wasm-browser/net.test.js`, `node tools/wasm-net/relay.test.js` |
 | The rust fork or the toolchain pin | `just bootstrap`, `just verify-stage1` (Linux/WSL), then the arch suites; see `rust-fork-rebase` |
@@ -62,16 +62,17 @@ just image <arch>
 ### Traps that keep catching us
 
 - **`cargo test` cannot see the in-kernel suite.** `crates/kernel/src/tests.rs`
-  sits behind `qemu-tests`, and `test-boot` runs `boot_test.rs` instead. A test
-  that exists only there is compiled by `just test-qemu-<arch>` and nothing
-  else. `syscall_brk` is the worked example: it asserted x86_64's heap base and
-  failed on aarch64 alone while the host and two arches were green.
+  sits behind `qemu-tests`, and the `boot` gate runs `boot_test.rs` instead. A test
+  that exists only there is compiled by the `qemu` gate
+  (`cargo xtask gate qemu --arch <arch>`) and nothing else. `syscall_brk` is the
+  worked example: it asserted x86_64's heap base and failed on aarch64 alone
+  while the host and two arches were green.
 - **Host clippy never compiles `#[cfg(target_os = "minix")]` code.** It is not a
   substitute for `just build-<arch>` on a minix-only path.
 - **The serial log is the verdict on riscv64 and aarch64.** Neither reports an
   exit status through SBI reset or PSCI on this QEMU build, so a killed run
-  still exits 0. `_assert-qemu-log` is what turns the guest's own marker into a
-  pass; a missing marker or a `FAILURES:` line is a failure, never something to
+  still exits 0. `cargo xtask gate` turns the guest's own marker into a pass; a
+  missing marker or a `FAILURES:` line is a failure, never something to
   reclassify with a longer timeout.
 - **Boot-process checks stop where userland starts.** The VFS/exec path is
   reachable only from a userland `execve`, so a suite that reads files through
@@ -85,7 +86,7 @@ just image <arch>
 - **The C headers in `tools/c-include` are a contract** for bash, libc++, and
   the C/C++ smoke tests. `cargo xtask check headers` catches an export and its
   declaration drifting apart.
-- **Windows host tests and Linux host tests differ.** `just test-linux` runs the
+- **Windows host tests and Linux host tests differ.** `just check-linux` runs the
   Linux suite and clippy in a read-only container; use it before pushing a
   host-side change (see `linux-host-tests`).
 - **A stale cargo cache hides a rebuilt compiler.** After `just bootstrap`, an
@@ -128,12 +129,12 @@ never the only test for a pure rule.
 
 - **Host `cargo test`**: parsing, struct layouts, constants, state machines,
   allocator logic, the loader's rules on the host. Instant.
-- **QEMU integration** (`just test-qemu-<arch>`): the in-kernel suite behind
+- **QEMU integration** (`cargo xtask gate qemu --arch <arch>`): the in-kernel suite behind
   `qemu-tests`. Page tables, IPC, scheduler, timers, syscalls, ELF loading,
   grant tables.
-- **Boot test** (`just test-boot-<arch>`): servers and `mount_root`, then a
+- **Boot test** (`cargo xtask gate boot --arch <arch>`): servers and `mount_root`, then a
   userland exec from the image. The boundary the host suite cannot cross.
-- **Shipped image** (`just image <arch>`): the artifact a user downloads, with
+- **Shipped image** (`cargo xtask gate image --arch <arch>`): the artifact a user downloads, with
   the shared smoke scenario typed into its shell.
 - **wasm harnesses**: boot at quiescence, a live prompt, the page under a stub
   DOM, and the link's own frames and relay.
@@ -150,10 +151,10 @@ regression test; nobody re-runs it after every edit. See `minix-testing`.
   is covered everywhere. A per-target scenario (`dyn.tsv`, `fbmmap.tsv`,
   `cdyn.tsv`) exists only because that target lacks the facility, not because it
   was easier to write a second file.
-- `cargo xtask smoke` drives a guest, and its expectations are part of the
-  scenario. Input sent before the prompt is dropped, `read` eats a trailing tab,
-  and a pipeline's left side can swallow an `exit 1`. `silent-failure-traps` is
-  the detail.
+- `cargo xtask gate` drives a guest through a `.tsv` scenario, and its
+  expectations are part of the scenario. Input sent before the prompt is dropped,
+  `read` eats a trailing tab, and a pipeline's left side can swallow an `exit 1`.
+  `silent-failure-traps` is the detail.
 - `.refs/minix-3.3.0/` is the C oracle. Expected behaviour comes from MINIX
   3.3.0 or POSIX, never re-derived from our implementation. A deliberate
   deviation is recorded in `.notes/`, not silently enshrined.
@@ -166,10 +167,10 @@ regression test; nobody re-runs it after every edit. See `minix-testing`.
 
 ## Long tests, timeouts and external tools
 
-- A timeout is a verdict, not a reason to raise the deadline. The guest suite
-  gets `qemu-timeout` after the build; anything that cannot finish inside it is
-  a real result.
-- The emulator floor is `qemu-min-version`. An older QEMU fails by reporting its
+- A timeout is a verdict, not a reason to raise the deadline. `cargo xtask gate`
+  bounds the guest and kills it; anything that cannot finish inside the gate's
+  timeout is a real result.
+- The emulator floor is `QEMU_MIN_VERSION` in `crates/xtask/src/gate.rs`. An older QEMU fails by reporting its
   version, rather than hanging the aarch64 suite and looking like a timeout.
 - Every gate prints a verdict. A gate that never spoke has failed, even if its
   exit status was 0; a crash after its verdict does not undo the verdict.
@@ -181,8 +182,8 @@ regression test; nobody re-runs it after every edit. See `minix-testing`.
 
 ## Diagnostics and self-testing
 
-- The system is its own test rig: `just test-qemu`, `just test-boot`,
-  `just image`, the wasm harnesses and `just check`. Prefer adding an assertion
+- The system is its own test rig: `cargo xtask gate qemu --arch x86`, `cargo xtask gate boot --arch x86`,
+  `cargo xtask gate image --arch x86`, the wasm harnesses and `just check`. Prefer adding an assertion
   to an existing gate over a new manual boot, and prefer a gate that prints a
   verdict over a transcript a human has to read.
 - Diagnostic switches are off unless set and write to stderr. A debug dump must
@@ -288,8 +289,8 @@ architecture map, a procedure, or a measured negative result.
   `cargo test`?
 - Was the whole gate run for the surface in the table, not only the test named
   after the change?
-- For an arch-gated change, did `just test-arches` pass?
-- For an image or packaging change, did `just image <arch>` boot the shipped
+- For an arch-gated change, did `cargo xtask gate-arches` pass?
+- For an image or packaging change, did `cargo xtask gate image --arch <arch>` boot the shipped
   artifact?
 - For a new gate or harness: does it print a verdict, time out, and fail on a
   missing tool?

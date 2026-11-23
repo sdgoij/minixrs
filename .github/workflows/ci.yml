@@ -41,8 +41,8 @@
 # the pin has no release yet.
 #
 # The image jobs depend on the suites for the same reason. Both suites also run
-# locally (`just test-boot-<arch>`, `just test-qemu-<arch>`, on Windows too); they
-# gate on the guest's serial log via `just _assert-qemu-log`.
+# locally (`cargo xtask gate boot --arch <arch>`, `cargo xtask gate qemu --arch <arch>`, on Windows too); they
+# gate on the guest's serial log through `cargo xtask gate`.
 #
 # The two wasm jobs close the last hole, and they are separate jobs on purpose. The
 # port's wasm front ends are its strongest surface - `run.js` types at a shell,
@@ -168,7 +168,7 @@ jobs:
           just check-static
 
       # The pinned channel's clippy component is not guaranteed to be in the
-      # runner image, so add it explicitly - the `test-linux` recipe does the
+      # runner image, so add it explicitly - the `check-linux` recipe does the
       # same in the container.
       - name: Run clippy
         if: runner.os == 'Linux'
@@ -486,7 +486,7 @@ jobs:
   # built on); the emulator comes from `install-qemu`, which builds the version
   # the suites require and caches it. No image pin is load-bearing here.
   #
-  # `just image-<arch>` runs in this job as its last step, because it is the one check on
+  # `cargo xtask gate image --arch <arch>` runs in this job as its last step, because it is the one check on
   # the artifact a user gets rather than on a kernel built for a suite: it boots the
   # shipped image and types the userspace smoke scenario into the shell. The release job
   # below re-runs the same recipes with a larger `boot-timeout` - a runner emulates the
@@ -530,7 +530,7 @@ jobs:
 
       - uses: ./.github/actions/install-clang
 
-      # The suites refuse an emulator below `qemu-min-version`, an image has none
+      # The gate refuses an emulator below `QEMU_MIN_VERSION`, an image has none
       # that new, and no distribution packages one yet - so build it. Cached, so
       # this is a restore on every run after the first.
       - uses: ./.github/actions/install-qemu
@@ -545,34 +545,34 @@ jobs:
         run: just fetch-stage1 ${{ matrix.arch }}
 
       - name: Kernel integration suite
-        run: just test-qemu ${{ matrix.arch }}
+        run: cargo xtask gate qemu --arch ${{ matrix.arch }}
 
       - name: Boot suite
-        run: just test-boot ${{ matrix.arch }}
+        run: cargo xtask gate boot --arch ${{ matrix.arch }}
 
       # The shipped artifact, which is not what the suites above run: they use a kernel
       # built with the test features, and this is the image a release publishes - without
       # the optional `/bin/bash` the release workflow injects, which the `bash` job boots
-      # separately. The recipe boots it and drives `tools/smoke/scenario.tsv` into its
+      # separately. The gate boots it and drives `tools/smoke/scenario.tsv` into its
       # shell - a program exec'd from the image, a file written, that file read back. 120 s
       # against a dev machine's 15: a runner emulates the guest, and a boot that is
       # actually broken still fails here, only later.
       - name: The shipped image, driven through the smoke scenario
-        run: just image ${{ matrix.arch }} 120
+        run: cargo xtask gate image --arch ${{ matrix.arch }} --timeout 120
 
       # The `/dev/fb` mmap path (`tools/smoke/fbmmap.tsv`): a userland mmap of the
       # framebuffer has to alias the device's memory, which every present path
       # (`wserver`, `/sbin/wlserver`, and the clients reading the frame back) depends on.
       # A physmap change once made it silently wrong on all of them.
       - name: The framebuffer mmap path
-        run: just test-fbmmap ${{ matrix.arch }}
+        run: cargo xtask gate fbmmap --arch ${{ matrix.arch }}
 
       # The zero-copy present path (`cargo xtask probe wlfull`): a whole-output `wl_shm` client must
       # be presented by re-pointing the scanout at its own buffer, so the compositor copies
       # nothing. A QMP screendump checks the display (the frame *is* the client's buffer, so
       # `/dev/fb` no longer holds it). Needs no GL host, unlike the `wlgl`/virgl gates.
       - name: The zero-copy present path
-        run: just test-wlfull ${{ matrix.arch }}
+        run: cargo xtask gate wlfull --arch ${{ matrix.arch }}
 
       # The render node's PRIME handoff (`tools/smoke/drmprime.tsv`): a client exports an object
       # to a dma-buf descriptor, imports it back, and reads its bytes. x86 only, because the
@@ -580,7 +580,7 @@ jobs:
       # where virtio-gpu *is* the display, the node is the display's and there is no other.
       - name: The render node's PRIME handoff
         if: matrix.arch == 'x86'
-        run: just test-drmprime-x86
+        run: cargo xtask gate drmprime --arch x86
 
   # Decides whether the pinned bash commit needs a release before anything consumes
   # one. Read-only; `bash-release` below does the publishing.
@@ -700,7 +700,7 @@ jobs:
       # loop, a redirect, an external command and `$PWD`. 120 s of boot budget, as
       # `image` above: a runner emulates the guest.
       - name: Boot bash through the scenario
-        run: just test-bash-${{ matrix.arch }} 120
+        run: cargo xtask gate bash --arch ${{ matrix.arch }} --timeout 120
 
       # `target/bash/<arch>/bash` is in hand; hand it to the release workflow.
       # `if-no-files-found: error` because a rename on either side should fail loudly
@@ -715,7 +715,7 @@ jobs:
       # with the shell in place and types a line at `bash-5.3#`, the one path that
       # exercises readline's raw-mode setup and its poll-then-read.
       - name: Interactive bash
-        run: just test-interactive-bash-${{ matrix.arch }} 120
+        run: cargo xtask gate interactive-bash --arch ${{ matrix.arch }} --timeout 120
 
   # Decides whether the pinned Mesa/libdrm pair needs a release before anything
   # consumes one. Read-only, so it needs no write permission; `mesa` below does the
@@ -832,7 +832,7 @@ jobs:
       # Boots the split pair with the client and the seven DSOs in the system image and
       # drives `tools/smoke/gltriangle.tsv`, which wants the client's `gltriangle: pass`.
       - name: Boot the triangle through surfaceless EGL
-        run: just test-gltriangle-${{ matrix.arch }} 180
+        run: cargo xtask gate gltriangle --arch ${{ matrix.arch }} --timeout 180
 
       # The seven DSOs, for the release workflow to inject into the system image it
       # publishes. `if-no-files-found: error` because a rename on either side should fail

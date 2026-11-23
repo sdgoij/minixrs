@@ -24,7 +24,7 @@ Why this is a hard rule, not a preference:
 
 Instead, use the **LLDB remote-debugging flow** in this skill: run QEMU with
 `-s` (GDB stub), attach LLDB, set breakpoints, read registers/memory — no
-source changes needed. Boot tests (`just test-boot`) may still assert values,
+source changes needed. Boot tests (`cargo xtask gate boot --arch x86`) may still assert values,
 but they must be removed or gated once the issue is resolved.
 
 If you find a debug print already in the tree (left by an earlier session),
@@ -63,7 +63,7 @@ Concrete example from this project - root directory size was zero:
 
 ## Boot Tests Are Your Fastest Probe
 
-The `boot-test` feature (`just test-boot`) runs assertions inside the kernel before any shell starts. Use it to:
+The `boot-test` feature (`cargo xtask gate boot --arch x86`) runs assertions inside the kernel before any shell starts. Use it to:
 
 - **Check a function return**: `test_vfs_reply_from_mfs()` reads VFS's `p_delivermsg.m_type` to confirm OK
 - **Dump raw bytes**: Add a `for i in 8..32 { print_hex(msg[i]); }` loop - you get concrete data, not speculation
@@ -227,13 +227,13 @@ allocation that lost its reference.
 ## Quick Reference: Boot Test Infrastructure
 
 ```
-just test-boot          # Build + boot QEMU + run 12 assertions + exit
+cargo xtask gate boot --arch x86          # Build + boot QEMU + run 12 assertions + exit
 just run                # Normal boot (skips test, starts shell)
 
-# All six gates (qemu + boot, x86/riscv64/aarch64). `test-qemu` runs
-# `crates/kernel/src/tests.rs`, which the host suite cannot see; the
-# `minix-testing` skill says when that matters.
-just test-arches
+# All arch gates (the qemu + boot suites on x86/riscv64/aarch64 and the
+# syscall gates). The `qemu` gate runs `crates/kernel/src/tests.rs`, which
+# the host suite cannot see; the `minix-testing` skill says when that matters.
+cargo xtask gate-arches
 ```
 
 Test file: `crates/kernel-boot/src/boot_test.rs`

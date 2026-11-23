@@ -1,6 +1,6 @@
 ---
 name: mesa-port
-description: Cross-building Mesa and libdrm for minix — the Wayland §6.10 phase-3 GL stack, its libc++ runtime, the cc-dso-minix DSO wrapper, and the surfaceless-EGL client, on all three arches. Use when running `just build-mesa`, `just libcxx` or `just gltriangle`/`just test-gltriangle`, when a Mesa/libdrm compile or link fails, when changing tools/build-mesa.py, the libcxx builder in `crates/xtask` or tools/cc-dso-minix.py, or when working on the GL/EGL stack.
+description: Cross-building Mesa and libdrm for minix — the Wayland §6.10 phase-3 GL stack, its libc++ runtime, the cc-dso-minix DSO wrapper, and the surfaceless-EGL client, on all three arches. Use when running `just build-mesa`, `just libcxx` or `just gltriangle`/`cargo xtask gate gltriangle`, when a Mesa/libdrm compile or link fails, when changing tools/build-mesa.py, the libcxx builder in `crates/xtask` or tools/cc-dso-minix.py, or when working on the GL/EGL stack.
 ---
 
 # Mesa + libdrm for minix
@@ -130,7 +130,7 @@ toolchain. `.notes/wayland.md` §6.10 is the design; these are the recipes and t
 
 ## The runtime gate
 
-`just test-gltriangle-<arch>` boots the split pair with `/bin/gltriangle` and the
+`cargo xtask gate gltriangle --arch <arch>` boots the split pair with `/bin/gltriangle` and the
 nine Mesa DSOs in the *system* image (`MINIXFS_BLOCKS=16384`, ~64 MiB — the two
 copies of `libgallium` alone are ~33 MiB, one named by `libEGL`/`libGLESv2` in
 `DT_NEEDED` and one `dlopen`ed as `swrast_dri.so`) and drives
@@ -143,18 +143,18 @@ a system image, not a blocker. It needs `just libcxx <arch>` and `just build-mes
 publishes the nine DSOs as `mesa-<arch>`, which the release injects into the
 system image it publishes.
 
-`just test-gltriangle-virgl-x86` is the 3c-3 gate: the same client on a GL device
+`cargo xtask gate gltriangle-virgl --arch x86` is the 3c-3 gate: the same client on a GL device
 (`-device virtio-gpu-gl-pci,blob=on`), which takes the `virgl` driver on the render
 node and asserts `GL_RENDERER=virgl` as well as the readback. It needs a GL-capable
 dev host (headless CI has none) and is not a CI gate.
 
-`just test-wlgl-x86` is the 3d-a gate: `/bin/wlgl` renders the triangle on the render
+`cargo xtask gate wlgl --arch x86` is the 3d-a gate: `/bin/wlgl` renders the triangle on the render
 node, commits it to `/sbin/wlserver` as a `wl_shm` surface, and reads the composited
 frame back from `/dev/fb`, asserting `GL_RENDERER=virgl` too. Like 3c-3 it needs a
 GL-capable dev host and is not a CI gate. It shares `/dev/fb`'s `mmap` path with
 `diag wlclient`, so a break there fails both gates with a black framebuffer.
 
-`just test-wldmabufgl-x86` is the 3d-b-4d gate: `/bin/wldmabufgl` renders the triangle
+`cargo xtask gate wldmabufgl --arch x86` is the 3d-b-4d gate: `/bin/wldmabufgl` renders the triangle
 into a GBM object on the render node, exports it, and commits it as a
 `zwp_linux_dmabuf_v1` buffer, which the fb server scans out of the client's own object
 (a host screendump shows it; there is no `/dev/fb` read). The QEMU line is a 2D
@@ -172,10 +172,10 @@ mid-line, and the whole-frame screenshot path is a QMP `screendump`.
 just libcxx <arch>                  # the C++ runtime (x86|riscv64|aarch64)
 just build-mesa <arch> --build       # compiles everything; 0 FAILED in the log
 just fetch-mesa <arch>               # or the pinned DSOs, without building
-just test-gltriangle-<arch>          # boots the triangle through surfaceless EGL
-just test-gltriangle-virgl-x86       # the 3c-3 gate: the same triangle on virgl (GL dev host)
-just test-wlgl-x86                   # the 3d-a gate: the triangle through wlserver to /dev/fb (GL dev host)
-just test-wldmabufgl-x86             # the 3d-b-4d gate: the GL render scanned out of the client's own buffer (GL dev host)
+cargo xtask gate gltriangle --arch <arch>          # boots the triangle through surfaceless EGL
+cargo xtask gate gltriangle-virgl --arch x86       # the 3c-3 gate: the same triangle on virgl (GL dev host)
+cargo xtask gate wlgl --arch x86                   # the 3d-a gate: the triangle through wlserver to /dev/fb (GL dev host)
+cargo xtask gate wldmabufgl --arch x86             # the 3d-b-4d gate: the GL render scanned out of the client's own buffer (GL dev host)
 just check                           # host clippy + header contract + physmap
 ```
 

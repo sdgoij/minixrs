@@ -5,8 +5,8 @@
 # Requires:
 #   - `just bootstrap` first (builds the rust fork stage1 compiler, which
 #     provides the in-tree minix targets + their std sysroot)
-#   - QEMU 11 or newer (the suite recipes refuse an older emulator - see
-#     `qemu-min-version`) and clang on PATH — clang assembles the x86 trampoline
+#   - QEMU 11 or newer (the gate refuses an older emulator) and clang on PATH —
+#     clang assembles the x86 trampoline
 #     and the C/C++ smoke tests; the toolchain's own tools (lld, nm, objcopy) are
 #     resolved from its build tree, with PATH only as a fallback (see `minix-lld`
 #     below)
@@ -49,7 +49,7 @@ export CARGO_TARGET_AARCH64_UNKNOWN_MINIX_LINKER := minix-lld
 # The exclusion has to be in the environment of the shell doing the spawning,
 # which is why this is exported for every recipe and not prefixed onto the lines
 # that spawn a native tool: the recipes that re-enter `just` (`run` -> `run-x86`,
-# `image` -> `image-x86`, `build` -> `build-x86`, ...) have the value converted
+# `build` -> `build-x86`, `system-image` -> `system-image-x86`, ...) have the value converted
 # when the inner `just.exe` starts, before any line of the inner recipe runs.
 # The list is semicolon-separated; `DYNLINK_BINS` has the same hazard as
 # `MINIXFS_EXTRA` (`/libexec/ld.so=<path>;...` is a POSIX-style value too).
@@ -59,7 +59,7 @@ export MSYS2_ENV_CONV_EXCL := "MINIXFS_EXTRA;DYNLINK_BINS;MINIXFS_ROOT"
 ROOT := replace(justfile_directory(), "\\", "/")
 
 # Rust channel pinned by rust-toolchain.toml; also the tag of the container
-# image `test-linux` uses, so the two cannot drift apart.
+# image `check-linux` uses, so the two cannot drift apart.
 rust-channel := `sed -n 's/^channel = "\(.*\)"/\1/p' rust-toolchain.toml | tr -d '\r'`
 
 # Fetches the build-critical submodules (the rust fork, the uutils coreutils
@@ -208,8 +208,8 @@ build target="x86":
 # The embedded root gets 5120 zones (20 MiB) rather than `crates/boot-image`'s 16 MiB
 # default: the x86 userland fills 4082 of those 4096 zones once `/bin/bash` is injected, so
 # at the default the builder refuses the image for want of a free zone. `/bin/bash` reaches
-# this recipe through `MINIXFS_EXTRA`, named by `image-x86` (the release artifact) and
-# `test-bash-x86`. 32 MiB, which `image-riscv64` uses, is not available here: the boot code
+# this recipe through `MINIXFS_EXTRA`, named by the `image` gate (the release
+# artifact) and `prepare-bash-<arch>`. 32 MiB, which `prepare-image-riscv64` uses, is not available here: the boot code
 # copies the embedded root into physical RAM for the ramdisk server (`boot_init.rs`), so
 # every zone added costs the guest a byte of its 256 MiB, and 8192 runs out of memory for a
 # brk heap at `-m 256M`. A caller with a larger payload still overrides `MINIXFS_BLOCKS`.
@@ -263,7 +263,7 @@ system-image-x86: boot-image-x86
 
 # riscv64 / aarch64, the same split without mkboot: the kernel ELF *is* the artifact
 # (`-kernel`). The boot image is copied to a distinct name so it does not collide with
-# the self-contained `release/kernel-boot-<arch>` that the tests and `image-<arch>` boot.
+# the self-contained `release/kernel-boot-<arch>` that the tests and the `image` gate boot.
 boot-image-riscv64: userland-riscv64 coreutils-riscv64 dynlib-riscv64
     RUSTC="{{stage1-rustc}}" cargo build -p kernel-boot --bin kernel-boot-riscv64 --target riscv64gc-unknown-minix --features embed_initramfs,riscv64 --release
     cp target/riscv64gc-unknown-minix/release/kernel-boot-riscv64 target/boot-kernel-riscv64.elf
@@ -284,69 +284,20 @@ system-image-aarch64: boot-image-aarch64
     extras=""; if [ -f target/bash/aarch64/bash ]; then extras=/bin/bash=target/bash/aarch64/bash; else echo "system-image: no /bin/bash (run 'just build-bash aarch64' to include it)"; fi; MINIXFS_EXTRA="${extras}${MINIXFS_EXTRA:+;$MINIXFS_EXTRA}" MINIXFS_BLOCKS="${MINIXFS_BLOCKS:-8192}" cargo run -q -p boot-image --bin mkminixfs --release -- aarch64
     @just mkfs-aarch64
 
-# Boot the split pair and drive the userspace smoke scenario into its shell, so a
-# release only ships a system image that was actually booted (the self-contained
-# `image-<arch>` is booted the same way). The dependency builds both images first.
-test-system-image-x86 boot-timeout="40": system-image-x86
-    @just _assert-qemu-version qemu-system-x86_64
-    cargo xtask smoke target/test-system-image-x86.log {{boot-timeout}} qemu-system-x86_64 -nographic -m 256M -no-reboot -vga none -device bochs-display,id=fb0 -kernel target/images/x86_64-pc-minix/minix-x86-boot.elf -drive if=none,id=disk0,file=target/images/x86_64-pc-minix/disk.img,format=raw,cache=writethrough -device virtio-blk-pci,disable-legacy=on,drive=disk0 -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0 -device virtio-tablet-pci,display=fb0
-    @just _assert-qemu-log target/test-system-image-x86.log "wserver: ready"
+# Boot the split pair: the minimal boot image plus the disk filesystem.
+system-image target="x86":
+    @just system-image-{{target}}
 
-test-system-image-riscv64 boot-timeout="60": system-image-riscv64
-    @just _assert-qemu-version qemu-system-riscv64
-    cargo xtask smoke target/test-system-image-riscv64.log {{boot-timeout}} qemu-system-riscv64 -machine virt -m 256M -nographic -global virtio-mmio.force-legacy=off -drive if=none,id=disk0,file=target/images/riscv64gc-unknown-minix/disk.img,format=raw,cache=writethrough -device virtio-blk-device,drive=disk0 -netdev user,id=net0 -device virtio-net-device,netdev=net0 -device virtio-gpu-device -device virtio-keyboard-device -kernel target/images/riscv64gc-unknown-minix/minix-riscv64-boot.elf
-    @just _assert-qemu-log target/test-system-image-riscv64.log "wserver: ready"
 
-test-system-image-aarch64 boot-timeout="60": system-image-aarch64
-    @just _assert-qemu-version qemu-system-aarch64
-    cargo xtask smoke target/test-system-image-aarch64.log {{boot-timeout}} qemu-system-aarch64 -machine virt -cpu cortex-a57 -m 256M -nographic -no-reboot -global virtio-mmio.force-legacy=off -drive if=none,id=disk0,file=target/images/aarch64-unknown-minix/disk.img,format=raw,cache=writethrough -device virtio-blk-device,drive=disk0 -netdev user,id=net0 -device virtio-net-device,netdev=net0 -device virtio-gpu-device -device virtio-keyboard-device -kernel target/images/aarch64-unknown-minix/minix-aarch64-boot.elf
-    @just _assert-qemu-log target/test-system-image-aarch64.log "wserver: ready"
 
-# The `/dev/fb` `mmap` path: a userland `mmap` of the framebuffer must alias the device's
-# own memory, which every present path (`wserver`, `/sbin/wlserver`, and the clients that
-# read the frame back) depends on. It broke silently once: after `VM_MAP_PHYS` began
-# returning a *window* rather than the physical address (`.notes/physmap.md` D5), the fb
-# server reported that window as the physical base, so every client's `mmap` landed where
-# the device is not and read a black frame. `/bin/fbmmap` does the whole check itself —
-# paint, then read back the block and the boot pattern — so this needs no screenshot and
-# no GL host, and it runs on every arch.
-test-fbmmap arch="x86" boot-timeout="40":
-    @just test-fbmmap-{{arch}} {{boot-timeout}}
 
-test-fbmmap-x86 boot-timeout="40": system-image-x86
-    @just _assert-qemu-version qemu-system-x86_64
-    FEED_SCENARIO=tools/smoke/fbmmap.tsv cargo xtask smoke target/test-fbmmap-x86.log {{boot-timeout}} qemu-system-x86_64 -nographic -m 256M -no-reboot -vga none -device bochs-display,id=fb0 -kernel target/images/x86_64-pc-minix/minix-x86-boot.elf -drive if=none,id=disk0,file=target/images/x86_64-pc-minix/disk.img,format=raw,cache=writethrough -device virtio-blk-pci,disable-legacy=on,drive=disk0 -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0 -device virtio-tablet-pci,display=fb0
-    @echo "fbmmap: a userland mmap of /dev/fb aliases the live framebuffer (x86_64)"
 
-test-fbmmap-riscv64 boot-timeout="60": system-image-riscv64
-    @just _assert-qemu-version qemu-system-riscv64
-    FEED_SCENARIO=tools/smoke/fbmmap.tsv cargo xtask smoke target/test-fbmmap-riscv64.log {{boot-timeout}} qemu-system-riscv64 -machine virt -m 256M -nographic -global virtio-mmio.force-legacy=off -drive if=none,id=disk0,file=target/images/riscv64gc-unknown-minix/disk.img,format=raw,cache=writethrough -device virtio-blk-device,drive=disk0 -netdev user,id=net0 -device virtio-net-device,netdev=net0 -device virtio-gpu-device -device virtio-keyboard-device -kernel target/images/riscv64gc-unknown-minix/minix-riscv64-boot.elf
-    @echo "fbmmap: a userland mmap of /dev/fb aliases the live framebuffer (riscv64)"
 
-test-fbmmap-aarch64 boot-timeout="60": system-image-aarch64
-    @just _assert-qemu-version qemu-system-aarch64
-    FEED_SCENARIO=tools/smoke/fbmmap.tsv cargo xtask smoke target/test-fbmmap-aarch64.log {{boot-timeout}} qemu-system-aarch64 -machine virt -cpu cortex-a57 -m 256M -nographic -no-reboot -global virtio-mmio.force-legacy=off -drive if=none,id=disk0,file=target/images/aarch64-unknown-minix/disk.img,format=raw,cache=writethrough -device virtio-blk-device,drive=disk0 -netdev user,id=net0 -device virtio-net-device,netdev=net0 -device virtio-gpu-device -device virtio-keyboard-device -kernel target/images/aarch64-unknown-minix/minix-aarch64-boot.elf
-    @echo "fbmmap: a userland mmap of /dev/fb aliases the live framebuffer (aarch64)"
 
-# Interactive bash: readline polls the console instead of blocking on a line read,
-# so this drives a *typed* line at `bash-5.3#` — the part the `bash -c` scenario in
-# `test-bash-<arch>` cannot see. It boots the split pair (the shipping artifact),
-# which carries bash when its `target/bash/<arch>/bash` exists; `build-bash` first
-# so the image the gate builds has it.
-test-interactive-bash arch="x86" boot-timeout="60": (build-bash arch)
-    @just test-interactive-bash-{{arch}} {{boot-timeout}}
 
-test-interactive-bash-x86 boot-timeout="40": system-image-x86
-    @just _assert-qemu-version qemu-system-x86_64
-    cargo xtask probe interactive-bash target/test-interactive-bash-x86.log {{boot-timeout}} -- qemu-system-x86_64 -nographic -m 256M -no-reboot -vga none -device bochs-display,id=fb0 -kernel target/images/x86_64-pc-minix/minix-x86-boot.elf -drive if=none,id=disk0,file=target/images/x86_64-pc-minix/disk.img,format=raw,cache=writethrough -device virtio-blk-pci,disable-legacy=on,drive=disk0 -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0 -device virtio-tablet-pci,display=fb0
 
-test-interactive-bash-riscv64 boot-timeout="60": system-image-riscv64
-    @just _assert-qemu-version qemu-system-riscv64
-    cargo xtask probe interactive-bash target/test-interactive-bash-riscv64.log {{boot-timeout}} -- qemu-system-riscv64 -machine virt -m 256M -nographic -global virtio-mmio.force-legacy=off -drive if=none,id=disk0,file=target/images/riscv64gc-unknown-minix/disk.img,format=raw,cache=writethrough -device virtio-blk-device,drive=disk0 -netdev user,id=net0 -device virtio-net-device,netdev=net0 -device virtio-gpu-device -device virtio-keyboard-device -kernel target/images/riscv64gc-unknown-minix/minix-riscv64-boot.elf
 
-test-interactive-bash-aarch64 boot-timeout="60": system-image-aarch64
-    @just _assert-qemu-version qemu-system-aarch64
-    cargo xtask probe interactive-bash target/test-interactive-bash-aarch64.log {{boot-timeout}} -- qemu-system-aarch64 -machine virt -cpu cortex-a57 -m 256M -nographic -no-reboot -global virtio-mmio.force-legacy=off -drive if=none,id=disk0,file=target/images/aarch64-unknown-minix/disk.img,format=raw,cache=writethrough -device virtio-blk-device,drive=disk0 -netdev user,id=net0 -device virtio-net-device,netdev=net0 -device virtio-gpu-device -device virtio-keyboard-device -kernel target/images/aarch64-unknown-minix/minix-aarch64-boot.elf
+
 
 build-riscv64: userland-riscv64 coreutils-riscv64 dynlib-riscv64
     RUSTC="{{stage1-rustc}}" cargo build -p kernel-boot --bin kernel-boot-riscv64 --target riscv64gc-unknown-minix --features embed_initramfs,embed_minixfs,riscv64 --release
@@ -360,7 +311,7 @@ build-aarch64: userland-aarch64 coreutils-aarch64 dynlib-aarch64
 # toolchain if `target/toolchain/<arch>/root` is there, the same way it includes
 # `/bin/bash`, so `just llvm-minix x86` then `just run x86 2048M` reaches
 # `/usr/bin/clang`, `clang++` and `ld.lld`. Without the root it says so and boots
-# the release-sized system. `just image` stays the self-contained 16 MiB system.
+# the release-sized system. `cargo xtask gate image` stays the self-contained 16 MiB system.
 run target="x86" memory="256M":
     @just run-{{target}} {{memory}}
 
@@ -374,55 +325,7 @@ run-riscv64 memory: boot-image-riscv64 system-image-riscv64
 run-aarch64 memory: boot-image-aarch64 system-image-aarch64
     qemu-system-aarch64 -machine virt -cpu cortex-a57 -m {{memory}} -nographic -no-reboot -global virtio-mmio.force-legacy=off -drive if=none,id=disk0,file=target/images/aarch64-unknown-minix/disk.img,format=raw,cache=writethrough -device virtio-blk-device,drive=disk0 -netdev user,id=net0 -device virtio-net-device,netdev=net0 -device virtio-gpu-device -device virtio-keyboard-device -kernel target/boot-kernel-aarch64.elf
 
-# One self-contained, bootable artifact per arch: the kernel with the initramfs
-# and root filesystem embedded, so QEMU needs no separate disk. With no virtio
-# disk attached, MFS mounts the embedded image through the ramdisk driver
-# (`fs::block_io::bdev_driver_root` falls back to it when the preferred driver
-# has no device).
-#
-# The artifact is an ELF, which is what `-kernel` loads; x86 carries the kernel
-# as a segment of its multiboot trampoline ELF, the other arches are the kernel
-# itself. A raw disk image for real hardware would instead be the (unwired)
-# `tools/mbr.S` + `tools/stage2.S` route (not wired up).
-#
-#  Each recipe boots what it produced and drives the userspace smoke scenario into its
-# shell, so a bad artifact fails here rather than in someone's hands. The boot timeout
-# bounds the guest - 15 s, against a guest that reaches the shell in about two, with the
-# scenario's own budget set a second inside it - so a guest that stops making progress
-# fails the recipe instead of only being slow. It is a parameter so that the release job
-# (`.github/workflows/image-release.yml`, called by `ci.yml`) can pass a larger one: a CI
-# runner emulates the guest, and that is a property of the runner, not of the artifact.
-#
-# The QEMU command mirrors the matching `run-*` recipe minus the disk - which is
-# the point - so the display and input devices are passed too: without virtio-gpu
-# `fb` fails to initialise on riscv64/aarch64 and wserver has no framebuffer (x86
-# would still look fine, because QEMU keeps a default VGA adapter under
-# `-nographic`).
-#
-# `/usr/bin/timeout` is spelled out because on Windows a bare `timeout` resolves
-# to the Windows TIMEOUT.EXE instead: a recipe shell inherits System32 ahead of
-# the MSYS bin dir, and that binary's command line is unrelated (the same trap
-# applies to `find`, `sort` and `more`).
-# Build the single-file boot artifact for an arch. `boot-timeout` is what the
-# self-check gets (see the note above).
-image target="x86" boot-timeout="15":
-    @just image-{{target}} {{boot-timeout}}
 
-# One self-contained, bootable ELF per arch, booted and driven through the userspace smoke scenario
-# (`tools/smoke/scenario.tsv`): a program exec'd from the image, a file written, that file read back
-# — the same steps `run.js` drives in the browser. The guest is not left to print markers on its own;
-# the scenario is typed into the shell that a user gets, which is what makes this a check on the
-# artifact rather than on the servers having started. `wserver: ready` stays an assertion as well:
-# it caught a real regression (a browser-ready desktop, dead on the arches) that the scenario could
-# not see — the shell worked while the window server was stuck, finding 66.
-image-x86 boot-timeout="15": build-x86
-    mkdir -p target/images/x86_64-pc-minix
-    cp target/trampoline.elf target/images/x86_64-pc-minix/minix-x86.elf
-    @just _assert-qemu-version qemu-system-x86_64
-    cargo xtask smoke target/image-x86.log {{boot-timeout}} qemu-system-x86_64 -nographic -m 256M -no-reboot -vga none -device bochs-display,id=fb0 -kernel target/images/x86_64-pc-minix/minix-x86.elf -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0 -device virtio-tablet-pci,display=fb0
-    @just _assert-qemu-log target/image-x86.log "wserver: ready"
-    @just _assert-qemu-log target/image-x86.log "fb: gpu3d none"
-    @echo "done: target/images/x86_64-pc-minix/minix-x86.elf — qemu-system-x86_64 -nographic -m 256M -kernel <it>"
 
 
 # The 3D half of 3a's gate. x86 keeps bochs-display for the output, so the virtio-gpu
@@ -469,8 +372,8 @@ image-x86 boot-timeout="15": build-x86
 #     whose storage is nothing but guest memory transfers to itself, so its round trip
 #     would pass while moving no data at all.
 #
-# The *degrade* half is graded on every plain x86 boot: `image-x86` asserts
-# `fb: gpu3d none`, and `test-gpu3d-nogl-x86` covers the other degrade case, a device
+# The *degrade* half is graded on every plain x86 boot: the `image` gate asserts
+# `fb: gpu3d none`, and the `gpu3d-nogl` gate covers the other degrade case, a device
 # the host gave no GL to.
 #
 # Nothing is typed into this guest, a departure from every other image recipe and a
@@ -483,481 +386,52 @@ image-x86 boot-timeout="15": build-x86
 # half-booted guest. QEMU is bounded by `timeout` rather than by a scenario's last
 # step, so the recipe's `boot-timeout` is the guest's whole lifetime.
 
-test-gpu3d-x86 boot-timeout="30": build-x86
-    mkdir -p target/images/x86_64-pc-minix
-    cp target/trampoline.elf target/images/x86_64-pc-minix/minix-x86.elf
-    @just _assert-qemu-version qemu-system-x86_64
-    /usr/bin/timeout -s 9 {{boot-timeout}} qemu-system-x86_64 -display egl-headless -serial stdio -m 256M -no-reboot -vga none -device bochs-display,id=fb0 -kernel target/images/x86_64-pc-minix/minix-x86.elf -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0 -device virtio-tablet-pci,display=fb0 -device virtio-gpu-gl-pci 2>&1 | tee target/test-gpu3d-x86.log
-    @just _assert-qemu-log target/test-gpu3d-x86.log "wserver: ready"
-    @just _assert-qemu-log target/test-gpu3d-x86.log "wlserver: ready"
-    @just _assert-qemu-log target/test-gpu3d-x86.log "fb: gpu3d virgl capset"
-    @just _assert-qemu-log target/test-gpu3d-x86.log "xfer 16384/16384"
-    @just _assert-qemu-log target/test-gpu3d-x86.log "submit 16384/16384"
-    @echo "gpu3d: the render node negotiated virgl, answered the capset query, and round-tripped a texture (x86_64)"
 
-# The other half of 3a's degrade path, and the one `image-x86` cannot cover: a
-# virtio-gpu device the host offers but did *not* enable GL on. Such a device answers
-# no VIRTIO_GPU_F_VIRGL, and the probe has to say so and stop there - the capset and
-# context commands it would otherwise send are exactly the ones a feature-less device
-# answers with errors (or, worse, does not answer at all). A plain `virtio-gpu-pci` is
-# that device on every x86 host, GL-capable or not, and being 2D-only it needs no GL
-# display backend: `-nographic` is enough, so this one boot carries both halves of 3b-2:
-# the fb server reports the device as no-3D, and then a client opens the render node and
-# is told so itself. The step is the client rather than the boot smoke because the client
-# is the stronger proof that the guest got here — it execs a binary from the image, opens
-# a device, and takes a path through VFS and a driver — and because the smoke proper is
-# `image-x86`'s. `tools/smoke/drminfo.tsv` has the rest of the reason this gate uses a
-# device without GL.
-test-gpu3d-nogl-x86 boot-timeout="20": build-x86
-    mkdir -p target/images/x86_64-pc-minix
-    cp target/trampoline.elf target/images/x86_64-pc-minix/minix-x86.elf
-    @just _assert-qemu-version qemu-system-x86_64
-    FEED_SCENARIO=tools/smoke/drminfo.tsv cargo xtask smoke target/test-gpu3d-nogl-x86.log {{boot-timeout}} qemu-system-x86_64 -nographic -m 256M -no-reboot -vga none -device bochs-display,id=fb0 -kernel target/images/x86_64-pc-minix/minix-x86.elf -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0 -device virtio-tablet-pci,display=fb0 -device virtio-gpu-pci
-    @just _assert-qemu-log target/test-gpu3d-nogl-x86.log "fb: gpu3d device, no VIRTIO_GPU_F_VIRGL"
-    @echo "gpu3d: a device the host gave no GL to was reported as no 3D by the fb server and by a client opening its render node (x86_64)"
 
-# The node's *memory objects*, which is 3b-3 and a different claim from 3b-2's: a client
-# creates one, maps it, and proves the mapping is that object's memory. Same device as the
-# gate above and for the same reasons (it types, so it needs the 2D-only device; and
-# `RESOURCE_CREATE` on a device without GL is the `RESOURCE_CREATE_2D` +
-# `ATTACH_BACKING` path, which a later client meets whenever the host has no GL).
-test-drmmap-x86 boot-timeout="20": build-x86
-    mkdir -p target/images/x86_64-pc-minix
-    cp target/trampoline.elf target/images/x86_64-pc-minix/minix-x86.elf
-    @just _assert-qemu-version qemu-system-x86_64
-    FEED_SCENARIO=tools/smoke/drmmap.tsv cargo xtask smoke target/test-drmmap-x86.log {{boot-timeout}} qemu-system-x86_64 -nographic -m 256M -no-reboot -vga none -device bochs-display,id=fb0 -kernel target/images/x86_64-pc-minix/minix-x86.elf -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0 -device virtio-tablet-pci,display=fb0 -device virtio-gpu-pci
-    @just _assert-qemu-log target/test-drmmap-x86.log "fb: gpu3d device, no VIRTIO_GPU_F_VIRGL"
-    @echo "drmmap: a client created a render node memory object, mapped it twice, found one set of frames, saw a second object be other memory, and closed it (x86_64)"
 
-# The render node's PRIME handoff (`tools/smoke/drmprime.tsv`): `diag drmprime` exports a
-# memory object to a dma-buf descriptor, checks the descriptor's own kind and device with
-# `fstat`, imports it back to the object's handle, and reads the bytes through it. The device
-# is the same plain `virtio-gpu-pci` the other node gates use, for their reason: sharing is a
-# property of the node's object table, not of GL, so the degraded device exercises the same
-# code without a GL host to drop serial bytes.
-test-drmprime-x86 boot-timeout="20": build-x86
-    mkdir -p target/images/x86_64-pc-minix
-    cp target/trampoline.elf target/images/x86_64-pc-minix/minix-x86.elf
-    @just _assert-qemu-version qemu-system-x86_64
-    FEED_SCENARIO=tools/smoke/drmprime.tsv cargo xtask smoke target/test-drmprime-x86.log {{boot-timeout}} qemu-system-x86_64 -nographic -m 256M -no-reboot -vga none -device bochs-display,id=fb0 -kernel target/images/x86_64-pc-minix/minix-x86.elf -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0 -device virtio-tablet-pci,display=fb0 -device virtio-gpu-pci
-    @just _assert-qemu-log target/test-drmprime-x86.log "fb: gpu3d device, no VIRTIO_GPU_F_VIRGL"
-    @echo "drmprime: a client exported a render node object to a dma-buf descriptor and imported it back, and the bytes survived (x86_64)"
 
-# `readlink(2)`, which nothing proved until now: the three pieces that move a filesystem
-# server's bytes into a user process (`tools/smoke/readlink.tsv` has the whole reason) are all
-# stubs of some kind before this, so the gate is the first exercise of the path. No device is
-# needed beyond the ones a plain boot has, and the step's own expectation is the assertion.
-test-readlink-x86 boot-timeout="20": build-x86
-    mkdir -p target/images/x86_64-pc-minix
-    cp target/trampoline.elf target/images/x86_64-pc-minix/minix-x86.elf
-    @just _assert-qemu-version qemu-system-x86_64
-    FEED_SCENARIO=tools/smoke/readlink.tsv cargo xtask smoke target/test-readlink-x86.log {{boot-timeout}} qemu-system-x86_64 -nographic -m 256M -no-reboot -vga none -device bochs-display,id=fb0 -kernel target/images/x86_64-pc-minix/minix-x86.elf -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0 -device virtio-tablet-pci,display=fb0
-    @echo "readlink: a client read the target of the symlink the image ships, and the refusals a read has to give (x86_64)"
 
-# `symlink(2)`, the write half of the readlink gate: a link MFS creates at run time, read
-# back out through the same path (`tools/smoke/symlink.tsv` has the whole reason). Nothing
-# had ever created one, so this is the first exercise of it, and the step's own expectation
-# is the assertion. No device is needed beyond the ones a plain boot has.
-test-symlink-x86 boot-timeout="20": build-x86
-    mkdir -p target/images/x86_64-pc-minix
-    cp target/trampoline.elf target/images/x86_64-pc-minix/minix-x86.elf
-    @just _assert-qemu-version qemu-system-x86_64
-    FEED_SCENARIO=tools/smoke/symlink.tsv cargo xtask smoke target/test-symlink-x86.log {{boot-timeout}} qemu-system-x86_64 -nographic -m 256M -no-reboot -vga none -device bochs-display,id=fb0 -kernel target/images/x86_64-pc-minix/minix-x86.elf -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0 -device virtio-tablet-pci,display=fb0
-    @echo "symlink: a client created a link in /tmp, read its target back through the grant, and got the three refusals (x86_64)"
 
-# `link(2)` and `rename(2)`, the acceptance test for KNOWN_ISSUES.md item 37 - green since that
-# item's faults were fixed (2026-10-02). It was *red* on purpose until then, and written to the
-# behaviour the calls should have rather than the behaviour they had, so no step here was edited
-# when the fix landed: the same file that measured the fault is what now passes.
-#
-# A step's fields are separate claims - each call's own errno, the state it left, and a
-# neighbour file's bytes - so a call that ran against the wrong name cannot read as one that
-# worked. x86 only: the fault was in VFS/MFS, which the other arches share.
-test-link-x86 boot-timeout="20": build-x86
-    mkdir -p target/images/x86_64-pc-minix
-    cp target/trampoline.elf target/images/x86_64-pc-minix/minix-x86.elf
-    @just _assert-qemu-version qemu-system-x86_64
-    FEED_SCENARIO=tools/smoke/link.tsv cargo xtask smoke target/test-link-x86.log {{boot-timeout}} qemu-system-x86_64 -nographic -m 256M -no-reboot -vga none -device bochs-display,id=fb0 -kernel target/images/x86_64-pc-minix/minix-x86.elf -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0 -device virtio-tablet-pci,display=fb0
-    @echo "link: a hard link and a rename carried their names (x86_64)"
 
-# The render node's client on the GL device, which is the one gate that types into a guest with a
-# GL display backend: host GL drops serial bytes mid-line, so this recipe sets `FEED_PACE` and
-# the smoke driver writes the step a byte at a time and refuses to believe it until the guest has echoed
-# the whole line (`tools/smoke/drmgl.tsv` has the measurements and the rest of the reason).
-#
-# `blob=on` because the blob feature is only available on this host's GL device, and the two
-# assertions below are the two ends of it: the fb server's boot line says the device offered it,
-# and the client's line says the node reports it.
-test-drmgl-x86 boot-timeout="40": build-x86
-    mkdir -p target/images/x86_64-pc-minix
-    cp target/trampoline.elf target/images/x86_64-pc-minix/minix-x86.elf
-    @just _assert-qemu-version qemu-system-x86_64
-    FEED_PACE=0.02 FEED_SCENARIO=tools/smoke/drmgl.tsv cargo xtask smoke target/test-drmgl-x86.log {{boot-timeout}} qemu-system-x86_64 -display egl-headless -serial stdio -m 256M -no-reboot -vga none -device bochs-display,id=fb0 -kernel target/images/x86_64-pc-minix/minix-x86.elf -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0 -device virtio-tablet-pci,display=fb0 -device virtio-gpu-gl-pci,blob=on
-    @just _assert-qemu-log target/test-drmgl-x86.log "wserver: ready"
-    @just _assert-qemu-log target/test-drmgl-x86.log "wlserver: ready"
-    @just _assert-qemu-log target/test-drmgl-x86.log "capsets 2 blob 1"
-    @echo "drmgl: a client was driven into a guest with a GL display, and the node answered its capset query with the device's blobs on (x86_64)"
 
-# Acceptance test for KNOWN_ISSUES.md 12 — `coreutils seq 3` must write its three lines and
-# the next tool must read them back. It is the gate that made the multicall wedge findable: a
-# child used to die inside `clap` on a corrupted pointer (item 12's open half), and these steps
-# are exactly what that defect broke.
-#
-# Green as of 2026-09-22: the last cause was the kernel clobbering a live process's XMM
-# registers on entry (`crates/kernel/src/fpu.rs`), and the recipe went green with no edit to
-# these steps, which is what it was written to do. Kept separate from `image-x86`'s boot smoke
-# so that gate keeps measuring what it means to (that the image boots), and out of
-# `test-arches`, as it was while red, so a failure here is never reported as a boot or arch
-# failure.
-test-coreutils-wedge boot-timeout="20": build-x86
-    mkdir -p target/images/x86_64-pc-minix
-    cp target/trampoline.elf target/images/x86_64-pc-minix/minix-x86.elf
-    @just _assert-qemu-version qemu-system-x86_64
-    FEED_SCENARIO=tools/smoke/coreutils-wedge.tsv cargo xtask smoke target/test-coreutils-wedge.log {{boot-timeout}} qemu-system-x86_64 -nographic -m 256M -no-reboot -vga none -device bochs-display,id=fb0 -kernel target/images/x86_64-pc-minix/minix-x86.elf -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0 -device virtio-tablet-pci,display=fb0
-    @echo "coreutils-wedge: no child was left wedged"
 
-# The aarch64 half of the coreutils gate: the multicall is embedded on aarch64 now, and
-# `seq 200 > file` is the sequence that used to write an empty file when a context switch
-# dropped the caller's SIMD registers (KNOWN_ISSUES aarch64 #9).
-test-coreutils-wedge-aarch64 boot-timeout="30": build-aarch64
-    @just _assert-qemu-version qemu-system-aarch64
-    FEED_SCENARIO=tools/smoke/coreutils-wedge.tsv cargo xtask smoke target/test-coreutils-wedge-aarch64.log {{boot-timeout}} qemu-system-aarch64 -machine virt -cpu cortex-a57 -m 256M -nographic -no-reboot -global virtio-mmio.force-legacy=off -netdev user,id=net0 -device virtio-net-device,netdev=net0 -device virtio-gpu-device -device virtio-keyboard-device -kernel target/aarch64-unknown-minix/release/kernel-boot-aarch64
-    @echo "coreutils-wedge: no child was left wedged (aarch64)"
 
-# The applets that were excluded from `feat_minix` for platform reasons, on every arch:
-# `touch` is the filetime path (`utimes`/`lutimes` and `stat`'s times), `env` the exec
-# and signal path (`execvp`, `sigprocmask`, `signal`), `rm`/`chmod` the `safe_traversal`
-# path over the C library's `openat` family, `chgrp`/`chown` the `wrap_chown` path over
-# VFS_CHOWN and `lchown`'s `AT_SYMLINK_NOFOLLOW`, `groups` the `getgrouplist` path,
-# `id` the passwd/group name lookups plus `getlogin`, `logname`/`whoami` the
-# same lookups from one id each, `install` the copy/mode/owner path,
-# `mkfifo` the VFS_MKNOD path, and `chroot` the VFS_CHROOT path.
-# `tools/smoke/coreutils-minix.tsv` says which step covers which.
-#
-# One boot, at 512 MiB. The fixture is the whole set (134 steps), and 512 MiB is
-# what it needs: x86's fb server keeps a 128 MiB `GEM_ARENA` static
-# (`crates/servers/src/fb.rs`) that the boot loader allocates with the image, so a
-# 256 MiB guest has only ~25 MiB free and the sequence exhausts it (the first
-# pipeline fails with EPIPE). The arena is deliberate, for the render node; the
-# gate gives the guest room for both.
-#
-# Every arch paces its input (`FEED_PACE`): the console drops bytes mid-line
-# under a burst, which runs a truncated command. Pacing costs a `sleep` per
-# group under MSYS, so the budgets cover a paced scenario.
-test-coreutils-minix arch="x86":
-    @just test-coreutils-minix-{{arch}}
 
-test-coreutils-minix-x86: build-x86
-    mkdir -p target/images/x86_64-pc-minix
-    cp target/trampoline.elf target/images/x86_64-pc-minix/minix-x86.elf
-    @just _assert-qemu-version qemu-system-x86_64
-    FEED_PACE=0.003 FEED_SCENARIO=tools/smoke/coreutils-minix.tsv cargo xtask smoke target/test-coreutils-minix-x86.log 300 qemu-system-x86_64 -nographic -m 512M -no-reboot -vga none -device bochs-display,id=fb0 -kernel target/images/x86_64-pc-minix/minix-x86.elf -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0 -device virtio-tablet-pci,display=fb0
-    @if grep -qE "^(touch|env|ln|chgrp|chown|groups|id|logname|whoami|install|mkfifo|chroot|coreutils|ls|dir|vdir|cp|mv|expr|link|hostid|nice|date|dd|tty|dircolors|csplit|du|kill|uname|arch|nproc|hostname|timeout|more):|^(RM-STILL-THERE|RMR-STILL-THERE|CHMOD-X-BAD|CHMOD-ENOENT-BAD|INSTALL-M-BAD)$" target/test-coreutils-minix-x86.log; then echo "!! a tool reported an error:"; grep -nE "^(touch|env|ln|chgrp|chown|groups|id|logname|whoami|install|mkfifo|chroot|coreutils|ls|dir|vdir|cp|mv|expr|link|hostid|nice|date|dd|tty|dircolors|csplit|du|kill|uname|arch|nproc|hostname|timeout|more):|^(RM-STILL-THERE|RMR-STILL-THERE|CHMOD-X-BAD|CHMOD-ENOENT-BAD|INSTALL-M-BAD)$" target/test-coreutils-minix-x86.log; exit 1; fi
-    @echo "coreutils-minix: the core scenario and ls, cp, mv, expr, link, hostid, nice, date, dd, tty, dircolors, csplit, du, uname, arch, nproc, hostname, timeout, nohup, more and kill ran (x86_64)"
 
-test-coreutils-minix-riscv64: build-riscv64
-    @just _assert-qemu-version qemu-system-riscv64
-    FEED_PACE=0.003 FEED_SCENARIO=tools/smoke/coreutils-minix.tsv cargo xtask smoke target/test-coreutils-minix-riscv64.log 480 qemu-system-riscv64 -machine virt -m 512M -nographic -global virtio-mmio.force-legacy=off -netdev user,id=net0 -device virtio-net-device,netdev=net0 -device virtio-gpu-device -device virtio-keyboard-device -kernel target/riscv64gc-unknown-minix/release/kernel-boot-riscv64
-    @if grep -qE "^(touch|env|ln|chgrp|chown|groups|id|logname|whoami|install|mkfifo|chroot|coreutils|ls|dir|vdir|cp|mv|expr|link|hostid|nice|date|dd|tty|dircolors|csplit|du|kill|uname|arch|nproc|hostname|timeout|more):|^(RM-STILL-THERE|RMR-STILL-THERE|CHMOD-X-BAD|CHMOD-ENOENT-BAD|INSTALL-M-BAD)$" target/test-coreutils-minix-riscv64.log; then echo "!! a tool reported an error:"; grep -nE "^(touch|env|ln|chgrp|chown|groups|id|logname|whoami|install|mkfifo|chroot|coreutils|ls|dir|vdir|cp|mv|expr|link|hostid|nice|date|dd|tty|dircolors|csplit|du|kill|uname|arch|nproc|hostname|timeout|more):|^(RM-STILL-THERE|RMR-STILL-THERE|CHMOD-X-BAD|CHMOD-ENOENT-BAD|INSTALL-M-BAD)$" target/test-coreutils-minix-riscv64.log; exit 1; fi
-    @echo "coreutils-minix: the core scenario and ls, cp, mv, expr, link, hostid, nice, date, dd, tty, dircolors, csplit, du, uname, arch, nproc, hostname, timeout, nohup, more and kill ran (riscv64)"
 
-test-coreutils-minix-aarch64: build-aarch64
-    @just _assert-qemu-version qemu-system-aarch64
-    FEED_PACE=0.003 FEED_SCENARIO=tools/smoke/coreutils-minix.tsv cargo xtask smoke target/test-coreutils-minix-aarch64.log 480 qemu-system-aarch64 -machine virt -cpu cortex-a57 -m 512M -nographic -no-reboot -global virtio-mmio.force-legacy=off -netdev user,id=net0 -device virtio-net-device,netdev=net0 -device virtio-gpu-device -device virtio-keyboard-device -kernel target/aarch64-unknown-minix/release/kernel-boot-aarch64
-    @if grep -qE "^(touch|env|ln|chgrp|chown|groups|id|logname|whoami|install|mkfifo|chroot|coreutils|ls|dir|vdir|cp|mv|expr|link|hostid|nice|date|dd|tty|dircolors|csplit|du|kill|uname|arch|nproc|hostname|timeout|more):|^(RM-STILL-THERE|RMR-STILL-THERE|CHMOD-X-BAD|CHMOD-ENOENT-BAD|INSTALL-M-BAD)$" target/test-coreutils-minix-aarch64.log; then echo "!! a tool reported an error:"; grep -nE "^(touch|env|ln|chgrp|chown|groups|id|logname|whoami|install|mkfifo|chroot|coreutils|ls|dir|vdir|cp|mv|expr|link|hostid|nice|date|dd|tty|dircolors|csplit|du|kill|uname|arch|nproc|hostname|timeout|more):|^(RM-STILL-THERE|RMR-STILL-THERE|CHMOD-X-BAD|CHMOD-ENOENT-BAD|INSTALL-M-BAD)$" target/test-coreutils-minix-aarch64.log; exit 1; fi
-    @echo "coreutils-minix: the core scenario and ls, cp, mv, expr, link, hostid, nice, date, dd, tty, dircolors, csplit, du, uname, arch, nproc, hostname, timeout, nohup, more and kill ran (aarch64)"
 
-# The read path over a file written this boot, per arch: `tools/smoke/fileread.tsv` writes
-# `seq 1 10000` (twelve blocks, so blocks 8-11 sit behind the single-indirect block) and hashes
-# what reads of a chosen size return through `/bin/filereadprobe`.
-#
-# The defect this pins is `KNOWN_ISSUES.md` item 60: an indirect entry `write_map` has not filled
-# yet is a zero, and reading that zero as `0xFFFFFFFF` made it a valid block number, so those
-# blocks all resolved to block 0. It is per arch because the read crosses VFS's grant, MFS's block
-# loop and the kernel's copy, and each arch builds its own tables; but the defect itself was
-# cross-arch, and x86 is the arch it was measured on.
-test-fileread arch="x86":
-    @just test-fileread-{{arch}}
 
-test-fileread-x86 boot-timeout="40": build-x86
-    mkdir -p target/images/x86_64-pc-minix
-    cp target/trampoline.elf target/images/x86_64-pc-minix/minix-x86.elf
-    @just _assert-qemu-version qemu-system-x86_64
-    FEED_SCENARIO=tools/smoke/fileread.tsv cargo xtask smoke target/test-fileread-x86.log {{boot-timeout}} qemu-system-x86_64 -nographic -m 256M -no-reboot -vga none -device bochs-display,id=fb0 -kernel target/images/x86_64-pc-minix/minix-x86.elf -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0 -device virtio-tablet-pci,display=fb0
-    @echo "fileread: a runtime-written file's indirect blocks read back (x86_64)"
 
-test-fileread-riscv64 boot-timeout="120": build-riscv64
-    @just _assert-qemu-version qemu-system-riscv64
-    FEED_PACE=0.003 FEED_SCENARIO=tools/smoke/fileread.tsv cargo xtask smoke target/test-fileread-riscv64.log {{boot-timeout}} qemu-system-riscv64 -machine virt -m 256M -nographic -global virtio-mmio.force-legacy=off -netdev user,id=net0 -device virtio-net-device,netdev=net0 -device virtio-gpu-device -device virtio-keyboard-device -kernel target/riscv64gc-unknown-minix/release/kernel-boot-riscv64
-    @echo "fileread: a runtime-written file's indirect blocks read back (riscv64)"
 
-test-fileread-aarch64 boot-timeout="120": build-aarch64
-    @just _assert-qemu-version qemu-system-aarch64
-    FEED_PACE=0.003 FEED_SCENARIO=tools/smoke/fileread.tsv cargo xtask smoke target/test-fileread-aarch64.log {{boot-timeout}} qemu-system-aarch64 -machine virt -cpu cortex-a57 -m 256M -nographic -no-reboot -global virtio-mmio.force-legacy=off -netdev user,id=net0 -device virtio-net-device,netdev=net0 -device virtio-gpu-device -device virtio-keyboard-device -kernel target/aarch64-unknown-minix/release/kernel-boot-aarch64
-    @echo "fileread: a runtime-written file's indirect blocks read back (aarch64)"
 
-# The shared anonymous mapping gate: VM allocates the frames at map time, so a
-# store the child makes after the fork is visible in the parent's view.
-test-mmapanon-x86 boot-timeout="20": build-x86
-    mkdir -p target/images/x86_64-pc-minix
-    cp target/trampoline.elf target/images/x86_64-pc-minix/minix-x86.elf
-    @just _assert-qemu-version qemu-system-x86_64
-    FEED_SCENARIO=tools/smoke/mmapanon.tsv cargo xtask smoke target/test-mmapanon-x86.log {{boot-timeout}} qemu-system-x86_64 -nographic -m 256M -no-reboot -vga none -device bochs-display,id=fb0 -kernel target/images/x86_64-pc-minix/minix-x86.elf -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0 -device virtio-tablet-pci,display=fb0
-    @echo "mmapanon: MAP_SHARED|MAP_ANONYMOUS is shared across fork (x86_64)"
 
-# The MAP_SHARED *file* gate: the store's visibility to other mappers is one half and
-# was already there; the other is that the file receives it when the mapping goes away
-# (KNOWN_ISSUES.md item 48). `tools/smoke/writeback.tsv` creates its own file and
-# reopens it with a new fd, which cannot see the cache, so only a real writeback can
-# satisfy the expectation. Per arch because the writeback goes through VM's own
-# self-mapping (`vm_mappage`) and VFS's grant, both of which are arch-specific.
-#
-# Input is paced (`FEED_PACE`) because the first step is a whole command line in one
-# write and a guest that drops the tail of a burst loses it: riscv64 failed 1 run in 3
-# on the unmodified tree with `# /bin/echo writeback-marker > wb.t` in the log, which
-# the paced path turns into a verified echo and a retry instead of a lost step.
-test-writeback arch="x86" boot-timeout="40":
-    @just test-writeback-{{arch}} {{boot-timeout}}
 
-test-writeback-x86 boot-timeout="40": system-image-x86
-    @just _assert-qemu-version qemu-system-x86_64
-    FEED_PACE=0.003 FEED_SCENARIO=tools/smoke/writeback.tsv cargo xtask smoke target/test-writeback-x86.log {{boot-timeout}} qemu-system-x86_64 -nographic -m 256M -no-reboot -vga none -device bochs-display,id=fb0 -kernel target/images/x86_64-pc-minix/minix-x86-boot.elf -drive if=none,id=disk0,file=target/images/x86_64-pc-minix/disk.img,format=raw,cache=writethrough -device virtio-blk-pci,disable-legacy=on,drive=disk0 -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0 -device virtio-tablet-pci,display=fb0
-    @echo "writeback: a MAP_SHARED file store reached the file (x86_64)"
 
-test-writeback-riscv64 boot-timeout="60": system-image-riscv64
-    @just _assert-qemu-version qemu-system-riscv64
-    FEED_PACE=0.003 FEED_SCENARIO=tools/smoke/writeback.tsv cargo xtask smoke target/test-writeback-riscv64.log {{boot-timeout}} qemu-system-riscv64 -machine virt -m 256M -nographic -global virtio-mmio.force-legacy=off -drive if=none,id=disk0,file=target/images/riscv64gc-unknown-minix/disk.img,format=raw,cache=writethrough -device virtio-blk-device,drive=disk0 -netdev user,id=net0 -device virtio-net-device,netdev=net0 -device virtio-gpu-device -device virtio-keyboard-device -kernel target/images/riscv64gc-unknown-minix/minix-riscv64-boot.elf
-    @echo "writeback: a MAP_SHARED file store reached the file (riscv64)"
 
-test-writeback-aarch64 boot-timeout="60": system-image-aarch64
-    @just _assert-qemu-version qemu-system-aarch64
-    FEED_PACE=0.003 FEED_SCENARIO=tools/smoke/writeback.tsv cargo xtask smoke target/test-writeback-aarch64.log {{boot-timeout}} qemu-system-aarch64 -machine virt -cpu cortex-a57 -m 256M -nographic -no-reboot -global virtio-mmio.force-legacy=off -drive if=none,id=disk0,file=target/images/aarch64-unknown-minix/disk.img,format=raw,cache=writethrough -device virtio-blk-device,drive=disk0 -netdev user,id=net0 -device virtio-net-device,netdev=net0 -device virtio-gpu-device -device virtio-keyboard-device -kernel target/images/aarch64-unknown-minix/minix-aarch64-boot.elf
-    @echo "writeback: a MAP_SHARED file store reached the file (aarch64)"
 
-# Long paths must resolve. KNOWN_ISSUES.md item 19: a pathname of 24 bytes or more
-# killed VFS — it wrote the REQ_LOOKUP terminator one byte past the 56-byte message
-# at exactly 24, and truncated anything longer to 24 and resolved the wrong name.
-# The path now travels in a grant. Steps bracket that boundary so a regression names
-# the length it stopped at, and each read-back is a marker no other step can print.
-# *Creating* a name past 28 bytes is item 20, still open, and is not what this gate
-# measures. x86 only, like `test-coreutils-wedge`; the other arches have images and
-# could run the same scenario.
-test-long-path boot-timeout="30": build-x86
-    mkdir -p target/images/x86_64-pc-minix
-    cp target/trampoline.elf target/images/x86_64-pc-minix/minix-x86.elf
-    @just _assert-qemu-version qemu-system-x86_64
-    FEED_SCENARIO=tools/smoke/long-path.tsv cargo xtask smoke target/test-long-path.log {{boot-timeout}} qemu-system-x86_64 -nographic -m 256M -no-reboot -vga none -device bochs-display,id=fb0 -kernel target/images/x86_64-pc-minix/minix-x86.elf -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0 -device virtio-tablet-pci,display=fb0
-    @echo "long-path: every length resolved"
 
-# A 240-byte command line. The tty has four console lines and every one used to drain the one
-# kernel serial ring, so a burst was split between them; the lines that are not the active console
-# keep the default termios (canonical, ECHO on) and printed what they took, which the console showed
-# as the argument's tail ahead of the command's own echo (the "rotated" burst in KNOWN_ISSUES).
-# Each step's argument starts with a tag its output must begin with, so a byte lost to QEMU's stdio
-# transport still passes while a line the shell never ran fails: the exact argument is deliberately
-# not the expectation, because that loss is a separate, known limitation and this gate is about the
-# line reaching the shell.
-#
-# Paced (`FEED_PACE`), for the same reason the read-cost gate is. A 240-byte write reaches QEMU in
-# one go and its 16-byte receive FIFO overflows before the guest drains it, losing the middle of the
-# line and the newline with it (measured 2026-11-16: the gate failed about one run in two on x86_64
-# and riscv64, the echo stopping mid-line, with the same tree that passes the rest of the time).
-# That is `cargo xtask smoke`'s transport limitation, not the line discipline: `type_step` writes
-# a byte at a time and refuses to go on unless the whole command came back, so what this gate
-# measures stays the guest's behaviour.
-#
-# The dispatcher passes no timeout: each arch recipe's own default is the budget it was measured
-# with. An earlier version forwarded a flat 30 s, which silently overrode riscv64's and aarch64's
-# 60 s and made the gate fail on a slow boot rather than on a dropped line.
-test-burst arch="x86":
-    @just test-burst-{{arch}}
 
-test-burst-x86 boot-timeout="30": build-x86
-    mkdir -p target/images/x86_64-pc-minix
-    cp target/trampoline.elf target/images/x86_64-pc-minix/minix-x86.elf
-    @just _assert-qemu-version qemu-system-x86_64
-    FEED_PACE=0.003 FEED_SCENARIO=tools/smoke/burst.tsv cargo xtask smoke target/test-burst.log {{boot-timeout}} qemu-system-x86_64 -nographic -m 256M -no-reboot -vga none -device bochs-display,id=fb0 -kernel target/images/x86_64-pc-minix/minix-x86.elf -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0 -device virtio-tablet-pci,display=fb0
-    @echo "burst: every long line reached the shell and ran (x86_64)"
 
-test-burst-riscv64 boot-timeout="60": build-riscv64
-    @just _assert-qemu-version qemu-system-riscv64
-    FEED_PACE=0.003 FEED_SCENARIO=tools/smoke/burst.tsv cargo xtask smoke target/test-burst-riscv64.log {{boot-timeout}} qemu-system-riscv64 -machine virt -m 256M -nographic -global virtio-mmio.force-legacy=off -netdev user,id=net0 -device virtio-net-device,netdev=net0 -device virtio-gpu-device -device virtio-keyboard-device -kernel target/riscv64gc-unknown-minix/release/kernel-boot-riscv64
-    @echo "burst: every long line reached the shell and ran (riscv64)"
 
-test-burst-aarch64 boot-timeout="60": build-aarch64
-    @just _assert-qemu-version qemu-system-aarch64
-    FEED_PACE=0.003 FEED_SCENARIO=tools/smoke/burst.tsv cargo xtask smoke target/test-burst-aarch64.log {{boot-timeout}} qemu-system-aarch64 -machine virt -cpu cortex-a57 -m 256M -nographic -no-reboot -global virtio-mmio.force-legacy=off -netdev user,id=net0 -device virtio-net-device,netdev=net0 -device virtio-gpu-device -device virtio-keyboard-device -kernel target/aarch64-unknown-minix/release/kernel-boot-aarch64
-    @echo "burst: every long line reached the shell and ran (aarch64)"
 
-# The tty read timer (MIN/TIME). `ttytimeout` switches the console to raw mode with VMIN=0 and
-# VTIME=2, reads without input, and expects zero bytes back once the deadline passes. Nothing
-# else in the tree observes a timer the tty server owns: the deadline is a number checked on
-# the console pump's own wake (C `tty.c` fires it from `expire_timers`), so a regression shows
-# up here as a read that never returns rather than as a wrong byte.
-test-ttytimeout arch="x86" boot-timeout="30":
-    @just test-ttytimeout-{{arch}} {{boot-timeout}}
 
-test-ttytimeout-x86 boot-timeout="30": build-x86
-    mkdir -p target/images/x86_64-pc-minix
-    cp target/trampoline.elf target/images/x86_64-pc-minix/minix-x86.elf
-    @just _assert-qemu-version qemu-system-x86_64
-    FEED_SCENARIO=tools/smoke/ttytimeout.tsv cargo xtask smoke target/test-ttytimeout.log {{boot-timeout}} qemu-system-x86_64 -nographic -m 256M -no-reboot -vga none -device bochs-display,id=fb0 -kernel target/images/x86_64-pc-minix/minix-x86.elf -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0 -device virtio-tablet-pci,display=fb0
-    @echo "ttytimeout: a MIN/TIME read returned after its deadline (x86_64)"
 
-test-ttytimeout-riscv64 boot-timeout="60": build-riscv64
-    @just _assert-qemu-version qemu-system-riscv64
-    FEED_SCENARIO=tools/smoke/ttytimeout.tsv cargo xtask smoke target/test-ttytimeout-riscv64.log {{boot-timeout}} qemu-system-riscv64 -machine virt -m 256M -nographic -global virtio-mmio.force-legacy=off -netdev user,id=net0 -device virtio-net-device,netdev=net0 -device virtio-gpu-device -device virtio-keyboard-device -kernel target/riscv64gc-unknown-minix/release/kernel-boot-riscv64
-    @echo "ttytimeout: a MIN/TIME read returned after its deadline (riscv64)"
 
-test-ttytimeout-aarch64 boot-timeout="60": build-aarch64
-    @just _assert-qemu-version qemu-system-aarch64
-    FEED_SCENARIO=tools/smoke/ttytimeout.tsv cargo xtask smoke target/test-ttytimeout-aarch64.log {{boot-timeout}} qemu-system-aarch64 -machine virt -cpu cortex-a57 -m 256M -nographic -no-reboot -global virtio-mmio.force-legacy=off -netdev user,id=net0 -device virtio-net-device,netdev=net0 -device virtio-gpu-device -device virtio-keyboard-device -kernel target/aarch64-unknown-minix/release/kernel-boot-aarch64
-    @echo "ttytimeout: a MIN/TIME read returned after its deadline (aarch64)"
 
-# Blocking pipe reads and writes (KNOWN_ISSUES.md 32): `tools/smoke/pipeblock.tsv`. A read of
-# an empty pipe waits for its producer instead of answering EAGAIN, and a write bigger than the
-# buffer waits for the reader to drain it, on every arch because the pipe is VFS's own code.
-test-pipeblock arch="x86" boot-timeout="60":
-    @just test-pipeblock-{{arch}} {{boot-timeout}}
 
-test-pipeblock-x86 boot-timeout="30": build-x86
-    mkdir -p target/images/x86_64-pc-minix
-    cp target/trampoline.elf target/images/x86_64-pc-minix/minix-x86.elf
-    @just _assert-qemu-version qemu-system-x86_64
-    FEED_SCENARIO=tools/smoke/pipeblock.tsv cargo xtask smoke target/test-pipeblock-x86.log {{boot-timeout}} qemu-system-x86_64 -nographic -m 256M -no-reboot -vga none -device bochs-display,id=fb0 -kernel target/images/x86_64-pc-minix/minix-x86.elf -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0 -device virtio-tablet-pci,display=fb0
-    @echo "pipeblock: a pipe read waited for its writer (x86_64)"
 
-test-pipeblock-riscv64 boot-timeout="40": build-riscv64
-    @just _assert-qemu-version qemu-system-riscv64
-    FEED_SCENARIO=tools/smoke/pipeblock.tsv cargo xtask smoke target/test-pipeblock-riscv64.log {{boot-timeout}} qemu-system-riscv64 -machine virt -m 256M -nographic -global virtio-mmio.force-legacy=off -netdev user,id=net0 -device virtio-net-device,netdev=net0 -device virtio-gpu-device -device virtio-keyboard-device -kernel target/riscv64gc-unknown-minix/release/kernel-boot-riscv64
-    @echo "pipeblock: a pipe read waited for its writer (riscv64)"
 
-test-pipeblock-aarch64 boot-timeout="40": build-aarch64
-    @just _assert-qemu-version qemu-system-aarch64
-    FEED_SCENARIO=tools/smoke/pipeblock.tsv cargo xtask smoke target/test-pipeblock-aarch64.log {{boot-timeout}} qemu-system-aarch64 -machine virt -cpu cortex-a57 -m 256M -nographic -no-reboot -global virtio-mmio.force-legacy=off -netdev user,id=net0 -device virtio-net-device,netdev=net0 -device virtio-gpu-device -device virtio-keyboard-device -kernel target/aarch64-unknown-minix/release/kernel-boot-aarch64
-    @echo "pipeblock: a pipe read waited for its writer (aarch64)"
 
-# Kernel threads (KNOWN_ISSUES.md 8): `tools/smoke/threads.tsv`. `threadtest` spawns four
-# kernel threads that block in PM IPC, bump a shared counter and exit, and joins them;
-# `forkthread` forks from a worker and requires the child to be a copy of that worker. Per
-# arch because the thread frame is: the kernel records the stack top and the TLS base in
-# each arch's own layout (`SYS_thread_create`/`SYS_thread_set_tls`).
-test-threads arch="x86" boot-timeout="40":
-    @just test-threads-{{arch}} {{boot-timeout}}
 
-test-threads-x86 boot-timeout="30": build-x86
-    mkdir -p target/images/x86_64-pc-minix
-    cp target/trampoline.elf target/images/x86_64-pc-minix/minix-x86.elf
-    @just _assert-qemu-version qemu-system-x86_64
-    FEED_SCENARIO=tools/smoke/threads.tsv cargo xtask smoke target/test-threads-x86.log {{boot-timeout}} qemu-system-x86_64 -nographic -m 256M -no-reboot -vga none -device bochs-display,id=fb0 -kernel target/images/x86_64-pc-minix/minix-x86.elf -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0 -device virtio-tablet-pci,display=fb0
-    @echo "threads: four kernel threads shared the process and were joined (x86_64)"
 
-test-threads-riscv64 boot-timeout="40": build-riscv64
-    @just _assert-qemu-version qemu-system-riscv64
-    FEED_SCENARIO=tools/smoke/threads.tsv cargo xtask smoke target/test-threads-riscv64.log {{boot-timeout}} qemu-system-riscv64 -machine virt -m 256M -nographic -global virtio-mmio.force-legacy=off -netdev user,id=net0 -device virtio-net-device,netdev=net0 -device virtio-gpu-device -device virtio-keyboard-device -kernel target/riscv64gc-unknown-minix/release/kernel-boot-riscv64
-    @echo "threads: four kernel threads shared the process and were joined (riscv64)"
 
-test-threads-aarch64 boot-timeout="40": build-aarch64
-    @just _assert-qemu-version qemu-system-aarch64
-    FEED_SCENARIO=tools/smoke/threads.tsv cargo xtask smoke target/test-threads-aarch64.log {{boot-timeout}} qemu-system-aarch64 -machine virt -cpu cortex-a57 -m 256M -nographic -no-reboot -global virtio-mmio.force-legacy=off -netdev user,id=net0 -device virtio-net-device,netdev=net0 -device virtio-gpu-device -device virtio-keyboard-device -kernel target/aarch64-unknown-minix/release/kernel-boot-aarch64
-    @echo "threads: four kernel threads shared the process and were joined (aarch64)"
 
-# The per-command read cost of a large binary. The scenario runs two invocations of the multicall,
-# each reading no file data: the first costs ~1080 virtio reads of 4 KiB because the first text
-# fault pre-faults every non-executable region of the image (KNOWN_ISSUES #5), and the second
-# costs ~9 because VM's file cache serves those pages from the same boot. The total was 1146 when
-# the multicall gained `ls`, `cp`, `mv` and the small unix set (KNOWN_ISSUES 62), one zone-sized
-# request per added page, so the ceiling is 1200; it still fails if either the cold start grows or
-# the cache stops serving the warm one, and the warm half is the property that matters for a shell
-# running many applets. Paced input (`FEED_PACE`) because the traced stdio console drops bytes, and
-# a step that never arrived would fail before the count mattered.
-test-read-cost arch="x86" boot-timeout="40":
-    @just test-read-cost-{{arch}} {{boot-timeout}}
 
-test-read-cost-x86 boot-timeout="40": build-x86
-    mkdir -p target/images/x86_64-pc-minix
-    cp target/trampoline.elf target/images/x86_64-pc-minix/minix-x86.elf
-    @just _assert-qemu-version qemu-system-x86_64
-    rm -f target/test-read-cost.trace
-    FEED_PACE=0.003 FEED_SCENARIO=tools/smoke/read-cost.tsv cargo xtask smoke target/test-read-cost.log {{boot-timeout}} qemu-system-x86_64 -nographic -monitor none -m 256M -no-reboot -vga none -device bochs-display,id=fb0 -kernel target/images/x86_64-pc-minix/minix-x86.elf -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0 -device virtio-tablet-pci,display=fb0 -drive if=none,id=disk0,file=target/images/x86_64-pc-minix/disk.img,format=raw,cache=writethrough -device virtio-blk-pci,disable-legacy=on,drive=disk0 -trace enable=virtio_blk_handle_read -D target/test-read-cost.trace
-    cargo xtask probe read-hist target/test-read-cost.trace --max=1200
-    @echo "read-cost: per-command read cost within the ceiling"
 
-# Boot the bash that `build-bash` produced and drive `tools/smoke/bash.tsv` at
-# it: the version banner, a `-c` command line, an arithmetic expansion, a loop, a
-# redirection read back through a second process, an external command (bash's
-# fork+exec path) and `$PWD` from its own startup. Nothing else in the tree boots
-# bash, and the shared smoke scenario cannot: it types into the minix shell and
-# waits for its `#` prompt, which an interactive bash would replace with
-# `bash-5.3#`.
-#
-# The injection is what puts bash in the image: it is deliberately not a
-# `BOOT_BINS` entry, so an image build never depends on bash having been built.
-test-bash arch="x86" boot-timeout="60": (build-bash arch)
-    @just test-bash-{{arch}} {{boot-timeout}}
 
-test-bash-x86 boot-timeout="40":
-    MINIXFS_EXTRA='/bin/bash=target/bash/x86/bash' just build-x86
-    mkdir -p target/images/x86_64-pc-minix
-    cp target/trampoline.elf target/images/x86_64-pc-minix/minix-x86.elf
-    @just _assert-qemu-version qemu-system-x86_64
-    FEED_SCENARIO=tools/smoke/bash.tsv cargo xtask smoke target/test-bash-x86.log {{boot-timeout}} qemu-system-x86_64 -nographic -m 256M -no-reboot -vga none -device bochs-display,id=fb0 -kernel target/images/x86_64-pc-minix/minix-x86.elf -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0 -device virtio-tablet-pci,display=fb0
-    @echo "bash: every step of tools/smoke/bash.tsv answered (x86_64)"
 
-# The shell does not fit the 16 MiB default here either; riscv64 boots fine at 8192, the
-# value `image-riscv64` uses, so this gate uses it too (`build-x86` records what the window
-# costs the guest and why x86 cannot take the larger one).
-test-bash-riscv64 boot-timeout="60":
-    MINIXFS_EXTRA='/bin/bash=target/bash/riscv64/bash' MINIXFS_BLOCKS=8192 just build-riscv64
-    @just _assert-qemu-version qemu-system-riscv64
-    FEED_SCENARIO=tools/smoke/bash.tsv cargo xtask smoke target/test-bash-riscv64.log {{boot-timeout}} qemu-system-riscv64 -machine virt -m 256M -nographic -global virtio-mmio.force-legacy=off -netdev user,id=net0 -device virtio-net-device,netdev=net0 -device virtio-gpu-device -device virtio-keyboard-device -kernel target/riscv64gc-unknown-minix/release/kernel-boot-riscv64
-    @echo "bash: every step of tools/smoke/bash.tsv answered (riscv64)"
 
-test-bash-aarch64 boot-timeout="60":
-    MINIXFS_EXTRA='/bin/bash=target/bash/aarch64/bash' just build-aarch64
-    @just _assert-qemu-version qemu-system-aarch64
-    FEED_SCENARIO=tools/smoke/bash.tsv cargo xtask smoke target/test-bash-aarch64.log {{boot-timeout}} qemu-system-aarch64 -machine virt -cpu cortex-a57 -m 256M -nographic -no-reboot -global virtio-mmio.force-legacy=off -netdev user,id=net0 -device virtio-net-device,netdev=net0 -device virtio-gpu-device -device virtio-keyboard-device -kernel target/aarch64-unknown-minix/release/kernel-boot-aarch64
-    @echo "bash: every step of tools/smoke/bash.tsv answered (aarch64)"
 
-# Boot the dynamic-linking artifacts and drive `tools/smoke/dyn.tsv` at them.
-# `/bin/dynhello` is an `ET_EXEC` with `PT_INTERP /libexec/ld.so` and `DT_NEEDED`
-# for three shared objects, one of which names another three times, so the strings that
-# live only in those objects are what prove the loader chose a base for each of them,
-# followed a dependency of a dependency, resolved names across objects, applied
-# each object's own `RELATIVE` fixups and `R_X86_64_COPY`, and ran the objects'
-# initialisers in dependency order. Two further steps ask for a fork after the
-# load (the child calls into both objects) and an exec after it (the replacement
-# program loads again).
-#
-# The negative check is the centre of this gate: no `dynlink` string may be in
-# `/bin/dynhello`. Were one there, the program could print it with no loader at
-# all and the boot below would pass while proving nothing. (The check is against
-# the built program, which is the file `/bin/dynhello` is a copy of.)
-#
-# The injection adds the loader's *own* test objects to a standard image: `libdyn*.so`
-# and `/bin/dynhello` are deliberately not `BOOT_BINS`, so no image carries them. What
-# they need in order to run — the loader, `/lib/libc.so` and `/bin/dynclib` — an image
-# does carry, and this gate is where the shipped `/bin/dynclib` is exercised, so a
-# regression in it is caught here rather than only in a gate that had built its own
-# copy.
-#
-# The last five steps are `dlopen` (Phase 6). `tools/dynopen.c` asks the loader for
-# `libdlopen.so` at run time — the object is in nothing's `DT_NEEDED`, which is the case a
-# driver lookup is — and reaches it through the handle, and through `RTLD_DEFAULT` after an
-# `RTLD_GLOBAL` load, and again after a `dlclose`. The two failing steps assert the loader's
-# own message rather than just "it failed": a path that is not there, and `libtls1.so`,
-# whose thread-local the loader cannot place, because the module it lays out is fixed at
-# startup for every thread.
-test-dynlink-x86 boot-timeout="40": dynlink-x86
-    DYNLINK_BINS='/lib/libdyn.so=target/dynlink/x86/libdyn.so;/lib/libdyn2.so=target/dynlink/x86/libdyn2.so;/lib/libdyn3.so=target/dynlink/x86/libdyn3.so;/bin/dynhello=target/dynlink/x86/dynhello;/lib/libdlopen.so=target/dynlink/x86/libdlopen.so;/lib/libtls1.so=target/dynlink/x86/libtls1.so;/bin/dynopen=target/dynlink/x86/dynopen' just build-x86
-    @if grep -q 'dynlink' target/dynlink/x86/dynhello; then echo "!! /bin/dynhello contains a 'dynlink' string - the message cannot have come from a shared object" >&2; exit 1; fi
-    @if grep -q 'No such file or directory' target/x86_64-pc-minix/release/dynclib; then echo "!! /bin/dynclib contains the error message - it cannot have come from libc.so" >&2; exit 1; fi
-    @if grep -q 'dynopen-text' target/dynlink/x86/dynopen; then echo "!! /bin/dynopen contains the object's text - the line cannot have come from libdlopen.so" >&2; exit 1; fi
-    mkdir -p target/images/x86_64-pc-minix
-    cp target/trampoline.elf target/images/x86_64-pc-minix/minix-x86.elf
-    @just _assert-qemu-version qemu-system-x86_64
-    FEED_SCENARIO=tools/smoke/dyn.tsv cargo xtask smoke target/test-dynlink-x86.log {{boot-timeout}} qemu-system-x86_64 -nographic -m 256M -no-reboot -vga none -device bochs-display,id=fb0 -kernel target/images/x86_64-pc-minix/minix-x86.elf -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0 -device virtio-tablet-pci,display=fb0
-    @echo "dynlink: /bin/dynhello printed what only the shared objects contain, before and after a fork and an exec, and /bin/dynclib ran against libc.so (x86_64)"
 
 # The same artifacts for riscv64. `cargo xtask build dynlink` and
 # `cargo xtask build dynlibc` take the target; only the loader's `_start` and its TLS
@@ -970,18 +444,6 @@ dynlib-riscv64:
 dynlink-riscv64: dynlib-riscv64
     cargo xtask build dynlink riscv64
 
-# The dynamic-linking gate for riscv64: the same `tools/smoke/dyn.tsv` scenario as
-# x86_64, which is deliberately arch-neutral — it asserts on symbols only the shared
-# objects contain, on an errno read through the loader's TLS, and on the program's
-# own constructor, none of which depends on the instruction set.
-test-dynlink-riscv64 boot-timeout="60": dynlink-riscv64
-    DYNLINK_BINS='/lib/libdyn.so=target/dynlink/riscv64/libdyn.so;/lib/libdyn2.so=target/dynlink/riscv64/libdyn2.so;/lib/libdyn3.so=target/dynlink/riscv64/libdyn3.so;/bin/dynhello=target/dynlink/riscv64/dynhello;/lib/libdlopen.so=target/dynlink/riscv64/libdlopen.so;/lib/libtls1.so=target/dynlink/riscv64/libtls1.so;/bin/dynopen=target/dynlink/riscv64/dynopen' just build-riscv64
-    @if grep -q 'dynlink' target/dynlink/riscv64/dynhello; then echo "!! /bin/dynhello contains a 'dynlink' string - the message cannot have come from a shared object" >&2; exit 1; fi
-    @if grep -q 'No such file or directory' target/riscv64gc-unknown-minix/release/dynclib; then echo "!! /bin/dynclib contains the error message - it cannot have come from libc.so" >&2; exit 1; fi
-    @if grep -q 'dynopen-text' target/dynlink/riscv64/dynopen; then echo "!! /bin/dynopen contains the object's text - the line cannot have come from libdlopen.so" >&2; exit 1; fi
-    @just _assert-qemu-version qemu-system-riscv64
-    FEED_SCENARIO=tools/smoke/dyn.tsv cargo xtask smoke target/test-dynlink-riscv64.log {{boot-timeout}} qemu-system-riscv64 -machine virt -m 256M -nographic -global virtio-mmio.force-legacy=off -netdev user,id=net0 -device virtio-net-device,netdev=net0 -device virtio-gpu-device -device virtio-keyboard-device -kernel target/riscv64gc-unknown-minix/release/kernel-boot-riscv64
-    @echo "dynlink: /bin/dynhello printed what only the shared objects contain, before and after a fork and an exec, and /bin/dynclib ran against libc.so (riscv64)"
 
 dynlib-aarch64:
     @test -n "{{stage1-rustc}}" || (echo 'error: stage1 rustc not found — run `just bootstrap` first' >&2 && exit 1)
@@ -991,35 +453,7 @@ dynlib-aarch64:
 dynlink-aarch64: dynlib-aarch64
     cargo xtask build dynlink aarch64
 
-test-dynlink-aarch64 boot-timeout="60": dynlink-aarch64
-    DYNLINK_BINS='/lib/libdyn.so=target/dynlink/aarch64/libdyn.so;/lib/libdyn2.so=target/dynlink/aarch64/libdyn2.so;/lib/libdyn3.so=target/dynlink/aarch64/libdyn3.so;/bin/dynhello=target/dynlink/aarch64/dynhello;/lib/libdlopen.so=target/dynlink/aarch64/libdlopen.so;/lib/libtls1.so=target/dynlink/aarch64/libtls1.so;/bin/dynopen=target/dynlink/aarch64/dynopen' just build-aarch64
-    @if grep -q 'dynlink' target/dynlink/aarch64/dynhello; then echo "!! /bin/dynhello contains a 'dynlink' string - the message cannot have come from a shared object" >&2; exit 1; fi
-    @if grep -q 'No such file or directory' target/aarch64-unknown-minix/release/dynclib; then echo "!! /bin/dynclib contains the error message - it cannot have come from libc.so" >&2; exit 1; fi
-    @if grep -q 'dynopen-text' target/dynlink/aarch64/dynopen; then echo "!! /bin/dynopen contains the object's text - the line cannot have come from libdlopen.so" >&2; exit 1; fi
-    @just _assert-qemu-version qemu-system-aarch64
-    FEED_SCENARIO=tools/smoke/dyn.tsv cargo xtask smoke target/test-dynlink-aarch64.log {{boot-timeout}} qemu-system-aarch64 -machine virt -cpu cortex-a57 -m 256M -nographic -no-reboot -global virtio-mmio.force-legacy=off -netdev user,id=net0 -device virtio-net-device,netdev=net0 -device virtio-gpu-device -device virtio-keyboard-device -kernel target/aarch64-unknown-minix/release/kernel-boot-aarch64
-    @echo "dynlink: /bin/dynhello printed what only the shared objects contain, before and after a fork and an exec, and /bin/dynclib ran against libc.so (aarch64)"
 
-# The gate on `just cdyn` — the recipe a user is told to use for a program of their own.
-# Every other recipe here builds its programs with `cargo xtask build dynlink` or
-# `cargo xtask build dynlibc`; this one goes through the recipe's own interface and boots what
-# it produced, which is what makes the two commands `cargo xtask build cdyn` prints for a user
-# something that has been run at least once. The link underneath is that script's, the same
-# one the shipped `/bin/dynclib` gets.
-#
-# The injection is `MINIXFS_EXTRA` set inside the recipe, so the Justfile's
-# `MSYS2_ENV_CONV_EXCL` covers it. A user setting the variable in their own shell has to
-# cover it themselves, which is why the hint `cargo xtask build cdyn` prints names that variable on
-# Windows.
-test-cdyn-x86 boot-timeout="40": dynlib-x86
-    just cdyn tools/cdyn-demo.c x86
-    @if grep -q 'No such file or directory' target/dync/x86/cdyn-demo; then echo "!! the program contains the error message - it cannot have come from libc.so" >&2; exit 1; fi
-    MINIXFS_EXTRA='/bin/cdyn-demo=target/dync/x86/cdyn-demo' just build-x86
-    mkdir -p target/images/x86_64-pc-minix
-    cp target/trampoline.elf target/images/x86_64-pc-minix/minix-x86.elf
-    @just _assert-qemu-version qemu-system-x86_64
-    FEED_SCENARIO=tools/smoke/cdyn.tsv cargo xtask smoke target/test-cdyn-x86.log {{boot-timeout}} qemu-system-x86_64 -nographic -m 256M -no-reboot -vga none -device bochs-display,id=fb0 -kernel target/images/x86_64-pc-minix/minix-x86.elf -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0 -device virtio-tablet-pci,display=fb0
-    @echo "cdyn: a program built by the recipe ran against the shipped libc.so (x86_64)"
 
 # gltriangle: build the surfaceless-EGL GLES2 triangle client and stage the Mesa
 # DSOs it runs against (§6.10 stage 3c-2) for one target.
@@ -1050,40 +484,8 @@ gltriangle-aarch64: dynlib-aarch64
     cargo xtask build gltriangle aarch64
     @echo "gltriangle: /bin/gltriangle built and the Mesa DSOs staged (aarch64)"
 
-# The §6.10 stage 3c-2 gate: boot the split pair with /bin/gltriangle and the seven
-# Mesa DSOs in the *system* image and drive `tools/smoke/gltriangle.tsv`, whose one
-# step wants the client's `gltriangle: pass` line. This is the end-to-end proof of the
-# C GL stack — surfaceless EGL, the gallium `softpipe` driver, GLSL and a checked
-# readback — and of the loader's `DTPREL` (a general-dynamic thread-local access).
-# The DSOs are ~36 MiB, so the system image carries them with `MINIXFS_BLOCKS` raised.
-# Needs `just build-mesa <arch> --build` and `just libcxx <arch>` first.
-test-gltriangle arch="x86" boot-timeout="180":
-    @just test-gltriangle-{{arch}} {{boot-timeout}}
 
-test-gltriangle-x86 boot-timeout="180": gltriangle-x86 boot-image-x86
-    @just _assert-qemu-version qemu-system-x86_64
-    M=target/mesa/x86; E="/lib/libdrm.so.2=$M/lib/libdrm.so.2;/lib/libEGL.so.1=$M/lib/libEGL.so.1;/lib/libgbm.so.1=$M/lib/libgbm.so.1;/lib/libexpat.so.1=$M/lib/libexpat.so.1;/lib/libgallium-25.3.6.so=$M/lib/libgallium-25.3.6.so;/lib/libGLESv2.so.2=$M/lib/libGLESv2.so.2;/lib/libz.so.1=$M/lib/libz.so.1;/lib/swrast_dri.so=$M/lib/swrast_dri.so;/bin/gltriangle=$M/bin/gltriangle"; MINIXFS_EXTRA="$E" MINIXFS_BLOCKS=16384 cargo run -q -p boot-image --bin mkminixfs --release -- x86_64
-    @just mkfs-x86
-    FEED_SCENARIO=tools/smoke/gltriangle.tsv cargo xtask smoke target/test-gltriangle-x86.log {{boot-timeout}} qemu-system-x86_64 -nographic -m 512M -no-reboot -vga none -device bochs-display,id=fb0 -kernel target/images/x86_64-pc-minix/minix-x86-boot.elf -drive if=none,id=disk0,file=target/images/x86_64-pc-minix/disk.img,format=raw,cache=writethrough -device virtio-blk-pci,disable-legacy=on,drive=disk0 -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0 -device virtio-tablet-pci,display=fb0
-    @echo "gltriangle: the GLES2 triangle rendered through surfaceless EGL on softpipe (x86_64)"
 
-# The 3c-3 gate: the *same* client as 3c-2, differing only in the device Mesa is
-# handed. The guest gets a GL device (`-device virtio-gpu-gl-pci,blob=on`), so its
-# render node opens and surfaceless EGL takes the `virgl` driver on it instead of
-# falling back to `softpipe`. That path exists because libdrm is built as its
-# OpenBSD/DragonFly branch and the render node answers `DRM_IOCTL_GET_PCIINFO`
-# (`.notes/wayland.md` §5 row 24): the loader reads the virtio-gpu ids from it and
-# picks `virtio_gpu`. `FEED_PACE` because a GL display backend drops serial bytes
-# mid-line (see `test-drmgl-x86`); the assertion is the scenario's
-# `gltriangle: pass`, which is a real readback.
-test-gltriangle-virgl-x86 boot-timeout="180": gltriangle-x86 boot-image-x86
-    @just _assert-qemu-version qemu-system-x86_64
-    M=target/mesa/x86; E="/lib/libdrm.so.2=$M/lib/libdrm.so.2;/lib/libEGL.so.1=$M/lib/libEGL.so.1;/lib/libgbm.so.1=$M/lib/libgbm.so.1;/lib/libexpat.so.1=$M/lib/libexpat.so.1;/lib/libgallium-25.3.6.so=$M/lib/libgallium-25.3.6.so;/lib/libGLESv2.so.2=$M/lib/libGLESv2.so.2;/lib/libz.so.1=$M/lib/libz.so.1;/bin/gltriangle=$M/bin/gltriangle"; MINIXFS_EXTRA="$E" MINIXFS_BLOCKS=16384 cargo run -q -p boot-image --bin mkminixfs --release -- x86_64
-    @just mkfs-x86
-    FEED_PACE=0.02 FEED_SCENARIO=tools/smoke/gltriangle.tsv cargo xtask smoke target/test-gltriangle-virgl-x86.log {{boot-timeout}} qemu-system-x86_64 -display egl-headless -serial stdio -m 512M -no-reboot -vga none -device bochs-display,id=fb0 -kernel target/images/x86_64-pc-minix/minix-x86-boot.elf -drive if=none,id=disk0,file=target/images/x86_64-pc-minix/disk.img,format=raw,cache=writethrough -device virtio-blk-pci,disable-legacy=on,drive=disk0 -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0 -device virtio-tablet-pci,display=fb0 -device virtio-gpu-gl-pci,blob=on
-    @just _assert-qemu-log target/test-gltriangle-virgl-x86.log "gltriangle: pass"
-    @just _assert-qemu-log target/test-gltriangle-virgl-x86.log "gltriangle: GL_RENDERER=virgl"
-    @echo "gltriangle-virgl: the GLES2 triangle rendered through surfaceless EGL on the render node, via virgl (x86_64)"
 
 # wlgl: build /bin/wlgl, the GL present client (§6.10 stage 3d-a). It is the tree's
 # first *dynamically linked Rust* program, and it has to be one: `dlopen` needs a
@@ -1097,18 +499,6 @@ wlgl-x86: userland-x86 dynlib-x86
     cargo xtask build wlgl x86
     @echo "wlgl: /bin/wlgl built and the Mesa DSOs staged (x86_64)"
 
-# The 3d-a gate: the client renders a GL surface with Mesa on the render node and
-# commits it through /sbin/wlserver to /dev/fb, then reads the composited frame back.
-# `GL_RENDERER=virgl` is asserted too, so the frame is the host GPU's and not the
-# software fallback's. It is a dev-host gate like 3c-3 — headless CI has no GL.
-test-wlgl-x86 boot-timeout="60": wlgl-x86 boot-image-x86
-    @just _assert-qemu-version qemu-system-x86_64
-    M=target/mesa/x86; E="/lib/libdrm.so.2=$M/lib/libdrm.so.2;/lib/libEGL.so.1=$M/lib/libEGL.so.1;/lib/libgbm.so.1=$M/lib/libgbm.so.1;/lib/libexpat.so.1=$M/lib/libexpat.so.1;/lib/libgallium-25.3.6.so=$M/lib/libgallium-25.3.6.so;/lib/libGLESv2.so.2=$M/lib/libGLESv2.so.2;/lib/libz.so.1=$M/lib/libz.so.1;/bin/wlgl=$M/bin/wlgl"; MINIXFS_EXTRA="$E" MINIXFS_BLOCKS=16384 cargo run -q -p boot-image --bin mkminixfs --release -- x86_64
-    @just mkfs-x86
-    FEED_PACE=0.02 FEED_SCENARIO=tools/smoke/wlgl.tsv cargo xtask smoke target/test-wlgl-x86.log {{boot-timeout}} qemu-system-x86_64 -display egl-headless -serial stdio -m 512M -no-reboot -vga none -device bochs-display,id=fb0 -kernel target/images/x86_64-pc-minix/minix-x86-boot.elf -drive if=none,id=disk0,file=target/images/x86_64-pc-minix/disk.img,format=raw,cache=writethrough -device virtio-blk-pci,disable-legacy=on,drive=disk0 -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0 -device virtio-tablet-pci,display=fb0 -device virtio-gpu-gl-pci,blob=on
-    @just _assert-qemu-log target/test-wlgl-x86.log "wlgl: GL_RENDERER=virgl"
-    @just _assert-qemu-log target/test-wlgl-x86.log "wlgl: PASS"
-    @echo "wlgl: a GL surface rendered on the render node, committed through the compositor, and read back from /dev/fb (x86_64)"
 
 # gui: build /bin/gui, the in-house renderer client (`gui.md` milestone M1). Like /bin/wlgl it
 # is a dynamic image that loads Mesa, but the GL half is the `render` crate rather than a C
@@ -1119,16 +509,6 @@ gui-x86: userland-x86 dynlib-x86
     cargo xtask build gui x86
     @echo "gui: /bin/gui built and the Mesa DSOs staged (x86_64)"
 
-# The M1 gate: the in-house renderer draws a quad and a line of text into a wl_shm pool,
-# /sbin/wlserver presents it, and the client checks /dev/fb. The guest has no GL device, so
-# Mesa takes softpipe and the gate runs headless, like `test-gltriangle-x86`.
-test-gui-x86 boot-timeout="120": gui-x86 boot-image-x86
-    @just _assert-qemu-version qemu-system-x86_64
-    M=target/mesa/x86; E="/lib/libdrm.so.2=$M/lib/libdrm.so.2;/lib/libEGL.so.1=$M/lib/libEGL.so.1;/lib/libgbm.so.1=$M/lib/libgbm.so.1;/lib/libexpat.so.1=$M/lib/libexpat.so.1;/lib/libgallium-25.3.6.so=$M/lib/libgallium-25.3.6.so;/lib/libGLESv2.so.2=$M/lib/libGLESv2.so.2;/lib/libz.so.1=$M/lib/libz.so.1;/lib/swrast_dri.so=$M/lib/swrast_dri.so;/bin/gui=$M/bin/gui"; MINIXFS_EXTRA="$E" MINIXFS_BLOCKS=16384 cargo run -q -p boot-image --bin mkminixfs --release -- x86_64
-    @just mkfs-x86
-    FEED_SCENARIO=tools/smoke/gui.tsv cargo xtask smoke target/test-gui-x86.log {{boot-timeout}} qemu-system-x86_64 -nographic -m 512M -no-reboot -vga none -device bochs-display,id=fb0 -kernel target/images/x86_64-pc-minix/minix-x86-boot.elf -drive if=none,id=disk0,file=target/images/x86_64-pc-minix/disk.img,format=raw,cache=writethrough -device virtio-blk-pci,disable-legacy=on,drive=disk0 -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0 -device virtio-tablet-pci,display=fb0
-    @just _assert-qemu-log target/test-gui-x86.log "gui: PASS"
-    @echo "gui: a quad and a line of text from the in-house renderer, presented through the compositor, and read back from /dev/fb (x86_64)"
 
 # gbmtest: build /bin/gbmtest, the GBM create/export probe (§6.10 stage 3d-b-3). It links
 # `libgbm` and `libdrm` and includes the GBM/libdrm headers from the source checkouts, so it
@@ -1139,46 +519,9 @@ gbmtest-x86: userland-x86 dynlib-x86
     cargo xtask build gbmtest x86
     @echo "gbmtest: /bin/gbmtest built and the Mesa DSOs staged (x86_64)"
 
-# The 3d-b-3 gate: a GBM buffer object made on the render node, exported to a dma-buf by
-# `gbm_bo_get_fd`, and imported back by `drmPrimeFDToHandle` (`.notes/wayland.md` §6.10). It
-# is a dev-host gate like 3c-3 and 3d-a — GBM allocates through the node's DRI driver, which
-# needs a GL-capable host — so headless CI does not run it. `dri_gbm.so` is the backend
-# `libgbm` `dlopen`s, at `/lib/dri_gbm.so` (`gbm-backends-path`).
-test-gbmtest-x86 boot-timeout="120": gbmtest-x86 boot-image-x86
-    @just _assert-qemu-version qemu-system-x86_64
-    M=target/mesa/x86; E="/lib/libdrm.so.2=$M/lib/libdrm.so.2;/lib/libgbm.so.1=$M/lib/libgbm.so.1;/lib/libexpat.so.1=$M/lib/libexpat.so.1;/lib/libgallium-25.3.6.so=$M/lib/libgallium-25.3.6.so;/lib/libz.so.1=$M/lib/libz.so.1;/lib/dri_gbm.so=$M/lib/dri_gbm.so;/bin/gbmtest=$M/bin/gbmtest"; MINIXFS_EXTRA="$E" MINIXFS_BLOCKS=16384 cargo run -q -p boot-image --bin mkminixfs --release -- x86_64
-    @just mkfs-x86
-    FEED_PACE=0.02 FEED_SCENARIO=tools/smoke/gbmtest.tsv cargo xtask smoke target/test-gbmtest-x86.log {{boot-timeout}} qemu-system-x86_64 -display egl-headless -serial stdio -m 512M -no-reboot -vga none -device bochs-display,id=fb0 -kernel target/images/x86_64-pc-minix/minix-x86-boot.elf -drive if=none,id=disk0,file=target/images/x86_64-pc-minix/disk.img,format=raw,cache=writethrough -device virtio-blk-pci,disable-legacy=on,drive=disk0 -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0 -device virtio-tablet-pci,display=fb0 -device virtio-gpu-gl-pci,blob=on
-    @just _assert-qemu-log target/test-gbmtest-x86.log "gbmtest: dev=1 bo=1 w=64 h=64 import=0"
-    @echo "gbmtest: a GBM buffer object created on the render node exported to a dma-buf and imported back (x86_64)"
 
-# The 3d-b gate: a whole-output `wl_shm` client is presented by re-pointing the scanout at its own
-# buffer, so the compositor copies nothing (§6.10). `/dev/fb` no longer holds the frame (the frame
-# *is* the client's pool), so `cargo xtask probe wlfull` checks the display with a QMP screendump and the
-# fb server's `fb: scanout src` line. On x86 the output device is a `virtio-gpu`, not `bochs`: the
-# re-point is a virtio-gpu capability (D11); on riscv64/aarch64 the `virtio-gpu` is already the
-# output, so only the full-output client is new.
-test-wlfull arch="x86":
-    @just test-wlfull-{{arch}}
 
-test-wlfull-x86: build-x86
-    mkdir -p target/images/x86_64-pc-minix
-    cp target/trampoline.elf target/images/x86_64-pc-minix/minix-x86.elf
-    @just _assert-qemu-version qemu-system-x86_64
-    cargo xtask probe wlfull -- qemu-system-x86_64 -nographic -monitor none -display none -vga none -device virtio-gpu-pci -m 256M -no-reboot -qmp tcp:127.0.0.1:4447,server=on,wait=off -kernel target/images/x86_64-pc-minix/minix-x86.elf -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0
-    @echo "wlfull: a whole-output wl_shm frame was scanned out of the client's own buffer (x86_64)"
 
-# The 3d-b-4c gate: a linux-dmabuf client's render-node object is scanned out with no copy
-# (§6.10). The output is a virtio-gpu with no bochs-display, so the render node is served from
-# the output device itself (D11) — the client's render resource and the scanout are one device,
-# which is what lets the fb server re-point the scanout at it. A QMP screendump of the client's
-# colour and the fb server's `fb: scanout src` line are the evidence.
-test-wldmabuf-x86: build-x86
-    mkdir -p target/images/x86_64-pc-minix
-    cp target/trampoline.elf target/images/x86_64-pc-minix/minix-x86.elf
-    @just _assert-qemu-version qemu-system-x86_64
-    cargo xtask probe wldmabuf -- qemu-system-x86_64 -nographic -monitor none -display none -vga none -device virtio-gpu-pci -m 256M -no-reboot -qmp tcp:127.0.0.1:4447,server=on,wait=off -kernel target/images/x86_64-pc-minix/minix-x86.elf -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0
-    @echo "wldmabuf: a render-node object was handed over as a linux-dmabuf buffer and scanned out with no copy (x86_64)"
 
 # wldmabufgl: build /bin/wldmabufgl, the 3d-b-4d GL present client (§6.10). Like /bin/wlgl it
 # is a dynamic image that renders with Mesa, but it draws into the buffer it commits instead
@@ -1193,22 +536,6 @@ wldmabufgl-x86: userland-x86 dynlib-x86
     cargo xtask build wldmabufgl x86
     @echo "wldmabufgl: /bin/wldmabufgl built and the Mesa DSOs staged (x86_64)"
 
-# The 3d-b-4d gate: the GL client's render target *is* the dma-buf `wl_buffer`, which the
-# compositor scans out of the client's own object — no compositor copy. It is a dev-host gate
-# like 3c-3/3d-a/3d-b-3 — headless CI has no GL. The QEMU line puts a 2D `virtio-gpu-pci`
-# first and the GL device second: the client renders on the GL node and the fb server re-points
-# the 2D scanout at the client's object, so the screendump (which follows the first, 2D device)
-# shows the frame — a GL device *as* the output would need a host blob this host refuses (D11).
-# `-display egl-headless` is what a GL device needs. The one copy on this path is the client's,
-# not the compositor's: this host's virgl renders into a host-side texture, so the client
-# resolves it and transfers it into the object before committing (`.notes/wayland.md` §5, and
-# `tools/egl_bo_probe.c` is the measurement).
-test-wldmabufgl-x86: wldmabufgl-x86 boot-image-x86
-    @just _assert-qemu-version qemu-system-x86_64
-    M=target/mesa/x86; E="/lib/libdrm.so.2=$M/lib/libdrm.so.2;/lib/libEGL.so.1=$M/lib/libEGL.so.1;/lib/libgbm.so.1=$M/lib/libgbm.so.1;/lib/libexpat.so.1=$M/lib/libexpat.so.1;/lib/libgallium-25.3.6.so=$M/lib/libgallium-25.3.6.so;/lib/libGLESv2.so.2=$M/lib/libGLESv2.so.2;/lib/libz.so.1=$M/lib/libz.so.1;/lib/dri_gbm.so=$M/lib/dri_gbm.so;/bin/wldmabufgl=$M/bin/wldmabufgl"; MINIXFS_EXTRA="$E" MINIXFS_BLOCKS=16384 cargo run -q -p boot-image --bin mkminixfs --release -- x86_64
-    @just mkfs-x86
-    cargo xtask probe wldmabufgl -- qemu-system-x86_64 -display egl-headless -serial stdio -m 512M -no-reboot -vga none -device virtio-gpu-pci -kernel target/images/x86_64-pc-minix/minix-x86-boot.elf -drive if=none,id=disk0,file=target/images/x86_64-pc-minix/disk.img,format=raw,cache=writethrough -device virtio-blk-pci,disable-legacy=on,drive=disk0 -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0 -device virtio-gpu-gl-pci,blob=on -qmp tcp:127.0.0.1:4447,server=on,wait=off
-    @echo "wldmabufgl: the GL triangle's render target was the dma-buf wl_buffer, scanned out of the client's object with no compositor copy (x86_64)"
 
 # wlcompose: build /bin/wlcompose, the 3d-b-5b GPU-composition helper (§6.10). Like the other Mesa
 # gates it is a dynamic image; one binary is both the helper and its test peer, selected by argv
@@ -1219,300 +546,38 @@ wlcompose-x86: userland-x86 dynlib-x86
     cargo xtask build wlcompose x86
     @echo "wlcompose: /bin/wlcompose built and the Mesa DSOs staged (x86_64)"
 
-# The 3d-b-5b gate: two GL surfaces one process rendered are composed on the render node by a
-# helper in *another* process, and the peer reads the composed frame back. It is a dev-host gate
-# like 3c-3/3d-a/3d-b-4d — headless CI has no GL. The peer only passes if it read the peer-drawn
-# colours out of the returned frame, so this measures cross-process sampling, not merely a crash.
-# The devices are the 4d gate's — a 2D `virtio-gpu-pci` and a GL device — the pair the port's role
-# selection (D11) has been validated with; `-display egl-headless` is what a GL device needs.
-test-wlcompose-x86: wlcompose-x86 boot-image-x86
-    @just _assert-qemu-version qemu-system-x86_64
-    M=target/mesa/x86; E="/lib/libdrm.so.2=$M/lib/libdrm.so.2;/lib/libEGL.so.1=$M/lib/libEGL.so.1;/lib/libgbm.so.1=$M/lib/libgbm.so.1;/lib/libexpat.so.1=$M/lib/libexpat.so.1;/lib/libgallium-25.3.6.so=$M/lib/libgallium-25.3.6.so;/lib/libGLESv2.so.2=$M/lib/libGLESv2.so.2;/lib/libz.so.1=$M/lib/libz.so.1;/lib/dri_gbm.so=$M/lib/dri_gbm.so;/bin/wlcompose=$M/bin/wlcompose"; MINIXFS_EXTRA="$E" MINIXFS_BLOCKS=16384 cargo run -q -p boot-image --bin mkminixfs --release -- x86_64
-    @just mkfs-x86
-    cargo xtask probe wlcompose -- qemu-system-x86_64 -display egl-headless -serial stdio -m 512M -no-reboot -vga none -device virtio-gpu-pci -kernel target/images/x86_64-pc-minix/minix-x86-boot.elf -drive if=none,id=disk0,file=target/images/x86_64-pc-minix/disk.img,format=raw,cache=writethrough -device virtio-blk-pci,disable-legacy=on,drive=disk0 -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0 -device virtio-gpu-gl-pci,blob=on
-    @echo "wlcompose: two GL surfaces were composed on the render node by a helper in another process, and the frame read back holds them (x86_64)"
-
-# The 3d-b-5c/5d gate: two dma-buf surfaces committed on one connection are composed on the GPU by
-# the helper process and scanned out as one frame. `diag wlscene` is a plain static client; the
-# helper is the dynamic `/bin/wlcompose`, injected with the Mesa DSOs. The devices and the GL
-# display are the 5b gate's, plus QMP so the host can read the display the frame lands on.
-test-wlscene-x86: wlcompose-x86 boot-image-x86
-    @just _assert-qemu-version qemu-system-x86_64
-    M=target/mesa/x86; E="/lib/libdrm.so.2=$M/lib/libdrm.so.2;/lib/libEGL.so.1=$M/lib/libEGL.so.1;/lib/libgbm.so.1=$M/lib/libgbm.so.1;/lib/libexpat.so.1=$M/lib/libexpat.so.1;/lib/libgallium-25.3.6.so=$M/lib/libgallium-25.3.6.so;/lib/libGLESv2.so.2=$M/lib/libGLESv2.so.2;/lib/libz.so.1=$M/lib/libz.so.1;/lib/dri_gbm.so=$M/lib/dri_gbm.so;/bin/wlcompose=$M/bin/wlcompose"; MINIXFS_EXTRA="$E" MINIXFS_BLOCKS=16384 cargo run -q -p boot-image --bin mkminixfs --release -- x86_64
-    @just mkfs-x86
-    cargo xtask probe wlscene -- qemu-system-x86_64 -display egl-headless -serial stdio -m 512M -no-reboot -vga none -device virtio-gpu-pci -kernel target/images/x86_64-pc-minix/minix-x86-boot.elf -drive if=none,id=disk0,file=target/images/x86_64-pc-minix/disk.img,format=raw,cache=writethrough -device virtio-blk-pci,disable-legacy=on,drive=disk0 -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0 -device virtio-gpu-gl-pci,blob=on -qmp tcp:127.0.0.1:4447,server=on,wait=off
-    @echo "wlscene: the compositor composed two dma-buf surfaces on the GPU and scanned the frame out (x86_64)"
-
-test-wlfull-riscv64: system-image-riscv64
-    @just _assert-qemu-version qemu-system-riscv64
-    cargo xtask probe wlfull -- qemu-system-riscv64 -machine virt -m 256M -nographic -monitor none -display none -global virtio-mmio.force-legacy=off -drive if=none,id=disk0,file=target/images/riscv64gc-unknown-minix/disk.img,format=raw,cache=writethrough -device virtio-blk-device,drive=disk0 -netdev user,id=net0 -device virtio-net-device,netdev=net0 -device virtio-gpu-device -device virtio-keyboard-device -kernel target/images/riscv64gc-unknown-minix/minix-riscv64-boot.elf -qmp tcp:127.0.0.1:4447,server=on,wait=off
-    @echo "wlfull: a whole-output wl_shm frame was scanned out of the client's own buffer (riscv64)"
-
-test-wlfull-aarch64: system-image-aarch64
-    @just _assert-qemu-version qemu-system-aarch64
-    cargo xtask probe wlfull -- qemu-system-aarch64 -machine virt -cpu cortex-a57 -m 256M -nographic -monitor none -display none -no-reboot -global virtio-mmio.force-legacy=off -drive if=none,id=disk0,file=target/images/aarch64-unknown-minix/disk.img,format=raw,cache=writethrough -device virtio-blk-device,drive=disk0 -netdev user,id=net0 -device virtio-net-device,netdev=net0 -device virtio-gpu-device -device virtio-keyboard-device -kernel target/images/aarch64-unknown-minix/minix-aarch64-boot.elf -qmp tcp:127.0.0.1:4447,server=on,wait=off
-    @echo "wlfull: a whole-output wl_shm frame was scanned out of the client's own buffer (aarch64)"
-
-test-gltriangle-riscv64 boot-timeout="180": gltriangle-riscv64 boot-image-riscv64
-    @just _assert-qemu-version qemu-system-riscv64
-    M=target/mesa/riscv64; E="/lib/libdrm.so.2=$M/lib/libdrm.so.2;/lib/libEGL.so.1=$M/lib/libEGL.so.1;/lib/libgbm.so.1=$M/lib/libgbm.so.1;/lib/libexpat.so.1=$M/lib/libexpat.so.1;/lib/libgallium-25.3.6.so=$M/lib/libgallium-25.3.6.so;/lib/libGLESv2.so.2=$M/lib/libGLESv2.so.2;/lib/libz.so.1=$M/lib/libz.so.1;/lib/swrast_dri.so=$M/lib/swrast_dri.so;/bin/gltriangle=$M/bin/gltriangle"; MINIXFS_EXTRA="$E" MINIXFS_BLOCKS=16384 cargo run -q -p boot-image --bin mkminixfs --release -- riscv64
-    @just mkfs-riscv64
-    FEED_SCENARIO=tools/smoke/gltriangle.tsv cargo xtask smoke target/test-gltriangle-riscv64.log {{boot-timeout}} qemu-system-riscv64 -machine virt -m 512M -nographic -global virtio-mmio.force-legacy=off -drive if=none,id=disk0,file=target/images/riscv64gc-unknown-minix/disk.img,format=raw,cache=writethrough -device virtio-blk-device,drive=disk0 -netdev user,id=net0 -device virtio-net-device,netdev=net0 -device virtio-gpu-device -device virtio-keyboard-device -kernel target/images/riscv64gc-unknown-minix/minix-riscv64-boot.elf
-    @echo "gltriangle: the GLES2 triangle rendered through surfaceless EGL on softpipe (riscv64)"
-
-test-gltriangle-aarch64 boot-timeout="180": gltriangle-aarch64 boot-image-aarch64
-    @just _assert-qemu-version qemu-system-aarch64
-    M=target/mesa/aarch64; E="/lib/libdrm.so.2=$M/lib/libdrm.so.2;/lib/libEGL.so.1=$M/lib/libEGL.so.1;/lib/libgbm.so.1=$M/lib/libgbm.so.1;/lib/libexpat.so.1=$M/lib/libexpat.so.1;/lib/libgallium-25.3.6.so=$M/lib/libgallium-25.3.6.so;/lib/libGLESv2.so.2=$M/lib/libGLESv2.so.2;/lib/libz.so.1=$M/lib/libz.so.1;/lib/swrast_dri.so=$M/lib/swrast_dri.so;/bin/gltriangle=$M/bin/gltriangle"; MINIXFS_EXTRA="$E" MINIXFS_BLOCKS=16384 cargo run -q -p boot-image --bin mkminixfs --release -- aarch64
-    @just mkfs-aarch64
-    FEED_SCENARIO=tools/smoke/gltriangle.tsv cargo xtask smoke target/test-gltriangle-aarch64.log {{boot-timeout}} qemu-system-aarch64 -machine virt -cpu cortex-a57 -m 512M -nographic -no-reboot -global virtio-mmio.force-legacy=off -drive if=none,id=disk0,file=target/images/aarch64-unknown-minix/disk.img,format=raw,cache=writethrough -device virtio-blk-device,drive=disk0 -netdev user,id=net0 -device virtio-net-device,netdev=net0 -device virtio-gpu-device -device virtio-keyboard-device -kernel target/images/aarch64-unknown-minix/minix-aarch64-boot.elf
-    @echo "gltriangle: the GLES2 triangle rendered through surfaceless EGL on softpipe (aarch64)"
-
-# UNIX-domain sockets: /bin/udstest round-trips a socketpair and a
-# bind/listen/connect/accept connection through the /dev/uds server — Phase 0 of
-# .notes/wayland.md. build-x86 embeds the binary; the scenario types the command into
-# the shell and wants the whole line back.
-test-uds-x86 boot-timeout="40": build-x86
-    mkdir -p target/images/x86_64-pc-minix
-    cp target/trampoline.elf target/images/x86_64-pc-minix/minix-x86.elf
-    @just _assert-qemu-version qemu-system-x86_64
-    FEED_SCENARIO=tools/smoke/uds.tsv cargo xtask smoke target/test-uds-x86.log {{boot-timeout}} qemu-system-x86_64 -nographic -m 256M -no-reboot -vga none -device bochs-display,id=fb0 -kernel target/images/x86_64-pc-minix/minix-x86.elf -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0 -device virtio-tablet-pci,display=fb0
-    @echo "uds: socketpair, bind/listen/connect/accept and SCM_RIGHTS/SCM_CREDS passing (x86_64)"
-
-test-memfd-x86 boot-timeout="40": build-x86
-    mkdir -p target/images/x86_64-pc-minix
-    cp target/trampoline.elf target/images/x86_64-pc-minix/minix-x86.elf
-    @just _assert-qemu-version qemu-system-x86_64
-    FEED_SCENARIO=tools/smoke/memfd.tsv cargo xtask smoke target/test-memfd-x86.log {{boot-timeout}} qemu-system-x86_64 -nographic -m 256M -no-reboot -vga none -device bochs-display,id=fb0 -kernel target/images/x86_64-pc-minix/minix-x86.elf -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0 -device virtio-tablet-pci,display=fb0
-    @echo "memfd: one object mapped twice and across a fork, read/write agreeing (x86_64)"
-
-# The terminal path's readiness: /bin/ptytest opens a pty master, forks a slave,
-# and must come back from a `poll` on the master when the slave writes. Nothing
-# woke a master poller before the tty server reported it, which is why /bin/wterm
-# drained the master in an EAGAIN loop instead of polling. build-x86 embeds the
-# binary.
-test-pty-x86 boot-timeout="40": build-x86
-    mkdir -p target/images/x86_64-pc-minix
-    cp target/trampoline.elf target/images/x86_64-pc-minix/minix-x86.elf
-    @just _assert-qemu-version qemu-system-x86_64
-    FEED_SCENARIO=tools/smoke/pty.tsv cargo xtask smoke target/test-pty-x86.log {{boot-timeout}} qemu-system-x86_64 -nographic -m 256M -no-reboot -vga none -device bochs-display,id=fb0 -kernel target/images/x86_64-pc-minix/minix-x86.elf -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0 -device virtio-tablet-pci,display=fb0
-    @echo "pty: a poll on a pty master is woken by the slave's write (x86_64)"
-
-# Readiness primitives: /bin/seltest drives select(2) and poll(2) over pipes and
-# checks a real timeout on each — Phase 0 of .notes/wayland.md. build-x86 embeds the
-# binary; the scenario types the command into the shell and wants the whole line back.
-test-select-x86 boot-timeout="40": build-x86
-    mkdir -p target/images/x86_64-pc-minix
-    cp target/trampoline.elf target/images/x86_64-pc-minix/minix-x86.elf
-    @just _assert-qemu-version qemu-system-x86_64
-    FEED_SCENARIO=tools/smoke/select.tsv cargo xtask smoke target/test-select-x86.log {{boot-timeout}} qemu-system-x86_64 -nographic -m 256M -no-reboot -vga none -device bochs-display,id=fb0 -kernel target/images/x86_64-pc-minix/minix-x86.elf -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0 -device virtio-tablet-pci,display=fb0
-    @echo "select/poll: pipe readiness and real timeouts (x86_64)"
-
-# eventfd: /bin/eventfdtest exercises the counter semantics and a cross-process
-# wake of a blocked poll — Phase 0 of .notes/wayland.md. build-x86 embeds the binary.
-test-eventfd-x86 boot-timeout="40": build-x86
-    mkdir -p target/images/x86_64-pc-minix
-    cp target/trampoline.elf target/images/x86_64-pc-minix/minix-x86.elf
-    @just _assert-qemu-version qemu-system-x86_64
-    FEED_SCENARIO=tools/smoke/eventfd.tsv cargo xtask smoke target/test-eventfd-x86.log {{boot-timeout}} qemu-system-x86_64 -nographic -m 256M -no-reboot -vga none -device bochs-display,id=fb0 -kernel target/images/x86_64-pc-minix/minix-x86.elf -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0 -device virtio-tablet-pci,display=fb0
-    @echo "eventfd: counter semantics and a cross-process wake (x86_64)"
-
-# timerfd: /bin/timerfdtest drives one-shot, periodic and absolute timers (and a
-# disarm) through blocking polls — Phase 0 of .notes/wayland.md.
-test-timerfd-x86 boot-timeout="40": build-x86
-    mkdir -p target/images/x86_64-pc-minix
-    cp target/trampoline.elf target/images/x86_64-pc-minix/minix-x86.elf
-    @just _assert-qemu-version qemu-system-x86_64
-    FEED_SCENARIO=tools/smoke/timerfd.tsv cargo xtask smoke target/test-timerfd-x86.log {{boot-timeout}} qemu-system-x86_64 -nographic -m 256M -no-reboot -vga none -device bochs-display,id=fb0 -kernel target/images/x86_64-pc-minix/minix-x86.elf -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0 -device virtio-tablet-pci,display=fb0
-    @echo "timerfd: one-shot, periodic, absolute and disarmed timers (x86_64)"
-
-# epoll: /bin/epolltest drives a persistent interest set — add/modify/remove,
-# level-triggered readiness over an eventfd and a pipe, and a blocked
-# `epoll_wait` woken by a child process — Phase 0 of .notes/wayland.md.
-test-epoll-x86 boot-timeout="40": build-x86
-    mkdir -p target/images/x86_64-pc-minix
-    cp target/trampoline.elf target/images/x86_64-pc-minix/minix-x86.elf
-    @just _assert-qemu-version qemu-system-x86_64
-    FEED_SCENARIO=tools/smoke/epoll.tsv cargo xtask smoke target/test-epoll-x86.log {{boot-timeout}} qemu-system-x86_64 -nographic -m 256M -no-reboot -vga none -device bochs-display,id=fb0 -kernel target/images/x86_64-pc-minix/minix-x86.elf -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0 -device virtio-tablet-pci,display=fb0
-    @echo "epoll: persistent interest set, level-triggered readiness, cross-process wake (x86_64)"
-
-# wayland: /bin/waylandtest drives the Phase 1a protocol handshake (registry and
-# wl_display.sync) between a forked client and server over /dev/uds — .notes/wayland.md
-# §6.11. build-x86 embeds the binary.
-test-wayland-x86 boot-timeout="40": build-x86
-    mkdir -p target/images/x86_64-pc-minix
-    cp target/trampoline.elf target/images/x86_64-pc-minix/minix-x86.elf
-    @just _assert-qemu-version qemu-system-x86_64
-    FEED_SCENARIO=tools/smoke/wayland.tsv cargo xtask smoke target/test-wayland-x86.log {{boot-timeout}} qemu-system-x86_64 -nographic -m 256M -no-reboot -vga none -device bochs-display,id=fb0 -kernel target/images/x86_64-pc-minix/minix-x86.elf -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0 -device virtio-tablet-pci,display=fb0
-    @echo "wayland: registry + sync handshake over /dev/uds (x86_64)"
-
-# wlshm: `diag wlclient` drives the Phase 1b wl_shm present path — it draws into a
-# memfd pool, passes the fd to /sbin/wlserver (boot proc 20), commits a surface,
-# and reads the composited frame back from /dev/fb — .notes/wayland.md §6.11. build-x86
-# embeds both binaries.
-test-wlshm-x86 boot-timeout="40": build-x86
-    mkdir -p target/images/x86_64-pc-minix
-    cp target/trampoline.elf target/images/x86_64-pc-minix/minix-x86.elf
-    @just _assert-qemu-version qemu-system-x86_64
-    FEED_SCENARIO=tools/smoke/wlshm.tsv cargo xtask smoke target/test-wlshm-x86.log {{boot-timeout}} qemu-system-x86_64 -nographic -m 256M -no-reboot -vga none -device bochs-display,id=fb0 -kernel target/images/x86_64-pc-minix/minix-x86.elf -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0 -device virtio-tablet-pci,display=fb0
-    @echo "wlshm: wl_shm buffer committed and presented to /dev/fb (x86_64)"
-
-# wloverlap: the scene z-order gate. Two connections, two output-sized windows, and a
-# recommit by the lower one; the frame must still belong to the upper one.
-test-wloverlap-x86 boot-timeout="60": build-x86
-    mkdir -p target/images/x86_64-pc-minix
-    cp target/trampoline.elf target/images/x86_64-pc-minix/minix-x86.elf
-    @just _assert-qemu-version qemu-system-x86_64
-    FEED_SCENARIO=tools/smoke/wloverlap.tsv cargo xtask smoke target/test-wloverlap-x86.log {{boot-timeout}} qemu-system-x86_64 -nographic -m 256M -no-reboot -vga none -device bochs-display,id=fb0 -kernel target/images/x86_64-pc-minix/minix-x86.elf -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0 -device virtio-tablet-pci,display=fb0
-    @just _assert-qemu-log target/test-wloverlap-x86.log "wloverlap: PASS"
-    @echo "wloverlap: the lower window's commit left the window above it intact (x86_64)"
-
-# wlkey: `cargo xtask probe wlkey` drives the Phase 1c input path and the Phase 2a
-# keymap — `diag wlkey` binds wl_seat's keyboard, resolves the `keymap` event's fd
-# and checks its bytes (.notes/wayland.md §6.12), commits a surface, and a key injected
-# with QMP reaches it as `wl_keyboard.key` — .notes/wayland.md §6.11. A host probe rather
-# than a tsv scenario: the key has to be a real device event, and the serial console
-# the tsv gates type into is not one.
-test-wlkey-x86: build-x86
-    mkdir -p target/images/x86_64-pc-minix
-    cp target/trampoline.elf target/images/x86_64-pc-minix/minix-x86.elf
-    @just _assert-qemu-version qemu-system-x86_64
-    cargo xtask probe wlkey
-    @echo "wlkey: keymap served and wl_seat keyboard events reach a client (x86_64)"
 
 
-# wlx: `diag wlx` drives the Phase 2b xdg_shell path — it maps an xdg_toplevel, the
-# server sends `configure`, the client acks it and commits a frame of the configured
-# size, and the frame reaches /dev/fb — .notes/wayland.md §6.12.
-test-wlx-x86 boot-timeout="40": build-x86
-    mkdir -p target/images/x86_64-pc-minix
-    cp target/trampoline.elf target/images/x86_64-pc-minix/minix-x86.elf
-    @just _assert-qemu-version qemu-system-x86_64
-    FEED_SCENARIO=tools/smoke/wlx.tsv cargo xtask smoke target/test-wlx-x86.log {{boot-timeout}} qemu-system-x86_64 -nographic -m 256M -no-reboot -vga none -device bochs-display,id=fb0 -kernel target/images/x86_64-pc-minix/minix-x86.elf -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0 -device virtio-tablet-pci,display=fb0
-    @echo "wlx: xdg_shell toplevel configured, acked and presented (x86_64)"
 
 
-# wlfocus: `cargo xtask probe wlfocus` drives the Phase 2c focus path — `diag wlx2` opens
-# two connections, maps a window on each, and a QMP key must reach the focused one as
-# the focus moves between them — .notes/wayland.md §6.12. A host probe, like wlkey's: a key
-# has to be a real device event, which the serial console is not.
-test-wlfocus-x86: build-x86
-    mkdir -p target/images/x86_64-pc-minix
-    cp target/trampoline.elf target/images/x86_64-pc-minix/minix-x86.elf
-    @just _assert-qemu-version qemu-system-x86_64
-    cargo xtask probe wlfocus
-    @echo "wlfocus: two clients, one focus, and the keys follow it (x86_64)"
-
-# wlmotion: `cargo xtask probe wlmotion` drives the pointer-interpolation path — `diag wlmotion`
-# maps a window, the host moves the absolute pointer in one event, and the client must
-# receive a stream of steps ending where the device landed.
-test-wlmotion-x86: build-x86
-    mkdir -p target/images/x86_64-pc-minix
-    cp target/trampoline.elf target/images/x86_64-pc-minix/minix-x86.elf
-    @just _assert-qemu-version qemu-system-x86_64
-    cargo xtask probe wlmotion
-    @echo "wlmotion: the pointer moved in steps to where the device landed (x86_64)"
-
-# wlpointer: `cargo xtask probe wlpointer` drives pointer-follows-focus — `diag wlpointer` maps
-# a full-output window under a 64x64 one, and moving the pointer between them must move
-# the focus and the keys with it.
-test-wlpointer-x86: build-x86
-    mkdir -p target/images/x86_64-pc-minix
-    cp target/trampoline.elf target/images/x86_64-pc-minix/minix-x86.elf
-    @just _assert-qemu-version qemu-system-x86_64
-    cargo xtask probe wlpointer
-    @echo "wlpointer: the focus followed the pointer between two windows (x86_64)"
-
-# wldemo: `cargo xtask probe wldemo` drives the widget layer — `diag wldemo` is one window with
-# a text field, a list and a button, and the keys it is sent have to type, move the
-# selection, fire the button and reach the client as its own state report.
-test-wldemo-x86: build-x86
-    mkdir -p target/images/x86_64-pc-minix
-    cp target/trampoline.elf target/images/x86_64-pc-minix/minix-x86.elf
-    @just _assert-qemu-version qemu-system-x86_64
-    cargo xtask probe wldemo
-    @echo "wldemo: the field, the list and the button took their keys (x86_64)"
-
-# wlpanel: `cargo xtask probe wlpanel` drives the session panel, which is the session's own
-# first program: `/etc/rc` starts `/bin/session`, it waits for the shell's prompt and
-# starts `/etc/session`, and `diag wlpanel` maps a 200x32 layer strip at the output's
-# top-right. A click inside its launcher button has to reach it and start an app. This
-# is the shell milestone's gate, together with `test-rc-x86`'s chain.
-test-wlpanel-x86: build-x86
-    mkdir -p target/images/x86_64-pc-minix
-    cp target/trampoline.elf target/images/x86_64-pc-minix/minix-x86.elf
-    @just _assert-qemu-version qemu-system-x86_64
-    cargo xtask probe wlpanel
-    @echo "wlpanel: the launcher took a click on the layer surface (x86_64)"
-
-# rc: `cargo xtask probe rc` boots and types nothing. `/etc/rc` names the session manager,
-# which waits for the shell's prompt, ends that line and starts `/etc/session`, so the
-# chain from init to the session's first program has to happen on its own.
-test-rc-x86: build-x86
-    mkdir -p target/images/x86_64-pc-minix
-    cp target/trampoline.elf target/images/x86_64-pc-minix/minix-x86.elf
-    @just _assert-qemu-version qemu-system-x86_64
-    cargo xtask probe rc
-    @echo "rc: /etc/rc's commands ran at boot before the shell (x86_64)"
-
-# alloc: `cargo xtask probe alloc` types `allocprobe`, which grows the rt heap across several
-# chunks and frees all of it (a fully free chunk must be munmapped, so the region count returns
-# to its baseline), then churns 200 x 1 KiB blocks inside one chunk (a freed block must be
-# reused, so the count does not grow). A count that climbs is a leaked region or a chunk handed
-# out twice. `/bin/allocprobe` prints its own verdict, so `--arch riscv64` or `--arch aarch64`
-# boots the same command on the other kernels after `just build-riscv64`/`build-aarch64`.
-test-alloc-x86: build-x86
-    mkdir -p target/images/x86_64-pc-minix
-    cp target/trampoline.elf target/images/x86_64-pc-minix/minix-x86.elf
-    @just _assert-qemu-version qemu-system-x86_64
-    cargo xtask probe alloc
-    @echo "alloc: the region count returned to its baseline (x86_64)"
-
-# fb: `cargo xtask probe fb` takes a QMP screendump and reads its corners. The fb server paints
-# the boot frame as three vertical thirds, red then green then blue, so the pixels prove the
-# mode set and the BAR mapping with no input and no guest-side reporting. `/bin/fbmmap paint`
-# overwrites the top-left block and `restore` repaints it red for this reason: a run left
-# half-restored fails here.
-test-fb-x86: build-x86
-    mkdir -p target/images/x86_64-pc-minix
-    cp target/trampoline.elf target/images/x86_64-pc-minix/minix-x86.elf
-    @just _assert-qemu-version qemu-system-x86_64
-    cargo xtask probe fb
-    @echo "fb: the frame is the red/green/blue boot pattern (x86_64)"
-
-# exec-loop: `cargo xtask probe exec-loop` runs a command N times and samples `memstat` and
-# `regions` every K execs, which is how the repeated-exec leak is measured: free pages that fall
-# a little per exec, or a wedge at a round exec count, both show up in the samples. It types
-# into the guest for every exec, so it never samples past an exec that has not finished, and a
-# wedge is reported by sending `hangdump` rather than guessed at.
-test-exec-loop-x86 execs="100" sample="10": build-x86
-    mkdir -p target/images/x86_64-pc-minix
-    cp target/trampoline.elf target/images/x86_64-pc-minix/minix-x86.elf
-    @just _assert-qemu-version qemu-system-x86_64
-    cargo xtask probe exec-loop --execs {{execs}} --sample {{sample}}
-    @echo "exec-loop: {{execs}} execs left the free-page and region counts flat (x86_64)"
 
 
-# wlxd: `diag wlxd` drives the Phase 2d damage and cursor path — it damages a small
-# rectangle and checks the rest of the frame survives, then gives the pointer an
-# image and finds it on /dev/fb — .notes/wayland.md §6.12.
-test-wlxd-x86 boot-timeout="40": build-x86
-    mkdir -p target/images/x86_64-pc-minix
-    cp target/trampoline.elf target/images/x86_64-pc-minix/minix-x86.elf
-    @just _assert-qemu-version qemu-system-x86_64
-    FEED_SCENARIO=tools/smoke/wlxd.tsv cargo xtask smoke target/test-wlxd-x86.log {{boot-timeout}} qemu-system-x86_64 -nographic -m 256M -no-reboot -vga none -device bochs-display,id=fb0 -kernel target/images/x86_64-pc-minix/minix-x86.elf -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0 -device virtio-tablet-pci,display=fb0
-    @echo "wlxd: damage and the pointer's cursor (x86_64)"
 
 
-# wlxe: `diag wlxe` drives the Phase 2e panel, popup and decoration path — it maps an
-# opaque window, then a zwlr_layer_shell_v1 panel and an xdg_popup over it, requires
-# the decoration manager to answer client-side, and checks both are composited where
-# they asked and no wider — .notes/wayland.md §6.12.
-test-wlxe-x86 boot-timeout="40": build-x86
-    mkdir -p target/images/x86_64-pc-minix
-    cp target/trampoline.elf target/images/x86_64-pc-minix/minix-x86.elf
-    @just _assert-qemu-version qemu-system-x86_64
-    FEED_SCENARIO=tools/smoke/wlxe.tsv cargo xtask smoke target/test-wlxe-x86.log {{boot-timeout}} qemu-system-x86_64 -nographic -m 256M -no-reboot -vga none -device bochs-display,id=fb0 -kernel target/images/x86_64-pc-minix/minix-x86.elf -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0 -device virtio-tablet-pci,display=fb0
-    @echo "wlxe: layer-shell panel, xdg_popup and client-side decoration (x86_64)"
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 # Measure whether two processes that map one object through the loader share its
 # physical frames — Phase 5 of .notes/dynamic_linking.md. `cargo xtask probe dso-share` boots
 # the dynamic image, runs `/bin/dynclib hold | /bin/dynclib hold` (two lives of the
@@ -1527,37 +592,13 @@ test-wlxe-x86 boot-timeout="40": build-x86
 # other two, so it is not a recipe yet.
 probe-dso-share-x86: dynlink-x86
     DYNLINK_BINS='/lib/libdyn.so=target/dynlink/x86/libdyn.so;/lib/libdyn2.so=target/dynlink/x86/libdyn2.so;/lib/libdyn3.so=target/dynlink/x86/libdyn3.so;/bin/dynhello=target/dynlink/x86/dynhello' just build-x86
-    mkdir -p target/images/x86_64-pc-minix
-    cp target/trampoline.elf target/images/x86_64-pc-minix/minix-x86.elf
-    @just _assert-qemu-version qemu-system-x86_64
-    cargo xtask probe dso-share --arch x86
+    cargo xtask gate dso-share --arch x86
 
 probe-dso-share-riscv64: dynlink-riscv64
     DYNLINK_BINS='/lib/libdyn.so=target/dynlink/riscv64/libdyn.so;/lib/libdyn2.so=target/dynlink/riscv64/libdyn2.so;/lib/libdyn3.so=target/dynlink/riscv64/libdyn3.so;/bin/dynhello=target/dynlink/riscv64/dynhello' just build-riscv64
-    @just _assert-qemu-version qemu-system-riscv64
-    cargo xtask probe dso-share --arch riscv64
+    cargo xtask gate dso-share --arch riscv64
 
-# riscv64's bash is the one that does not fit the default embedded filesystem: the release
-# injects it (`MINIXFS_EXTRA`) and the image is embedded in the kernel, where 16 MiB is full
-# before bash goes in, so the build panics with `zone 4096 out of bounds`. The image is built
-# at the system images' 32 MiB instead; the other arches' bash fits in 16 MiB. (aarch64's
-# own embedded image is 32 MiB for the uutils multicall, not for bash.)
-image-riscv64 boot-timeout="15":
-    MINIXFS_BLOCKS="${MINIXFS_BLOCKS:-8192}" just build-riscv64
-    mkdir -p target/images/riscv64gc-unknown-minix
-    cp target/riscv64gc-unknown-minix/release/kernel-boot-riscv64 target/images/riscv64gc-unknown-minix/minix-riscv64.elf
-    @just _assert-qemu-version qemu-system-riscv64
-    cargo xtask smoke target/image-riscv64.log {{boot-timeout}} qemu-system-riscv64 -machine virt -m 256M -nographic -global virtio-mmio.force-legacy=off -netdev user,id=net0 -device virtio-net-device,netdev=net0 -device virtio-gpu-device -device virtio-keyboard-device -kernel target/images/riscv64gc-unknown-minix/minix-riscv64.elf
-    @just _assert-qemu-log target/image-riscv64.log "wserver: ready"
-    @echo "done: target/images/riscv64gc-unknown-minix/minix-riscv64.elf — qemu-system-riscv64 -machine virt -m 256M -nographic -kernel <it>"
 
-image-aarch64 boot-timeout="15": build-aarch64
-    mkdir -p target/images/aarch64-unknown-minix
-    cp target/aarch64-unknown-minix/release/kernel-boot-aarch64 target/images/aarch64-unknown-minix/minix-aarch64.elf
-    @just _assert-qemu-version qemu-system-aarch64
-    cargo xtask smoke target/image-aarch64.log {{boot-timeout}} qemu-system-aarch64 -machine virt -cpu cortex-a57 -m 256M -nographic -no-reboot -global virtio-mmio.force-legacy=off -netdev user,id=net0 -device virtio-net-device,netdev=net0 -device virtio-gpu-device -device virtio-keyboard-device -kernel target/images/aarch64-unknown-minix/minix-aarch64.elf
-    @just _assert-qemu-log target/image-aarch64.log "wserver: ready"
-    @echo "done: target/images/aarch64-unknown-minix/minix-aarch64.elf — qemu-system-aarch64 -machine virt -m 256M -nographic -kernel <it>"
 
 # ---------- desktop (graphical window; shell stays on stdio) ----------
 # The SDL window shows the framebuffer and routes host keys to the guest
@@ -1602,28 +643,8 @@ debug-aarch64: build-aarch64
 # mount_root.
 #
 # The suites self-terminate (isa-debug-exit on x86, SBI SRST / PSCI elsewhere),
-# so every QEMU run is bounded: a guest that hangs has to fail the recipe with its
-# serial tail from `_assert-qemu-log`, not walk the CI job into its own timeout.
-# `/usr/bin/timeout` is spelled out for the same reason the image recipes do it - a
-# bare `timeout` is the Windows one, whose command line is unrelated.
-#
-# Seconds one QEMU run may take before it is killed. A passing suite is seconds of
-# guest time once the build is out of the way, so this is bulk headroom for a slow
-# or loaded emulator, not a performance budget.
-qemu-timeout := "60"
-
-# The oldest emulator the suites pass on. An older one is not a slow-but-working
-# case to wait out: on the QEMU 8.2 that ubuntu-24.04 ships, the aarch64 boot suite
-# hangs forever at "scheduler starting..." behind a permanent IRQ storm, so a stale
-# emulator only looks like a timeout. Fail with its version instead.
-qemu-min-version := "11"
-
-# Refuse to boot a guest on an emulator older than `qemu-min-version`; `emulator`
-# is the qemu-system-* binary the calling recipe is about to run. Reported above
-# `_assert-qemu-log`, because a killed run's log tail says nothing about why.
-_assert-qemu-version emulator:
-    @command -v {{emulator}} > /dev/null || (echo "!! {{emulator}} is not on PATH." >&2; exit 1)
-    @v=$({{emulator}} --version 2>/dev/null | sed -n '1s/^QEMU emulator version \([0-9][0-9.]*\).*/\1/p'); major=${v%%.*}; if [ -z "$major" ] || [ "$major" -lt {{qemu-min-version}} ]; then echo "!! {{emulator}} is version ${v:-unknown}; the suites need QEMU {{qemu-min-version}} or newer - older emulators hang the aarch64 boot suite." >&2; exit 1; fi
+# and `cargo xtask gate` owns the guest: it bounds the run, kills a guest that
+# hangs, and fails on a missing completion marker with the serial tail.
 
 build-riscv64-test: userland-riscv64 coreutils-riscv64 dynlib-riscv64
     RUSTC="{{stage1-rustc}}" cargo build -p kernel-boot --bin kernel-boot-riscv64-test --target riscv64gc-unknown-minix --features embed_initramfs,embed_minixfs,riscv64,integration-tests --release
@@ -1637,254 +658,35 @@ build-riscv64-boot: userland-riscv64 coreutils-riscv64 dynlib-riscv64
 build-aarch64-boot: userland-aarch64 coreutils-aarch64 dynlib-aarch64
     MINIXFS_BLOCKS="${MINIXFS_BLOCKS:-8192}" RUSTC="{{stage1-rustc}}" cargo build -p kernel-boot --bin kernel-boot-aarch64-boot --target aarch64-unknown-minix --features embed_initramfs,embed_minixfs,aarch64,boot-test --release
 
-test-qemu target="x86":
-    @just test-qemu-{{target}}
 
-test-qemu-x86: build-x86-test mkfs-x86
-    @just _assert-qemu-version qemu-system-x86_64
-    /usr/bin/timeout -s 9 {{qemu-timeout}} qemu-system-x86_64 -nographic -m 256M -no-reboot -kernel target/kernel-test-trampoline.elf -device loader,file=target/kernel-test.bin,addr=0x200000 -device isa-debug-exit -monitor none -drive if=none,id=disk0,file=target/images/x86_64-pc-minix/disk.img,format=raw,cache=writethrough -device virtio-blk-pci,disable-legacy=on,drive=disk0 2>&1 | tee target/test-qemu-x86.log
-    @just _assert-qemu-log target/test-qemu-x86.log "-- done --"
 
-# RISC-V exits via SBI SRST (no exit-code device in this QEMU build), so the
-# serial log is the gate - see _assert-qemu-log above.
-test-qemu-riscv64: build-riscv64-test
-    @just _assert-qemu-version qemu-system-riscv64
-    /usr/bin/timeout -s 9 {{qemu-timeout}} qemu-system-riscv64 -machine virt -m 256M -nographic -kernel target/riscv64gc-unknown-minix/release/kernel-boot-riscv64-test 2>&1 | tee target/test-qemu-riscv64.log
-    @just _assert-qemu-log target/test-qemu-riscv64.log "ALL TESTS PASSED"
 
-# AArch64 exits via PSCI SYSTEM_OFF (always exit code 0 - no exit-code device
-# and no semihosting on this QEMU build), so the serial log is the gate.
-test-qemu-aarch64: build-aarch64-test
-    @just _assert-qemu-version qemu-system-aarch64
-    /usr/bin/timeout -s 9 {{qemu-timeout}} qemu-system-aarch64 -machine virt -cpu cortex-a57 -m 256M -nographic -no-reboot -kernel target/aarch64-unknown-minix/release/kernel-boot-aarch64-test 2>&1 | tee target/test-qemu-aarch64.log
-    @just _assert-qemu-log target/test-qemu-aarch64.log "ALL TESTS PASSED"
 
-test-boot target="x86":
-    @just test-boot-{{target}}
 
-# Gate a QEMU test run on its serial log. The riscv64/aarch64 kernels report no
-# exit status through SBI SRST / PSCI on this QEMU build, so the log is the only
-# evidence that the suite ran to completion - without this the recipes exit 0
-# whatever the guest does. `marker` is the summary the suite prints when every
-# check passed (`ALL TESTS PASSED`, or `-- done --` for the x86 kernel suite).
-#
-# The recipes `tee` the serial output, so the log also holds host-side failures
-# (a missing qemu binary, a bad device) and a QEMU that dies mid-run. All of
-# those fail here, because the marker never appears.
-_assert-qemu-log log marker:
-    @if grep -q -- "FAILURES:" {{log}}; then echo "!! failures reported in {{log}}:"; grep -n -- "FAILURES:" {{log}}; exit 1; fi
-    @if ! grep -qF -- "{{marker}}" {{log}}; then echo "!! no '{{marker}}' in {{log}} - the suite did not run to completion. Tail:"; tail -30 {{log}}; exit 1; fi
 
-test-boot-x86: build-x86-boot mkfs-x86
-    @just _assert-qemu-version qemu-system-x86_64
-    /usr/bin/timeout -s 9 {{qemu-timeout}} qemu-system-x86_64 -nographic -m 256M -no-reboot -kernel target/kernel-boot-trampoline.elf -device loader,file=target/kernel-boot.bin,addr=0x200000 -device isa-debug-exit -monitor none -drive if=none,id=disk0,file=target/images/x86_64-pc-minix/disk.img,format=raw,cache=writethrough -device virtio-blk-pci,disable-legacy=on,drive=disk0 2>&1 | tee target/test-boot-x86.log
-    @just _assert-qemu-log target/test-boot-x86.log "ALL TESTS PASSED"
 
-test-boot-riscv64: build-riscv64-boot mkfs-riscv64
-    @just _assert-qemu-version qemu-system-riscv64
-    /usr/bin/timeout -s 9 {{qemu-timeout}} qemu-system-riscv64 -machine virt -m 256M -nographic -global virtio-mmio.force-legacy=off -drive if=none,id=disk0,file=target/images/riscv64gc-unknown-minix/disk.img,format=raw,cache=writethrough -device virtio-blk-device,drive=disk0 -device virtio-gpu-device -device virtio-keyboard-device -kernel target/riscv64gc-unknown-minix/release/kernel-boot-riscv64-boot 2>&1 | tee target/test-boot-riscv64.log
-    @just _assert-qemu-log target/test-boot-riscv64.log "ALL TESTS PASSED"
 
-test-boot-aarch64: build-aarch64-boot mkfs-aarch64
-    @just _assert-qemu-version qemu-system-aarch64
-    /usr/bin/timeout -s 9 {{qemu-timeout}} qemu-system-aarch64 -machine virt -cpu cortex-a57 -m 256M -nographic -no-reboot -global virtio-mmio.force-legacy=off -drive if=none,id=disk0,file=target/images/aarch64-unknown-minix/disk.img,format=raw,cache=writethrough -device virtio-blk-device,drive=disk0 -device virtio-gpu-device -device virtio-keyboard-device -kernel target/aarch64-unknown-minix/release/kernel-boot-aarch64-boot 2>&1 | tee target/test-boot-aarch64.log
-    @just _assert-qemu-log target/test-boot-aarch64.log "ALL TESTS PASSED"
 
-# The per-arch QEMU gates a change to a VA layout, a HAL constant or anything arch-gated
-# has to be followed by. They cover different things and none substitutes for another:
-# `test-qemu` runs the in-kernel suite (`crates/kernel/src/tests.rs`, behind the
-# `qemu-tests` feature), `test-boot` boots to a shell and runs `boot_test.rs`, and
-# `test-fork` forks a process and checks both directions of the copy. The host suite
-# cannot stand in for the first, because `tests.rs` is compiled only under `qemu-tests` -
-# which is exactly how `syscall_brk` came to assert x86_64's heap base and fail on aarch64
-# alone: `cargo test` never saw it.
-#
-# Grouped by arch so each arch's userland/coreutils build is reused, and stops at
-# the first failing gate like the individual recipes (the failing log is on
-# stdout).
-#
-# Every QEMU gate, on every arch, in one command.
-# The procfs mount, per arch: `tools/smoke/procfs.tsv` runs `/bin/procfsprobe`, the only
-# client that opens a path under a user-mounted VTreeFS. It reads `/proc/hz` and
-# `/proc/uptime`, stats `/proc`, and asks for a path under it that is not there, so a mount
-# that never crossed the VFS boundary reads as a failure rather than as silence.
-test-procfs arch="x86" boot-timeout="40":
-    @just test-procfs-{{arch}} {{boot-timeout}}
 
-test-procfs-x86 boot-timeout="40": build-x86
-    mkdir -p target/images/x86_64-pc-minix
-    cp target/trampoline.elf target/images/x86_64-pc-minix/minix-x86.elf
-    @just _assert-qemu-version qemu-system-x86_64
-    FEED_SCENARIO=tools/smoke/procfs.tsv cargo xtask smoke target/test-procfs-x86.log {{boot-timeout}} qemu-system-x86_64 -nographic -m 256M -no-reboot -vga none -device bochs-display,id=fb0 -kernel target/images/x86_64-pc-minix/minix-x86.elf -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0 -device virtio-tablet-pci,display=fb0
-    @echo "procfs: /proc is mounted, serves hz, uptime and loadavg, resolves /proc/self and /proc/self/exe, names the running program, and lists its entries once each (x86_64)"
 
-test-procfs-riscv64 boot-timeout="60": build-riscv64
-    @just _assert-qemu-version qemu-system-riscv64
-    FEED_SCENARIO=tools/smoke/procfs.tsv cargo xtask smoke target/test-procfs-riscv64.log {{boot-timeout}} qemu-system-riscv64 -machine virt -m 256M -nographic -global virtio-mmio.force-legacy=off -netdev user,id=net0 -device virtio-net-device,netdev=net0 -device virtio-gpu-device -device virtio-keyboard-device -kernel target/riscv64gc-unknown-minix/release/kernel-boot-riscv64
-    @echo "procfs: /proc is mounted, serves hz, uptime and loadavg, resolves /proc/self and /proc/self/exe, names the running program, and lists its entries once each (riscv64)"
 
-test-procfs-aarch64 boot-timeout="60": build-aarch64
-    @just _assert-qemu-version qemu-system-aarch64
-    FEED_SCENARIO=tools/smoke/procfs.tsv cargo xtask smoke target/test-procfs-aarch64.log {{boot-timeout}} qemu-system-aarch64 -machine virt -cpu cortex-a57 -m 256M -nographic -no-reboot -global virtio-mmio.force-legacy=off -netdev user,id=net0 -device virtio-net-device,netdev=net0 -device virtio-gpu-device -device virtio-keyboard-device -kernel target/aarch64-unknown-minix/release/kernel-boot-aarch64
-    @echo "procfs: /proc is mounted, serves hz, uptime and loadavg, resolves /proc/self and /proc/self/exe, names the running program, and lists its entries once each (aarch64)"
 
-test-arches:
-    @just test-qemu x86
-    @just test-boot x86
-    @just test-fork x86
-    @just test-waitid x86
-    @just test-cabi x86
-    @just test-mmapanon-x86
-    @just test-memfd-x86
-    @just test-uds-x86
-    @just test-writeback x86
-    @just test-winprobe x86
-    @just test-procfs x86
-    @just test-burst x86
-    @just test-ttytimeout x86
-    @just test-pipeblock x86
-    @just test-threads x86
-    @just test-eventfd-x86
-    @just test-timerfd-x86
-    @just test-epoll-x86
-    @just test-read-cost x86
-    @just test-coreutils-minix x86
-    @just test-fileread x86
-    @just test-cdirect-x86
-    @just test-qemu riscv64
-    @just test-boot riscv64
-    @just test-fork riscv64
-    @just test-waitid riscv64
-    @just test-writeback riscv64
-    @just test-winprobe riscv64
-    @just test-procfs riscv64
-    @just test-burst riscv64
-    @just test-ttytimeout riscv64
-    @just test-pipeblock riscv64
-    @just test-threads riscv64
-    @just test-coreutils-minix riscv64
-    @just test-fileread riscv64
-    @just test-cdirect-riscv64
-    @just test-qemu aarch64
-    @just test-boot aarch64
-    @just test-fork aarch64
-    @just test-waitid aarch64
-    @just test-writeback aarch64
-    @just test-winprobe aarch64
-    @just test-procfs aarch64
-    @just test-burst aarch64
-    @just test-ttytimeout aarch64
-    @just test-pipeblock aarch64
-    @just test-threads aarch64
-    @just test-coreutils-wedge-aarch64
-    @just test-coreutils-minix aarch64
-    @just test-fileread aarch64
-    @just test-cdirect-aarch64
 
-# Fork isolation, per arch: `tools/smoke/fork.tsv` runs `/bin/forktest`, which forks and checks
-# all three directions of the copy - the child's write must not reach the parent, the parent's
-# post-fork write must not reach a child that only reads that page, and a *kernel* write into a
-# page the child never touched must not reach the parent either. That last one is the answer to
-# the trade item 27 records: the kernel cannot take a page fault in the middle of a copy, so it
-# breaks the copy itself (`cow_prepare_write`). Per arch because each arch's `vm_paging_fork`
-# builds the COW mapping itself (aarch64's AP[2:1] encoding is its own).
-#
-# `/bin/forktest` is a `BOOT_BINS` entry, so every image carries it, and this is the gate the
-# per-arch fork entries in `KNOWN_ISSUES.md` point at.
-test-fork arch="x86" boot-timeout="40":
-    @just test-fork-{{arch}} {{boot-timeout}}
 
-# The user-window alias probe, per arch: `tools/smoke/winprobe.tsv` runs `/bin/winprobe`, which
-# asks whether a VA the process was never given is reachable. The invariant is that it is not -
-# `KNOWN_ISSUES.md` item 16 - and it is per arch because the fresh exec root is built per arch:
-# aarch64 used to fill the window with EL0-RW blocks aliasing the kernel's physical allocator
-# (item 16, fixed 2026-10-02), RISC-V does not copy the window's entry at all, and x86's
-# identity map stops at the user base. All three answer `reachable=0` now.
-test-winprobe arch="x86" boot-timeout="40":
-    @just test-winprobe-{{arch}} {{boot-timeout}}
 
-test-winprobe-x86 boot-timeout="40": build-x86
-    mkdir -p target/images/x86_64-pc-minix
-    cp target/trampoline.elf target/images/x86_64-pc-minix/minix-x86.elf
-    @just _assert-qemu-version qemu-system-x86_64
-    FEED_SCENARIO=tools/smoke/winprobe.tsv cargo xtask smoke target/test-winprobe-x86.log {{boot-timeout}} qemu-system-x86_64 -nographic -m 256M -no-reboot -vga none -device bochs-display,id=fb0 -kernel target/images/x86_64-pc-minix/minix-x86.elf -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0 -device virtio-tablet-pci,display=fb0
-    @echo "winprobe: no user VA outside a region is reachable (x86_64)"
 
-test-winprobe-riscv64 boot-timeout="60": build-riscv64
-    @just _assert-qemu-version qemu-system-riscv64
-    FEED_SCENARIO=tools/smoke/winprobe.tsv cargo xtask smoke target/test-winprobe-riscv64.log {{boot-timeout}} qemu-system-riscv64 -machine virt -m 256M -nographic -global virtio-mmio.force-legacy=off -netdev user,id=net0 -device virtio-net-device,netdev=net0 -device virtio-gpu-device -device virtio-keyboard-device -kernel target/riscv64gc-unknown-minix/release/kernel-boot-riscv64
-    @echo "winprobe: no user VA outside a region is reachable (riscv64)"
 
-test-winprobe-aarch64 boot-timeout="60": build-aarch64
-    @just _assert-qemu-version qemu-system-aarch64
-    FEED_SCENARIO=tools/smoke/winprobe.tsv cargo xtask smoke target/test-winprobe-aarch64.log {{boot-timeout}} qemu-system-aarch64 -machine virt -cpu cortex-a57 -m 256M -nographic -no-reboot -global virtio-mmio.force-legacy=off -netdev user,id=net0 -device virtio-net-device,netdev=net0 -device virtio-gpu-device -device virtio-keyboard-device -kernel target/aarch64-unknown-minix/release/kernel-boot-aarch64
-    @echo "winprobe: no user VA outside a region is reachable (aarch64)"
 
-test-fork-x86 boot-timeout="40": build-x86
-    mkdir -p target/images/x86_64-pc-minix
-    cp target/trampoline.elf target/images/x86_64-pc-minix/minix-x86.elf
-    @just _assert-qemu-version qemu-system-x86_64
-    FEED_SCENARIO=tools/smoke/fork.tsv cargo xtask smoke target/test-fork-x86.log {{boot-timeout}} qemu-system-x86_64 -nographic -m 256M -no-reboot -vga none -device bochs-display,id=fb0 -kernel target/images/x86_64-pc-minix/minix-x86.elf -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0 -device virtio-tablet-pci,display=fb0
-    @echo "fork: both directions of the copy held (x86_64)"
 
-test-fork-riscv64 boot-timeout="60": build-riscv64
-    @just _assert-qemu-version qemu-system-riscv64
-    FEED_SCENARIO=tools/smoke/fork.tsv cargo xtask smoke target/test-fork-riscv64.log {{boot-timeout}} qemu-system-riscv64 -machine virt -m 256M -nographic -global virtio-mmio.force-legacy=off -netdev user,id=net0 -device virtio-net-device,netdev=net0 -device virtio-gpu-device -device virtio-keyboard-device -kernel target/riscv64gc-unknown-minix/release/kernel-boot-riscv64
-    @echo "fork: both directions of the copy held (riscv64)"
 
-test-fork-aarch64 boot-timeout="60": build-aarch64
-    @just _assert-qemu-version qemu-system-aarch64
-    FEED_SCENARIO=tools/smoke/fork.tsv cargo xtask smoke target/test-fork-aarch64.log {{boot-timeout}} qemu-system-aarch64 -machine virt -cpu cortex-a57 -m 256M -nographic -no-reboot -global virtio-mmio.force-legacy=off -netdev user,id=net0 -device virtio-net-device,netdev=net0 -device virtio-gpu-device -device virtio-keyboard-device -kernel target/aarch64-unknown-minix/release/kernel-boot-aarch64
-    @echo "fork: both directions of the copy held (aarch64)"
 
-# `waitid` decoding, per arch: `tools/smoke/waitid.tsv` runs `/bin/waittest`, which forks a
-# child that exits 42 and checks that `waitid` reports `CLD_EXITED` with `si_status == 42`, that
-# `P_ALL` names the child it took, and that `WSTOPPED`/`WNOWAIT`/an empty option set are
-# refused. The encoding is PM's and therefore arch-independent, but the gate runs per arch for
-# the same reason `test-fork` does: it forks, and an arch whose fork path is broken should fail
-# here rather than only in the gate that happens to run on it.
-test-waitid arch="x86" boot-timeout="40":
-    @just test-waitid-{{arch}} {{boot-timeout}}
 
-test-waitid-x86 boot-timeout="40": build-x86
-    mkdir -p target/images/x86_64-pc-minix
-    cp target/trampoline.elf target/images/x86_64-pc-minix/minix-x86.elf
-    @just _assert-qemu-version qemu-system-x86_64
-    FEED_SCENARIO=tools/smoke/waitid.tsv cargo xtask smoke target/test-waitid-x86.log {{boot-timeout}} qemu-system-x86_64 -nographic -m 256M -no-reboot -vga none -device bochs-display,id=fb0 -kernel target/images/x86_64-pc-minix/minix-x86.elf -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0 -device virtio-tablet-pci,display=fb0
-    @echo "waitid: status decoded, P_ALL named the child, unsupported states refused (x86_64)"
 
-test-waitid-riscv64 boot-timeout="60": build-riscv64
-    @just _assert-qemu-version qemu-system-riscv64
-    FEED_SCENARIO=tools/smoke/waitid.tsv cargo xtask smoke target/test-waitid-riscv64.log {{boot-timeout}} qemu-system-riscv64 -machine virt -m 256M -nographic -global virtio-mmio.force-legacy=off -netdev user,id=net0 -device virtio-net-device,netdev=net0 -device virtio-gpu-device -device virtio-keyboard-device -kernel target/riscv64gc-unknown-minix/release/kernel-boot-riscv64
-    @echo "waitid: status decoded, P_ALL named the child, unsupported states refused (riscv64)"
 
-test-waitid-aarch64 boot-timeout="60": build-aarch64
-    @just _assert-qemu-version qemu-system-aarch64
-    FEED_SCENARIO=tools/smoke/waitid.tsv cargo xtask smoke target/test-waitid-aarch64.log {{boot-timeout}} qemu-system-aarch64 -machine virt -cpu cortex-a57 -m 256M -nographic -no-reboot -global virtio-mmio.force-legacy=off -netdev user,id=net0 -device virtio-net-device,netdev=net0 -device virtio-gpu-device -device virtio-keyboard-device -kernel target/aarch64-unknown-minix/release/kernel-boot-aarch64
-    @echo "waitid: status decoded, P_ALL named the child, unsupported states refused (aarch64)"
 
-# The C libc ABI, x86 only: `cargo xtask build c-hello` builds `/bin/cabi` for x86_64
-# alone. `tools/smoke/cabi.tsv` asserts the `sockaddr_in` round trip (the only place
-# the header's layout and `minix-libc`'s decoder meet), `pipe2(O_NONBLOCK)` reaching
-# the pipe's read path, and an anonymous `mmap`.
-test-cabi arch="x86" boot-timeout="40":
-    @just test-cabi-{{arch}} {{boot-timeout}}
 
-test-cabi-x86 boot-timeout="40": (build-c-hello "x86") build-x86
-    mkdir -p target/images/x86_64-pc-minix
-    cp target/trampoline.elf target/images/x86_64-pc-minix/minix-x86.elf
-    @just _assert-qemu-version qemu-system-x86_64
-    FEED_SCENARIO=tools/smoke/cabi.tsv cargo xtask smoke target/test-cabi-x86.log {{boot-timeout}} qemu-system-x86_64 -nographic -m 256M -no-reboot -vga none -device bochs-display,id=fb0 -kernel target/images/x86_64-pc-minix/minix-x86.elf -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0 -device virtio-tablet-pci,display=fb0
-    @echo "cabi: the C socket, pipe2, group and mmap ABIs held (x86_64)"
 
-test target="x86":
-    @just test-{{target}}
 
-test-riscv64: build-riscv64
-    qemu-system-riscv64 -machine virt -m 256M -nographic -kernel target/riscv64gc-unknown-minix/release/kernel-boot-riscv64
-
-test-kernel target="x86":
-    @just test-qemu {{target}}
 
 # Write the root filesystem blob to the per-arch
 # target/images/<triple>/disk.img for the virtio-blk drive (kept separate
@@ -1924,34 +726,14 @@ libc-static arch="x86":
     cargo xtask build libc-static {{arch}}
 
 # A C program linked by clang and LLD alone, against `libc.a` and the arch's `crt0`.
-# `just test-cdirect-<arch>` boots it; the image base and `BASE_ADDRESS`/`LOADER_BASE`
+# `cargo xtask gate c-direct --arch <arch>` boots it; the image base and `BASE_ADDRESS`/`LOADER_BASE`
 # come from `Arch`, mirroring the fork target spec's `pre_link_args`.
 c-direct arch="x86":
     @just libc-static {{arch}}
     cargo xtask build c-direct {{arch}}
 
-# The gate on the direct link: `/bin/cdirect` is `tools/hello.c` compiled by clang and
-# linked by LLD against `libc.a`, with no rustc anywhere in the line. The scenario's
-# line can only be produced by running it.
-test-cdirect-x86 boot-timeout="40": build-x86 (c-direct "x86")
-    MINIXFS_EXTRA='/bin/cdirect=target/x86_64-pc-minix/release/cdirect' just build-x86
-    mkdir -p target/images/x86_64-pc-minix
-    cp target/trampoline.elf target/images/x86_64-pc-minix/minix-x86.elf
-    @just _assert-qemu-version qemu-system-x86_64
-    FEED_SCENARIO=tools/smoke/cdirect.tsv cargo xtask smoke target/test-cdirect-x86.log {{boot-timeout}} qemu-system-x86_64 -nographic -m 256M -no-reboot -vga none -device bochs-display,id=fb0 -kernel target/images/x86_64-pc-minix/minix-x86.elf -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0 -device virtio-tablet-pci,display=fb0
-    @echo "c-direct: clang + LLD linked /bin/cdirect against libc.a with no rustc, and it ran (x86_64)"
 
-test-cdirect-riscv64 boot-timeout="60": build-riscv64 (c-direct "riscv64")
-    MINIXFS_EXTRA='/bin/cdirect=target/riscv64gc-unknown-minix/release/cdirect' just build-riscv64
-    @just _assert-qemu-version qemu-system-riscv64
-    FEED_SCENARIO=tools/smoke/cdirect.tsv cargo xtask smoke target/test-cdirect-riscv64.log {{boot-timeout}} qemu-system-riscv64 -machine virt -m 256M -nographic -global virtio-mmio.force-legacy=off -netdev user,id=net0 -device virtio-net-device,netdev=net0 -device virtio-gpu-device -device virtio-keyboard-device -kernel target/riscv64gc-unknown-minix/release/kernel-boot-riscv64
-    @echo "c-direct: clang + LLD linked /bin/cdirect against libc.a with no rustc, and it ran (riscv64)"
 
-test-cdirect-aarch64 boot-timeout="60": build-aarch64 (c-direct "aarch64")
-    MINIXFS_EXTRA='/bin/cdirect=target/aarch64-unknown-minix/release/cdirect' just build-aarch64
-    @just _assert-qemu-version qemu-system-aarch64
-    FEED_SCENARIO=tools/smoke/cdirect.tsv cargo xtask smoke target/test-cdirect-aarch64.log {{boot-timeout}} qemu-system-aarch64 -machine virt -cpu cortex-a57 -m 256M -nographic -no-reboot -global virtio-mmio.force-legacy=off -netdev user,id=net0 -device virtio-net-device,netdev=net0 -device virtio-gpu-device -device virtio-keyboard-device -kernel target/aarch64-unknown-minix/release/kernel-boot-aarch64
-    @echo "c-direct: clang + LLD linked /bin/cdirect against libc.a with no rustc, and it ran (aarch64)"
 
 # The host tablegen programs a cross build of clang needs. The fork's LLVM build
 # tree carries `llvm-tblgen` only; `clang-tblgen` and `llvm-min-tblgen` come from
@@ -1968,41 +750,16 @@ llvm-host-tools:
 llvm-minix arch="x86":
     cargo xtask build llvm-minix {{arch}}
 
-# The in-guest toolchain gate: the guest's own clang compiles `tools/hello.c` and
-# links it with the guest's ld.lld against `libc.a`, and the program runs. The
-# staged root is required (there is no build of it in CI: it costs an LLVM cross
-# build), and a missing root is refused by name rather than booted as a failure.
-test-toolchain arch="x86":
-    @just test-toolchain-{{arch}}
 
-test-toolchain-x86 boot-timeout="3600": toolchain-root-x86
-    @just system-image-x86
-    @just _assert-qemu-version qemu-system-x86_64
-    FEED_PACE=0.01 FEED_SCENARIO=tools/smoke/toolchain.tsv cargo xtask smoke target/test-toolchain-x86.log {{boot-timeout}} qemu-system-x86_64 -nographic -m 1024M -no-reboot -vga none -device bochs-display,id=fb0 -kernel target/images/x86_64-pc-minix/minix-x86-boot.elf -drive if=none,id=disk0,file=target/images/x86_64-pc-minix/disk.img,format=raw,cache=writethrough -device virtio-blk-pci,disable-legacy=on,drive=disk0 -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0 -device virtio-tablet-pci,display=fb0
-    @echo "toolchain: the guest's clang compiled and the guest's lld linked hello.c, and it ran (x86_64)"
 
-# The TableGen target, in two boots: the guest compiles every source of
-# `obj.LLVMTableGenBasic` plus `llvm-min-tblgen.cpp` and links `llvm-min-tblgen`
-# in the first, then a fresh boot runs the binary on a `.td` probe. 2 GiB is a
-# measured requirement, not a guess: at 512 MiB `TargetFeaturesEmitter.cpp`
-# thrashed for the whole 90-minute budget, and at 1 GiB the sequence reached the
-# thirteenth unit before the cache and memory pressure stopped it. The second
-# boot is not a convenience: the binary runs on a fresh image but hangs when run
-# in the boot that compiled it (KNOWN_ISSUES.md item 89).
-test-tblgen-x86 boot-timeout="5400": toolchain-root-x86
-    @just system-image-x86
-    @just _assert-qemu-version qemu-system-x86_64
-    FEED_PACE=0.01 FEED_SCENARIO=tools/smoke/tblgen-build.tsv cargo xtask smoke target/test-tblgen-build.log {{boot-timeout}} qemu-system-x86_64 -nographic -m 2048M -no-reboot -vga none -device bochs-display,id=fb0 -kernel target/images/x86_64-pc-minix/minix-x86-boot.elf -drive if=none,id=disk0,file=target/images/x86_64-pc-minix/disk.img,format=raw,cache=writethrough -device virtio-blk-pci,disable-legacy=on,drive=disk0 -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0 -device virtio-tablet-pci,display=fb0
-    FEED_PACE=0.01 FEED_SCENARIO=tools/smoke/tblgen-run.tsv cargo xtask smoke target/test-tblgen-run.log 300 qemu-system-x86_64 -nographic -m 2048M -no-reboot -vga none -device bochs-display,id=fb0 -kernel target/images/x86_64-pc-minix/minix-x86-boot.elf -drive if=none,id=disk0,file=target/images/x86_64-pc-minix/disk.img,format=raw,cache=writethrough -device virtio-blk-pci,disable-legacy=on,drive=disk0 -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0 -device virtio-tablet-pci,display=fb0
-    @echo "tblgen: the guest compiled and linked llvm-min-tblgen, and it ran in a fresh boot (x86_64)"
 
 # GNU bash for a minix target, from the upstream commit `tools/pins.ini` pins:
 # fetched, configured against `tools/c-include` and linked against minix-libc by
 # `cargo xtask cc minix`, the `cc` a C project's own build needs. That host must be
 # POSIX (the stage1, the rlib and clang all have to be the same host's), so on
 # Windows `cargo xtask build bash` re-enters WSL by itself; `MINIX_WSL_DISTRO`
-# picks the distribution. Artifact: `target/bash/<arch>/bash`; `just test-bash
-# <arch>` boots it. `.notes/c_build.md` has the why of each flag and each trap this
+# picks the distribution. Artifact: `target/bash/<arch>/bash`; `cargo xtask gate
+# bash --arch <arch>` boots it. `.notes/c_build.md` has the why of each flag and each trap this
 # build costs.
 #
 # Run this *after* the toolchain: `bootstrap` and `fetch-stage1` start with
@@ -2060,7 +817,7 @@ dynlib-x86:
 # What the loader's *own* gate needs on top of `dynlib-x86`: `cargo xtask build dynlink`
 # builds `libdyn*.so` and `dynhello` (resolution, the region budget), `libdlopen.so`,
 # `libtls1.so` and `dynopen` (the `dlopen` steps), whose strings live only in the objects
-# and which no image ships. `test-dynlink-x86` injects them into a standard image
+# and which no image ships. The `dynlink` gate injects them into a standard image
 # (`DYNLINK_BINS`) and boots it.
 dynlink-x86: dynlib-x86
     cargo xtask build dynlink x86
@@ -2075,7 +832,7 @@ dynlink-x86: dynlib-x86
 #
 # `cargo xtask build cdyn` is the same link `cargo xtask build dynlibc` gives the shipped
 # `/bin/dynclib`, so a program of your own gets the flags that program is tested with, and
-# `just test-cdyn-x86` is the gate on this recipe.
+# `cargo xtask gate cdyn --arch x86` is the gate on this recipe.
 cdyn src arch="x86":
     cargo xtask build cdyn {{src}} --target {{arch}}
 
@@ -2102,6 +859,149 @@ cdyn src arch="x86":
 libcxx arch="x86":
     cargo xtask build libcxx {{arch}}
 
+# ---------- gate preparation ----------
+#
+# `cargo xtask gate <name> --arch <arch>` runs one of these before it boots the
+# guest, so a gate is one command. They are build recipes: none of them boots
+# anything. The default is `build <arch>` (an embedded image) or
+# `system-image <arch>` (a boot image plus the disk); the gates whose artifact
+# needs an injected file or a Mesa disk name their own recipe here.
+
+prepare-image arch="x86":
+    @just prepare-image-{{arch}}
+
+prepare-image-x86:
+    @just build-x86
+
+prepare-image-riscv64:
+    MINIXFS_BLOCKS="${MINIXFS_BLOCKS:-8192}" just build-riscv64
+
+prepare-image-aarch64:
+    @just build-aarch64
+
+prepare-bash arch="x86":
+    @just prepare-bash-{{arch}}
+
+prepare-bash-x86: (build-bash "x86")
+    MINIXFS_EXTRA='/bin/bash=target/bash/x86/bash' just build-x86
+
+prepare-bash-riscv64: (build-bash "riscv64")
+    MINIXFS_EXTRA='/bin/bash=target/bash/riscv64/bash' MINIXFS_BLOCKS=8192 just build-riscv64
+
+prepare-bash-aarch64: (build-bash "aarch64")
+    MINIXFS_EXTRA='/bin/bash=target/bash/aarch64/bash' just build-aarch64
+
+prepare-dynlink arch="x86":
+    @just prepare-dynlink-{{arch}}
+
+prepare-dynlink-x86: dynlink-x86
+    DYNLINK_BINS='/lib/libdyn.so=target/dynlink/x86/libdyn.so;/lib/libdyn2.so=target/dynlink/x86/libdyn2.so;/lib/libdyn3.so=target/dynlink/x86/libdyn3.so;/bin/dynhello=target/dynlink/x86/dynhello;/lib/libdlopen.so=target/dynlink/x86/libdlopen.so;/lib/libtls1.so=target/dynlink/x86/libtls1.so;/bin/dynopen=target/dynlink/x86/dynopen' just build-x86
+    @if grep -q 'dynlink' target/dynlink/x86/dynhello; then echo "!! /bin/dynhello contains a 'dynlink' string - the message cannot have come from a shared object" >&2; exit 1; fi
+    @if grep -q 'No such file or directory' target/x86_64-pc-minix/release/dynclib; then echo "!! /bin/dynclib contains the error message - it cannot have come from libc.so" >&2; exit 1; fi
+    @if grep -q 'dynopen-text' target/dynlink/x86/dynopen; then echo "!! /bin/dynopen contains the object's text - the line cannot have come from libdlopen.so" >&2; exit 1; fi
+
+prepare-dynlink-riscv64: dynlink-riscv64
+    DYNLINK_BINS='/lib/libdyn.so=target/dynlink/riscv64/libdyn.so;/lib/libdyn2.so=target/dynlink/riscv64/libdyn2.so;/lib/libdyn3.so=target/dynlink/riscv64/libdyn3.so;/bin/dynhello=target/dynlink/riscv64/dynhello;/lib/libdlopen.so=target/dynlink/riscv64/libdlopen.so;/lib/libtls1.so=target/dynlink/riscv64/libtls1.so;/bin/dynopen=target/dynlink/riscv64/dynopen' just build-riscv64
+    @if grep -q 'dynlink' target/dynlink/riscv64/dynhello; then echo "!! /bin/dynhello contains a 'dynlink' string - the message cannot have come from a shared object" >&2; exit 1; fi
+    @if grep -q 'No such file or directory' target/riscv64gc-unknown-minix/release/dynclib; then echo "!! /bin/dynclib contains the error message - it cannot have come from libc.so" >&2; exit 1; fi
+    @if grep -q 'dynopen-text' target/dynlink/riscv64/dynopen; then echo "!! /bin/dynopen contains the object's text - the line cannot have come from libdlopen.so" >&2; exit 1; fi
+
+prepare-dynlink-aarch64: dynlink-aarch64
+    DYNLINK_BINS='/lib/libdyn.so=target/dynlink/aarch64/libdyn.so;/lib/libdyn2.so=target/dynlink/aarch64/libdyn2.so;/lib/libdyn3.so=target/dynlink/aarch64/libdyn3.so;/bin/dynhello=target/dynlink/aarch64/dynhello;/lib/libdlopen.so=target/dynlink/aarch64/libdlopen.so;/lib/libtls1.so=target/dynlink/aarch64/libtls1.so;/bin/dynopen=target/dynlink/aarch64/dynopen' just build-aarch64
+    @if grep -q 'dynlink' target/dynlink/aarch64/dynhello; then echo "!! /bin/dynhello contains a 'dynlink' string - the message cannot have come from a shared object" >&2; exit 1; fi
+    @if grep -q 'No such file or directory' target/aarch64-unknown-minix/release/dynclib; then echo "!! /bin/dynclib contains the error message - it cannot have come from libc.so" >&2; exit 1; fi
+    @if grep -q 'dynopen-text' target/dynlink/aarch64/dynopen; then echo "!! /bin/dynopen contains the object's text - the line cannot have come from libdlopen.so" >&2; exit 1; fi
+
+prepare-dso-share arch="x86":
+    @just prepare-dso-share-{{arch}}
+
+prepare-dso-share-x86: dynlink-x86
+    DYNLINK_BINS='/lib/libdyn.so=target/dynlink/x86/libdyn.so;/lib/libdyn2.so=target/dynlink/x86/libdyn2.so;/lib/libdyn3.so=target/dynlink/x86/libdyn3.so;/bin/dynhello=target/dynlink/x86/dynhello' just build-x86
+
+prepare-dso-share-riscv64: dynlink-riscv64
+    DYNLINK_BINS='/lib/libdyn.so=target/dynlink/riscv64/libdyn.so;/lib/libdyn2.so=target/dynlink/riscv64/libdyn2.so;/lib/libdyn3.so=target/dynlink/riscv64/libdyn3.so;/bin/dynhello=target/dynlink/riscv64/dynhello' just build-riscv64
+
+prepare-c-direct arch="x86":
+    @just prepare-c-direct-{{arch}}
+
+prepare-c-direct-x86: (c-direct "x86")
+    MINIXFS_EXTRA='/bin/cdirect=target/x86_64-pc-minix/release/cdirect' just build-x86
+
+prepare-c-direct-riscv64: (c-direct "riscv64")
+    MINIXFS_EXTRA='/bin/cdirect=target/riscv64gc-unknown-minix/release/cdirect' just build-riscv64
+
+prepare-c-direct-aarch64: (c-direct "aarch64")
+    MINIXFS_EXTRA='/bin/cdirect=target/aarch64-unknown-minix/release/cdirect' just build-aarch64
+
+prepare-cdyn-x86: dynlib-x86
+    just cdyn tools/cdyn-demo.c x86
+    @if grep -q 'No such file or directory' target/dync/x86/cdyn-demo; then echo "!! the program contains the error message - it cannot have come from libc.so" >&2; exit 1; fi
+    MINIXFS_EXTRA='/bin/cdyn-demo=target/dync/x86/cdyn-demo' just build-x86
+
+prepare-wlfull arch="x86":
+    @just prepare-wlfull-{{arch}}
+
+prepare-wlfull-x86:
+    @just build-x86
+
+prepare-wlfull-riscv64:
+    @just system-image-riscv64
+
+prepare-wlfull-aarch64:
+    @just system-image-aarch64
+
+prepare-gltriangle arch="x86":
+    @just prepare-gltriangle-{{arch}}
+
+prepare-gltriangle-x86: gltriangle-x86 boot-image-x86
+    M=target/mesa/x86; E="/lib/libdrm.so.2=$M/lib/libdrm.so.2;/lib/libEGL.so.1=$M/lib/libEGL.so.1;/lib/libgbm.so.1=$M/lib/libgbm.so.1;/lib/libexpat.so.1=$M/lib/libexpat.so.1;/lib/libgallium-25.3.6.so=$M/lib/libgallium-25.3.6.so;/lib/libGLESv2.so.2=$M/lib/libGLESv2.so.2;/lib/libz.so.1=$M/lib/libz.so.1;/lib/swrast_dri.so=$M/lib/swrast_dri.so;/bin/gltriangle=$M/bin/gltriangle"; MINIXFS_EXTRA="$E" MINIXFS_BLOCKS=16384 cargo run -q -p boot-image --bin mkminixfs --release -- x86_64
+    @just mkfs-x86
+
+prepare-gltriangle-riscv64: gltriangle-riscv64 boot-image-riscv64
+    M=target/mesa/riscv64; E="/lib/libdrm.so.2=$M/lib/libdrm.so.2;/lib/libEGL.so.1=$M/lib/libEGL.so.1;/lib/libgbm.so.1=$M/lib/libgbm.so.1;/lib/libexpat.so.1=$M/lib/libexpat.so.1;/lib/libgallium-25.3.6.so=$M/lib/libgallium-25.3.6.so;/lib/libGLESv2.so.2=$M/lib/libGLESv2.so.2;/lib/libz.so.1=$M/lib/libz.so.1;/lib/swrast_dri.so=$M/lib/swrast_dri.so;/bin/gltriangle=$M/bin/gltriangle"; MINIXFS_EXTRA="$E" MINIXFS_BLOCKS=16384 cargo run -q -p boot-image --bin mkminixfs --release -- riscv64
+    @just mkfs-riscv64
+
+prepare-gltriangle-aarch64: gltriangle-aarch64 boot-image-aarch64
+    M=target/mesa/aarch64; E="/lib/libdrm.so.2=$M/lib/libdrm.so.2;/lib/libEGL.so.1=$M/lib/libEGL.so.1;/lib/libgbm.so.1=$M/lib/libgbm.so.1;/lib/libexpat.so.1=$M/lib/libexpat.so.1;/lib/libgallium-25.3.6.so=$M/lib/libgallium-25.3.6.so;/lib/libGLESv2.so.2=$M/lib/libGLESv2.so.2;/lib/libz.so.1=$M/lib/libz.so.1;/lib/swrast_dri.so=$M/lib/swrast_dri.so;/bin/gltriangle=$M/bin/gltriangle"; MINIXFS_EXTRA="$E" MINIXFS_BLOCKS=16384 cargo run -q -p boot-image --bin mkminixfs --release -- aarch64
+    @just mkfs-aarch64
+
+prepare-gltriangle-virgl-x86: gltriangle-x86 boot-image-x86
+    M=target/mesa/x86; E="/lib/libdrm.so.2=$M/lib/libdrm.so.2;/lib/libEGL.so.1=$M/lib/libEGL.so.1;/lib/libgbm.so.1=$M/lib/libgbm.so.1;/lib/libexpat.so.1=$M/lib/libexpat.so.1;/lib/libgallium-25.3.6.so=$M/lib/libgallium-25.3.6.so;/lib/libGLESv2.so.2=$M/lib/libGLESv2.so.2;/lib/libz.so.1=$M/lib/libz.so.1;/bin/gltriangle=$M/bin/gltriangle"; MINIXFS_EXTRA="$E" MINIXFS_BLOCKS=16384 cargo run -q -p boot-image --bin mkminixfs --release -- x86_64
+    @just mkfs-x86
+
+prepare-wlgl-x86: wlgl-x86 boot-image-x86
+    M=target/mesa/x86; E="/lib/libdrm.so.2=$M/lib/libdrm.so.2;/lib/libEGL.so.1=$M/lib/libEGL.so.1;/lib/libgbm.so.1=$M/lib/libgbm.so.1;/lib/libexpat.so.1=$M/lib/libexpat.so.1;/lib/libgallium-25.3.6.so=$M/lib/libgallium-25.3.6.so;/lib/libGLESv2.so.2=$M/lib/libGLESv2.so.2;/lib/libz.so.1=$M/lib/libz.so.1;/bin/wlgl=$M/bin/wlgl"; MINIXFS_EXTRA="$E" MINIXFS_BLOCKS=16384 cargo run -q -p boot-image --bin mkminixfs --release -- x86_64
+    @just mkfs-x86
+
+prepare-gui-x86: gui-x86 boot-image-x86
+    M=target/mesa/x86; E="/lib/libdrm.so.2=$M/lib/libdrm.so.2;/lib/libEGL.so.1=$M/lib/libEGL.so.1;/lib/libgbm.so.1=$M/lib/libgbm.so.1;/lib/libexpat.so.1=$M/lib/libexpat.so.1;/lib/libgallium-25.3.6.so=$M/lib/libgallium-25.3.6.so;/lib/libGLESv2.so.2=$M/lib/libGLESv2.so.2;/lib/libz.so.1=$M/lib/libz.so.1;/lib/swrast_dri.so=$M/lib/swrast_dri.so;/bin/gui=$M/bin/gui"; MINIXFS_EXTRA="$E" MINIXFS_BLOCKS=16384 cargo run -q -p boot-image --bin mkminixfs --release -- x86_64
+    @just mkfs-x86
+
+prepare-gbmtest-x86: gbmtest-x86 boot-image-x86
+    M=target/mesa/x86; E="/lib/libdrm.so.2=$M/lib/libdrm.so.2;/lib/libgbm.so.1=$M/lib/libgbm.so.1;/lib/libexpat.so.1=$M/lib/libexpat.so.1;/lib/libgallium-25.3.6.so=$M/lib/libgallium-25.3.6.so;/lib/libz.so.1=$M/lib/libz.so.1;/lib/dri_gbm.so=$M/lib/dri_gbm.so;/bin/gbmtest=$M/bin/gbmtest"; MINIXFS_EXTRA="$E" MINIXFS_BLOCKS=16384 cargo run -q -p boot-image --bin mkminixfs --release -- x86_64
+    @just mkfs-x86
+
+prepare-wldmabufgl-x86: wldmabufgl-x86 boot-image-x86
+    M=target/mesa/x86; E="/lib/libdrm.so.2=$M/lib/libdrm.so.2;/lib/libEGL.so.1=$M/lib/libEGL.so.1;/lib/libgbm.so.1=$M/lib/libgbm.so.1;/lib/libexpat.so.1=$M/lib/libexpat.so.1;/lib/libgallium-25.3.6.so=$M/lib/libgallium-25.3.6.so;/lib/libGLESv2.so.2=$M/lib/libGLESv2.so.2;/lib/libz.so.1=$M/lib/libz.so.1;/lib/dri_gbm.so=$M/lib/dri_gbm.so;/bin/wldmabufgl=$M/bin/wldmabufgl"; MINIXFS_EXTRA="$E" MINIXFS_BLOCKS=16384 cargo run -q -p boot-image --bin mkminixfs --release -- x86_64
+    @just mkfs-x86
+
+prepare-wlcompose-x86: wlcompose-x86 boot-image-x86
+    M=target/mesa/x86; E="/lib/libdrm.so.2=$M/lib/libdrm.so.2;/lib/libEGL.so.1=$M/lib/libEGL.so.1;/lib/libgbm.so.1=$M/lib/libgbm.so.1;/lib/libexpat.so.1=$M/lib/libexpat.so.1;/lib/libgallium-25.3.6.so=$M/lib/libgallium-25.3.6.so;/lib/libGLESv2.so.2=$M/lib/libGLESv2.so.2;/lib/libz.so.1=$M/lib/libz.so.1;/lib/dri_gbm.so=$M/lib/dri_gbm.so;/bin/wlcompose=$M/bin/wlcompose"; MINIXFS_EXTRA="$E" MINIXFS_BLOCKS=16384 cargo run -q -p boot-image --bin mkminixfs --release -- x86_64
+    @just mkfs-x86
+
+prepare-wlscene-x86: wlcompose-x86 boot-image-x86
+    M=target/mesa/x86; E="/lib/libdrm.so.2=$M/lib/libdrm.so.2;/lib/libEGL.so.1=$M/lib/libEGL.so.1;/lib/libgbm.so.1=$M/lib/libgbm.so.1;/lib/libexpat.so.1=$M/lib/libexpat.so.1;/lib/libgallium-25.3.6.so=$M/lib/libgallium-25.3.6.so;/lib/libGLESv2.so.2=$M/lib/libGLESv2.so.2;/lib/libz.so.1=$M/lib/libz.so.1;/lib/dri_gbm.so=$M/lib/dri_gbm.so;/bin/wlcompose=$M/bin/wlcompose"; MINIXFS_EXTRA="$E" MINIXFS_BLOCKS=16384 cargo run -q -p boot-image --bin mkminixfs --release -- x86_64
+    @just mkfs-x86
+
+prepare-build-test arch="x86":
+    @just build-{{arch}}-test
+
+prepare-build-boot arch="x86":
+    @just build-{{arch}}-boot
+
+prepare-mkfs arch="x86":
+    @just mkfs-{{arch}}
+
 # ---------- check ----------
 
 # Run the host test suite (and clippy) on Linux, in a container on the podman
@@ -2113,7 +1013,7 @@ libcxx arch="x86":
 # output stays inside the container, so the working tree is never touched.
 #
 # Needs: podman with a `podman machine` VM, and network for the image pull.
-test-linux:
+check-linux:
     @podman machine start >/dev/null 2>&1 || true
     MSYS_NO_PATHCONV=1 podman run --rm --network=host -e RUSTUP_TOOLCHAIN={{rust-channel}}-x86_64-unknown-linux-gnu -e CARGO_TARGET_DIR=/tmp/just-target -v "{{ROOT}}:/w:ro" -w /w rust:{{rust-channel}} bash -c 'export PATH=/usr/local/cargo/bin:/usr/bin:/bin; cargo test --workspace --no-fail-fast --locked 2>&1 | tee /tmp/t.log; t=${PIPESTATUS[0]}; grep -h "^test result:" /tmp/t.log | awk "{p+=\$4;i+=\$8} END {printf \"linux host tests: passed=%d ignored=%d summaries=%d\\n\",p,i,NR}"; if [ $t -ne 0 ]; then echo "--- failures ---"; grep -nE "test result: FAILED|^error|signal:|panicked" /tmp/t.log | head -20; fi; rustup component add clippy >/dev/null 2>&1; cargo clippy --all-targets -- -D warnings; c=$?; echo "linux host tests: cargo-test rc=$t clippy rc=$c"; test $t -eq 0 -a $c -eq 0'
 

@@ -24,6 +24,7 @@ mod check;
 mod dynamic;
 mod fetch;
 mod fetch_stage1;
+mod gate;
 mod guest;
 mod image;
 mod mirror;
@@ -71,6 +72,27 @@ fn main() -> ExitCode {
         ),
         Some(("verify-stage1", _)) => verify_stage1::run(&root).map(|()| true),
         Some(("probe", matches)) => run_probe(&root, matches),
+        Some(("gate", matches)) => {
+            if matches.get_flag("list") {
+                gate::list(&mut out)
+            } else {
+                let name = matches
+                    .get_one::<String>("name")
+                    .expect("clap requires the gate name");
+                let arch = matches
+                    .get_one::<String>("arch")
+                    .expect("clap defaults the arch");
+                let timeout = matches.get_one::<u64>("timeout").copied();
+                gate::run(
+                    &root,
+                    name,
+                    arch,
+                    timeout,
+                    matches.get_flag("dry-run"),
+                )
+            }
+        }
+        Some(("gate-arches", _)) => gate::run_arches(&root),
         Some(("smoke", matches)) => {
             let log = matches
                 .get_one::<String>("log")
@@ -742,6 +764,40 @@ fn command() -> clap::Command {
         .subcommand(
             clap::Command::new("verify-stage1")
                 .about("Install the published stage1, then link the probe binaries with it"),
+        )
+        .subcommand(
+            clap::Command::new("gate")
+                .about("Run one QEMU gate: its scenario, its markers and its verdict")
+                .arg(
+                    clap::Arg::new("name")
+                        .value_name("GATE")
+                        .required_unless_present("list")
+                        .help("The gate name, e.g. fork or coreutils-minix"),
+                )
+                .arg(
+                    clap::Arg::new("list")
+                        .long("list")
+                        .action(clap::ArgAction::SetTrue)
+                        .help("List the gates instead of running one"),
+                )
+                .arg(probe_arch_arg())
+                .arg(
+                    clap::Arg::new("timeout")
+                        .long("timeout")
+                        .value_name("SECONDS")
+                        .value_parser(clap::value_parser!(u64))
+                        .help("How long the guest may run (default: the gate's own)"),
+                )
+                .arg(
+                    clap::Arg::new("dry-run")
+                        .long("dry-run")
+                        .action(clap::ArgAction::SetTrue)
+                        .help("Print the QEMU command instead of running it"),
+                ),
+        )
+        .subcommand(
+            clap::Command::new("gate-arches")
+                .about("Every arch-gated QEMU gate, in the order the arch suites use"),
         )
         .subcommand(
             clap::Command::new("smoke")

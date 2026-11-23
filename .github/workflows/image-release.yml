@@ -44,16 +44,17 @@
 #     plain `v0.2.0` release.
 # Either way the version is the same string in the release tag and the asset names.
 #
-# Each job *boots* what it built and drives it: `just image-<arch>` runs the self-contained
-# artifact in QEMU, and `just test-system-image-<arch>` boots the split pair with its system
+# Each job *boots* what it built and drives it: `cargo xtask gate image --arch <arch>` runs the self-contained
+# artifact in QEMU, and `cargo xtask gate system-image --arch <arch>` boots the split pair with its system
 # image attached - each typing the userspace smoke scenario (`tools/smoke/scenario.tsv`) into
 # its shell, and failing unless every step answers - so a release can only contain images whose
 # shell execs a program from the image, writes a file and reads it back. That
 # self-check's 15 s timeout is calibrated for a dev machine with KVM, so the job passes
-# a larger `boot-timeout`: a runner emulates the guest.
+# a larger `--timeout`: a runner emulates the guest.
 #
 # The emulator is not optional here either - the artifact boots userspace, so it is
-# subject to the same floor as the suites (`qemu-min-version`), which
+# subject to the same floor as the suites (`QEMU_MIN_VERSION` in
+# `crates/xtask/src/gate.rs`), which
 # `.github/actions/install-qemu` provides. Clang assembles the x86 trampoline, and
 # the `rust`, `coreutils` and `libc` submodules are needed by the workspace and the
 # multicall (`build-x86` embeds it; both workspaces patch `libc` onto the sibling
@@ -189,17 +190,17 @@ jobs:
       # here, only later.
       - name: Build and boot the artifact
         env:
-          # The same injection `just test-bash` uses, so the published image is the one
+          # The same injection `cargo xtask gate bash --arch <arch>` uses, so the published image is the one
           # the `bash` job booted with `/bin/bash` in place. `scenario.tsv` still runs in
           # the minix shell - its `#` prompt is not replaced by an installed bash.
           MINIXFS_EXTRA: /bin/bash=target/bash/${{ matrix.arch }}/bash
-        run: just image ${{ matrix.arch }} 120
+        run: cargo xtask gate image --arch ${{ matrix.arch }} --timeout 120
 
       # The split form: a small boot image and a full system image (coreutils, GNU bash
       # because the `bash` artifact above is in place, and the seven Mesa DSOs because the
       # `mesa-<arch>` artifact is). The DSOs are ~36 MiB, so `MINIXFS_BLOCKS` is raised from
       # the recipe's 32 MiB default - the system image is the artifact the 16 MiB embedded
-      # window cannot hold. `180` is the runner's emulation speed, not a budget. The recipe
+      # window cannot hold. `180` is the runner's emulation speed, not a budget. The gate
       # boots what it builds and drives the smoke scenario, so the release cannot ship a
       # system image that was never booted.
       - name: Build and boot the boot image and system image
@@ -212,7 +213,7 @@ jobs:
             extra="${extra};/lib/$(basename "$so")=$so"
           done
           MINIXFS_EXTRA="${extra#;}" MINIXFS_BLOCKS=16384 \
-            just test-system-image-${{ matrix.arch }} 180
+            cargo xtask gate system-image --arch ${{ matrix.arch }} --timeout 180
 
       # Named without the version: the publish job is the only place that knows
       # whether this is a tag or a commit, so it renames on the way into the

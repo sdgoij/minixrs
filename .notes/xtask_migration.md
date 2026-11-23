@@ -564,6 +564,8 @@ populates.
 
 **Phase 4, landed.** `cargo xtask smoke` replaces `tools/smoke/feed.sh`. The driver owns the child, so it needs none of the shell's workarounds: no FIFO, no `timeout` binary, no status file, no subshell whose exit status is unavailable. It keeps the `.tsv` contract exactly: comments and blank lines, the tab separator (a line without one is an error), the whole-line expectation, the step's own byte anchor, the literal echo check for a paced send, and one shared budget that ends a second before the guest's timeout. The console is copied to the log as it arrives, so `_assert-qemu-log` and the image-boot recipes keep working. Every recipe that called `sh tools/smoke/feed.sh` now calls `cargo xtask smoke`, and the parser is tested against all 45 repository scenarios. `cargo xtask probe interactive-bash` replaces `tools/smoke/interactive_bash.py`, so phase 4 no longer has a script.
 
+**The gate layer.** `cargo xtask gate <name> --arch <arch>` now owns what the recipes used to spell out: the build recipe, the QEMU line, the `.tsv` scenario, the boot markers, the image copy and the verdict. The table is `crates/xtask/src/gate.rs`; a gate names its image kind (embedded, split system image, self-contained), memory, display, extra devices, disk and trace, plus the `prepare` recipe(s) it runs first (`just build <arch>`, `just system-image <arch>`, or a `prepare-<name>` recipe for the injected/Mesa images). The command builders have one canonical order per arch and are unit-tested; `--dry-run` prints the build and boot commands. The per-gate `test-*` and `image-*` recipes are gone: `cargo xtask gate-arches` replaces `test-arches`, `cargo xtask gate exec-loop --arch x86` replaces `test-exec-loop-x86`, and `check-linux` replaces `test-linux`. The comments the recipes carried are in `.notes/gates.md`; the marker assertions moved into the gate, so `_assert-qemu-log`, `_assert-qemu-version`, `qemu-timeout` and `qemu-min-version` are gone. The x86 embedded, system-image, marker, probe and kernel-suite gates, the host suite, clippy and the Justfile checker passed here; the riscv64, aarch64 and Mesa gates were not run on this host.
+
 `cc-minix` and `cc-dso-minix` are **not** ported, and that is a decision
 rather than a pending item. The reason is a host: `build-bash.py` and
 `build-mesa.py` drive them from inside WSL (`build-mesa.py`'s meson cross file
@@ -681,15 +683,15 @@ the phase.** Three kinds are cheap here and one is not:
 - **`AGENTS.md`**: the gate table and the "Traps that keep catching us" list
   lose the MSYS entries only when phase 4 lands, not before. Do not pre-edit
   them: the rule is that a rule emerges from a validated pattern.
-- **`Justfile`**: one body line per migrated recipe; the `check` recipe loses
-  two of its dependencies over the migration.
-- **CI**: unchanged until phase 5. The `python3` shim steps stay until no job
-  runs a script; phases 0 to 3 remove them from `host-tests` and `kernel-tests`
-  first.
-- **Docs**: 22 files reference a `just` recipe and 23 reference a `tools/`
-  path. Since recipe names do not change, the first number stays valid. The
-  second needs a pass at the end of each phase for the files that phase
-  deletes.
+- **`Justfile`**: the build recipes and the `prepare-*` recipes remain; the
+  per-gate `test-*`/`image-*` recipes are gone, and `cargo xtask gate` runs the
+  `prepare` recipe before it boots. `check-linux` replaces `test-linux`, and
+  `test-arches` is `cargo xtask gate-arches`.
+- **CI**: the suites and image jobs call `cargo xtask gate ...`; the `python3`
+  shim steps stay where a recipe or script still needs them.
+- **Docs**: the instructions, skills and CI name `cargo xtask gate ...` and
+  `cargo xtask gate-arches`; recipe names in historical `.notes` prose describe
+  the tree as it was when they were written.
 - **`.notes/`**: this document. Update the phase table as phases land, rather
   than writing a second plan.
 

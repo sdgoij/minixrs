@@ -109,7 +109,7 @@ debugging session went down that path before the addresses were re-derived.
 
 Rules:
 
-1. After ANY rebuild (`just build aarch64`, `cargo build ... --release`, and `just test-*` —
+1. After ANY rebuild (`just build aarch64`, `cargo build ... --release`, and `cargo xtask gate` —
    test builds relink too), re-run and re-derive **every** base you probe:
    `rust-nm -n target/aarch64-unknown-minix/release/kernel-boot-aarch64 | grep -iE "BOOT_CPU_STORAGE|PROC_TABLE_ALIGNED|MONOTONIC|ser_input"`.
 2. Validate a base before trusting its fields — cross-check against an independent source.
@@ -313,6 +313,6 @@ The trace grows huge (~100+ MB/min during a livelock). Stop it once the pattern 
     this one is not. On the QEMU 8.2 that ubuntu-24.04 ships, the boot suite stops at
     `scheduler starting...` behind a permanent IRQ storm (966k `Taking exception 5
     [IRQ]` in 20 s, all from one ELR); the same kernel finishes in 0.2 s on 11. The
-    suite recipes refuse anything below QEMU 11 (`_assert-qemu-version`), but a
+    suite recipes refuse anything below QEMU 11 (`cargo xtask gate` checks it), but a
     hand-run `qemu-system-aarch64 ...` does not, so compare against a known-good
     emulator before instrumenting the kernel. The `minix-testing` skill has the rest.

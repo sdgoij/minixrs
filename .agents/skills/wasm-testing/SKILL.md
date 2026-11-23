@@ -40,7 +40,7 @@ the guest boots part-way and hangs on a peer that will never answer.
 ## Worked example: the `/proc` mount broke the wasm boot
 
 Adding procfs as boot process 21 and `mount_procfs` in VFS's init was correct on the hardware
-arches and green locally (`just test-arches`). CI's `wasm system` job failed with five `FAIL`
+arches and green locally (`cargo xtask gate-arches`). CI's `wasm system` job failed with five `FAIL`
 lines, the first being `every server reached its main loop` with `vfs: 50,48,48,48` (four
 syscalls: the root mount, then the procfs `REQ_READSUPER`, then nothing). VFS was blocked in
 `mount_procfs` because slot 21 had no procfs instance, the harness having given it to its

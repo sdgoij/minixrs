@@ -147,5 +147,5 @@ unchanged (`.notes/dynamic_linking.md`).
 ```
 just build          # Build kernel + trampoline + initramfs
 just run            # Boot QEMU with serial console
-just test-boot      # Build + boot + run 12 assertion tests + exit
+cargo xtask gate boot --arch x86      # Build + boot + run 12 assertion tests + exit
 ```

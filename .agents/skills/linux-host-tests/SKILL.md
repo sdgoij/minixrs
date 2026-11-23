@@ -9,7 +9,7 @@ Run the host test suite the way CI's Linux `host-tests` job does, without
 leaving Windows. The whole run is one recipe:
 
 ```
-just test-linux
+just check-linux
 ```
 
 It boots the podman WSL machine if needed, runs `cargo test --workspace` and

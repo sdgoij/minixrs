@@ -52,20 +52,20 @@ just bootstrap
 just build                    # Build the kernel + boot images
 just run                      # Build and boot in QEMU
 just debug                    # Build and boot with GDB server on :1234
-just test-qemu                # Run the QEMU integration tests
+cargo xtask gate qemu --arch x86                # Run the QEMU integration tests
 
 # RISC-V64
 just build riscv64            # Build the RISC-V kernel
 just run riscv64              # Boot in QEMU (uses OpenSBI)
-just test-qemu riscv64        # Run the QEMU integration tests
-just test-boot riscv64        # Run the boot tests
+cargo xtask gate qemu --arch riscv64        # Run the QEMU integration tests
+cargo xtask gate boot --arch riscv64        # Run the boot tests
 
 # AArch64
 just build aarch64            # Build the AArch64 kernel
 just run aarch64              # Boot in QEMU (virt machine)
 just debug aarch64            # Build and boot with GDB server on :1234
-just test-qemu aarch64        # Run the QEMU integration tests
-just test-boot aarch64        # Run the boot tests
+cargo xtask gate qemu --arch aarch64        # Run the QEMU integration tests
+cargo xtask gate boot --arch aarch64        # Run the boot tests
 
 # wasm32 — the same system in a browser tab (run from a Linux host; see above)
 sh tools/wasm-browser/build.sh    # Build the artifacts and stage the page's copies of them
@@ -80,7 +80,7 @@ built userland/server binaries, and the x86 trampoline/kernel.bin post-link
 is handled by `cargo xtask image mkboot`. Assembled images are mirrored per-target
 under `target/images/<triple>/` for host inspection.
 
-`just image [arch]` builds one self-contained, bootable ELF per arch — the
+`cargo xtask gate image --arch <arch>` builds one self-contained, bootable ELF per arch — the
 initramfs and root image are embedded, so QEMU needs no disk attached. Prebuilt
 ones are attached to releases: a `v*` tag for a release, `image-<sha>`
 (prereleases) for a per-commit build. The assets carry the version
@@ -108,7 +108,7 @@ Images come in two forms: a self-contained ELF (kernel, initramfs and root files
 embedded), and a split pair — a boot image plus a root filesystem on a virtio disk. The
 split is what carries the optional larger pieces: GNU bash, and the Mesa/libdrm GL stack,
 which draws a GLES2 triangle through surfaceless EGL on all three hardware arches
-(`just test-gltriangle-<arch>`; [.notes/wayland.md](.notes/wayland.md)).
+(`cargo xtask gate gltriangle --arch <arch>`; [.notes/wayland.md](.notes/wayland.md)).
 
 See `.agents/skills/` for domain-specific documentation and
 [.notes/porting_plan.md](.notes/porting_plan.md) for the task tracker.
@@ -120,10 +120,10 @@ See `.agents/skills/` for domain-specific documentation and
 
 The project is now a real toolchain target. The most recent work:
 
-- **The C graphics stack runs** — libdrm and Mesa (its GLSL compiler included) build as minix **shared objects** against the port's C library and load under its own dynamic loader; a surfaceless-EGL client draws a GLES2 triangle on `softpipe`, reads it back and checks it, on all three hardware arches (`just test-gltriangle-<arch>`: EGL 1.5 / GLES 3.1). The loader grew to meet it — a general-dynamic thread-local's offset word, and a cross-object `TLSDESC` descriptor on aarch64 — and it is the forcing function the C++ toolchain and `dlopen` needed; see [.notes/wayland.md](.notes/wayland.md).
+- **The C graphics stack runs** — libdrm and Mesa (its GLSL compiler included) build as minix **shared objects** against the port's C library and load under its own dynamic loader; a surfaceless-EGL client draws a GLES2 triangle on `softpipe`, reads it back and checks it, on all three hardware arches (`cargo xtask gate gltriangle --arch <arch>`: EGL 1.5 / GLES 3.1). The loader grew to meet it — a general-dynamic thread-local's offset word, and a cross-object `TLSDESC` descriptor on aarch64 — and it is the forcing function the C++ toolchain and `dlopen` needed; see [.notes/wayland.md](.notes/wayland.md).
 - **Bash and Mesa as releases per pin** — GNU bash is built at a pinned upstream commit, and both it and the Mesa/libdrm DSOs are published as releases keyed on the pin *and* the toolchain, so `just fetch-bash <arch>` and `just fetch-mesa <arch>` install them in seconds and CI rebuilds only when a pin moves. The stage1 toolchain already worked this way (`just fetch-stage1`); `just build-bash`/`just build-mesa` stay the authoritative builds.
 - **A split image** — the boot image (kernel + initramfs) and the root filesystem are separate release artifacts, so the root can outgrow the 16 MiB embedded window and carry GNU bash and the ~36 MiB GL stack; the self-contained ELF is still built and booted too.
-- **Interactive bash** — readline works at the console: it sets the terminal raw and *polls* before it reads, which the tty server never woke because its `select` did not pump the kernel serial ring. `just test-interactive-bash-<arch>` types a line at `bash-5.3#` and checks it ran.
+- **Interactive bash** — readline works at the console: it sets the terminal raw and *polls* before it reads, which the tty server never woke because its `select` did not pump the kernel serial ring. `cargo xtask gate interactive-bash --arch <arch>` types a line at `bash-5.3#` and checks it ran.
 - **A physical-memory map a user window cannot shadow** — kernel mappings of physical frames are asserted against the user address space at compile time, and a checker refuses to treat a physical address as a pointer (the bug that read a large server's own image instead of the frame); see [.notes/physmap.md](.notes/physmap.md).
 - **The whole system in a browser tab** — a **wasm32** target where each process is a WebAssembly instance and the host *is* the devices (console, clock, disk, display, keyboard, pointer, the network). The kernel, the servers and the userland are the ones the arches run: the shell forks, execs from the image, writes a file to the disk and reads it back, and `ping 10.0.2.2` reaches a peer over the host's link. [Try it](https://sdgoij.github.io/minixrs/).
 - **1:1 kernel threads** — every thread is a schedulable Proc slot: `thread_create`/`exit`/`join`/`yield`, wake-one IPC delivery, group sweep on exit/exec/fork, per-thread TLS. MINIX proper had no native threads; this port does.
@@ -132,7 +132,7 @@ The project is now a real toolchain target. The most recent work:
 - **Memory from 72M to 16G** — the same kernel boots in ~72 MiB of guest RAM and runs `/bin/hello` up to 16 GiB, on all three hardware arches (x86_64, RISC-V64, AArch64).
 - **A heap that actually grows** — userland heap growth routed through VM's brk (demand-mapped, freed on exit); the COW refcount bug that killed repeated `hello` runs is fixed.
 - **Honest memory reporting** — the boot banner prints detected vs usable RAM (a 4 GiB guest says `4095 MiB detected (4078 MiB usable)`, not the old "5120 MiB" artifact).
-- **uutils/coreutils runs on the OS** — the multicall binary (60 applets) boots, allocates and writes output a second tool reads back; it is embedded on x86_64 and riscv64, gated by `just test-coreutils-wedge`. The coreutils submodule tracks the port (see [coreutils](#coreutils) below).
+- **uutils/coreutils runs on the OS** — the multicall binary (60 applets) boots, allocates and writes output a second tool reads back; it is embedded on x86_64 and riscv64, gated by `cargo xtask gate coreutils-wedge --arch x86`. The coreutils submodule tracks the port (see [coreutils](#coreutils) below).
 - **GNU bash runs** — built by the fork's stage1 (a POSIX host, see `.notes/c_build.md`), injected as `/bin/bash` and booted: it prints its banner, runs `-c`, loops, arithmetic and redirects, and gets its own `$PWD`. Getting there filled the C surface it needed (`termios`/`ioctl`, `mknod`, `inet_*`, `scanf`, an environment that survives `exec`) plus two gaps it found in the shell and the libc: a shell that did not remove quotes, and a `getcwd` that returned `ENOSYS`.
 - **A `ls` that behaves like one** — sorted, and laid out in columns that fit the terminal (80 columns when the tty cannot say, which a serial console cannot), one name per line when the output is a file or a pipe. A wider directory listing is what found an MFS `getdents` bug: at end-of-directory it returned `OK` with a stale reply payload, so a reader asking until it got 0 was handed the same entries for ever.
 - **Dynamic linking** — a Rust loader (`crates/ldso`, installed as `/libexec/ld.so`) that VFS's exec enters as a program's `PT_INTERP`, and every image now carries it together with the port's C library as a shared object (`/lib/libc.so`) and a C program linked against it (`/bin/dynclib`). The loader maps each `DT_NEEDED` at a deterministic base, binds eagerly, follows the dependency graph transitively, applies every object's relocations and runs its initialisers in order, maps one file once (by inode, not by the name it was asked for), and gives a dynamically linked program thread-local storage. A program can also `dlopen` one at run time — which is what a driver lookup needs — and linking dynamically stays opt-in as MINIX's is: the default is still static, and a program of your own is `just cdyn`, which links against the `/lib/libc.so` every image already carries; see [below](#dynamic-linking).
@@ -154,7 +154,7 @@ The applets run as `coreutils <name> [args]`; the multicall also dispatches on i
 (`factor`, `seq`, `shuf`, `sort`) until it grows one. The link is stripped and `opt-level=z` to
 keep the ~6 MiB binary inside the default 16 MiB minixfs.
 
-`just test-coreutils-wedge` is the acceptance gate — the scenario in
+`cargo xtask gate coreutils-wedge --arch x86` is the acceptance gate — the scenario in
 `tools/smoke/coreutils-wedge.tsv` has `coreutils seq 3` write three lines and the next tool read
 them back, the reproducer for the wedge that once left a child dead at its ELF entry
 (KNOWN_ISSUES item 12). It runs in QEMU on x86_64, and the same scenario has also been run green
@@ -217,16 +217,16 @@ nothing is added to the image but the program itself.
 - [.notes/dynamic_linking.md](.notes/dynamic_linking.md) — the design decisions, the phased plan (0–8), the
   measurements and the traps; it builds on the file-backed exec path in
   [.notes/filemmap.md](.notes/filemmap.md).
-- `just test-dynlink-x86` (also `riscv64`, `aarch64`) — boots an image and drives
+- `cargo xtask gate dynlink --arch x86` (also `riscv64`, `aarch64`) — boots an image and drives
   `tools/smoke/dyn.tsv`: the loader's bases, relocations, transitive load, cross-object
   resolution and initialiser order, before and after a `fork` and a re-`exec`, then the shipped
   `/bin/dynclib`'s line — `errno` read through the loader's thread-local storage, `strerror`'s
   buffer inside `libc.so`, and the program's own `.init_array` — and five `dlopen` steps: the two
   scopes, `dlclose`, and the two failures the loader names itself.
-- `just test-cdyn-x86` — the gate on the recipe for a program of your own: it builds
+- `cargo xtask gate cdyn --arch x86` — the gate on the recipe for a program of your own: it builds
   `tools/cdyn-demo.c` with `just cdyn`, injects the result and boots `tools/smoke/cdyn.tsv`,
   whose line is a string only `libc.so` holds.
-- `just probe-dso-share-x86` (also `riscv64`) — measures from the host's page tables that two
+- `cargo xtask gate dso-share --arch x86` (also `riscv64`) — measures from the host's page tables that two
   processes mapping one object share its read-only frames (13/13 on x86_64).
 - `cargo test -p ldso` — the host side: the ELF parse, every relocation rule, the base
   allocator and the name resolution.
@@ -296,11 +296,11 @@ See `.agents/skills/` for domain deep-dives:
 ## Testing
 
 - **Host tests:** `cargo test` — pure-logic unit and property tests
-- **QEMU integration:** `just test-qemu [arch]` — kernel tests running in QEMU
+- **QEMU integration:** `cargo xtask gate qemu --arch <arch>` — kernel tests running in QEMU
   (page tables, IPC, scheduler, timers, syscalls, ELF loading, grants):
-  - `just test-qemu` (x86_64) — 91 tests, exits with a real pass/fail code
-  - `just test-qemu riscv64` — 76 tests, paging enabled
-  - `just test-qemu aarch64` — 76 tests, MMU enabled
+  - `cargo xtask gate qemu --arch x86` (x86_64) — 91 tests, exits with a real pass/fail code
+  - `cargo xtask gate qemu --arch riscv64` — 76 tests, paging enabled
+  - `cargo xtask gate qemu --arch aarch64` — 76 tests, MMU enabled
 
   RISC-V/AArch64 integration builds enable the MMU before running the shared
   suite, so copy_from_user / delivermsg perform real page-table walks, the
@@ -308,7 +308,7 @@ See `.agents/skills/` for domain deep-dives:
   hardware tests probe the actual devices: RISC-V CLINT timer (rdtime + SSTC
   stimecmp) and SBI console; AArch64 generic timer (cntpct_el0/cntfrq_el0)
   and PL011 UART.
-- **Boot tests:** `just test-boot [arch]` — multi-server verification after VFS
+- **Boot tests:** `cargo xtask gate boot --arch <arch>` — multi-server verification after VFS
   mount_root on all three hardware arches (server liveness, process-table
   consistency, VFS→MFS readsuper IPC round-trip, brk/RAM-disk mappings,
   allocator, initramfs), then a userspace phase in which a test init execs a
@@ -316,39 +316,38 @@ See `.agents/skills/` for domain deep-dives:
   mapped user+executable
 - **One scenario, four targets:** `tools/smoke/scenario.tsv` is the userspace smoke
   test — a program exec'd from the image, a file written, that file read back — and all
-  four targets read that one file. `just image [arch]` builds the shipped ELF and types
-  the steps into the shell that comes up, through `cargo xtask smoke`; `run.js` drives
-  the same steps in the wasm engine. `arch-tests` runs it on every PR, so an image whose
+  four targets read that one file. `cargo xtask gate image --arch <arch>` builds the shipped ELF and types
+  the steps into the shell that comes up; `run.js` drives the same steps in the wasm engine. `arch-tests` runs it on every PR, so an image whose
   shell cannot run a command has to fail the build rather than a download.
-- **Dynamic linking:** `just test-dynlink-{x86,riscv64,aarch64}` boots an image and drives
+- **Dynamic linking:** `cargo xtask gate dynlink --arch <arch>` boots an image and drives
   `tools/smoke/dyn.tsv` — the loader's relocations, transitive load, cross-object resolution
   and initialiser order, across a `fork` and a re-`exec`, then the shipped `/bin/dynclib`
   against `/lib/libc.so`. It is a per-arch scenario rather than another `scenario.tsv` step
-  because wasm drives that one and has no dynamic linking. `just test-cdyn-x86` is the gate on
+  because wasm drives that one and has no dynamic linking. `cargo xtask gate cdyn --arch x86` is the gate on
   `just cdyn`, the recipe for a program of your own: it builds `tools/cdyn-demo.c` with the
-  recipe, injects it and boots `tools/smoke/cdyn.tsv`. `just probe-dso-share-{x86,riscv64}`
+  recipe, injects it and boots `tools/smoke/cdyn.tsv`. `cargo xtask gate dso-share --arch {x86,riscv64}`
   measures read-only frame sharing between two processes from the host's page tables, and
   `cargo test -p ldso` covers the loader's parsing, relocation rules and name resolution on
   the host. The boot test asserts that an image carries the loader and the two objects.
-- **The framebuffer `mmap` path:** `just test-fbmmap <arch>` boots the split system image and
+- **The framebuffer `mmap` path:** `cargo xtask gate fbmmap --arch <arch>` boots the split system image and
   drives `tools/smoke/fbmmap.tsv` — `/bin/fbmmap paint` mmaps `/dev/fb` `MAP_SHARED`, paints a
   block and reads it back, which only matches when the mapping aliases the device's own memory.
   It is a per-arch scenario rather than a `scenario.tsv` step for the same reason the dynamic
   linking gate is: wasm drives that one and has no `/dev/fb` to map. `arch-tests` runs it on
   every arch, which is what catches a physmap change quietly making every client's `mmap` land
   where the framebuffer is not.
-- **Zero-copy present:** `just test-wlfull-<arch>` boots with a `virtio-gpu` as the *output* and runs
+- **Zero-copy present:** `cargo xtask gate wlfull --arch <arch>` boots with a `virtio-gpu` as the *output* and runs
   `diag wlclient full`, a whole-output `wl_shm` client. `/sbin/wlserver` hands the client's buffer to
   the fb server instead of blitting it, so the scanout *is* the client's memory and the compositor
   copies nothing; `cargo xtask probe wlfull` checks the display with a QMP screendump and the fb
   server's `fb: scanout src` line. Because the frame is the client's buffer, `/dev/fb` no longer
   shows it — which is why this gate screendumps rather than reading the framebuffer back. It needs
   no GL host.
-- **The C graphics stack:** `just test-gltriangle-<arch>` cross-builds Mesa/libdrm as shared
+- **The C graphics stack:** `cargo xtask gate gltriangle --arch <arch>` cross-builds Mesa/libdrm as shared
   objects (`just build-mesa <arch> --build`, or `just fetch-mesa <arch>` for the published
   ones) and boots a surfaceless-EGL client that draws a GLES2 triangle on `softpipe` and
   checks the readback. It is the end-to-end gate on the C++ toolchain and the loader.
-- **Interactive bash:** `just test-interactive-bash-<arch>` boots the split system image and
+- **Interactive bash:** `cargo xtask gate interactive-bash --arch <arch>` boots the split system image and
   types a line at `bash-5.3#` — the one path that exercises readline's raw-mode setup and its
   poll-then-read, which the `bash -c` steps cannot reach.
 - **wasm (the browser target):** `sh tools/wasm-browser/build.sh` builds and stages the artifacts
