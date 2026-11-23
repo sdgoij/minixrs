@@ -288,17 +288,6 @@ system-image-aarch64: boot-image-aarch64
 system-image target="x86":
     @just system-image-{{target}}
 
-
-
-
-
-
-
-
-
-
-
-
 build-riscv64: userland-riscv64 coreutils-riscv64 dynlib-riscv64
     RUSTC="{{stage1-rustc}}" cargo build -p kernel-boot --bin kernel-boot-riscv64 --target riscv64gc-unknown-minix --features embed_initramfs,embed_minixfs,riscv64 --release
 
@@ -318,15 +307,11 @@ run target="x86" memory="256M":
 run-x86 memory: boot-image-x86 system-image-x86
     qemu-system-x86_64 -nographic -m {{memory}} -no-reboot -vga none -device bochs-display,id=fb0 -kernel target/boot-kernel-trampoline.elf -device loader,file=target/boot-kernel.bin,addr=0x200000 -drive if=none,id=disk0,file=target/images/x86_64-pc-minix/disk.img,format=raw,cache=writethrough -device virtio-blk-pci,disable-legacy=on,drive=disk0 -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0 -device virtio-tablet-pci,display=fb0
 
-
 run-riscv64 memory: boot-image-riscv64 system-image-riscv64
     qemu-system-riscv64 -machine virt -m {{memory}} -nographic -global virtio-mmio.force-legacy=off -drive if=none,id=disk0,file=target/images/riscv64gc-unknown-minix/disk.img,format=raw,cache=writethrough -device virtio-blk-device,drive=disk0 -netdev user,id=net0 -device virtio-net-device,netdev=net0 -device virtio-gpu-device -device virtio-keyboard-device -kernel target/boot-kernel-riscv64.elf
 
 run-aarch64 memory: boot-image-aarch64 system-image-aarch64
     qemu-system-aarch64 -machine virt -cpu cortex-a57 -m {{memory}} -nographic -no-reboot -global virtio-mmio.force-legacy=off -drive if=none,id=disk0,file=target/images/aarch64-unknown-minix/disk.img,format=raw,cache=writethrough -device virtio-blk-device,drive=disk0 -netdev user,id=net0 -device virtio-net-device,netdev=net0 -device virtio-gpu-device -device virtio-keyboard-device -kernel target/boot-kernel-aarch64.elf
-
-
-
 
 # The 3D half of 3a's gate. x86 keeps bochs-display for the output, so the virtio-gpu
 # device the host provides is a render node only (D3): the probe negotiates
@@ -386,53 +371,6 @@ run-aarch64 memory: boot-image-aarch64 system-image-aarch64
 # half-booted guest. QEMU is bounded by `timeout` rather than by a scenario's last
 # step, so the recipe's `boot-timeout` is the guest's whole lifetime.
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 # The same artifacts for riscv64. `cargo xtask build dynlink` and
 # `cargo xtask build dynlibc` take the target; only the loader's `_start` and its TLS
 # placement differ between them (`crates/ldso`).
@@ -444,7 +382,6 @@ dynlib-riscv64:
 dynlink-riscv64: dynlib-riscv64
     cargo xtask build dynlink riscv64
 
-
 dynlib-aarch64:
     @test -n "{{stage1-rustc}}" || (echo 'error: stage1 rustc not found — run `just bootstrap` first' >&2 && exit 1)
     RUSTC="{{stage1-rustc}}" RUSTFLAGS="-C link-arg=-Ttools/minix-ldso.ld -C link-arg=--no-eh-frame-hdr" cargo build -p ldso --bin ldso --features bin --target aarch64-unknown-minix --release
@@ -452,8 +389,6 @@ dynlib-aarch64:
 
 dynlink-aarch64: dynlib-aarch64
     cargo xtask build dynlink aarch64
-
-
 
 # gltriangle: build the surfaceless-EGL GLES2 triangle client and stage the Mesa
 # DSOs it runs against (§6.10 stage 3c-2) for one target.
@@ -484,9 +419,6 @@ gltriangle-aarch64: dynlib-aarch64
     cargo xtask build gltriangle aarch64
     @echo "gltriangle: /bin/gltriangle built and the Mesa DSOs staged (aarch64)"
 
-
-
-
 # wlgl: build /bin/wlgl, the GL present client (§6.10 stage 3d-a). It is the tree's
 # first *dynamically linked Rust* program, and it has to be one: `dlopen` needs a
 # loader in the address space and a statically linked minix image has none
@@ -499,7 +431,6 @@ wlgl-x86: userland-x86 dynlib-x86
     cargo xtask build wlgl x86
     @echo "wlgl: /bin/wlgl built and the Mesa DSOs staged (x86_64)"
 
-
 # gui: build /bin/gui, the in-house renderer client (`gui.md` milestone M1). Like /bin/wlgl it
 # is a dynamic image that loads Mesa, but the GL half is the `render` crate rather than a C
 # object, and it draws a pass (clear, quad, glyph quads) instead of a triangle.
@@ -509,7 +440,6 @@ gui-x86: userland-x86 dynlib-x86
     cargo xtask build gui x86
     @echo "gui: /bin/gui built and the Mesa DSOs staged (x86_64)"
 
-
 # gbmtest: build /bin/gbmtest, the GBM create/export probe (§6.10 stage 3d-b-3). It links
 # `libgbm` and `libdrm` and includes the GBM/libdrm headers from the source checkouts, so it
 # is built from `just build-mesa x86 --build` like the DSOs are.
@@ -518,10 +448,6 @@ gbmtest-x86: userland-x86 dynlib-x86
     @test -f target/mesa/x86/lib/libgbm.so.1 || (echo 'gbmtest: no libgbm — run `just build-mesa x86 --build` first' >&2; exit 1)
     cargo xtask build gbmtest x86
     @echo "gbmtest: /bin/gbmtest built and the Mesa DSOs staged (x86_64)"
-
-
-
-
 
 # wldmabufgl: build /bin/wldmabufgl, the 3d-b-4d GL present client (§6.10). Like /bin/wlgl it
 # is a dynamic image that renders with Mesa, but it draws into the buffer it commits instead
@@ -536,7 +462,6 @@ wldmabufgl-x86: userland-x86 dynlib-x86
     cargo xtask build wldmabufgl x86
     @echo "wldmabufgl: /bin/wldmabufgl built and the Mesa DSOs staged (x86_64)"
 
-
 # wlcompose: build /bin/wlcompose, the 3d-b-5b GPU-composition helper (§6.10). Like the other Mesa
 # gates it is a dynamic image; one binary is both the helper and its test peer, selected by argv
 # (`serve`/`test`), which is what makes the cross-process measurement a real two-process one.
@@ -545,38 +470,6 @@ wlcompose-x86: userland-x86 dynlib-x86
     @test -f target/mesa/x86/lib/libgbm.so.1 || (echo 'wlcompose: no libgbm — run `just build-mesa x86 --build` first' >&2; exit 1)
     cargo xtask build wlcompose x86
     @echo "wlcompose: /bin/wlcompose built and the Mesa DSOs staged (x86_64)"
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 # Measure whether two processes that map one object through the loader share its
 # physical frames — Phase 5 of .notes/dynamic_linking.md. `cargo xtask probe dso-share` boots
@@ -597,8 +490,6 @@ probe-dso-share-x86: dynlink-x86
 probe-dso-share-riscv64: dynlink-riscv64
     DYNLINK_BINS='/lib/libdyn.so=target/dynlink/riscv64/libdyn.so;/lib/libdyn2.so=target/dynlink/riscv64/libdyn2.so;/lib/libdyn3.so=target/dynlink/riscv64/libdyn3.so;/bin/dynhello=target/dynlink/riscv64/dynhello' just build-riscv64
     cargo xtask gate dso-share --arch riscv64
-
-
 
 # ---------- desktop (graphical window; shell stays on stdio) ----------
 # The SDL window shows the framebuffer and routes host keys to the guest
@@ -658,36 +549,6 @@ build-riscv64-boot: userland-riscv64 coreutils-riscv64 dynlib-riscv64
 build-aarch64-boot: userland-aarch64 coreutils-aarch64 dynlib-aarch64
     MINIXFS_BLOCKS="${MINIXFS_BLOCKS:-8192}" RUSTC="{{stage1-rustc}}" cargo build -p kernel-boot --bin kernel-boot-aarch64-boot --target aarch64-unknown-minix --features embed_initramfs,embed_minixfs,aarch64,boot-test --release
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 # Write the root filesystem blob to the per-arch
 # target/images/<triple>/disk.img for the virtio-blk drive (kept separate
 # per arch so one arch's mkfs never clobbers another's disk image).
@@ -732,9 +593,6 @@ c-direct arch="x86":
     @just libc-static {{arch}}
     cargo xtask build c-direct {{arch}}
 
-
-
-
 # The host tablegen programs a cross build of clang needs. The fork's LLVM build
 # tree carries `llvm-tblgen` only; `clang-tblgen` and `llvm-min-tblgen` come from
 # this build. Artifact: `target/llvm/host/{Release/,}bin`.
@@ -749,9 +607,6 @@ llvm-host-tools:
 # root: 199 MiB, far past the embedded ramdisk's 16 MiB window.
 llvm-minix arch="x86":
     cargo xtask build llvm-minix {{arch}}
-
-
-
 
 # GNU bash for a minix target, from the upstream commit `tools/pins.ini` pins:
 # fetched, configured against `tools/c-include` and linked against minix-libc by
