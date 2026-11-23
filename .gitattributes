@@ -1,5 +1,12 @@
+# Text files are stored and checked out with LF. `core.autocrlf` is off on the
+# Windows dev host, so without this an editor that writes CRLF puts CRLF
+# straight into the index. The guest's shell, clang response files and smoke
+# scenarios read bytes, and a CR is data there. Specific patterns below override
+# this rule.
+* text=auto eol=lf
+
 # `wl_keyboard.keymap` serves these bytes verbatim, and the keymap gate checks
-# their length — an EOL conversion would change every byte count (.notes/wayland.md §6.12).
+# their length: an EOL conversion would change every byte count (.notes/wayland.md 6.12).
 crates/servers/data/*.xkb binary
 
 # Shell scripts are checked out LF whatever `core.autocrlf` is set to, so they

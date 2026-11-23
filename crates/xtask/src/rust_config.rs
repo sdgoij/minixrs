@@ -91,16 +91,13 @@ fn write(root: &Path, token: &str) -> io::Result<Plan> {
     Ok(plan)
 }
 
-/// `text` with the platform's line ending, which is what the old writer
-/// (`Path.write_text`) produced: x.py accepts either, but keeping the file
-/// byte-for-byte what the same host regenerates avoids a spurious whole-file
-/// diff when the two tools are compared.
+/// `text` as UTF-8 with LF line endings.
+///
+/// x.py accepts either, but LF is the repository's convention and what every
+/// non-Windows host already wrote; a CRLF file makes editors and `git diff` see
+/// a whole-file change on a checkout whose `core.autocrlf` is off.
 fn write_text(path: &Path, text: &str) -> io::Result<()> {
-    if cfg!(windows) {
-        fs::write(path, text.replace('\n', "\r\n"))
-    } else {
-        fs::write(path, text)
-    }
+    fs::write(path, text)
 }
 
 /// The config text for `token` (`all`, or one arch's short name or triple) and
@@ -294,7 +291,8 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
         let plan = write(&dir, "x86").unwrap();
         let written = fs::read_to_string(config_path(&dir)).unwrap();
-        assert_eq!(written.replace("\r\n", "\n"), plan.text);
+        assert_eq!(written, plan.text);
+        assert!(!written.contains('\r'), "the generated config must be LF");
         assert!(plan.targets.contains("'x86_64-pc-minix'"));
         let _ = fs::remove_dir_all(&dir);
     }
