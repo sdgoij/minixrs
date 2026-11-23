@@ -248,7 +248,7 @@ pub extern "C" fn kmain_body(magic: u32, info_ptr: u32) -> ! {
     init_serial();
 
     // Initialize the physical memory allocator.
-    serial_write("initializing allocator...\r\n");
+    serial_write("initializing allocator...\n");
     {
         // Use the linker-provided __kernel_end symbol to compute where the
         // kernel binary ends in physical memory. This is page-aligned in
@@ -293,7 +293,7 @@ pub extern "C" fn kmain_body(magic: u32, info_ptr: u32) -> ! {
         // the in-kernel test suite, which carves itself a reserved chunk through
         // `test_runner::init_vm_allocator`.
     }
-    serial_write("allocator ready\r\n");
+    serial_write("allocator ready\n");
 
     // The physmap goes in as soon as the allocator can hand out the page it needs on this arch, and
     // before anything walks a page table: the walk helpers reach every table through the window
@@ -303,7 +303,7 @@ pub extern "C" fn kmain_body(magic: u32, info_ptr: u32) -> ! {
     }
 
     // Print banner via serial
-    serial_write("Hello MINIX!\r\n");
+    serial_write("Hello MINIX!\n");
 
     // Initialize the PIT timer interrupt.
     unsafe {
@@ -454,14 +454,14 @@ pub extern "C" fn kmain_body(magic: u32, info_ptr: u32) -> ! {
 
     #[cfg(feature = "integration-tests")]
     {
-        serial_write("Running integration tests...\r\n");
+        serial_write("Running integration tests...\n");
         // This never returns — calls qemu_exit_success/failure
         kernel_boot::test_runner::run_integration_tests();
     }
 
     #[cfg(not(feature = "integration-tests"))]
     {
-        serial_write("  initializing boot processes...\r\n");
+        serial_write("  initializing boot processes...\n");
 
         unsafe {
             kernel::table::proc_init();

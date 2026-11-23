@@ -47,7 +47,7 @@ pub extern "C" fn kmain() -> ! {
         core::arch::asm!("out dx, al", in("dx") p + 2, in("al") 0xC7u8);
         core::arch::asm!("out dx, al", in("dx") p + 4, in("al") 0x0Bu8);
     }
-    serial_write(b"\r\n");
+    serial_write(b"\n");
 
     let total = TESTS.len();
     let mut passed: u32 = 0;
@@ -229,16 +229,23 @@ fn test_page_table_walk_end() -> u32 {
 
 fn serial_write(bytes: &[u8]) {
     for &b in bytes {
-        unsafe {
-            loop {
-                let lsr: u8;
-                core::arch::asm!("in al, dx", out("al") lsr, in("dx") 0x3FDu16, options(nostack));
-                if lsr & 0x20 != 0 {
-                    break;
-                }
-            }
-            core::arch::asm!("out dx, al", in("dx") 0x3F8u16, in("al") b, options(nostack));
+        if b == b'\n' {
+            serial_byte(b'\r');
         }
+        serial_byte(b);
+    }
+}
+
+fn serial_byte(b: u8) {
+    unsafe {
+        loop {
+            let lsr: u8;
+            core::arch::asm!("in al, dx", out("al") lsr, in("dx") 0x3FDu16, options(nostack));
+            if lsr & 0x20 != 0 {
+                break;
+            }
+        }
+        core::arch::asm!("out dx, al", in("dx") 0x3F8u16, in("al") b, options(nostack));
     }
 }
 

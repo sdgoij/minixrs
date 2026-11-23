@@ -183,6 +183,11 @@ unsafe fn sbi_putc(c: u8) {
 
 unsafe fn sbi_puts(s: &str) {
     for &b in s.as_bytes() {
+        if b == b'\n' {
+            unsafe {
+                sbi_putc(b'\r');
+            }
+        }
         unsafe {
             sbi_putc(b);
         }
@@ -412,9 +417,9 @@ pub unsafe extern "C" fn trap_handler(frame: &mut [u8; 296]) {
                     sbi_puts(" sstatus=");
                     sbi_hex(sstatus);
                     sbi_puts(if (sstatus >> 8) & 1 == 0 {
-                        " mode=user\r\n"
+                        " mode=user\n"
                     } else {
-                        " mode=kernel\r\n"
+                        " mode=kernel\n"
                     });
                 }
                 loop {

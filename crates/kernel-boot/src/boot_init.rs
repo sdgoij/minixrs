@@ -57,7 +57,7 @@ pub unsafe fn load_and_prepare_proc(path: &str, proc_nr: i32, argv: &[&str]) -> 
         Err(_) => {
             print!("  ");
             print!(path);
-            print!(": invalid ELF header\r\n");
+            print!(": invalid ELF header\n");
             return None;
         }
     };
@@ -65,7 +65,7 @@ pub unsafe fn load_and_prepare_proc(path: &str, proc_nr: i32, argv: &[&str]) -> 
     print!(path);
     print!(": ELF64 entry=0x");
     print_hex(ehdr.e_entry);
-    print!("\r\n");
+    print!("\n");
 
     // Step 1: Calculate ELF bounds and page count without loading yet.
     let loaded = match unsafe { calc_elf_bounds(data) } {
@@ -73,7 +73,7 @@ pub unsafe fn load_and_prepare_proc(path: &str, proc_nr: i32, argv: &[&str]) -> 
         Err(_) => {
             print!("  ");
             print!(path);
-            print!(": invalid ELF\r\n");
+            print!(": invalid ELF\n");
             return None;
         }
     };
@@ -89,7 +89,7 @@ pub unsafe fn load_and_prepare_proc(path: &str, proc_nr: i32, argv: &[&str]) -> 
         None => {
             print!("  ");
             print!(path);
-            print!(": out of memory for code\r\n");
+            print!(": out of memory for code\n");
             return None;
         }
     };
@@ -98,7 +98,7 @@ pub unsafe fn load_and_prepare_proc(path: &str, proc_nr: i32, argv: &[&str]) -> 
     if unsafe { load_elf_at(data, phys_code_base, loaded.base) }.is_err() {
         print!("  ");
         print!(path);
-        print!(": ELF load failed\r\n");
+        print!(": ELF load failed\n");
         return None;
     }
 
@@ -138,7 +138,7 @@ pub unsafe fn load_and_prepare_proc(path: &str, proc_nr: i32, argv: &[&str]) -> 
         None => {
             print!("  ");
             print!(path);
-            print!(": out of memory for stack\r\n");
+            print!(": out of memory for stack\n");
             return None;
         }
     };
@@ -155,7 +155,7 @@ pub unsafe fn load_and_prepare_proc(path: &str, proc_nr: i32, argv: &[&str]) -> 
         Err(_) => {
             print!("  ");
             print!(path);
-            print!(": stack setup failed\r\n");
+            print!(": stack setup failed\n");
             return None;
         }
     };
@@ -375,7 +375,7 @@ pub unsafe fn install_physmap_in_boot_tables() {
 pub unsafe fn load_and_prepare_all(cfg: &BootProcessConfig) -> *mut Proc {
     let boot_procs = cfg.procs;
 
-    print!("  loading boot processes...\r\n");
+    print!("  loading boot processes...\n");
 
     // One slot per entry in `BOOT_PROCS_ALL`: `BOOT_PROC_SLOTS` is derived from
     // that list, so this array cannot be left one short when a boot process is
@@ -395,7 +395,7 @@ pub unsafe fn load_and_prepare_all(cfg: &BootProcessConfig) -> *mut Proc {
         boot_infos[i] = core::mem::MaybeUninit::new(info);
     }
 
-    print!("  creating per-process page tables...\r\n");
+    print!("  creating per-process page tables...\n");
 
     // The physmap is already in the boot tables: [`install_physmap_in_boot_tables`] ran in this
     // arch's entry before calling here. The constructors below either inherit it through the boot
@@ -512,7 +512,7 @@ pub unsafe fn load_and_prepare_all(cfg: &BootProcessConfig) -> *mut Proc {
                         boot_abort("RAM disk page mapping");
                     }
                 }
-                print!("  RAM disk mapped for ramdisk server\r\n");
+                print!("  RAM disk mapped for ramdisk server\n");
             } else {
                 // The split's boot image carries no root, but the server still probes
                 // `RAMDISK_IMAGE_VA` for its superblock: `ramdisk_image_size` reads a
@@ -531,7 +531,7 @@ pub unsafe fn load_and_prepare_all(cfg: &BootProcessConfig) -> *mut Proc {
                 {
                     boot_abort("RAM disk probe page mapping");
                 }
-                print!("  RAM disk probe page mapped (no embedded root)\r\n");
+                print!("  RAM disk probe page mapped (no embedded root)\n");
             }
         }
 
@@ -556,7 +556,7 @@ pub unsafe fn load_and_prepare_all(cfg: &BootProcessConfig) -> *mut Proc {
             if let Some((subsys, must_exist)) = target {
                 let mapped = unsafe { map_virtio_driver_bars(pt_phys, user_flags, subsys) };
                 if !mapped && must_exist {
-                    print!("  WARN: virtio driver BAR mapping failed\r\n");
+                    print!("  WARN: virtio driver BAR mapping failed\n");
                 }
             }
         }
@@ -633,7 +633,7 @@ pub unsafe fn enqueue_and_start(cfg: &BootProcessConfig, first_proc: *mut Proc) 
         }
     }
 
-    print!("  enqueuing processes...\r\n");
+    print!("  enqueuing processes...\n");
 
     // Ensure all boot processes are runnable with clean flags. In real
     // MINIX, BOOTINHIBIT is cleared by VM via VMCTL_BOOTINHIBIT_CLEAR; VM
@@ -678,7 +678,7 @@ pub unsafe fn enqueue_and_start(cfg: &BootProcessConfig, first_proc: *mut Proc) 
         arch_riscv64::cpulocals::set_current_proc(first_proc as u64);
     }
 
-    print!("  scheduler starting...\r\n");
+    print!("  scheduler starting...\n");
 
     #[cfg(target_arch = "x86_64")]
     {

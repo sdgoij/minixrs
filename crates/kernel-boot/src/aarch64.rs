@@ -118,7 +118,7 @@ pub unsafe extern "C" fn kmain(arg_dtb: u64) -> ! {
     let kernel_end = kernel_end.div_ceil(4096) * 4096;
 
     // Initialize physical memory allocator.
-    serial_write("initializing allocator...\r\n");
+    serial_write("initializing allocator...\n");
     let mut mmap = arch_aarch64::alloc::PhysicalMemoryMap::new();
     if kernel_end < mem_base + mem_size {
         mmap.add(kernel_end, mem_base + mem_size);
@@ -136,7 +136,7 @@ pub unsafe extern "C" fn kmain(arg_dtb: u64) -> ! {
         arch_aarch64::alloc::usable_size(),
     );
     kernel_boot::print_memory_banner(mem_size, mmap.total_available());
-    serial_write("allocator ready\r\n");
+    serial_write("allocator ready\n");
 
     // Set up VBAR_EL1 (exception vector table).
     let vbar = arch_aarch64::exception::vector_table_addr();
@@ -150,13 +150,13 @@ pub unsafe extern "C" fn kmain(arg_dtb: u64) -> ! {
         kernel::panic::mark_cpulocals_ready();
     }
 
-    serial_write("\r\nHello MINIX/AArch64!\r\n");
+    serial_write("\nHello MINIX/AArch64!\n");
 
     // Initialize kernel subsystems.
     kernel::init();
 
     // Initialize the process table, kernel call handlers, and IPC syscalls.
-    serial_write("  initializing boot processes...\r\n");
+    serial_write("  initializing boot processes...\n");
     unsafe {
         kernel::table::proc_init();
         kernel::system::system_init();
@@ -506,7 +506,7 @@ pub unsafe extern "C" fn kmain(arg_dtb: u64) -> ! {
         // page-table walks (BOOT_CR3 non-zero) instead of silently skipping
         // the copy. This unblocks the SENDREC payload assertions
         // (sendrec_direct, sendrec_reply_cycle) on AArch64.
-        serial_write("  enabling MMU...\r\n");
+        serial_write("  enabling MMU...\n");
         unsafe {
             enable_mmu();
             let boot_ttbr0: u64;
@@ -519,15 +519,15 @@ pub unsafe extern "C" fn kmain(arg_dtb: u64) -> ! {
             // frame or a device register needs the window (`.notes/physmap.md` P4).
             kernel_boot::boot_init::install_physmap_in_boot_tables();
         }
-        serial_write("  MMU enabled\r\n");
+        serial_write("  MMU enabled\n");
 
-        serial_write("Running AArch64 integration tests...\r\n");
+        serial_write("Running AArch64 integration tests...\n");
         let mut failures = kernel::tests::run_all();
         failures += unsafe { test_cntpct_advances() };
         failures += unsafe { test_pl011_output() };
-        serial_write("\r\n");
+        serial_write("\n");
         if failures == 0 {
-            serial_write("ALL TESTS PASSED\r\n");
+            serial_write("ALL TESTS PASSED\n");
         } else {
             serial_write("FAILURES: ");
             // Print failure count as decimal digits
@@ -537,7 +537,7 @@ pub unsafe extern "C" fn kmain(arg_dtb: u64) -> ! {
                 serial_putc(b'0' + (tens as u8));
             }
             serial_putc(b'0' + (ones as u8));
-            serial_write("\r\n");
+            serial_write("\n");
         }
         // Exit QEMU via PSCI SYSTEM_OFF (HVC conduit); the exit code is
         // always 0, so the recipe checks the serial log for the result.
@@ -546,7 +546,7 @@ pub unsafe extern "C" fn kmain(arg_dtb: u64) -> ! {
 
     #[cfg(not(feature = "integration-tests"))]
     {
-        serial_write("  enabling MMU...\r\n");
+        serial_write("  enabling MMU...\n");
         unsafe {
             enable_mmu();
             let boot_ttbr0: u64;
@@ -559,7 +559,7 @@ pub unsafe extern "C" fn kmain(arg_dtb: u64) -> ! {
             // frame or a device register needs the window (`.notes/physmap.md` P4).
             kernel_boot::boot_init::install_physmap_in_boot_tables();
         }
-        serial_write("  MMU enabled\r\n");
+        serial_write("  MMU enabled\n");
 
         // Set CPU frequency so clock::ms_2_cpu_time converts ms to cntpct_el0
         // cycles (QEMU virt generic timer = 62.5 MHz, matching
@@ -611,7 +611,7 @@ pub unsafe extern "C" fn kmain(arg_dtb: u64) -> ! {
             core::arch::asm!("isb", options(nostack));
         }
 
-        serial_write("  switching to userspace...\r\n");
+        serial_write("  switching to userspace...\n");
         unsafe {
             // The process entered here has no saved FP image yet; restoring it
             // gives it a zeroed one rather than whatever the boot code left in the
@@ -642,7 +642,7 @@ unsafe fn test_cntpct_advances() -> u32 {
         let freq: u64;
         core::arch::asm!("mrs {v}, cntfrq_el0", v = out(reg) freq, options(nomem, nostack));
         if freq < 1_000_000 || freq > 1_000_000_000 {
-            serial_write("  FAIL: cntfrq_el0 unexpected frequency\r\n");
+            serial_write("  FAIL: cntfrq_el0 unexpected frequency\n");
             return 1;
         }
         let t1 = arch_aarch64::hal::read_cycles(); // cntpct_el0
@@ -654,10 +654,10 @@ unsafe fn test_cntpct_advances() -> u32 {
             spins += 1;
         }
         if t2 <= t1 {
-            serial_write("  FAIL: cntpct_el0 should advance\r\n");
+            serial_write("  FAIL: cntpct_el0 should advance\n");
             return 1;
         }
-        serial_write("  OK generic timer cntpct_el0 advances\r\n");
+        serial_write("  OK generic timer cntpct_el0 advances\n");
     }
     0
 }
@@ -673,7 +673,7 @@ unsafe fn test_pl011_output() -> u32 {
     const FR_TXFF: u32 = 1 << 5;
     unsafe {
         if core::ptr::read_volatile(fr) == 0xFFFF_FFFF {
-            serial_write("  FAIL: PL011 not present\r\n");
+            serial_write("  FAIL: PL011 not present\n");
             return 1;
         }
         let mut spins = 0usize;
@@ -681,7 +681,7 @@ unsafe fn test_pl011_output() -> u32 {
             spins += 1;
         }
         core::ptr::write_volatile(dr, b'@');
-        serial_write("  OK PL011 output\r\n");
+        serial_write("  OK PL011 output\n");
     }
     0
 }

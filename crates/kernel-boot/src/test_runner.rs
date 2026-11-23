@@ -42,7 +42,7 @@ fn init_vm_allocator() {
 ///
 /// Returns the total failure count (0 = all passed).
 pub fn run_integration_tests() -> ! {
-    serial_puts("Bare-metal integration tests\r\n");
+    serial_puts("Bare-metal integration tests\n");
 
     // Initialize VM allocator (needed by map_page and VM allocator tests)
     init_vm_allocator();
@@ -107,7 +107,7 @@ pub fn run_integration_tests() -> ! {
     total += test_keyboard_controller_present();
 
     if total == 0 {
-        serial_puts("-- done --\r\n");
+        serial_puts("-- done --\n");
         qemu::qemu_exit_success();
     } else {
         serial_puts("FAILURES: ");
@@ -121,7 +121,7 @@ pub fn run_integration_tests() -> ! {
             t %= 10;
         }
         serial_putc(b'0' + t as u8);
-        serial_puts("\r\n");
+        serial_puts("\n");
         qemu::qemu_exit_failure(total);
     }
 }

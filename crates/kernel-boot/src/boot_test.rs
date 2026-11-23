@@ -56,7 +56,7 @@ const BOOTED_PROCS: &[(i32, &str)] = &[
 /// Requires that the kernel-allocator, process table, IPC, and per-process
 /// page tables are fully set up. The function never returns — it exits QEMU.
 pub unsafe fn run_boot_tests() {
-    serial_write("\r\n=== BOOT TEST ===\r\n");
+    serial_write("\n=== BOOT TEST ===\n");
     let mut failures: u32 = 0;
 
     // A: Server liveness
@@ -151,7 +151,7 @@ pub unsafe fn run_boot_tests() {
     if failures != 0 {
         serial_write("FAILURES: ");
         print_dec(failures);
-        serial_write("\r\n");
+        serial_write("\n");
         exit_qemu_failure(failures);
     }
 
@@ -161,7 +161,7 @@ pub unsafe fn run_boot_tests() {
     // exactly the fixed state it always has; releasing it lets the boot continue past the point this
     // suite used to exit at, and the watch armed here turns "it never ran" into a failure instead of
     // a summary printed before anyone had tried.
-    serial_write("\r\n  phase 1 complete; releasing init\r\n");
+    serial_write("\n  phase 1 complete; releasing init\n");
     kernel::bootwatch::arm(
         kernel::clock::get_monotonic() + BOOT_WATCH_TICKS,
         boot_watch_verdict,
@@ -180,15 +180,15 @@ const BOOT_WATCH_TICKS: u64 = 500;
 /// process table is dumped first. A stuck boot saying *who* is stuck is the whole point.
 fn boot_watch_verdict(passed: bool) {
     unsafe {
-        serial_write("\r\n=== BOOT TEST: userspace ===\r\n");
+        serial_write("\n=== BOOT TEST: userspace ===\n");
         if passed {
-            serial_write("  OK a user process exec'd an image and ran\r\n");
-            serial_write("ALL TESTS PASSED\r\n");
+            serial_write("  OK a user process exec'd an image and ran\n");
+            serial_write("ALL TESTS PASSED\n");
             exit_qemu_success();
         } else {
-            serial_write("  FAIL: no user process ran after exec — the system stopped\r\n");
+            serial_write("  FAIL: no user process ran after exec — the system stopped\n");
             kernel::syscall::sys_hang_dump_handler(core::ptr::null_mut(), &[0u64; 6]);
-            serial_write("\r\nFAILURES: 1\r\n");
+            serial_write("\nFAILURES: 1\n");
             exit_qemu_failure(1);
         }
     }
@@ -221,10 +221,10 @@ fn test_mouse_irq_notifies_input() -> u32 {
         (*privp).s_int_pending &= !(1u64 << 2);
         kernel::interrupt::irq_handle(12);
         if (*privp).s_int_pending & (1u64 << 2) == 0 {
-            serial_write("  FAIL: mouse IRQ12 notification not pending\r\n");
+            serial_write("  FAIL: mouse IRQ12 notification not pending\n");
             return 1;
         }
-        serial_write("  OK mouse IRQ12 -> input notification\r\n");
+        serial_write("  OK mouse IRQ12 -> input notification\n");
     }
     0
 }
@@ -235,12 +235,12 @@ fn test_alive(ep: i32, name: &str) -> u32 {
         if rp.is_null() || (*rp).p_endpoint != ep {
             serial_write("  FAIL: ");
             serial_write(name);
-            serial_write(" dead\r\n");
+            serial_write(" dead\n");
             return 1;
         }
         serial_write("  OK ");
         serial_write(name);
-        serial_write("\r\n");
+        serial_write("\n");
     }
     0
 }
@@ -259,10 +259,10 @@ fn test_vfs_runnable() -> u32 {
         if f & (kernel::proc::RtsFlags::SENDING.bits() | kernel::proc::RtsFlags::RECEIVING.bits())
             != 0
         {
-            serial_write("  FAIL: VFS blocked\r\n");
+            serial_write("  FAIL: VFS blocked\n");
             return 1;
         }
-        serial_write("  OK VFS main loop\r\n");
+        serial_write("  OK VFS main loop\n");
     }
     0
 }
@@ -280,15 +280,15 @@ fn test_mfs_post_readsuper() -> u32 {
             // MFS might not be in RECEIVE if mount hasn't sent it a message.
             // Check if it's runnable instead.
             if f == 0 {
-                serial_write("  OK MFS runnable (mount not started)\r\n");
+                serial_write("  OK MFS runnable (mount not started)\n");
                 return 0;
             }
             serial_write("  FAIL: MFS unexpected flags=");
             print_dec(f);
-            serial_write("\r\n");
+            serial_write("\n");
             return 1;
         }
-        serial_write("  OK MFS waiting\r\n");
+        serial_write("  OK MFS waiting\n");
     }
     0
 }
@@ -306,15 +306,15 @@ fn test_pm_idle() -> u32 {
             // PM might be runnable (flags=0) between notifications.
             // That's OK — it means it's processing and will receive again.
             if f == 0 {
-                serial_write("  OK PM runnable\r\n");
+                serial_write("  OK PM runnable\n");
                 return 0;
             }
             serial_write("  FAIL: PM unexpected flags=");
             print_dec(f);
-            serial_write("\r\n");
+            serial_write("\n");
             return 1;
         }
-        serial_write("  OK PM idle\r\n");
+        serial_write("  OK PM idle\n");
     }
     0
 }
@@ -340,19 +340,19 @@ fn test_vfs_sent_readsuper() -> u32 {
         }
         let ty = rdi((*rp).p_sendmsg.as_ptr(), 4);
         if ty == 0 {
-            serial_write("  SKIP: mount not started\r\n");
+            serial_write("  SKIP: mount not started\n");
             return 0;
         }
         if ty != REQ_READSUPER && ty != REQ_LOOKUP {
             serial_write("  FAIL: VFS send type=");
             print_dec(ty as u32);
-            serial_write(" expected 2588 (readsuper) or a later request\r\n");
+            serial_write(" expected 2588 (readsuper) or a later request\n");
             return 1;
         }
         if ty == REQ_READSUPER {
-            serial_write("  OK VFS sent REQ_READSUPER to MFS\r\n");
+            serial_write("  OK VFS sent REQ_READSUPER to MFS\n");
         } else {
-            serial_write("  OK VFS reached MFS (readsuper sent; now past it)\r\n");
+            serial_write("  OK VFS reached MFS (readsuper sent; now past it)\n");
         }
     }
     0
@@ -369,17 +369,17 @@ fn test_vfs_reply_from_mfs() -> u32 {
         let msg = (*rp).p_delivermsg.as_ptr();
         let src = rdi(msg, 0); // m_source
         if src != MFS_PROC_NR {
-            serial_write("  SKIP: no MFS reply (mount not ready)\r\n");
+            serial_write("  SKIP: no MFS reply (mount not ready)\n");
             return 0;
         }
         let st = rdi(msg, 4); // m_type (status)
         if st != 0 {
             serial_write("  FAIL: reply status=");
             print_dec(st as u32);
-            serial_write(" expected 0\r\n");
+            serial_write(" expected 0\n");
             return 1;
         }
-        serial_write("  OK VFS reply from MFS status=OK\r\n");
+        serial_write("  OK VFS reply from MFS status=OK\n");
     }
     0
 }
@@ -397,7 +397,7 @@ fn test_vfs_reply_devices_lookup() -> u32 {
         let msg = (*rp).p_delivermsg.as_ptr();
         let src = rdi(msg, 0);
         if src != MFS_PROC_NR {
-            serial_write("  SKIP: no MFS reply\r\n");
+            serial_write("  SKIP: no MFS reply\n");
             return 0;
         }
         // REQ_LOOKUP reply: inode @ 28, dev @ 24 (req_lookup parsing).
@@ -406,12 +406,12 @@ fn test_vfs_reply_devices_lookup() -> u32 {
         if ino != 7 {
             serial_write("  FAIL: devices inode=");
             print_dec(ino);
-            serial_write(" expected 7\r\n");
+            serial_write(" expected 7\n");
             return 1;
         }
         serial_write("  OK devices dir inode=7 dev=");
         print_dec(dev);
-        serial_write("\r\n");
+        serial_write("\n");
     }
     0
 }
@@ -425,7 +425,7 @@ fn test_vfs_reply_devices_size() -> u32 {
         let msg = (*rp).p_delivermsg.as_ptr();
         let src = rdi(msg, 0);
         if src != MFS_PROC_NR {
-            serial_write("  SKIP: no MFS reply\r\n");
+            serial_write("  SKIP: no MFS reply\n");
             return 0;
         }
         // REQ_LOOKUP reply: file_size (i64) @ 16.
@@ -433,14 +433,14 @@ fn test_vfs_reply_devices_size() -> u32 {
         let high = rdu(msg, 20);
         let size = (low as u64) | ((high as u64) << 32);
         if size == 0 {
-            serial_write("  FAIL: devices dir size=0 (empty?)\r\n");
+            serial_write("  FAIL: devices dir size=0 (empty?)\n");
             return 1;
         }
         serial_write("  OK devices dir size=");
         print_dec(high);
         serial_write(",");
         print_dec(low);
-        serial_write("\r\n");
+        serial_write("\n");
     }
     0
 }
@@ -455,16 +455,16 @@ fn test_grant_registered() -> u32 {
         }
         let p = (*rp).p_priv;
         if p.is_null() {
-            serial_write("  FAIL: VFS no priv\r\n");
+            serial_write("  FAIL: VFS no priv\n");
             return 1;
         }
         let gt = (*p).s_grant_table;
         let ge = (*p).s_grant_entries;
         if gt == 0 || ge <= 0 {
-            serial_write("  FAIL: grant table not registered\r\n");
+            serial_write("  FAIL: grant table not registered\n");
             return 1;
         }
-        serial_write("  OK grant table registered\r\n");
+        serial_write("  OK grant table registered\n");
     }
     0
 }
@@ -473,27 +473,27 @@ fn test_vm_check_range() -> u32 {
     unsafe {
         let rp = kernel::table::proc_addr(MFS_PROC_NR);
         if rp.is_null() {
-            serial_write("  VM: no MFS\r\n");
+            serial_write("  VM: no MFS\n");
             return 1;
         }
         let cr3 = (*rp).p_seg.p_cr3;
         if cr3 == 0 {
-            serial_write("  VM: no CR3\r\n");
+            serial_write("  VM: no CR3\n");
             return 1;
         }
         // Every userland binary is linked at its arch's user image base, so the
         // first code page is that address on every arch.
         if kernel::pagetable::walk(cr3, USER_IMAGE_BASE).is_err() {
-            serial_write("  VM: code page FAIL\r\n");
+            serial_write("  VM: code page FAIL\n");
             return 1;
         }
         // The user stack lives at the arch's user_stack_base().
         let stack_va = kernel::hal::user_stack_base() & !0xFFF;
         if kernel::pagetable::walk(cr3, stack_va).is_err() {
-            serial_write("  VM: stack page FAIL\r\n");
+            serial_write("  VM: stack page FAIL\n");
             return 1;
         }
-        serial_write("  OK VM: pages mapped\r\n");
+        serial_write("  OK VM: pages mapped\n");
         // Test CR3 switches: switch to each process's CR3 and back.
         // If kernel higher-half isn't mapped in per-process page tables,
         // write_cr3 will cause a triple fault. x86 only: the switch-and-read
@@ -525,7 +525,7 @@ fn test_vm_check_range() -> u32 {
                 let _k = core::ptr::read_volatile(kernel::hal::kern_vaddr() as *const u8);
                 kernel::hal::write_cr3(saved);
             }
-            serial_write("  OK VM: CR3 switches\r\n");
+            serial_write("  OK VM: CR3 switches\n");
         }
     }
     0
@@ -552,19 +552,19 @@ fn test_allocator() -> u32 {
     let page = match unsafe { kernel::hal::alloc_phys_page() } {
         Some(p) => p,
         None => {
-            serial_write("  FAIL: alloc_phys_page returned None\r\n");
+            serial_write("  FAIL: alloc_phys_page returned None\n");
             return 1;
         }
     };
     if page == 0 || page & 0xFFF != 0 {
         serial_write("  FAIL: allocator returned invalid page 0x");
         print_hex(page);
-        serial_write("\r\n");
+        serial_write("\n");
         return 1;
     }
     serial_write("  OK allocator page=0x");
     print_hex(page);
-    serial_write("\r\n");
+    serial_write("\n");
     0
 }
 
@@ -598,7 +598,7 @@ fn test_allocator_aarch64_clears_boot_stack() -> u32 {
         print_hex(base);
         serial_write(" is below the boot stack top 0x");
         print_hex(stack_top);
-        serial_write(" — the loader would overwrite its own stack\r\n");
+        serial_write(" — the loader would overwrite its own stack\n");
         return 1;
     }
 
@@ -606,7 +606,7 @@ fn test_allocator_aarch64_clears_boot_stack() -> u32 {
     print_hex(base);
     serial_write(" is at or above the boot stack top 0x");
     print_hex(stack_top);
-    serial_write("\r\n");
+    serial_write("\n");
     0
 }
 
@@ -623,7 +623,7 @@ fn test_allocator_no_kernel_overlap() -> u32 {
     let page = match arch_x86_64::alloc::alloc_phys_page() {
         Some(p) => p,
         None => {
-            serial_write("  FAIL: alloc_phys_page returned None\r\n");
+            serial_write("  FAIL: alloc_phys_page returned None\n");
             return 1;
         }
     };
@@ -635,7 +635,7 @@ fn test_allocator_no_kernel_overlap() -> u32 {
         print_hex(page);
         serial_write(" is inside kernel range [0x200000, 0x");
         print_hex(kernel_end);
-        serial_write(")\r\n");
+        serial_write(")\n");
         return 1;
     }
 
@@ -644,7 +644,7 @@ fn test_allocator_no_kernel_overlap() -> u32 {
 
     serial_write("  OK allocator page 0x");
     print_hex(page);
-    serial_write(" outside kernel\r\n");
+    serial_write(" outside kernel\n");
     0
 }
 
@@ -652,7 +652,7 @@ fn test_allocator_no_kernel_overlap() -> u32 {
 fn test_allocator_has_free_pages() -> u32 {
     let alloc = arch_x86_64::alloc::global_allocator();
     if alloc.is_null() {
-        serial_write("  FAIL: global allocator null\r\n");
+        serial_write("  FAIL: global allocator null\n");
         return 1;
     }
     unsafe {
@@ -660,12 +660,12 @@ fn test_allocator_has_free_pages() -> u32 {
         if free < 10 {
             serial_write("  FAIL: only ");
             print_dec(free as u32);
-            serial_write(" free pages (expected >= 10)\r\n");
+            serial_write(" free pages (expected >= 10)\n");
             return 1;
         }
         serial_write("  OK allocator free pages=");
         print_dec(free as u32);
-        serial_write("\r\n");
+        serial_write("\n");
     }
     0
 }
@@ -679,12 +679,12 @@ fn test_pm_has_message() -> u32 {
         let msg = (*rp).p_delivermsg.as_ptr();
         let src = rdi(msg, 0);
         if src < 0 {
-            serial_write("  FAIL: PM no message\r\n");
+            serial_write("  FAIL: PM no message\n");
             return 1;
         }
         serial_write("  OK PM msg src=");
         print_dec(src as u32);
-        serial_write("\r\n");
+        serial_write("\n");
     }
     0
 }
@@ -712,7 +712,7 @@ fn test_boot_procs_have_sig_mgr() -> u32 {
             if priv_ptr.is_null() {
                 serial_write("  FAIL: ");
                 serial_write(core::str::from_utf8(&(*rp).p_name).unwrap_or("?"));
-                serial_write(" p_priv is null\r\n");
+                serial_write(" p_priv is null\n");
                 fail += 1;
                 rp = rp.add(1);
                 continue;
@@ -724,7 +724,7 @@ fn test_boot_procs_have_sig_mgr() -> u32 {
                 print_dec((*priv_ptr).s_sig_mgr as u32);
                 serial_write(" expected ");
                 print_dec(PM_PROC_NR as u32);
-                serial_write("\r\n");
+                serial_write("\n");
                 fail += 1;
             } else {
                 ok += 1;
@@ -733,7 +733,7 @@ fn test_boot_procs_have_sig_mgr() -> u32 {
         }
         serial_write("  OK ");
         print_dec(ok);
-        serial_write(" processes have s_sig_mgr=PM\r\n");
+        serial_write(" processes have s_sig_mgr=PM\n");
         fail
     }
 }
@@ -780,13 +780,13 @@ unsafe fn test_physmap() -> u32 {
         on_kernel_tables(|| {
             let cr3 = kernel::hal::boot_cr3();
             if !kernel::hal::install_physmap(cr3, arch_common::PhysAccess::Physmap) {
-                serial_write("  FAIL: install_physmap failed\r\n");
+                serial_write("  FAIL: install_physmap failed\n");
                 return 1;
             }
             let pa = match kernel::hal::alloc_phys_page() {
                 Some(p) => p,
                 None => {
-                    serial_write("  FAIL: physmap: no free frame\r\n");
+                    serial_write("  FAIL: physmap: no free frame\n");
                     return 1;
                 }
             };
@@ -802,14 +802,14 @@ unsafe fn test_physmap() -> u32 {
                 print_hex(va);
                 serial_write(", want ");
                 print_hex(pattern);
-                serial_write("\r\n");
+                serial_write("\n");
                 return 1;
             }
 
             core::ptr::write_volatile(va as *mut u64, !pattern);
             let back = core::ptr::read_volatile(pa as *const u64);
             if back != !pattern {
-                serial_write("  FAIL: identity view missed the physmap write\r\n");
+                serial_write("  FAIL: identity view missed the physmap write\n");
                 return 1;
             }
 
@@ -817,7 +817,7 @@ unsafe fn test_physmap() -> u32 {
             print_hex(pa);
             serial_write(" at ");
             print_hex(va);
-            serial_write("\r\n");
+            serial_write("\n");
             0
         })
     }
@@ -834,7 +834,7 @@ unsafe fn test_physmap_everywhere() -> u32 {
         let pa = match kernel::hal::alloc_phys_page() {
             Some(p) => p,
             None => {
-                serial_write("  FAIL: physmap: no free frame\r\n");
+                serial_write("  FAIL: physmap: no free frame\n");
                 return 1;
             }
         };
@@ -847,14 +847,14 @@ unsafe fn test_physmap_everywhere() -> u32 {
             if cr3 == 0 {
                 serial_write("  FAIL: ");
                 serial_write(name);
-                serial_write(" has no page table\r\n");
+                serial_write(" has no page table\n");
                 failures += 1;
                 continue;
             }
             if kernel::pagetable::walk(cr3, va).is_err() {
                 serial_write("  FAIL: ");
                 serial_write(name);
-                serial_write(" cannot reach the physmap\r\n");
+                serial_write(" cannot reach the physmap\n");
                 failures += 1;
             }
         }
@@ -884,13 +884,13 @@ unsafe fn test_physmap_everywhere() -> u32 {
                 serial_write(name);
                 serial_write(" physmap read ");
                 print_hex(seen);
-                serial_write("\r\n");
+                serial_write("\n");
                 failures += 1;
             }
         }
 
         if failures == 0 {
-            serial_write("  OK physmap reachable from every boot process's table\r\n");
+            serial_write("  OK physmap reachable from every boot process's table\n");
         }
         failures
     }
@@ -924,7 +924,7 @@ unsafe fn test_walk_through_the_physmap() -> u32 {
         on_kernel_tables(|| {
             let boot = kernel::hal::boot_cr3();
             if boot == 0 {
-                serial_write("  SKIP: physmap walk check needs the boot tables\r\n");
+                serial_write("  SKIP: physmap walk check needs the boot tables\n");
                 return 0;
             }
 
@@ -940,7 +940,7 @@ unsafe fn test_walk_through_the_physmap() -> u32 {
                 match kernel::hal::alloc_phys_page() {
                     Some(p) => *f = p,
                     None => {
-                        serial_write("  FAIL: physmap walk: no free frame\r\n");
+                        serial_write("  FAIL: physmap walk: no free frame\n");
                         return 1;
                     }
                 }
@@ -973,7 +973,7 @@ unsafe fn test_walk_through_the_physmap() -> u32 {
             // Shadow the root's identity address: from here, VA `root_pa` is the (zeroed) decoy.
             let kernel_flags = kernel::pagetable::PG_P | kernel::pagetable::PG_RW;
             if kernel::pagetable::map_page(boot, root_pa, decoy_pa, kernel_flags).is_err() {
-                serial_write("  FAIL: physmap walk: could not shadow the root\r\n");
+                serial_write("  FAIL: physmap walk: could not shadow the root\n");
                 return 1;
             }
 
@@ -997,19 +997,19 @@ unsafe fn test_walk_through_the_physmap() -> u32 {
             let _ = kernel::pagetable::map_page(boot, root_pa, root_pa, kernel_flags);
 
             if spoiled != 0 {
-                serial_write("  FAIL: physmap walk: the identity shadow did not take\r\n");
+                serial_write("  FAIL: physmap walk: the identity shadow did not take\n");
                 return 1;
             }
 
             if resolved {
                 serial_write(
-                    "  OK physmap walk: a table shadowed by the identity map still resolves\r\n",
+                    "  OK physmap walk: a table shadowed by the identity map still resolves\n",
                 );
                 0
             } else {
                 serial_write("  FAIL: physmap walk: table ");
                 print_hex(root_pa);
-                serial_write(" did not resolve from behind the identity map\r\n");
+                serial_write(" did not resolve from behind the identity map\n");
                 1
             }
         })
@@ -1035,7 +1035,7 @@ unsafe fn test_vm_memset_targets_the_named_process() -> u32 {
                 match kernel::hal::alloc_phys_page() {
                     Some(p) => *f = p,
                     None => {
-                        serial_write("  FAIL: vm_memset: no free frame\r\n");
+                        serial_write("  FAIL: vm_memset: no free frame\n");
                         return 1;
                     }
                 }
@@ -1058,7 +1058,7 @@ unsafe fn test_vm_memset_targets_the_named_process() -> u32 {
             let (proc_nr, name, cr3) = match named {
                 Some(t) => t,
                 None => {
-                    serial_write("  SKIP: vm_memset: no boot process with its own table\r\n");
+                    serial_write("  SKIP: vm_memset: no boot process with its own table\n");
                     return 0;
                 }
             };
@@ -1071,7 +1071,7 @@ unsafe fn test_vm_memset_targets_the_named_process() -> u32 {
                 .is_err()
             {
                 serial_write(
-                    "  FAIL: vm_memset: could not map the address in the named process\r\n",
+                    "  FAIL: vm_memset: could not map the address in the named process\n",
                 );
                 return 1;
             }
@@ -1083,7 +1083,7 @@ unsafe fn test_vm_memset_targets_the_named_process() -> u32 {
             let _ = kernel::pagetable::map_page(cr3, va, va, kernel_flags);
 
             if r != 0 {
-                serial_write("  FAIL: vm_memset returned an error\r\n");
+                serial_write("  FAIL: vm_memset returned an error\n");
                 return 1;
             }
 
@@ -1092,17 +1092,17 @@ unsafe fn test_vm_memset_targets_the_named_process() -> u32 {
             let shadow =
                 core::slice::from_raw_parts(kernel::hal::phys_to_virt(va) as *const u8, LEN);
             if !target.iter().all(|&b| b == PATTERN) {
-                serial_write("  FAIL: vm_memset did not reach the named process's frame\r\n");
+                serial_write("  FAIL: vm_memset did not reach the named process's frame\n");
                 return 1;
             }
             if !shadow.iter().all(|&b| b == 0) {
-                serial_write("  FAIL: vm_memset wrote the running space instead\r\n");
+                serial_write("  FAIL: vm_memset wrote the running space instead\n");
                 return 1;
             }
 
             serial_write("  OK vm_memset wrote ");
             serial_write(name);
-            serial_write("'s own frame, not the running space\r\n");
+            serial_write("'s own frame, not the running space\n");
             0
         })
     }
@@ -1117,12 +1117,12 @@ fn test_initramfs_holds_every_boot_process() -> u32 {
         if kernel::initramfs::find_initramfs_file(path).is_none() {
             serial_write("  FAIL: missing ");
             serial_write(path);
-            serial_write("\r\n");
+            serial_write("\n");
             failures += 1;
         }
     }
     if failures == 0 {
-        serial_write("  OK every boot process is in the initramfs\r\n");
+        serial_write("  OK every boot process is in the initramfs\n");
     }
     failures
 }
@@ -1138,7 +1138,7 @@ fn test_initramfs_init_elf() -> u32 {
         let ehdr = match kernel::elf::parse_elf_header(data) {
             Ok(e) => e,
             Err(_) => {
-                serial_write("  FAIL: /sbin/init bad ELF header\r\n");
+                serial_write("  FAIL: /sbin/init bad ELF header\n");
                 return 1;
             }
         };
@@ -1146,7 +1146,7 @@ fn test_initramfs_init_elf() -> u32 {
         print_hex(ehdr.e_entry);
         serial_write(" phnum=");
         print_dec(ehdr.e_phnum as u32);
-        serial_write("\r\n");
+        serial_write("\n");
         let phoff = ehdr.e_phoff as usize;
         let phnum = ehdr.e_phnum as usize;
         let phentsize = ehdr.e_phentsize as usize;
@@ -1164,15 +1164,15 @@ fn test_initramfs_init_elf() -> u32 {
             print_dec(phdr.p_memsz as u32);
             serial_write(" filesz=");
             print_dec(phdr.p_filesz as u32);
-            serial_write("\r\n");
+            serial_write("\n");
         }
         if load_count == 0 {
-            serial_write("  FAIL: no PT_LOAD segments\r\n");
+            serial_write("  FAIL: no PT_LOAD segments\n");
             return 1;
         }
         serial_write("  OK /sbin/init PT_LOAD count=");
         print_dec(load_count);
-        serial_write("\r\n");
+        serial_write("\n");
         0
     }
 }
@@ -1183,17 +1183,17 @@ fn test_pm_mproc_pt() -> u32 {
     unsafe {
         let rp = kernel::table::proc_addr(PM_PROC_NR);
         if rp.is_null() {
-            serial_write("  FAIL: PM not found\r\n");
+            serial_write("  FAIL: PM not found\n");
             return 1;
         }
         let cr3 = (*rp).p_seg.p_cr3;
         if cr3 == 0 {
-            serial_write("  FAIL: PM has no CR3\r\n");
+            serial_write("  FAIL: PM has no CR3\n");
             return 1;
         }
         serial_write("  PM CR3=0x");
         print_hex(cr3);
-        serial_write("\r\n");
+        serial_write("\n");
 
         // Walk known PM code pages — must be mapped with user permissions.
         // Every userland binary links at its arch's user image base, so the entry
@@ -1205,13 +1205,13 @@ fn test_pm_mproc_pt() -> u32 {
                 serial_write("  PM slot0 PTE=0x");
                 print_hex(r.pte_value);
                 if !has_user {
-                    serial_write(" FAIL (no PG_U)\r\n");
+                    serial_write(" FAIL (no PG_U)\n");
                     return 1;
                 }
-                serial_write("\r\n");
+                serial_write("\n");
             }
             Err(_) => {
-                serial_write("  FAIL: PM slot0 not mapped\r\n");
+                serial_write("  FAIL: PM slot0 not mapped\n");
                 return 1;
             }
         }
@@ -1227,13 +1227,13 @@ fn test_pm_mproc_pt() -> u32 {
                 serial_write("  PM stack PTE=0x");
                 print_hex(r.pte_value);
                 if !has_user {
-                    serial_write(" FAIL (no PG_U)\r\n");
+                    serial_write(" FAIL (no PG_U)\n");
                     return 1;
                 }
-                serial_write("\r\n");
+                serial_write("\n");
             }
             Err(_) => {
-                serial_write("  FAIL: PM stack not mapped\r\n");
+                serial_write("  FAIL: PM stack not mapped\n");
                 return 1;
             }
         }
@@ -1253,7 +1253,7 @@ fn test_boot_procs_page_tables() -> u32 {
             if rp.is_null() {
                 serial_write("  FAIL: ");
                 serial_write(name);
-                serial_write(" null proc\r\n");
+                serial_write(" null proc\n");
                 failures += 1;
                 continue;
             }
@@ -1262,7 +1262,7 @@ fn test_boot_procs_page_tables() -> u32 {
             if cr3 == 0 {
                 serial_write("  FAIL: ");
                 serial_write(name);
-                serial_write(" CR3=0\r\n");
+                serial_write(" CR3=0\n");
                 failures += 1;
                 continue;
             }
@@ -1282,21 +1282,21 @@ fn test_boot_procs_page_tables() -> u32 {
                     if !has_user {
                         serial_write("  FAIL: ");
                         serial_write(name);
-                        serial_write(" entry missing PG_U\r\n");
+                        serial_write(" entry missing PG_U\n");
                         failures += 1;
                     }
                 }
                 Err(_) => {
                     serial_write("  FAIL: ");
                     serial_write(name);
-                    serial_write(" entry not mapped\r\n");
+                    serial_write(" entry not mapped\n");
                     failures += 1;
                 }
             }
         }
 
         if failures == 0 {
-            serial_write("  OK all booted procs have walkable page tables\r\n");
+            serial_write("  OK all booted procs have walkable page tables\n");
         }
         failures
     }
@@ -1340,7 +1340,7 @@ fn test_user_and_kernel_mappings_do_not_overlap() -> u32 {
             #[cfg(target_arch = "x86_64")]
             {
                 if kernel::hal::identity_map_top() != USER_IMAGE_BASE {
-                    serial_write("  FAIL: the identity map does not stop at the user base\r\n");
+                    serial_write("  FAIL: the identity map does not stop at the user base\n");
                     return 1;
                 }
             }
@@ -1352,7 +1352,7 @@ fn test_user_and_kernel_mappings_do_not_overlap() -> u32 {
                         serial_write(label);
                         serial_write(" has a kernel-only mapping at user MiB ");
                         print_dec((va >> 20) as u32);
-                        serial_write("\r\n");
+                        serial_write("\n");
                         return 1;
                     }
                 }
@@ -1384,7 +1384,7 @@ fn test_user_and_kernel_mappings_do_not_overlap() -> u32 {
                 serial_write(label);
                 serial_write(" has a user-accessible mapping at kernel MiB ");
                 print_dec((va >> 20) as u32);
-                serial_write("\r\n");
+                serial_write("\n");
             };
 
             // The identity map is *below* the window on x86 and above it on the other two arches,
@@ -1457,7 +1457,7 @@ fn test_user_and_kernel_mappings_do_not_overlap() -> u32 {
                 {
                     serial_write("  FAIL: a fresh exec root maps user MiB ");
                     print_dec((va >> 20) as u32);
-                    serial_write(" outside the device window\r\n");
+                    serial_write(" outside the device window\n");
                     failures += 1;
                     break;
                 }
@@ -1466,7 +1466,7 @@ fn test_user_and_kernel_mappings_do_not_overlap() -> u32 {
         }
 
         if failures == 0 {
-            serial_write("  OK user and kernel mappings do not overlap\r\n");
+            serial_write("  OK user and kernel mappings do not overlap\n");
         }
         failures
     }
@@ -1484,7 +1484,7 @@ fn test_map_page_walk_roundtrip() -> u32 {
         let root = match kernel::hal::alloc_phys_page() {
             Some(p) => p,
             None => {
-                serial_write("  FAIL: alloc root page\r\n");
+                serial_write("  FAIL: alloc root page\n");
                 return 1;
             }
         };
@@ -1497,7 +1497,7 @@ fn test_map_page_walk_roundtrip() -> u32 {
         let test_pa = match kernel::hal::alloc_phys_page() {
             Some(p) => p,
             None => {
-                serial_write("  FAIL: alloc data page\r\n");
+                serial_write("  FAIL: alloc data page\n");
                 return 1;
             }
         };
@@ -1514,7 +1514,7 @@ fn test_map_page_walk_roundtrip() -> u32 {
         //    write the final PTE.  The map_page validation must accept
         //    the physical addresses returned by alloc_phys_page().
         if kernel::pagetable::map_page(root, test_va, test_pa, flags).is_err() {
-            serial_write("  FAIL: map_page returned error\r\n");
+            serial_write("  FAIL: map_page returned error\n");
             return 1;
         }
 
@@ -1528,20 +1528,20 @@ fn test_map_page_walk_roundtrip() -> u32 {
                     print_hex(mapped_pa);
                     serial_write(" expected=0x");
                     print_hex(expected_pa);
-                    serial_write("\r\n");
+                    serial_write("\n");
                     return 1;
                 }
                 let has_user = result.pte_value & kernel::pagetable::PG_U != 0;
                 if !has_user {
-                    serial_write("  FAIL: mapped PTE missing PG_U\r\n");
+                    serial_write("  FAIL: mapped PTE missing PG_U\n");
                     return 1;
                 }
                 serial_write("  OK map+walk roundtrip PA=0x");
                 print_hex(mapped_pa);
-                serial_write("\r\n");
+                serial_write("\n");
             }
             Err(_) => {
-                serial_write("  FAIL: walk after map_page\r\n");
+                serial_write("  FAIL: walk after map_page\n");
                 return 1;
             }
         }
@@ -1606,7 +1606,7 @@ fn test_boot_procs_consistent() -> u32 {
             if rp.is_null() {
                 serial_write("  FAIL: ");
                 serial_write(name);
-                serial_write(" null proc\r\n");
+                serial_write(" null proc\n");
                 failures += 1;
                 continue;
             }
@@ -1618,25 +1618,25 @@ fn test_boot_procs_consistent() -> u32 {
                 print_dec((*rp).p_endpoint as u32);
                 serial_write(" expected ");
                 print_dec(expected as u32);
-                serial_write("\r\n");
+                serial_write("\n");
                 failures += 1;
             }
             if (*rp).p_magic != kernel::proc::PMAGIC {
                 serial_write("  FAIL: ");
                 serial_write(name);
-                serial_write(" bad magic\r\n");
+                serial_write(" bad magic\n");
                 failures += 1;
             }
             if (*rp).p_priv.is_null() {
                 serial_write("  FAIL: ");
                 serial_write(name);
-                serial_write(" null p_priv\r\n");
+                serial_write(" null p_priv\n");
                 failures += 1;
             }
         }
     }
     if failures == 0 {
-        serial_write("  OK all boot procs consistent (endpoint/magic/priv)\r\n");
+        serial_write("  OK all boot procs consistent (endpoint/magic/priv)\n");
     }
     failures
 }
@@ -1674,13 +1674,13 @@ fn test_brk_heap_mapped() -> u32 {
             if kernel::pagetable::walk(cr3, kernel::hal::user_heap_base()).is_err() {
                 serial_write("  FAIL: ");
                 serial_write(name);
-                serial_write(" brk heap not mapped\r\n");
+                serial_write(" brk heap not mapped\n");
                 failures += 1;
             }
         }
     }
     if failures == 0 {
-        serial_write("  OK all boot procs have brk heap mapped\r\n");
+        serial_write("  OK all boot procs have brk heap mapped\n");
     }
     failures
 }
@@ -1691,19 +1691,19 @@ fn test_mfs_ramdisk_mapped() -> u32 {
     unsafe {
         let rp = kernel::table::proc_addr(RAMDISK_PROC_NR);
         if rp.is_null() {
-            serial_write("  FAIL: no ramdisk server\r\n");
+            serial_write("  FAIL: no ramdisk server\n");
             return 1;
         }
         let cr3 = (*rp).p_seg.p_cr3;
         if cr3 == 0 {
-            serial_write("  FAIL: ramdisk server no CR3\r\n");
+            serial_write("  FAIL: ramdisk server no CR3\n");
             return 1;
         }
         if kernel::pagetable::walk(cr3, arch_common::com::RAMDISK_IMAGE_VA).is_err() {
-            serial_write("  FAIL: ramdisk image VA not mapped\r\n");
+            serial_write("  FAIL: ramdisk image VA not mapped\n");
             return 1;
         }
-        serial_write("  OK ramdisk image mapped\r\n");
+        serial_write("  OK ramdisk image mapped\n");
     }
     0
 }
@@ -1718,6 +1718,9 @@ fn exit_qemu_failure(f: u32) -> ! {
 }
 fn serial_write(s: &str) {
     for &b in s.as_bytes() {
+        if b == b'\n' {
+            kernel::hal::serial_write_byte(b'\r');
+        }
         kernel::hal::serial_write_byte(b);
     }
 }

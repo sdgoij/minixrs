@@ -38,6 +38,9 @@ fn panic(info: &PanicInfo) -> ! {
 /// import.
 fn print(s: &str) {
     for byte in s.bytes() {
+        if byte == b'\n' {
+            arch_wasm32::hal::serial_write_byte(b'\r');
+        }
         arch_wasm32::hal::serial_write_byte(byte);
     }
 }
@@ -68,8 +71,8 @@ pub extern "C" fn minix_kernel_init() {
         kernel::syscall::init_basic_syscalls();
     }
 
-    print("Hello MINIX!\r\n");
-    print("kernel: wasm32 instance initialised\r\n");
+    print("Hello MINIX!\n");
+    print("kernel: wasm32 instance initialised\n");
 }
 
 // ------------------------------------------------------- dispatch protocol

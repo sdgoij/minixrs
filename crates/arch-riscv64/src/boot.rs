@@ -122,7 +122,10 @@ pub unsafe extern "C" fn early_init(hart_id: u64, dtb_ptr: u64) {
     }
 
     // Print a message via SBI to confirm we're alive
-    for &b in b"Hello MINIX!\r\n" {
+    for &b in b"Hello MINIX!\n" {
+        if b == b'\n' {
+            crate::sbi::console_putchar(b'\r');
+        }
         crate::sbi::console_putchar(b);
     }
 

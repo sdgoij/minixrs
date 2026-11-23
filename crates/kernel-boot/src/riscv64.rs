@@ -124,7 +124,7 @@ pub unsafe extern "C" fn kmain(hart_id: u64, dtb_ptr: u64) -> ! {
         kernel::panic::mark_cpulocals_ready();
     }
 
-    serial_write("\r\nHello MINIX/RISC-V!\r\n");
+    serial_write("\nHello MINIX/RISC-V!\n");
 
     // Initialize kernel subsystems
     kernel::init();
@@ -598,7 +598,7 @@ pub unsafe extern "C" fn kmain(hart_id: u64, dtb_ptr: u64) -> ! {
         // page-table walks (BOOT_CR3 non-zero) instead of silently skipping
         // the copy. This unblocks the SENDREC payload assertions
         // (sendrec_direct, sendrec_reply_cycle) on RISC-V.
-        serial_write("  enabling SV39 paging...\r\n");
+        serial_write("  enabling SV39 paging...\n");
         unsafe {
             if let Some(boot_pt) = create_boot_page_table() {
                 arch_riscv64::BOOT_CR3.store(boot_pt, core::sync::atomic::Ordering::Relaxed);
@@ -607,19 +607,19 @@ pub unsafe extern "C" fn kmain(hart_id: u64, dtb_ptr: u64) -> ! {
                 // here that reaches a frame or a device register needs it, and taking it this early
                 // is what lets the boot path stop leaning on the identity map (`.notes/physmap.md` P4).
                 kernel_boot::boot_init::install_physmap_in_boot_tables();
-                serial_write("  SV39 enabled\r\n");
+                serial_write("  SV39 enabled\n");
             } else {
                 boot_abort("boot page table");
             }
         }
 
-        serial_write("Running RISC-V integration tests...\r\n");
+        serial_write("Running RISC-V integration tests...\n");
         let mut failures = kernel::tests::run_all();
         failures += unsafe { test_clint_timer() };
         failures += unsafe { test_sbi_console() };
-        serial_write("\r\n");
+        serial_write("\n");
         if failures == 0 {
-            serial_write("ALL TESTS PASSED\r\n");
+            serial_write("ALL TESTS PASSED\n");
         } else {
             serial_write("FAILURES: ");
             // Print failure count as decimal digits
@@ -629,7 +629,7 @@ pub unsafe extern "C" fn kmain(hart_id: u64, dtb_ptr: u64) -> ! {
                 serial_putc(b'0' + (tens as u8));
             }
             serial_putc(b'0' + (ones as u8));
-            serial_write("\r\n");
+            serial_write("\n");
         }
         // Shutdown QEMU via SBI
         arch_riscv64::sbi::system_reset(true);
@@ -662,7 +662,7 @@ pub unsafe extern "C" fn kmain(hart_id: u64, dtb_ptr: u64) -> ! {
             arch_riscv64::plic::init_plic();
         }
 
-        serial_write("  enabling SV39 paging...\r\n");
+        serial_write("  enabling SV39 paging...\n");
         unsafe {
             if let Some(boot_pt) = create_boot_page_table() {
                 // Save boot CR3 for delivermsg and other kernel code
@@ -683,7 +683,7 @@ pub unsafe extern "C" fn kmain(hart_id: u64, dtb_ptr: u64) -> ! {
                 // and write_cr3() (device MMIO mapped by the boot table).
                 arch_riscv64::uart::enable_rx_interrupt();
                 arch_riscv64::plic::enable_irq(arch_riscv64::plic::UART_IRQ);
-                serial_write("  SV39 enabled\r\n");
+                serial_write("  SV39 enabled\n");
             } else {
                 boot_abort("boot page table");
             }
@@ -706,7 +706,7 @@ pub unsafe extern "C" fn kmain(hart_id: u64, dtb_ptr: u64) -> ! {
             kernel::fpu::restore(next_proc);
         }
 
-        serial_write("  switching to userspace...\r\n");
+        serial_write("  switching to userspace...\n");
         unsafe {
             arch_riscv64::switch::switch_to_user(next_proc as *const u8);
         }
@@ -740,7 +740,7 @@ unsafe fn test_clint_timer() -> u32 {
             spins += 1;
         }
         if t2 <= t1 {
-            serial_write("  FAIL: rdtime should advance\r\n");
+            serial_write("  FAIL: rdtime should advance\n");
             return 1;
         }
 
@@ -752,10 +752,10 @@ unsafe fn test_clint_timer() -> u32 {
         let read_back: u64;
         core::arch::asm!("csrr {v}, 0x14D", v = out(reg) read_back, options(nomem, nostack));
         if read_back != deadline {
-            serial_write("  FAIL: stimecmp readback mismatch\r\n");
+            serial_write("  FAIL: stimecmp readback mismatch\n");
             return 1;
         }
-        serial_write("  OK CLINT timer (rdtime + SSTC stimecmp)\r\n");
+        serial_write("  OK CLINT timer (rdtime + SSTC stimecmp)\n");
     }
     0
 }
@@ -771,7 +771,7 @@ unsafe fn test_sbi_console() -> u32 {
     arch_riscv64::sbi::console_putchar(b'~');
     // Must return cleanly; with no console input this is None.
     let _ = arch_riscv64::sbi::console_getchar();
-    serial_write("  OK SBI console (legacy putchar/getchar)\r\n");
+    serial_write("  OK SBI console (legacy putchar/getchar)\n");
     0
 }
 

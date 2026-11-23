@@ -231,6 +231,9 @@ pub fn crossed_sendrec_detections() -> u32 {
 
 unsafe fn ser_puts(bytes: &[u8]) {
     for &b in bytes {
+        if b == b'\n' {
+            crate::hal::serial_write_byte(b'\r');
+        }
         crate::hal::serial_write_byte(b);
     }
 }
@@ -288,7 +291,7 @@ unsafe fn report_crossed_sendrec(caller_ptr: *mut Proc, recv_ptr: *mut Proc, mty
             ser_puts(name.as_bytes());
             ser_puts(b")");
         }
-        ser_puts(b"; both were awaiting a reply\r\n");
+        ser_puts(b"; both were awaiting a reply\n");
     }
 }
 

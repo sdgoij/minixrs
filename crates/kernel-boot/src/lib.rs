@@ -42,58 +42,62 @@ pub unsafe fn boot_test_syscall_handler(_caller: *mut kernel::proc::Proc, _args:
     0 // OK — VFS calls SYS_BOOT_COMPLETE to signal boot finished
 }
 
-/// Write a string to the boot console.
+/// Write one byte to the boot console, with no newline translation.
 ///
-/// On x86_64: COM1 serial port via port I/O.
-/// On RISC-V: SBI debug console.
-/// On AArch64: PL011 UART (QEMU virt, 0x09000000).
-pub fn serial_write(s: &str) {
-    #[cfg(all(not(test), target_arch = "x86_64"))]
-    {
-        let port = 0x3F8u16;
-        for &b in s.as_bytes() {
-            unsafe {
-                loop {
-                    let lsr: u8;
-                    core::arch::asm!(
-                        "in al, dx",
-                        out("al") lsr,
-                        in("dx") port + 5,
-                        options(nomem, nostack),
-                    );
-                    if lsr & 0x20 != 0 {
-                        break;
-                    }
-                }
-                core::arch::asm!("out dx, al", in("dx") port, in("al") b, options(nomem, nostack));
+/// On x86_64 this is COM1 via port I/O, on RISC-V the SBI debug console, and
+/// on AArch64 the PL011 through the arch's byte writer (which reaches it at its
+/// physical address while the MMU is off and through the physmap once it is on).
+#[cfg(all(not(test), target_arch = "x86_64"))]
+fn serial_byte(b: u8) {
+    let port = 0x3F8u16;
+    unsafe {
+        loop {
+            let lsr: u8;
+            core::arch::asm!(
+                "in al, dx",
+                out("al") lsr,
+                in("dx") port + 5,
+                options(nomem, nostack),
+            );
+            if lsr & 0x20 != 0 {
+                break;
             }
         }
+        core::arch::asm!("out dx, al", in("dx") port, in("al") b, options(nomem, nostack));
     }
-    #[cfg(all(not(test), target_arch = "riscv64"))]
-    {
-        for &b in s.as_bytes() {
-            arch_riscv64::sbi::console_putchar(b);
+}
+
+#[cfg(all(not(test), target_arch = "riscv64"))]
+fn serial_byte(b: u8) {
+    arch_riscv64::sbi::console_putchar(b);
+}
+
+#[cfg(all(not(test), target_arch = "aarch64"))]
+fn serial_byte(b: u8) {
+    arch_aarch64::hal::serial_write_byte(b);
+}
+
+#[cfg(any(
+    test,
+    not(any(
+        target_arch = "x86_64",
+        target_arch = "riscv64",
+        target_arch = "aarch64"
+    ))
+))]
+fn serial_byte(_b: u8) {}
+
+/// Write a string to the boot console.
+///
+/// A newline is written as CR LF here, because the UART does not translate it.
+/// Callers write `\n` only; this is the one place the boot console adds the CR.
+pub fn serial_write(s: &str) {
+    for &b in s.as_bytes() {
+        if b == b'\n' {
+            serial_byte(b'\r');
         }
+        serial_byte(b);
     }
-    #[cfg(all(not(test), target_arch = "aarch64"))]
-    {
-        // Through the arch's byte writer, which reaches the PL011 at its physical address while the
-        // MMU is off and through the physmap once it is on. Writing 0x0900_0000 here directly only
-        // works while the identity map covers it, and that is the map `.notes/physmap.md` P4 shrinks — so
-        // every boot message after the MMU comes on depended on a block the shrink removes.
-        for &b in s.as_bytes() {
-            arch_aarch64::hal::serial_write_byte(b);
-        }
-    }
-    #[cfg(any(
-        test,
-        not(any(
-            target_arch = "x86_64",
-            target_arch = "riscv64",
-            target_arch = "aarch64"
-        ))
-    ))]
-    let _ = s;
 }
 
 /// Write an unsigned integer in decimal to the boot console.
@@ -123,7 +127,7 @@ pub fn print_memory_banner(detected: u64, usable: u64) {
     serial_write_u64_dec(detected / (1024 * 1024));
     serial_write(" MiB detected (");
     serial_write_u64_dec(usable / (1024 * 1024));
-    serial_write(" MiB usable)\r\n");
+    serial_write(" MiB usable)\n");
 }
 
 /// Print a fatal boot error to the boot console, then halt the CPU forever.
@@ -133,7 +137,7 @@ pub fn print_memory_banner(detected: u64, usable: u64) {
 pub fn boot_abort(msg: &str) -> ! {
     serial_write("  FAILED: ");
     serial_write(msg);
-    serial_write("\r\n");
+    serial_write("\n");
     #[cfg(all(not(test), target_arch = "x86_64"))]
     loop {
         unsafe {

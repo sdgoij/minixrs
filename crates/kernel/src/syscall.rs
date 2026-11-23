@@ -400,6 +400,9 @@ pub unsafe fn sys_hang_dump_handler(_caller: *mut crate::proc::Proc, _args: &[u6
         }
         fn puts(s: &[u8]) {
             for &b in s {
+                if b == b'\n' {
+                    put(b'\r');
+                }
                 put(b);
             }
         }
@@ -431,7 +434,7 @@ pub unsafe fn sys_hang_dump_handler(_caller: *mut crate::proc::Proc, _args: &[u6
             }
         }
 
-        puts(b"--- hangdump ---\r\n");
+        puts(b"--- hangdump ---\n");
         puts(b"  runq:");
         crate::sched::dump_queues(|ep| {
             put(b' ');
@@ -441,7 +444,7 @@ pub unsafe fn sys_hang_dump_handler(_caller: *mut crate::proc::Proc, _args: &[u6
         // Reuse the memstat plumbing: phys_free_pages is only callable from
         // ring 0, which we are in.
         put_hex(crate::vm::phys_free_pages() as i32);
-        puts(b"\r\n");
+        puts(b"\n");
         for i in 0..crate::proc::NR_PROCS_TOTAL {
             let rp = crate::table::proc_addr(i as i32);
             if rp.is_null() || (*rp).is_empty() {
@@ -479,9 +482,9 @@ pub unsafe fn sys_hang_dump_handler(_caller: *mut crate::proc::Proc, _args: &[u6
             put_hex64(frame_rip(rp));
             puts(b" rsp=");
             put_hex64(frame_rsp(rp));
-            puts(b"\r\n");
+            puts(b"\n");
         }
-        puts(b"--- end hangdump ---\r\n");
+        puts(b"--- end hangdump ---\n");
     }
     0
 }
