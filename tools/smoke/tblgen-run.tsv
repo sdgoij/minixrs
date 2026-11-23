@@ -1,0 +1,9 @@
+# Run the guest-built llvm-min-tblgen in a fresh boot (`.notes/toolchain_in_os.md`
+# Phase 4). The first boot (`tools/smoke/tblgen-build.tsv`) compiled and linked it
+# and ran `sync`; this boot only reads the binary and the probe input.
+#
+# The `-print-records` dump names the record the probe defines, which is the
+# evidence that the generator parsed the class, resolved the template argument,
+# and printed the field. The same binary run in the build boot does not reach
+# this step; KNOWN_ISSUES.md item 89 records that state-dependent hang.
+/tmp/llvm-min-tblgen -print-records /usr/src/llvm/tablegen/tblgen-probe.td	^ *def probe.*$

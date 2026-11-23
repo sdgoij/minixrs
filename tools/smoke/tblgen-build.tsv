@@ -1,0 +1,50 @@
+# Build llvm-min-tblgen inside the guest (`.notes/toolchain_in_os.md` Phase 4).
+#
+# This is the first of two boots. It compiles every source of
+# `obj.LLVMTableGenBasic` plus `llvm-min-tblgen.cpp`, links them against the
+# cross-built `libLLVMTableGen.a` and `libLLVMSupport.a`, and leaves the binary
+# on the disk. `tools/smoke/tblgen-run.tsv` runs it in the second boot.
+#
+# Two include paths are needed: the source side of `utils/TableGen` for
+# `Basic/...` headers, and the staged LLVM include tree for `llvm/ADT/...`. The
+# archives are built `-fno-rtti` (`LLVM_ENABLE_RTTI` is off), so the guest units
+# take it too; without it a class with a virtual base emits a typeinfo reference
+# the archive does not define. The archives are also built `NDEBUG`.
+#
+# Each source is its own step so a compile failure names the file, and every
+# object is checked before the link. The line buffer in the shell is 256 bytes,
+# which is why no line below lists more than one source and the link takes its
+# object list from `tblgen-link.rsp`.
+#
+# The final `sync` is what lets the second boot run a binary this boot wrote.
+/usr/bin/clang++ -c -fno-rtti -I/usr/src/llvm/tablegen -I/usr/lib/llvm/include /usr/src/llvm/tablegen/Basic/ARMTargetDefEmitter.cpp -o /usr/src/llvm/tablegen/Basic/ARMTargetDefEmitter.cpp.o	^$
+/bin/coreutils wc -c /usr/src/llvm/tablegen/Basic/ARMTargetDefEmitter.cpp.o	^ *[0-9]+ /usr/src/llvm/tablegen/Basic/ARMTargetDefEmitter.cpp.o$
+/usr/bin/clang++ -c -fno-rtti -I/usr/src/llvm/tablegen -I/usr/lib/llvm/include /usr/src/llvm/tablegen/Basic/Attributes.cpp -o /usr/src/llvm/tablegen/Basic/Attributes.cpp.o	^$
+/bin/coreutils wc -c /usr/src/llvm/tablegen/Basic/Attributes.cpp.o	^ *[0-9]+ /usr/src/llvm/tablegen/Basic/Attributes.cpp.o$
+/usr/bin/clang++ -c -fno-rtti -I/usr/src/llvm/tablegen -I/usr/lib/llvm/include /usr/src/llvm/tablegen/Basic/CodeGenIntrinsics.cpp -o /usr/src/llvm/tablegen/Basic/CodeGenIntrinsics.cpp.o	^$
+/bin/coreutils wc -c /usr/src/llvm/tablegen/Basic/CodeGenIntrinsics.cpp.o	^ *[0-9]+ /usr/src/llvm/tablegen/Basic/CodeGenIntrinsics.cpp.o$
+/usr/bin/clang++ -c -fno-rtti -I/usr/src/llvm/tablegen -I/usr/lib/llvm/include /usr/src/llvm/tablegen/Basic/DirectiveEmitter.cpp -o /usr/src/llvm/tablegen/Basic/DirectiveEmitter.cpp.o	^$
+/bin/coreutils wc -c /usr/src/llvm/tablegen/Basic/DirectiveEmitter.cpp.o	^ *[0-9]+ /usr/src/llvm/tablegen/Basic/DirectiveEmitter.cpp.o$
+/usr/bin/clang++ -c -fno-rtti -I/usr/src/llvm/tablegen -I/usr/lib/llvm/include /usr/src/llvm/tablegen/Basic/IntrinsicEmitter.cpp -o /usr/src/llvm/tablegen/Basic/IntrinsicEmitter.cpp.o	^$
+/bin/coreutils wc -c /usr/src/llvm/tablegen/Basic/IntrinsicEmitter.cpp.o	^ *[0-9]+ /usr/src/llvm/tablegen/Basic/IntrinsicEmitter.cpp.o$
+/usr/bin/clang++ -c -fno-rtti -I/usr/src/llvm/tablegen -I/usr/lib/llvm/include /usr/src/llvm/tablegen/Basic/RISCVTargetDefEmitter.cpp -o /usr/src/llvm/tablegen/Basic/RISCVTargetDefEmitter.cpp.o	^$
+/bin/coreutils wc -c /usr/src/llvm/tablegen/Basic/RISCVTargetDefEmitter.cpp.o	^ *[0-9]+ /usr/src/llvm/tablegen/Basic/RISCVTargetDefEmitter.cpp.o$
+/usr/bin/clang++ -c -fno-rtti -I/usr/src/llvm/tablegen -I/usr/lib/llvm/include /usr/src/llvm/tablegen/Basic/RuntimeLibcallsEmitter.cpp -o /usr/src/llvm/tablegen/Basic/RuntimeLibcallsEmitter.cpp.o	^$
+/bin/coreutils wc -c /usr/src/llvm/tablegen/Basic/RuntimeLibcallsEmitter.cpp.o	^ *[0-9]+ /usr/src/llvm/tablegen/Basic/RuntimeLibcallsEmitter.cpp.o$
+/usr/bin/clang++ -c -fno-rtti -I/usr/src/llvm/tablegen -I/usr/lib/llvm/include /usr/src/llvm/tablegen/Basic/RuntimeLibcalls.cpp -o /usr/src/llvm/tablegen/Basic/RuntimeLibcalls.cpp.o	^$
+/bin/coreutils wc -c /usr/src/llvm/tablegen/Basic/RuntimeLibcalls.cpp.o	^ *[0-9]+ /usr/src/llvm/tablegen/Basic/RuntimeLibcalls.cpp.o$
+/usr/bin/clang++ -c -fno-rtti -I/usr/src/llvm/tablegen -I/usr/lib/llvm/include /usr/src/llvm/tablegen/Basic/SDNodeProperties.cpp -o /usr/src/llvm/tablegen/Basic/SDNodeProperties.cpp.o	^$
+/bin/coreutils wc -c /usr/src/llvm/tablegen/Basic/SDNodeProperties.cpp.o	^ *[0-9]+ /usr/src/llvm/tablegen/Basic/SDNodeProperties.cpp.o$
+/usr/bin/clang++ -c -fno-rtti -I/usr/src/llvm/tablegen -I/usr/lib/llvm/include /usr/src/llvm/tablegen/Basic/TableGen.cpp -o /usr/src/llvm/tablegen/Basic/TableGen.cpp.o	^$
+/bin/coreutils wc -c /usr/src/llvm/tablegen/Basic/TableGen.cpp.o	^ *[0-9]+ /usr/src/llvm/tablegen/Basic/TableGen.cpp.o$
+/usr/bin/clang++ -c -fno-rtti -I/usr/src/llvm/tablegen -I/usr/lib/llvm/include /usr/src/llvm/tablegen/Basic/TargetFeaturesEmitter.cpp -o /usr/src/llvm/tablegen/Basic/TargetFeaturesEmitter.cpp.o	^$
+/bin/coreutils wc -c /usr/src/llvm/tablegen/Basic/TargetFeaturesEmitter.cpp.o	^ *[0-9]+ /usr/src/llvm/tablegen/Basic/TargetFeaturesEmitter.cpp.o$
+/usr/bin/clang++ -c -fno-rtti -I/usr/src/llvm/tablegen -I/usr/lib/llvm/include /usr/src/llvm/tablegen/Basic/TargetLibraryInfoEmitter.cpp -o /usr/src/llvm/tablegen/Basic/TargetLibraryInfoEmitter.cpp.o	^$
+/bin/coreutils wc -c /usr/src/llvm/tablegen/Basic/TargetLibraryInfoEmitter.cpp.o	^ *[0-9]+ /usr/src/llvm/tablegen/Basic/TargetLibraryInfoEmitter.cpp.o$
+/usr/bin/clang++ -c -fno-rtti -I/usr/src/llvm/tablegen -I/usr/lib/llvm/include /usr/src/llvm/tablegen/Basic/VTEmitter.cpp -o /usr/src/llvm/tablegen/Basic/VTEmitter.cpp.o	^$
+/bin/coreutils wc -c /usr/src/llvm/tablegen/Basic/VTEmitter.cpp.o	^ *[0-9]+ /usr/src/llvm/tablegen/Basic/VTEmitter.cpp.o$
+/usr/bin/clang++ -c -fno-rtti -I/usr/src/llvm/tablegen -I/usr/lib/llvm/include /usr/src/llvm/tablegen/llvm-min-tblgen.cpp -o /usr/src/llvm/tablegen/llvm-min-tblgen.cpp.o	^$
+/bin/coreutils wc -c /usr/src/llvm/tablegen/llvm-min-tblgen.cpp.o	^ *[0-9]+ /usr/src/llvm/tablegen/llvm-min-tblgen.cpp.o$
+/usr/bin/clang++ @/usr/src/llvm/tablegen/tblgen-link.rsp && /bin/coreutils echo link-ok	^link-ok$
+/bin/coreutils wc -c /tmp/llvm-min-tblgen	^ *[1-9][0-9]* /tmp/llvm-min-tblgen$
+sync	^$

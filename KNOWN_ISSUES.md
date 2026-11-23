@@ -170,6 +170,8 @@ are arch-specific, `[env]` is tooling/platform, not kernel.
     canonicalizes its own path through LLVM's helper is exposed.
     (`.notes/toolchain_in_os.md`, `tools/clang-wrapper.c`)
 
+89. **A long in-guest compile sequence leaves the next file access hung (found 2026-11-22).** In one boot, the guest compiled all fourteen `llvm-min-tblgen` translation units and linked the binary (`link-ok`, 3,005,376 bytes). The next step, `/tmp/llvm-min-tblgen -print-records`, never returned and consumed the whole scenario budget. The binary is not the cause: its `--version` answers on a fresh boot, and a host-linked binary built from the same sources and archives runs the same probe on a fresh boot. `hangdump` after ten of the compiles showed the compiler child runnable at different instructions (`TypeVisibilityAttr`, `minix_std::fs::close`, `CFGBuilder`) and twice in `RTS_PAGEFAULT`, so it was advancing, not spinning. `memstat` drops 40.6 MiB on the first compile (the file-page cache warming), then about 2.2 MiB per compile; `regions` stays flat at 41 pages / 87. At 512 MiB the sequence thrashed in `TargetFeaturesEmitter.cpp`; 1 GiB reached the thirteenth unit; 2 GiB completes the compiles and the link. The working hypothesis is item 83's residual risk: the cache fills with pages a mapping still references, so a later large file access cannot be admitted. Not fixed. `just test-tblgen-x86` therefore runs the binary in a second boot, and `tools/smoke/tblgen-run.tsv` says so. (`crates/servers/src/vm/cache.rs`, `.notes/toolchain_in_os.md`, `tools/smoke/tblgen-*`)
+
 ---
 
 ## RISC-V (`[riscv]`)

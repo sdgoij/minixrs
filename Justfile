@@ -240,9 +240,22 @@ boot-image-x86: userland-x86 coreutils-x86 dynlib-x86
 # forced onto the `run-<arch>` path. The image builder reads `MINIXFS_EXTRA` /
 # `DYNLINK_BINS` / `MINIXFS_BLOCKS` itself, so a root larger than the 16 MiB embedded
 # window needs no kernel change.
+#
+# The staged toolchain root is part of the system image when it exists:
+# `mkminixfs` starts from the boot manifest and `MINIXFS_ROOT` adds that tree on
+# top of it. The 250 MiB root needs 98304 blocks and 16384 inodes, so those
+# replace the release-sized defaults in that case. `just run x86 2048M` then
+# reaches `/usr/bin/clang` in the same system image the gates boot.
 system-image-x86: boot-image-x86
-    extras=""; if [ -f target/bash/x86/bash ]; then extras=/bin/bash=target/bash/x86/bash; else echo "system-image: no /bin/bash (run 'just build-bash x86' to include it)"; fi; MINIXFS_EXTRA="${extras}${MINIXFS_EXTRA:+;$MINIXFS_EXTRA}" MINIXFS_BLOCKS="${MINIXFS_BLOCKS:-8192}" cargo run -q -p boot-image --bin mkminixfs --release -- x86_64
+    extras=""; if [ -f target/bash/x86/bash ]; then extras=/bin/bash=target/bash/x86/bash; else echo "system-image: no /bin/bash (run 'just build-bash x86' to include it)"; fi; \
+    if [ -d target/toolchain/x86/root ]; then \
+        echo "system-image: including the staged toolchain"; \
+        MINIXFS_ROOT=target/toolchain/x86/root MINIXFS_EXTRA="${extras}${MINIXFS_EXTRA:+;$MINIXFS_EXTRA}" MINIXFS_BLOCKS="${MINIXFS_BLOCKS:-98304}" MINIXFS_INODES="${MINIXFS_INODES:-16384}" cargo run -q -p boot-image --bin mkminixfs --release -- x86_64; \
+    else \
+        MINIXFS_EXTRA="${extras}${MINIXFS_EXTRA:+;$MINIXFS_EXTRA}" MINIXFS_BLOCKS="${MINIXFS_BLOCKS:-8192}" cargo run -q -p boot-image --bin mkminixfs --release -- x86_64; \
+    fi
     @just mkfs-x86
+
 
 # riscv64 / aarch64, the same split without mkboot: the kernel ELF *is* the artifact
 # (`-kernel`). The boot image is copied to a distinct name so it does not collide with
@@ -339,11 +352,16 @@ build-aarch64: userland-aarch64 coreutils-aarch64 dynlib-aarch64
 
 # ---------- run ----------
 
+# The system image, booted by the minimal boot image. If the staged toolchain
+# root exists, `system-image-<arch>` includes it, so `just run x86 2048M` reaches
+# `/usr/bin/clang`, `clang++` and `ld.lld`. Without that root it is the
+# release-sized system image.
 run target="x86" memory="256M":
     @just run-{{target}} {{memory}}
 
 run-x86 memory: boot-image-x86 system-image-x86
     qemu-system-x86_64 -nographic -m {{memory}} -no-reboot -vga none -device bochs-display,id=fb0 -kernel target/boot-kernel-trampoline.elf -device loader,file=target/boot-kernel.bin,addr=0x200000 -drive if=none,id=disk0,file=target/images/x86_64-pc-minix/disk.img,format=raw,cache=writethrough -device virtio-blk-pci,disable-legacy=on,drive=disk0 -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0 -device virtio-tablet-pci,display=fb0
+
 
 run-riscv64 memory: boot-image-riscv64 system-image-riscv64
     qemu-system-riscv64 -machine virt -m {{memory}} -nographic -global virtio-mmio.force-legacy=off -drive if=none,id=disk0,file=target/images/riscv64gc-unknown-minix/disk.img,format=raw,cache=writethrough -device virtio-blk-device,drive=disk0 -netdev user,id=net0 -device virtio-net-device,netdev=net0 -device virtio-gpu-device -device virtio-keyboard-device -kernel target/boot-kernel-riscv64.elf
@@ -1952,13 +1970,26 @@ llvm-minix arch="x86":
 test-toolchain arch="x86":
     @just test-toolchain-{{arch}}
 
-test-toolchain-x86 boot-timeout="3600": boot-image-x86
+test-toolchain-x86 boot-timeout="3600": system-image-x86
     @test -d target/toolchain/x86/root || (echo "test-toolchain: no staged toolchain root; run 'just llvm-minix x86'" && exit 1)
     @just _assert-qemu-version qemu-system-x86_64
-    MINIXFS_ROOT=target/toolchain/x86/root MINIXFS_BLOCKS=98304 MINIXFS_INODES=16384 cargo run -q -p boot-image --bin mkminixfs --release -- x86_64
-    cargo xtask image mkfs x86
-    FEED_PACE=0.003 FEED_SCENARIO=tools/smoke/toolchain.tsv cargo xtask smoke target/test-toolchain-x86.log {{boot-timeout}} qemu-system-x86_64 -nographic -m 512M -no-reboot -vga none -device bochs-display,id=fb0 -kernel target/images/x86_64-pc-minix/minix-x86-boot.elf -drive if=none,id=disk0,file=target/images/x86_64-pc-minix/disk.img,format=raw,cache=writethrough -device virtio-blk-pci,disable-legacy=on,drive=disk0 -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0 -device virtio-tablet-pci,display=fb0
+    FEED_PACE=0.01 FEED_SCENARIO=tools/smoke/toolchain.tsv cargo xtask smoke target/test-toolchain-x86.log {{boot-timeout}} qemu-system-x86_64 -nographic -m 1024M -no-reboot -vga none -device bochs-display,id=fb0 -kernel target/images/x86_64-pc-minix/minix-x86-boot.elf -drive if=none,id=disk0,file=target/images/x86_64-pc-minix/disk.img,format=raw,cache=writethrough -device virtio-blk-pci,disable-legacy=on,drive=disk0 -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0 -device virtio-tablet-pci,display=fb0
     @echo "toolchain: the guest's clang compiled and the guest's lld linked hello.c, and it ran (x86_64)"
+
+# The TableGen target, in two boots: the guest compiles every source of
+# `obj.LLVMTableGenBasic` plus `llvm-min-tblgen.cpp` and links `llvm-min-tblgen`
+# in the first, then a fresh boot runs the binary on a `.td` probe. 2 GiB is a
+# measured requirement, not a guess: at 512 MiB `TargetFeaturesEmitter.cpp`
+# thrashed for the whole 90-minute budget, and at 1 GiB the sequence reached the
+# thirteenth unit before the cache and memory pressure stopped it. The second
+# boot is not a convenience: the binary runs on a fresh image but hangs when run
+# in the boot that compiled it (KNOWN_ISSUES.md item 89).
+test-tblgen-x86 boot-timeout="5400": system-image-x86
+    @test -d target/toolchain/x86/root || (echo "test-tblgen: no staged toolchain root; run 'just llvm-minix x86'" && exit 1)
+    @just _assert-qemu-version qemu-system-x86_64
+    FEED_PACE=0.01 FEED_SCENARIO=tools/smoke/tblgen-build.tsv cargo xtask smoke target/test-tblgen-build.log {{boot-timeout}} qemu-system-x86_64 -nographic -m 2048M -no-reboot -vga none -device bochs-display,id=fb0 -kernel target/images/x86_64-pc-minix/minix-x86-boot.elf -drive if=none,id=disk0,file=target/images/x86_64-pc-minix/disk.img,format=raw,cache=writethrough -device virtio-blk-pci,disable-legacy=on,drive=disk0 -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0 -device virtio-tablet-pci,display=fb0
+    FEED_PACE=0.01 FEED_SCENARIO=tools/smoke/tblgen-run.tsv cargo xtask smoke target/test-tblgen-run.log 300 qemu-system-x86_64 -nographic -m 2048M -no-reboot -vga none -device bochs-display,id=fb0 -kernel target/images/x86_64-pc-minix/minix-x86-boot.elf -drive if=none,id=disk0,file=target/images/x86_64-pc-minix/disk.img,format=raw,cache=writethrough -device virtio-blk-pci,disable-legacy=on,drive=disk0 -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0 -device virtio-tablet-pci,display=fb0
+    @echo "tblgen: the guest compiled and linked llvm-min-tblgen, and it ran in a fresh boot (x86_64)"
 
 # GNU bash for a minix target, from the upstream commit `tools/pins.ini` pins:
 # fetched, configured against `tools/c-include` and linked against minix-libc by

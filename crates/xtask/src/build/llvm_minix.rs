@@ -36,6 +36,26 @@ use crate::toolchain;
 /// claiming the others before a gate runs them is worse than saying so.
 const ARCHES: [&str; 1] = ["x86"];
 
+/// The sources of `obj.LLVMTableGenBasic`, the object library `llvm-min-tblgen`
+/// links on top of `libLLVMTableGen.a`. Kept here because the guest compiles
+/// these one at a time and the link response file names their objects; both
+/// have to move with `utils/TableGen/Basic/CMakeLists.txt`.
+const TABLEGEN_BASIC_SOURCES: [&str; 13] = [
+    "ARMTargetDefEmitter.cpp",
+    "Attributes.cpp",
+    "CodeGenIntrinsics.cpp",
+    "DirectiveEmitter.cpp",
+    "IntrinsicEmitter.cpp",
+    "RISCVTargetDefEmitter.cpp",
+    "RuntimeLibcallsEmitter.cpp",
+    "RuntimeLibcalls.cpp",
+    "SDNodeProperties.cpp",
+    "TableGen.cpp",
+    "TargetFeaturesEmitter.cpp",
+    "TargetLibraryInfoEmitter.cpp",
+    "VTEmitter.cpp",
+];
+
 /// The LLVM backend a cross build needs: the guest's own target.
 fn llvm_targets(arch: &Arch) -> &'static str {
     match arch.name {
@@ -303,7 +323,11 @@ pub fn run(root: &Path, target: Option<&str>) -> io::Result<()> {
     let build = build_dir(root, arch);
     let mut build_command = Command::new(&cmake);
     build_command.arg("--build").arg(&build);
-    for target in ["clang", "lld"] {
+    // `llvm-min-tblgen` is the next in-guest target after FileCheck: a real
+    // generator whose sources the guest compiles itself. Building it here also
+    // produces `libLLVMTableGen.a` and the Basic object files, which the guest
+    // link consumes.
+    for target in ["clang", "lld", "llvm-min-tblgen"] {
         build_command.arg("--target").arg(target);
     }
     build_command.args(["--parallel", "16"]);
@@ -505,6 +529,14 @@ fn stage(
         build.join("lib/libLLVMSupport.a"),
         stage.join("usr/lib/llvm/libLLVMSupport.a"),
     )?;
+    fs::copy(
+        build.join("lib/libLLVMTableGen.a"),
+        stage.join("usr/lib/llvm/libLLVMTableGen.a"),
+    )?;
+    fs::copy(
+        build.join("lib/libLLVMDemangle.a"),
+        stage.join("usr/lib/llvm/libLLVMDemangle.a"),
+    )?;
 
     let llvm = root.join("rust/src/llvm-project/llvm");
     let llvm_src = stage.join("usr/src/llvm");
@@ -534,6 +566,39 @@ fn stage(
     for name in ["fc-lib.rsp", "fc-main.rsp", "fc-link.rsp"] {
         fs::copy(root.join("tools/cxx").join(name), llvm_src.join(name))?;
     }
+
+    // llvm-min-tblgen: the Basic backends plus the small main, compiled by the
+    // guest against `libLLVMTableGen.a` and `libLLVMSupport.a`. The source list
+    // is the CMake object library, not a hand-picked subset: a backend left out
+    // links but cannot generate its record kind.
+    let tablegen = llvm.join("utils/TableGen");
+    let tg_src = llvm_src.join("tablegen");
+    copy_tree(&tablegen.join("Basic"), &tg_src.join("Basic"))?;
+    fs::copy(
+        tablegen.join("llvm-min-tblgen.cpp"),
+        tg_src.join("llvm-min-tblgen.cpp"),
+    )?;
+    fs::copy(
+        root.join("tools/tblgen-probe.td"),
+        tg_src.join("tblgen-probe.td"),
+    )?;
+
+    // The shell reads one 256-byte line at a time and has no loop construct, so
+    // the build is a list of short compile commands in the scenario's own tsv.
+    // Only the link needs a response file; its object list is too long for a
+    // line that the console has to echo.
+    let mut link = String::from("/usr/src/llvm/tablegen/llvm-min-tblgen.cpp.o\n");
+    for name in TABLEGEN_BASIC_SOURCES {
+        link.push_str(&format!("/usr/src/llvm/tablegen/Basic/{name}.o\n"));
+    }
+    // The cross link uses `--gc-sections` and names Demangle after Support. The
+    // guest link keeps both: without gc-sections an unused Support member can
+    // pull a host-only symbol into the link, and TableGen's own objects are
+    // otherwise kept whole.
+    link.push_str(
+        "-Wl,--gc-sections\n/usr/lib/llvm/libLLVMTableGen.a\n/usr/lib/llvm/libLLVMSupport.a\n/usr/lib/llvm/libLLVMDemangle.a\n-o\n/tmp/llvm-min-tblgen\n",
+    );
+    fs::write(tg_src.join("tblgen-link.rsp"), link)?;
     Ok(())
 }
 

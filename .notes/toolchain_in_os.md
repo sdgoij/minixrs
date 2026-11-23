@@ -236,9 +236,12 @@ A staged root under `target/toolchain/<arch>/root`:
 /usr/src/hello.c
 ```
 
-Ship it on the **disk** path only (never the embedded ramdisk): a recipe that
-runs `mkminixfs` with `MINIXFS_BLOCKS` large enough for the staged root and
-boots `just run-x86` with more RAM. The x86 root is 199 MiB unstripped.
+Ship it on the **disk** path only (never the embedded ramdisk): `system-image-x86`
+adds the staged root with `MINIXFS_ROOT` on top of the boot manifest, and
+`just run x86 2048M` boots the same minimal boot image against it. The root is
+about 250 MiB, so the system image is 384 MiB (98304 blocks) with 16384 inodes.
+There is no separate toolchain image type; the toolchain is part of the system
+image when it is staged.
 
 `/usr/bin/clang` is `tools/clang-wrapper.c`, not the driver renamed: it execs
 `/usr/libexec/clang` with the sysroot flags, and adds the link inputs (`crt0.o`,
@@ -279,16 +282,43 @@ one. `hello.c` ships in the image under `/usr/src` rather than being typed.
 The gate is not in `test-arches`: the staged root costs an LLVM cross build, so
 a missing root is refused by name instead.
 
-### Phase 4: self-hosting clang (FileCheck done)
+### Phase 4: self-hosting clang (FileCheck and llvm-min-tblgen done)
 
-The first target is done: the guest compiles LLVM's FileCheck from
-`lib/FileCheck/FileCheck.cpp` and `utils/FileCheck/FileCheck.cpp` against the
-staged include tree and `libLLVMSupport.a`, links it with the guest's `ld.lld`,
-and runs it on a check that must fail. `tools/cxx/fc-*.rsp` keep the command
-lines short; `-c @file` and a link `@file` both work. The 22-step scenario took
-**24m52s** of guest wall time, from the disk image at 18:48:39 to the last step
-at 19:13:32, against the 3600s budget in `just test-toolchain-x86`. Nearly all of
-that is the two TUs and the link, and the run used `-m 512M`.
+**FileCheck.** The first target is done: the guest compiles LLVM's FileCheck
+from `lib/FileCheck/FileCheck.cpp` and `utils/FileCheck/FileCheck.cpp` against
+the staged include tree and `libLLVMSupport.a`, links it with the guest's
+`ld.lld`, and runs it on a check that must fail. `tools/cxx/fc-*.rsp` keep the
+command lines short; `-c @file` and a link `@file` both work. The 22-step
+scenario took **24m52s** of guest wall time, from the disk image at 18:48:39 to
+the last step at 19:13:32, against the 3600s budget in
+`just test-toolchain-x86`. Nearly all of that is the two TUs and the link. The
+measurement was at 512M; the gate now names 1024M for headroom.
+
+**llvm-min-tblgen.** The second target is done: the guest compiles every source
+of `obj.LLVMTableGenBasic` (thirteen files) plus `llvm-min-tblgen.cpp`, links
+them with the guest's `ld.lld` against the cross-built `libLLVMTableGen.a`,
+`libLLVMSupport.a` and `libLLVMDemangle.a`, and runs the result on a `.td` that
+defines a class and a record. The archives are built `LLVM_ENABLE_RTTI=OFF`, so
+the guest units take `-fno-rtti`; the link takes `--gc-sections` and the
+Demangle archive, as the cross link does. `tools/tblgen-probe.td` is the input.
+
+`just test-tblgen-x86` is **two boots**. The build boot runs 31 steps and took
+**68m06s** at `-m 2048M` (05:50:24 to 06:58:30). The run boot takes **1.8s**
+(06:58:30 to 06:58:32) and requires only the binary and the probe.
+
+Memory is the limiting factor, and the numbers are measured rather than guessed.
+At 512 MiB `TargetFeaturesEmitter.cpp` thrashed until the 90-minute budget ran
+out. At 1 GiB a single `TargetFeaturesEmitter.cpp` completed in 4m19s end to end,
+and the full sequence reached the thirteenth unit. At 2 GiB every unit and the
+link complete. `memstat` shows the cost: the first compile drops free pages by
+40.6 MiB (the file-page cache warming), each later compile by about 2.2 MiB,
+and `regions` stays flat at 41 pages / 87.
+
+The second boot is not cosmetic. If the generator runs in the boot that built
+it, `-print-records` never returns, although the same binary answers `--version`
+there and the host-linked binary runs the same probe on a fresh boot.
+`KNOWN_ISSUES.md` item 89 has the samples and the hypothesis (item 83's cache
+risk). The gate keeps the build and the run apart for that reason.
 
 Two gaps surfaced and are closed:
 
@@ -303,9 +333,10 @@ Two gaps surfaced and are closed:
   minix-libc's glibc-shaped four-argument export. The declaration is now
   `extern "C"` and takes `__func__` as its fourth argument.
 
-The next target, if Phase 4 is continued, is `llvm-tblgen` or a full clang. The
-measurement above is the budget to plan against, not an estimate: a full
-self-host is far beyond one TCG session.
+The next target, if Phase 4 is continued, is the full `llvm-tblgen` (the
+`obj.LLVMTableGenCommon` backends) or a full clang. The measurements above are
+the budget to plan against, not estimates: 5.6k lines across fourteen files took
+68 minutes in TCG, so a full self-host is far beyond one session.
 
 ### Phase 5: rustc for minix
 
@@ -334,9 +365,11 @@ the program runs. Then a bootstrap: `x.py` with that binary as stage0,
 - **The image builder's inode table defaults to 512.** `MINIXFS_INODES` raises
   it, and the toolchain image uses 16384. MFS's in-core table is a separate
   number (now 2048) and is what an in-guest compile exhausts.
-- **Guest RAM.** `run` defaults to 256M. LLVM's compile of a single translation
-  unit is fine in that; linking clang, or self-hosting, is not. Measure and then
-  name a bigger `-m` in the recipe; do not quietly raise the default.
+- **Guest RAM.** `run` defaults to 256M. The toolchain gates name their own
+  `-m`: FileCheck uses 1024M, and the TableGen build uses 2048M. 512M is not
+  enough for `TargetFeaturesEmitter.cpp` (it thrashed for the whole budget), and
+  1G completes single units but not the fourteen-unit sequence. Do not quietly
+  raise the default.
 - **Host choice.** Phase 1 was built on the Windows host with MSVC 2022: the
   fork's build tree and the stage1 are both here, and MSVC is present. LLVM's
   CMake build is self-contained enough for that (unlike a `configure`/`make`
@@ -356,8 +389,10 @@ the program runs. Then a bootstrap: `x.py` with that binary as stage0,
   but is a feature test to read, not to guess.
 - **Do not ship a `libLLVM.so`.** Static archives keep the image smaller and the
   loader out of the compiler's start-up.
-- **A toolchain image is not a release artifact.** `just image <arch>` stays the
-  16 MiB system; the toolchain image is a separate recipe and a separate gate.
+- **A toolchain boot is not a release artifact.** `just image <arch>` stays the
+  self-contained 16 MiB system. The disk system image includes the staged
+  toolchain when it exists, which is what `just run <arch> 2048M` boots; the
+  release artifact does not grow.
 - **No debug prints in the kernel or servers.** A bring-up that hangs is a
   `bare-metal-debug` problem (LLDB + QEMU `-s`), not a `serial_write` problem.
 - **`cargo xtask build c-direct` is a canary.** If it breaks, the `libc.a`
