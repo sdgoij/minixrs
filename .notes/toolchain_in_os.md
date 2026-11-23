@@ -349,11 +349,16 @@ Two pieces are specific:
 
 - `rustc_llvm`'s build script needs a **runnable** `llvm-config` that reports
   the minix LLVM build's libraries and `--cxxflags`. The generated
-  `llvm-config` is a minix ELF and cannot run on the build host.
-  `tools/llvm-config-minix.rs` is an earlier, uncalled attempt: it hardcodes this
-  machine's paths. Rewrite it as `cargo xtask llvm-config --build-root <dir>`
-  (or delete it and let Phase 5 write the parameterized form) when this phase
-  starts.
+  `llvm-config` is a minix ELF and cannot run on the build host, so
+  `cargo xtask llvm-config --build-root target/llvm-<arch>/build [QUERY...]`
+  reads the build's `LibraryDependencies.inc` and `llvm-config.h` and answers
+  the same queries. Its `--cxxflags` names the cross build's own clang resource
+  headers, which are the version the libraries were built with; the host clang's
+  are a different version and can sit under a path with a space, which
+  `rustc_llvm` splits because it takes the output unquoted. `cargo xtask build
+  llvm-minix` also builds `LLVMMCA` and the arch's `TargetMCA`: `clang` does not
+  pull them in, but the arch component's dependency list names them and rustc's
+  link needs them.
 - `rustc` needs its sysroot (the minix `std`/`core`/`alloc`) staged into the
   guest, which is the same root tree as Phase 3 plus `target/<triple>/release/libstd*.rlib`.
 

@@ -27,6 +27,7 @@ mod fetch_stage1;
 mod gate;
 mod guest;
 mod image;
+mod llvm_config;
 mod mirror;
 mod minix_ld;
 mod paths;
@@ -114,6 +115,19 @@ fn main() -> ExitCode {
             rust_config::run(&root, token).map(|()| true)
         }
         Some(("minix-ld", matches)) => run_minix_ld(&root, matches),
+        Some(("llvm-config", matches)) => {
+            let build_root = matches
+                .get_one::<String>("build-root")
+                .map(String::as_str);
+            let arch = matches
+                .get_one::<String>("arch")
+                .expect("clap defaults the arch");
+            let words: Vec<String> = matches
+                .get_many::<String>("query")
+                .map(|values| values.cloned().collect())
+                .unwrap_or_default();
+            llvm_config::run(&root, build_root, arch, &words)
+        }
         _ => unreachable!("clap requires a subcommand"),
     };
 
@@ -634,6 +648,32 @@ fn command() -> clap::Command {
                 .arg(clap::Arg::new("script").long("script").value_name("FILE").required(true))
                 .arg(clap::Arg::new("lld").long("lld").value_name("FILE").required(true))
                 .arg(cc_args()),
+        )
+        .subcommand(
+            clap::Command::new("llvm-config")
+                .about("Answer llvm-config queries for the minix LLVM cross-build, on the host")
+                .arg(
+                    clap::Arg::new("build-root")
+                        .long("build-root")
+                        .value_name("DIR")
+                        .help("The LLVM build tree (default: target/llvm-<arch>/build)"),
+                )
+                .arg(
+                    clap::Arg::new("arch")
+                        .long("arch")
+                        .value_name("ARCH")
+                        .value_parser(["x86", "riscv64", "aarch64"])
+                        .default_value("x86")
+                        .help("Which arch's LLVM build tree to answer for"),
+                )
+                .arg(
+                    clap::Arg::new("query")
+                        .value_name("QUERY")
+                        .num_args(0..)
+                        .trailing_var_arg(true)
+                        .allow_hyphen_values(true)
+                        .help("llvm-config output flags, and the components a --libs query names"),
+                ),
         )
         .subcommand(
             clap::Command::new("image")

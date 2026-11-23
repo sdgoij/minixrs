@@ -66,6 +66,18 @@ fn llvm_targets(arch: &Arch) -> &'static str {
     }
 }
 
+/// The per-target MCA library the build has to produce, where the target has
+/// one. `rustc_llvm` links the arch component, and that component's dependency
+/// list names this library, so a build that stops at `clang` leaves rustc's
+/// link short an archive. AArch64 ships no such library.
+fn target_mca(arch: &Arch) -> Option<&'static str> {
+    match arch.name {
+        "x86" => Some("LLVMX86TargetMCA"),
+        "riscv64" => Some("LLVMRISCVTargetMCA"),
+        _ => None,
+    }
+}
+
 /// Where the cross build and its toolchain file live.
 pub fn out_dir(root: &Path, arch: &Arch) -> PathBuf {
     root.join("target").join(format!("llvm-{}", arch.name))
@@ -327,7 +339,15 @@ pub fn run(root: &Path, target: Option<&str>) -> io::Result<()> {
     // generator whose sources the guest compiles itself. Building it here also
     // produces `libLLVMTableGen.a` and the Basic object files, which the guest
     // link consumes.
-    for target in ["clang", "lld", "llvm-min-tblgen"] {
+    //
+    // `LLVMMCA` and the arch's `TargetMCA` are not pulled in by `clang`, but
+    // `rustc_llvm` links the arch component and its dependency list names both,
+    // so `build rustc` on the host needs them in this tree.
+    let mut targets = vec!["clang", "lld", "llvm-min-tblgen", "LLVMMCA"];
+    if let Some(mca) = target_mca(arch) {
+        targets.push(mca);
+    }
+    for target in targets {
         build_command.arg("--target").arg(target);
     }
     build_command.args(["--parallel", "16"]);
@@ -666,6 +686,13 @@ fn step(command: &mut Command, what: &str) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_target_mca_is_named_only_where_llvm_ships_one() {
+        assert_eq!(target_mca(&arch::X86_64), Some("LLVMX86TargetMCA"));
+        assert_eq!(target_mca(&arch::RISCV64), Some("LLVMRISCVTargetMCA"));
+        assert_eq!(target_mca(&arch::AARCH64), None);
+    }
 
     fn text() -> String {
         toolchain_text(
