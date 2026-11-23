@@ -71,7 +71,7 @@ jobs:
           done
 
       # The runner has cmake but no meson, and its apt meson is older than Mesa asks for.
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
 
