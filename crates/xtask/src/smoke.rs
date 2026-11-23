@@ -199,6 +199,7 @@ impl Driver<'_> {
         if !self.wait_prompt(0) {
             return Verdict::NoPrompt;
         }
+        self.settle();
         if steps.is_empty() {
             return Verdict::NoSteps;
         }
@@ -211,6 +212,28 @@ impl Driver<'_> {
             }
         }
         Verdict::Passed(steps.len())
+    }
+
+    /// Let the boot output finish before typing.
+    ///
+    /// The shell prints its first prompt before the session and the panel have
+    /// printed their own startup lines. Those lines can then arrive while a step is
+    /// being typed or its answer printed, interleaving two lines character by
+    /// character; a step matches a whole line, so a slow boot loses the step. Wait,
+    /// bounded, until the transcript stops growing so the first write lands on a
+    /// quiet console.
+    fn settle(&mut self) {
+        let quiet = Duration::from_millis(150);
+        let bound = Instant::now() + Duration::from_secs(5);
+        let mut last = self.guest.transcript_len();
+        loop {
+            thread::sleep(quiet);
+            let now = self.guest.transcript_len();
+            if now == last || Instant::now() >= bound {
+                return;
+            }
+            last = now;
+        }
     }
 
     fn step(&mut self, step: &Step) -> Result<(), String> {
@@ -481,13 +504,33 @@ fn window(out: &[u8], from: usize) -> &[u8] {
 /// window: the shell can still be writing that prompt's terminator when the
 /// step starts, and a blank line from it satisfies a `^$` expectation before
 /// the command has run.
+///
+/// The anchor is the last occurrence of `sent` that ends its line, not the last
+/// occurrence overall. A command whose output contains its own name
+/// (`ttytimeout: PASS`) would otherwise anchor after that output line, and the
+/// expectation could never match.
 fn output_window<'a>(out: &'a [u8], from: usize, sent: &str) -> &'a [u8] {
     let rest = window(out, from);
-    match rest
-        .windows(sent.len())
-        .rposition(|window| window == sent.as_bytes())
-    {
-        Some(at) => &rest[at + sent.len()..],
+    if sent.is_empty() {
+        return rest;
+    }
+    let needle = sent.as_bytes();
+    let mut found = None;
+    for (at, window) in rest.windows(needle.len()).enumerate() {
+        if window != needle {
+            continue;
+        }
+        let after = &rest[at + needle.len()..];
+        let tail = match after.iter().position(|&byte| byte == b'\n') {
+            Some(end) => &after[..end],
+            None => after,
+        };
+        if tail.iter().all(|&byte| byte == b'\r') {
+            found = Some(at + needle.len());
+        }
+    }
+    match found {
+        Some(at) => &rest[at..],
         None => rest,
     }
 }
@@ -509,6 +552,16 @@ fn last_lines(text: &[u8], count: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_answer_window_starts_at_the_echo_not_the_output() {
+        let transcript = b"# ttytimeout\r\nttytimeout: PASS\r\n# ";
+        let re = compile("^ttytimeout: PASS[[:space:]]*$").unwrap();
+        assert!(
+            line_matches(output_window(transcript, 0, "ttytimeout"), &re),
+            "the output line names the command, so it is not the echo"
+        );
+    }
 
     #[test]
     fn a_line_is_submitted_only_after_its_newline() {
