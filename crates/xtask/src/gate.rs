@@ -1017,6 +1017,7 @@ fn table() -> Vec<Gate> {
             ALL,
             Seconds::Fixed(300),
             Layout {
+                gpu_only: true,
                 monitor_none: true,
                 display_none: true,
                 ..EMBEDDED_256
@@ -2139,6 +2140,18 @@ mod tests {
         assert!(!words.contains(&"virtio-tablet-pci,display=fb0".to_string()));
         assert!(words.contains(&"virtio-gpu-pci".to_string()));
         assert!(words.iter().any(|word| word.contains("server=on,wait=off")));
+    }
+
+    #[test]
+    fn wlfull_on_x86_makes_the_virtio_gpu_the_output() {
+        let gate = find("wlfull").unwrap();
+        let arch = arch::resolve("x86").unwrap();
+        let layout = gate.layout_for(arch);
+        assert!(layout.gpu_only, "wlfull must not put a bochs display on x86");
+        let words = command_words(&standard_command(Path::new("root"), arch, layout, true));
+        assert!(words.contains(&"virtio-gpu-pci".to_string()));
+        assert!(!words.contains(&"bochs-display,id=fb0".to_string()));
+        assert!(!words.contains(&"virtio-tablet-pci,display=fb0".to_string()));
     }
 
     #[test]
