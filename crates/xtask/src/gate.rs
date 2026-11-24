@@ -877,6 +877,17 @@ fn table() -> Vec<Gate> {
             "toolchain: the guest's clang compiled and the guest's lld linked hello.c, and it ran ({arch})",
         ),
         g(
+            "rustc",
+            X86_ONLY,
+            Seconds::Fixed(3600),
+            Layout {
+                memory: "2048M",
+                ..SYSTEM_256
+            },
+            smoke_paced("tools/smoke/rustc.tsv", Pace::Fixed("0.01"), &[]),
+            "rustc: the guest's rustc compiled and linked a Rust program, and it ran ({arch})",
+        ),
+        g(
             "tblgen",
             X86_ONLY,
             Seconds::Fixed(5400),
@@ -1170,6 +1181,10 @@ fn with_prepare(mut gate: Gate) -> Gate {
         "interactive-bash" => &[Prepare::Arch("build-bash"), Prepare::Arch("system-image")],
         "toolchain" | "tblgen" => &[
             Prepare::Exact("toolchain-root-x86"),
+            Prepare::Arch("system-image"),
+        ],
+        "rustc" => &[
+            Prepare::Exact("rustc-root-x86"),
             Prepare::Arch("system-image"),
         ],
         "wlfull" => &[Prepare::Arch("prepare-wlfull")],

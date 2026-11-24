@@ -22,6 +22,16 @@ exclude = [
     # it would shadow nothing (`[patch]` is the only way it is consumed) and
     # would build the wrong thing into this workspace's lockfile.
     "crates/errno",
+    # The same pattern for ecosystem crates that have no minix arm and are used
+    # by the in-guest compiler: each directory documents the gap its upstream
+    # release cannot cross.
+    "crates/ctrlc",
+    "crates/jobserver",
+    "crates/libloading",
+    # The in-guest rustc. It has its own workspace because it is built with the
+    # fork's stage1 compiler and `rustc_private`, and it carries the
+    # `[patch.crates-io]` table the four crates above are consumed through.
+    "crates/rustc-minix",
 ]
 
 members = [

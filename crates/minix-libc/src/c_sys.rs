@@ -9,6 +9,8 @@
 //! the LLVM code paths that call them.
 
 use core::ffi::{c_char, c_int, c_long, c_uint, c_ulong, c_ushort, c_void};
+#[cfg(target_os = "minix")]
+use core::sync::atomic::{AtomicPtr, Ordering};
 
 use crate::c_time::TimeT;
 
@@ -1804,12 +1806,78 @@ pub struct DlInfo {
     dli_saddr: *mut c_void,
 }
 
-/// Resolve an address to a symbol. Minix has no dynamic symbol table, so
-/// this reports "not found" (LLVM's GetMainExecutable falls back to "").
+/// The main executable's path, published once by [`exe_path`].
+#[cfg(target_os = "minix")]
+static EXE_PATH: AtomicPtr<u8> = AtomicPtr::new(core::ptr::null_mut());
+/// Where `EXE_PATH` points. Written once by the thread that wins the fill, and
+/// never again, so a published pointer stays valid for the process.
+#[cfg(target_os = "minix")]
+static mut EXE_PATH_BUF: [u8; 256] = [0; 256];
+/// The value `EXE_PATH` holds while its winner is still filling the buffer.
+#[cfg(target_os = "minix")]
+const EXE_PATH_FILLING: *mut u8 = 1 as *mut u8;
+
+/// The path `execve` was given, from `/proc/self/exe`.
+///
+/// Filled at most once: a second caller either spins while the first is reading
+/// or takes the published pointer. A failed read leaves the slot empty so a
+/// later call can try again, which is why the null value is reused for
+/// "unstarted".
+#[cfg(target_os = "minix")]
+fn exe_path() -> *const c_char {
+    loop {
+        match EXE_PATH.compare_exchange(
+            core::ptr::null_mut(),
+            EXE_PATH_FILLING,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        ) {
+            Ok(_) => break,
+            Err(EXE_PATH_FILLING) => core::hint::spin_loop(),
+            Err(ready) => return ready.cast(),
+        }
+    }
+
+    let buf = (&raw mut EXE_PATH_BUF).cast::<u8>();
+    // SAFETY: `buf` is the 256-byte static array and the size passed is one
+    // less than it, which leaves room for the terminator below.
+    let n = unsafe { readlink(b"/proc/self/exe\0".as_ptr().cast(), buf.cast(), 255) };
+    if n <= 0 {
+        EXE_PATH.store(core::ptr::null_mut(), Ordering::Release);
+        return core::ptr::null();
+    }
+    // SAFETY: `readlink` wrote `n` bytes at the start of the array and `n` is at
+    // most 255, so the last byte is in bounds.
+    unsafe { *buf.add(n as usize) = 0 };
+    EXE_PATH.store(buf, Ordering::Release);
+    buf.cast()
+}
+
+/// Resolve an address to the object containing it.
+///
+/// A statically linked image has one object, so a live address answers with the
+/// main executable's path and no symbol name. The loader keeps no per-object
+/// symbol table, so an address in a shared object answers the same way; that is
+/// the honest answer for a program with no dynamic symbol table.
 #[cfg(target_os = "minix")]
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn dladdr(_addr: *mut c_void, _info: *mut DlInfo) -> c_int {
-    0
+pub unsafe extern "C" fn dladdr(_addr: *mut c_void, info: *mut DlInfo) -> c_int {
+    if info.is_null() {
+        return 0;
+    }
+    let path = exe_path();
+    if path.is_null() {
+        return 0;
+    }
+    // SAFETY: `info` was checked for null and `path` is a static buffer that
+    // lives for the process.
+    unsafe {
+        (*info).dli_fname = path;
+        (*info).dli_fbase = core::ptr::null_mut();
+        (*info).dli_sname = core::ptr::null();
+        (*info).dli_saddr = core::ptr::null_mut();
+    }
+    1
 }
 
 // ---- sys/utsname.h ----

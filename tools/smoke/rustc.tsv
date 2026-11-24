@@ -1,0 +1,29 @@
+# The in-guest Rust compiler (`rustc-root-x86` builds it, `just bootstrap` gave
+# it a sysroot). Driven by `cargo xtask gate rustc`, on the disk image whose root
+# is the same staged tree the C toolchain lives in.
+#
+# `/usr/bin/rustc` finds its sysroot in `<exe>/../..`, so `/usr/lib/rustlib/
+# <triple>/lib` is where the rlibs were staged and no `--sysroot` is needed; that
+# path comes from `dladdr`, which `minix-libc` answers from `/proc/self/exe`. The
+# host triple compiled into the binary is the target triple, so a bare `rustc`
+# already targets x86_64-pc-minix.
+#
+# `threadprobe` runs first because the compiler builds its session on a spawned
+# thread: a thread-local block, an 8 MiB stack, heap allocation and a directory
+# walk of the sysroot are what the compiler needs before it prints anything, and
+# `threadtest` covers only `minix_rt::thread_create` itself.
+#
+# Three things are named on the compile line on purpose:
+#   * `-C linker=/usr/bin/ld.lld`: the lld the toolchain gate already proved;
+#   * `-T/usr/lib/minix-user.ld`: the image bases the spec's `--defsym` flags
+#     expect, which a build script normally passes;
+#   * `/usr/lib/libminix-libc.rlib`: `std`'s backtrace names `_Unwind_Backtrace`,
+#     whose port stub is in the C library, and no Rust crate imports it.
+# A `wc -c` follows the compile because an empty expectation also matches the
+# blank line the console prints, so a compile that failed with diagnostics would
+# otherwise still read as "ok".
+/usr/bin/threadprobe	^probe: ok$
+/usr/bin/rustc --version	^rustc [0-9]+\.[0-9]+\.[0-9]+.*
+/usr/bin/rustc -C linker=/usr/bin/ld.lld -C link-arg=-T/usr/lib/minix-user.ld -C link-arg=/usr/lib/libminix-libc.rlib -o /tmp/hello-rs /usr/src/hello.rs	^$
+/bin/coreutils wc -c /tmp/hello-rs	^ *[0-9]+ /tmp/hello-rs$
+/tmp/hello-rs	^hello from Rust$

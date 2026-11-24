@@ -1,0 +1,15 @@
+# A stand-in for the `ctrlc` crate, which has no minix arm: its unix backend is
+# built on `nix`, whose per-platform signal and errno tables have no minix arm.
+# Projects that pull it in point `[patch.crates-io]` here.
+#
+# The version is upstream's so it satisfies the requirement its consumer
+# declares (`^3.4.4` from `rustc_driver_impl`). `publish` is off: a
+# name-shadowing package must never reach a registry.
+[package]
+name = "ctrlc"
+version = "3.5.1"
+edition = "2024"
+rust-version = "1.96"
+license = "GPL2.0"
+description = "The minix Ctrl-C policy, as a stand-in for the ctrlc crate"
+publish = false

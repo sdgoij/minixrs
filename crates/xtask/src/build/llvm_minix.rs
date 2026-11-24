@@ -230,7 +230,14 @@ pub fn cmake_args(root: &Path, arch: &Arch, host_tools: &Path) -> Vec<String> {
         "-DHAVE_CXX_ATOMICS64_WITHOUT_LIB=1".to_string(),
         "-DLLVM_HAS_ATOMICS=1".to_string(),
         "-DLLVM_ENABLE_LIBCXX=ON".to_string(),
-        "-DLLVM_ENABLE_THREADS=OFF".to_string(),
+        // rustc refuses a codegen backend whose LLVM reports itself as
+        // single-threaded: `llvm_util::init` calls `bug!("LLVM compiled without
+        // support for threads")`, which is an ICE, so every session dies before
+        // it prints anything. libc++ is already configured with the pthread API
+        // (`LIBCXX_HAS_PTHREAD_API=ON`) and the C library's allocator is
+        // serialised, so the port can answer this correctly instead of
+        // pretending.
+        "-DLLVM_ENABLE_THREADS=ON".to_string(),
         "-DLLVM_ENABLE_EH=OFF".to_string(),
         "-DLLVM_ENABLE_RTTI=OFF".to_string(),
         "-DLLVM_ENABLE_PIC=OFF".to_string(),
@@ -350,7 +357,15 @@ pub fn run(root: &Path, target: Option<&str>) -> io::Result<()> {
     for target in targets {
         build_command.arg("--target").arg(target);
     }
-    build_command.args(["--parallel", "16"]);
+    // LLVM's build is memory-hungry (one compiler per core, each parsing the
+    // library's precompiled header), and 16 at once exhausted this host's commit
+    // limit. `CARGO_BUILD_JOBS` is already the tree's knob for how many compilers
+    // may run at once, so it bounds this build too; the default stays 16.
+    let jobs = std::env::var("CARGO_BUILD_JOBS")
+        .ok()
+        .filter(|jobs| !jobs.is_empty())
+        .unwrap_or_else(|| "16".to_string());
+    build_command.args(["--parallel", &jobs]);
     step(&mut build_command, "building clang and lld")?;
 
     let driver = build.join("bin").join("clang");
@@ -751,7 +766,7 @@ mod tests {
         let args = cmake_args(Path::new("repo"), &arch::X86_64, Path::new("host/bin"));
         for option in [
             "-DCMAKE_CROSSCOMPILING=ON",
-            "-DLLVM_ENABLE_THREADS=OFF",
+            "-DLLVM_ENABLE_THREADS=ON",
             "-DLLVM_ENABLE_EH=OFF",
             "-DLLVM_ENABLE_RTTI=OFF",
             "-DHAVE_CXX_ATOMICS_WITHOUT_LIB=1",

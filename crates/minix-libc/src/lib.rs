@@ -282,10 +282,73 @@ fn align_up(n: usize, a: usize) -> usize {
     (n + a - 1) & !(a - 1)
 }
 
+/// Serializes the heap metadata.
+///
+/// The first-fit walk, the block headers and `HEAP_START`/`HEAP_END` are shared
+/// by every thread in the process. Two threads inside the allocator at once
+/// would walk the same free list, read one block as free twice, and hand the
+/// same memory out twice. A futex makes the waiter sleep rather than spin: on
+/// this single-CPU target a spinning waiter would keep the holder from
+/// finishing.
+#[cfg(target_os = "minix")]
+struct HeapLock {
+    locked: core::sync::atomic::AtomicU32,
+}
+
+#[cfg(target_os = "minix")]
+impl HeapLock {
+    const fn new() -> Self {
+        Self {
+            locked: core::sync::atomic::AtomicU32::new(0),
+        }
+    }
+
+    fn lock(&self) {
+        while self
+            .locked
+            .swap(1, core::sync::atomic::Ordering::Acquire)
+            != 0
+        {
+            // SAFETY: `locked` is a `u32` in this process's address space, and
+            // the address stays valid because it is a static.
+            unsafe { minix_rt::futex_wait(core::ptr::addr_of!(self.locked).cast::<u32>(), 1) };
+        }
+    }
+
+    fn unlock(&self) {
+        self.locked
+            .store(0, core::sync::atomic::Ordering::Release);
+        // SAFETY: as in `lock`.
+        minix_rt::futex_wake(core::ptr::addr_of!(self.locked).cast::<u32>(), 1);
+    }
+}
+
+#[cfg(target_os = "minix")]
+static HEAP_LOCK: HeapLock = HeapLock::new();
+
+/// Releases `HEAP_LOCK` when an allocator entry point returns.
+#[cfg(target_os = "minix")]
+struct HeapGuard;
+
+#[cfg(target_os = "minix")]
+impl Drop for HeapGuard {
+    fn drop(&mut self) {
+        HEAP_LOCK.unlock();
+    }
+}
+
 /// `malloc(size)`: allocate `size` bytes, 16-byte aligned.
 #[cfg(target_os = "minix")]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn malloc(size: usize) -> *mut c_void {
+    HEAP_LOCK.lock();
+    let _guard = HeapGuard;
+    unsafe { heap_alloc(size) }
+}
+
+/// The body of `malloc`. The caller holds `HEAP_LOCK`.
+#[cfg(target_os = "minix")]
+unsafe fn heap_alloc(size: usize) -> *mut c_void {
     let need = align_up(size.max(1), ALIGN) + HDR;
     unsafe {
         let heap = HEAP_START;
@@ -362,6 +425,14 @@ pub unsafe extern "C" fn free(ptr: *mut c_void) {
     if ptr.is_null() {
         return;
     }
+    HEAP_LOCK.lock();
+    let _guard = HeapGuard;
+    unsafe { heap_free(ptr) }
+}
+
+/// The body of `free`. The caller holds `HEAP_LOCK`.
+#[cfg(target_os = "minix")]
+unsafe fn heap_free(ptr: *mut c_void) {
     unsafe {
         let block = ptr as usize - HDR;
         let mut sz = hdr_size(block as *mut u8);
@@ -393,7 +464,9 @@ pub unsafe extern "C" fn free(ptr: *mut c_void) {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn calloc(nmemb: usize, size: usize) -> *mut c_void {
     let total = nmemb.saturating_mul(size);
-    let p = unsafe { malloc(total) };
+    HEAP_LOCK.lock();
+    let _guard = HeapGuard;
+    let p = unsafe { heap_alloc(total) };
     // A block `malloc` just carved from a fresh break extension is already
     // zero, so the zero pass is skipped for it; a block reused from the free
     // list holds the previous owner's bytes and still has to be cleared.
@@ -412,6 +485,8 @@ pub unsafe extern "C" fn realloc(ptr: *mut c_void, size: usize) -> *mut c_void {
     if ptr.is_null() {
         return unsafe { malloc(size) };
     }
+    HEAP_LOCK.lock();
+    let _guard = HeapGuard;
     unsafe {
         // The size is in the block header, HDR bytes below the pointer handed
         // out — not at the pointer itself, which is the caller's first byte.
@@ -424,10 +499,10 @@ pub unsafe extern "C" fn realloc(ptr: *mut c_void, size: usize) -> *mut c_void {
         if size <= old {
             return ptr;
         }
-        let np = malloc(size);
+        let np = heap_alloc(size);
         if !np.is_null() {
             core::ptr::copy_nonoverlapping(ptr as *const u8, np as *mut u8, old);
-            free(ptr);
+            heap_free(ptr);
         }
         np
     }

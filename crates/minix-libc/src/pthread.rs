@@ -8,9 +8,10 @@
 //! sets up the thread's TLS block (per-thread errno) before calling the user
 //! routine.
 //!
-//! Not thread-safe by design: the C heap (`malloc`) is a single-threaded
-//! first-fit allocator; concurrent allocation from several threads needs the
-//! Stage-A allocator work (see THREADS.md "Related work").
+//! The C heap serialises its metadata with a futex (`HeapLock` in `lib.rs`), so a
+//! running thread may allocate; `pthread_create` itself still does its
+//! allocations on the calling thread, so the handles cannot be freed by a worker
+//! before the thread has started.
 
 use core::ffi::{c_char, c_int, c_long, c_uint, c_void};
 use core::mem::size_of;
@@ -56,10 +57,9 @@ static CURRENT_PTHREAD: core::cell::Cell<*mut Pthread> =
 /// user routine, store its return value for `pthread_join`, and exit the
 /// thread.
 ///
-/// The C heap is single-threaded and owned by the main thread: worker
-/// threads must not `malloc`/`sbrk`/`free` here. The [`PthreadStart`]
-/// handle (56 bytes) and the detached [`Pthread`] leak per thread —
-/// reclaimed by the Stage-A allocator work (THREADS.md).
+/// The C heap serialises its metadata, so a worker may allocate once it is
+/// running. The [`PthreadStart`] handle (56 bytes) and the detached [`Pthread`]
+/// leak per thread, reclaimed by the Stage-A allocator work (THREADS.md).
 unsafe extern "C" fn pthread_trampoline(data: usize) -> ! {
     unsafe {
         let start = &mut *(data as *mut PthreadStart);
@@ -74,10 +74,104 @@ unsafe extern "C" fn pthread_trampoline(data: usize) -> ! {
     }
 }
 
+/// The C `pthread_attr_t` from `tools/c-include/pthread.h`; the two definitions
+/// have to agree byte for byte.
+#[repr(C)]
+pub struct PthreadAttr {
+    stacksize: usize,
+    detachstate: c_int,
+    reserved: c_int,
+}
+
+/// Smallest stack `pthread_attr_setstacksize` accepts.
+const PTHREAD_STACK_MIN: usize = 16 * 1024;
+
+const PTHREAD_CREATE_DETACHED: c_int = 1;
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn pthread_attr_init(attr: *mut PthreadAttr) -> c_int {
+    if attr.is_null() {
+        return fail(EINVAL);
+    }
+    unsafe {
+        core::ptr::write(
+            attr,
+            PthreadAttr {
+                stacksize: 0,
+                detachstate: 0,
+                reserved: 0,
+            },
+        )
+    };
+    0
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn pthread_attr_destroy(_attr: *mut PthreadAttr) -> c_int {
+    // The attributes hold no resources: `pthread_create` copies what it needs.
+    0
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn pthread_attr_setstacksize(
+    attr: *mut PthreadAttr,
+    stacksize: usize,
+) -> c_int {
+    if attr.is_null() {
+        return fail(EINVAL);
+    }
+    if stacksize < PTHREAD_STACK_MIN {
+        return fail(EINVAL);
+    }
+    unsafe { (*attr).stacksize = stacksize };
+    0
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn pthread_attr_getstacksize(
+    attr: *const PthreadAttr,
+    stacksize: *mut usize,
+) -> c_int {
+    if attr.is_null() || stacksize.is_null() {
+        return fail(EINVAL);
+    }
+    unsafe {
+        *stacksize = match (*attr).stacksize {
+            0 => PTHREAD_STACK_SIZE,
+            size => size,
+        }
+    };
+    0
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn pthread_attr_setdetachstate(
+    attr: *mut PthreadAttr,
+    detachstate: c_int,
+) -> c_int {
+    if attr.is_null() || !(0..=PTHREAD_CREATE_DETACHED).contains(&detachstate) {
+        return fail(EINVAL);
+    }
+    unsafe { (*attr).detachstate = detachstate };
+    0
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn pthread_attr_getdetachstate(
+    attr: *const PthreadAttr,
+    detachstate: *mut c_int,
+) -> c_int {
+    if attr.is_null() || detachstate.is_null() {
+        return fail(EINVAL);
+    }
+    unsafe { *detachstate = (*attr).detachstate };
+    0
+}
+
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn pthread_create(
     thread: *mut usize,
-    _attr: *const c_void,
+    attr: *const PthreadAttr,
     start_routine: unsafe extern "C" fn(*mut c_void) -> *mut c_void,
     arg: *mut c_void,
 ) -> c_int {
@@ -85,13 +179,21 @@ pub unsafe extern "C" fn pthread_create(
         if thread.is_null() || start_routine as usize == 0 {
             return fail(EINVAL);
         }
+        let attr = attr.as_ref();
+        // 0 is "the default", so a caller that never touched the attributes gets
+        // the stack size this port has always used.
+        let stack_size = match attr {
+            Some(attr) if attr.stacksize != 0 => attr.stacksize,
+            _ => PTHREAD_STACK_SIZE,
+        };
+        let detached = matches!(attr, Some(attr) if attr.detachstate == PTHREAD_CREATE_DETACHED);
         let pth = super::malloc(size_of::<Pthread>()) as *mut Pthread;
         if pth.is_null() {
             return fail(ENOMEM);
         }
         (*pth).tid = 0;
         (*pth).retval = core::ptr::null_mut();
-        (*pth).detached = 0;
+        (*pth).detached = detached as i32;
 
         let start = super::malloc(size_of::<PthreadStart>()) as *mut PthreadStart;
         if start.is_null() {
@@ -105,12 +207,12 @@ pub unsafe extern "C" fn pthread_create(
         // single-threaded; the trampoline only installs the thread pointer).
         (*start).tp = super::tls_block_alloc();
 
-        // Thread stacks come from the C heap (main-thread-only, so the
-        // single-threaded allocator is safe). An sbrk'd stack would sit
-        // inside the heap's break range, and a later `malloc` grow would
-        // allocate into it — clobbering the stack and any handles stored
-        // there. The stack block is intentionally never freed.
-        let stack = super::malloc(PTHREAD_STACK_SIZE);
+        // Thread stacks come from the C heap (the allocator serialises its
+        // metadata, and this runs on the caller's thread). An sbrk'd stack would
+        // sit inside the heap's break range, and a later `malloc` grow would
+        // allocate into it, clobbering the stack and any handles stored there.
+        // The stack block is intentionally never freed.
+        let stack = super::malloc(stack_size);
         if stack.is_null() {
             super::free(start as *mut c_void);
             super::free(pth as *mut c_void);
@@ -118,9 +220,9 @@ pub unsafe extern "C" fn pthread_create(
         }
         let base = stack as usize;
         #[cfg(target_arch = "x86_64")]
-        let stack_top = ((base + PTHREAD_STACK_SIZE) & !0xF) - 8;
+        let stack_top = ((base + stack_size) & !0xF) - 8;
         #[cfg(not(target_arch = "x86_64"))]
-        let stack_top = (base + PTHREAD_STACK_SIZE) & !0xF;
+        let stack_top = (base + stack_size) & !0xF;
 
         let entry: usize = pthread_trampoline as unsafe extern "C" fn(usize) -> ! as usize;
         let tid = minix_rt::thread_create(entry, stack_top, start as usize);

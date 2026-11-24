@@ -1,0 +1,48 @@
+# The in-guest rustc. Its own workspace: it is built with the fork's stage1
+# compiler and the `rustc_private` feature, and the `[patch]` entries below are
+# what make the compiler's dependency graph buildable for minix. Keeping them
+# here leaves `rust/` untouched.
+[workspace]
+members = ["."]
+resolver = "3"
+
+[package]
+name = "rustc-minix"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[[bin]]
+name = "rustc"
+path = "src/main.rs"
+
+[dependencies]
+# Kept so `rustc_codegen_ssa` is in this build graph, as in `rustc-main`: an
+# out-of-tree codegen backend may use it and it is not pulled in otherwise.
+rustc_codegen_ssa = { path = "../../rust/compiler/rustc_codegen_ssa" }
+rustc_driver_impl = { path = "../../rust/compiler/rustc_driver_impl" }
+
+# The C library the C++ runtime and the LLVM wrapper call into is Rust in the
+# port, not a separate archive: `malloc`, `write`, `dlopen`, `__cxa_atexit` and
+# the rest are `minix-libc`'s exported wrappers. A std userland binary names it
+# the same way (`crates/xtask/src/build/std_hello.rs`).
+minix-libc = { path = "../minix-libc" }
+
+# `rand` reaches this graph through several compiler crates, and minix has no
+# `getrandom` backend, so the binary registers a custom one.
+getrandom = "=0.3.3"
+
+[features]
+# tidy-alphabetical-start
+llvm = ['rustc_driver_impl/llvm']
+# tidy-alphabetical-end
+
+[patch.crates-io]
+# The port's own crates, as everywhere else in this tree.
+libc = { path = "../../libc" }
+rustix = { path = "../../rustix" }
+# Stand-ins for crates whose published releases cannot be built for minix.
+# `crates/<name>/` documents each gap.
+jobserver = { path = "../jobserver" }
+libloading = { path = "../libloading" }
+ctrlc = { path = "../ctrlc" }

@@ -172,6 +172,32 @@ are arch-specific, `[env]` is tooling/platform, not kernel.
 
 89. **A long in-guest compile sequence leaves the next file access hung (found 2026-11-22).** In one boot, the guest compiled all fourteen `llvm-min-tblgen` translation units and linked the binary (`link-ok`, 3,005,376 bytes). The next step, `/tmp/llvm-min-tblgen -print-records`, never returned and consumed the whole scenario budget. The binary is not the cause: its `--version` answers on a fresh boot, and a host-linked binary built from the same sources and archives runs the same probe on a fresh boot. `hangdump` after ten of the compiles showed the compiler child runnable at different instructions (`TypeVisibilityAttr`, `minix_std::fs::close`, `CFGBuilder`) and twice in `RTS_PAGEFAULT`, so it was advancing, not spinning. `memstat` drops 40.6 MiB on the first compile (the file-page cache warming), then about 2.2 MiB per compile; `regions` stays flat at 41 pages / 87. At 512 MiB the sequence thrashed in `TargetFeaturesEmitter.cpp`; 1 GiB reached the thirteenth unit; 2 GiB completes the compiles and the link. The working hypothesis is item 83's residual risk: the cache fills with pages a mapping still references, so a later large file access cannot be admitted. Not fixed. `just test-tblgen-x86` therefore runs the binary in a second boot, and `tools/smoke/tblgen-run.tsv` says so. (`crates/servers/src/vm/cache.rs`, `.notes/toolchain_in_os.md`, `tools/smoke/tblgen-*`)
 
+90. **A Rust program's `_start` never runs C++ static constructors (found 2026-11-24).** A C++
+    object file's global initialisers live in `.init_array`. `tools/crt0-<arch>.S` walks that
+    array for a C program, but a Rust binary has no `crt0`: `std`'s minix `_start`
+    (`rust/library/std/src/sys/pal/minix/mod.rs`) goes straight to `minix_start` and never reads
+    it. Every `cl::opt` LLVM registers from such a constructor was therefore missing, and
+    `llvm_util::configure_llvm`'s four arguments (`-generate-arange-section`,
+    `-mergefunc-use-aliases`, `-preserve-alignment-assumptions-during-inlining`,
+    `-import-cold-multiplier`) were rejected with "Unknown command line argument", which exits
+    the compiler before a session exists. The `rustc` binary works around it in its own entry
+    point (`crates/rustc-minix/src/main.rs`, `run_static_constructors`); the proper home is the
+    same walk inside the PAL's `_start`, beside `init_tls`, so any Rust program that links C++
+    with constructors works. `tools/minix-user.ld` already defines both bounds.
+    (`rust/library/std/src/sys/pal/minix/`, `crates/rustc-minix/src/main.rs`)
+
+91. **lld's parallel link does not finish in-guest (found 2026-11-24).** The same link that
+    completes in seconds with `--threads=1` never returns with lld's own default, so the thread
+    pool it creates deadlocks. The thread count is 1 (`sysconf(_SC_NPROCESSORS_ONLN)` answers 1,
+    `crates/minix-libc/src/c_sys.rs`), so the pool is entered even with a single worker. The
+    workaround sits in the target spec rather than in the scenario:
+    `rust/compiler/rustc_target/src/spec/base/minix.rs` passes `--threads=1` as `post_link_args`,
+    so every in-guest link takes the sequential path. The C++ toolchain links through `clang++`
+    (`tools/clang-wrapper.c`) and does not set the flag; this is only proven for the `rustc`
+    path. Not fixed: the pool's barrier/condition-variable use has to be compared against
+    `minix-libc`'s futex condvar (`crates/minix-libc/src/pthread.rs`).
+    (`.notes/toolchain_in_os.md`, `tools/smoke/rustc.tsv`)
+
 ---
 
 ## RISC-V (`[riscv]`)
@@ -3138,6 +3164,28 @@ from resolving, is under `# Resolved issues`.
 87. **~~MFS's in-core inode table was too small for an in-guest compiler~~**: FIXED (2026-11-22). `NR_INODES` was 512, sized for a boot workload. An in-guest `clang++` of LLVM's FileCheck keeps every included header's inode alive for diagnostics and exhausted the table; `get_free_inode` answered `ENFILE`, which surfaced first as a header "not found" and then as a failed open of the output file. The table is now 2048 with a 256-bucket hash, costing about 240 KiB of MFS BSS, and the offsets in `mfs_global_layout_offsets` moved with it. (`crates/fs/src/mfs/consts.rs`, `crates/fs/src/mfs/glo.rs`, `.notes/toolchain_in_os.md`)
 
 88. **~~`assert` in a C++ translation unit did not link~~**: FIXED (2026-11-22). `tools/c-include/assert.h` declared `__assert_fail` with three arguments and no C linkage. libc++'s `<cassert>` includes that header from C++, so the call was mangled to `_Z11__assert_failPKcS0_i`, while `libc.a` exports the glibc-shaped four-argument `__assert_fail`; the FileCheck link stopped with an undefined three-argument symbol. The declaration is now `extern "C"` and takes `__func__`, matching the export. `cargo xtask check headers` compares names only, so it did not catch the mismatch. (`tools/c-include/assert.h`)
+
+93. **~~`libc::stat` was 24 bytes smaller than the C `struct stat`~~**: FIXED (2026-11-24).
+    `tools/c-include/sys/stat.h` ends with three `struct timespec` members, so the struct is 112
+    bytes, and `minix-libc`'s `fill_c_stat` writes all 112. The `libc` crate declared the same tail
+    as three bare `i64`s, making its `stat` 88 bytes, so **every** Rust caller that handed one to
+    `stat`/`lstat`/`statat` had 24 bytes written past the end of its buffer. The overflow was
+    latent for as long as it landed on padding; the in-guest `rustc` work changed `minix-libc`
+    enough to move the layout, and on riscv64 the clobbered slot was `safe_traversal`'s `DirFd`, so
+    `coreutils chmod -R` reported `fchmodat` failures against a descriptor that was no longer the
+    directory's (a closed fd, or reused as 0). `libc::stat` now carries `st_atime_nsec` /
+    `st_mtime_nsec` / `st_ctime_nsec`, matching the header at 112 bytes and offsets 64/80/96, and
+    `libc/src/minix/fs.rs`'s layout test asserts all four numbers. (`libc/src/minix/fs.rs`,
+    `crates/minix-libc/src/lib.rs`)
+
+94. **~~The riscv64 embedded test filesystem had no headroom~~**: FIXED (2026-11-24).
+    `boot-image::minixfs` defaults to `DEFAULT_BLOCKS = 4096` (16 MiB at `BLOCK_SIZE` 4096), and
+    `build-aarch64` overrides it to 8192 while `build-riscv64` was the one arch left at the
+    default. Once `minix-libc` grew (the heap lock, the pthread attributes, `dladdr`) the riscv64
+    userland filled the 16 MiB, and the tail of `tools/smoke/coreutils-minix.tsv` failed on a full
+    disk: `cp`/`install` reported `Input/output error`, `df -h /` showed `16M 16M 0 100%`, and the
+    `chroot` step after it had no binary to exec. `build-riscv64` now passes
+    `MINIXFS_BLOCKS=8192` like aarch64. (`Justfile`, `crates/boot-image/src/minixfs.rs`)
 
 ---
 

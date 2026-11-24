@@ -1,10 +1,10 @@
 /* pthreads for the minix libc — 1:1 kernel threads (THREADS.md Slice 3).
  * pthread_t is an opaque handle; pthread_self() returns 0 on the main
- * thread. The C heap is not thread-safe yet — threads should not malloc
- * concurrently. */
+ * thread. The C heap serialises its metadata, so threads may allocate. */
 #ifndef _PTHREAD_H
 #define _PTHREAD_H
 
+#include <stddef.h>
 #include <time.h>
 
 #ifdef __cplusplus
@@ -12,7 +12,18 @@ extern "C" {
 #endif
 
 typedef unsigned long pthread_t;
-typedef struct pthread_attr_t { int __x; } pthread_attr_t;
+
+/* A `stacksize` of 0 means the default (256 KiB). `pthread_create` honours the
+ * size the caller asked for; the layout must match `PthreadAttr` in
+ * `crates/minix-libc/src/pthread.rs`. */
+typedef struct pthread_attr_t {
+    unsigned long stacksize;
+    int detachstate;
+    int __reserved;
+} pthread_attr_t;
+#define PTHREAD_STACK_MIN 16384
+#define PTHREAD_CREATE_JOINABLE 0
+#define PTHREAD_CREATE_DETACHED 1
 
 typedef struct pthread_mutexattr_t { int type; } pthread_mutexattr_t;
 #define PTHREAD_MUTEX_NORMAL 0
@@ -38,6 +49,12 @@ typedef int pthread_once_t;
 
 int pthread_create(pthread_t *thread, const pthread_attr_t *attr,
                    void *(*start_routine)(void *), void *arg);
+int pthread_attr_init(pthread_attr_t *attr);
+int pthread_attr_destroy(pthread_attr_t *attr);
+int pthread_attr_setstacksize(pthread_attr_t *attr, size_t stacksize);
+int pthread_attr_getstacksize(const pthread_attr_t *attr, size_t *stacksize);
+int pthread_attr_setdetachstate(pthread_attr_t *attr, int detachstate);
+int pthread_attr_getdetachstate(const pthread_attr_t *attr, int *detachstate);
 int pthread_join(pthread_t thread, void **retval);
 void pthread_exit(void *retval);
 pthread_t pthread_self(void);

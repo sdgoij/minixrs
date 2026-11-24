@@ -1,0 +1,17 @@
+# A stand-in for the `jobserver` crate, which has no minix arm: its `cfg(unix)`
+# backend speaks the GNU make protocol over a pipe whose ends are inherited by
+# children, and the minix PAL can neither hand a spawned `Command` an extra
+# descriptor nor run `pre_exec`. Projects that pull it in point
+# `[patch.crates-io]` here.
+#
+# The version is upstream's so it satisfies the requirement its consumer
+# declares (`^0.1.28` from `rustc_data_structures`). `publish` is off: a
+# name-shadowing package must never reach a registry.
+[package]
+name = "jobserver"
+version = "0.1.34"
+edition = "2024"
+rust-version = "1.96"
+license = "GPL2.0"
+description = "The minix jobserver, as a stand-in for the jobserver crate"
+publish = false

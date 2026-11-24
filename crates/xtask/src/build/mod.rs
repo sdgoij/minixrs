@@ -16,6 +16,7 @@ pub mod llvm_host;
 pub mod llvm_minix;
 pub mod mesa;
 pub mod mesa_tree;
+pub mod rustc_minix;
 pub mod std_hello;
 
 use std::fs;

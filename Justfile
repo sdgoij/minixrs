@@ -243,9 +243,17 @@ boot-image-x86: userland-x86 coreutils-x86 dynlib-x86
 #
 # The staged toolchain root follows the same rule as `/bin/bash`: include it if
 # the artifact is there, say so and skip it if not. `toolchain-root-x86` is the
-# explicit builder (`just llvm-minix x86`), not a dependency of this recipe. The
-# 250 MiB root needs 98304 blocks and 16384 inodes, so the image is 384 MiB when
-# it is included and the release-sized image otherwise.
+# explicit builder (`just llvm-minix x86`), not a dependency of this recipe; add
+# `rustc-root-x86` to that root and it also carries the in-guest rustc. The root
+# with the C/C++ toolchain needs 98304 blocks and 16384 inodes; with rustc it is
+# about 610 MiB, so the image is 768 MiB when it is included and the
+# release-sized image otherwise.
+# The in-guest Rust compiler: `crates/rustc-minix` cross-built and staged into
+# the toolchain root with the target's sysroot. Additive to `toolchain-root-x86`,
+# which the gate prepares first.
+rustc-root-x86: toolchain-root-x86
+    @cargo xtask build rustc-minix x86
+
 toolchain-root-x86:
     @just llvm-minix x86
 
@@ -253,7 +261,7 @@ system-image-x86: boot-image-x86
     extras=""; if [ -f target/bash/x86/bash ]; then extras=/bin/bash=target/bash/x86/bash; else echo "system-image: no /bin/bash (run 'just build-bash x86' to include it)"; fi; \
     if [ -d target/toolchain/x86/root ]; then \
         echo "system-image: including the toolchain"; \
-        MINIXFS_ROOT=target/toolchain/x86/root MINIXFS_EXTRA="${extras}${MINIXFS_EXTRA:+;$MINIXFS_EXTRA}" MINIXFS_BLOCKS="${MINIXFS_BLOCKS:-98304}" MINIXFS_INODES="${MINIXFS_INODES:-16384}" cargo run -q -p boot-image --bin mkminixfs --release -- x86_64; \
+        MINIXFS_ROOT=target/toolchain/x86/root MINIXFS_EXTRA="${extras}${MINIXFS_EXTRA:+;$MINIXFS_EXTRA}" MINIXFS_BLOCKS="${MINIXFS_BLOCKS:-196608}" MINIXFS_INODES="${MINIXFS_INODES:-16384}" cargo run -q -p boot-image --bin mkminixfs --release -- x86_64; \
     else \
         echo "system-image: no toolchain root (run 'just llvm-minix x86' to include it)"; \
         MINIXFS_EXTRA="${extras}${MINIXFS_EXTRA:+;$MINIXFS_EXTRA}" MINIXFS_BLOCKS="${MINIXFS_BLOCKS:-8192}" cargo run -q -p boot-image --bin mkminixfs --release -- x86_64; \
@@ -289,7 +297,7 @@ system-image target="x86":
     @just system-image-{{target}}
 
 build-riscv64: userland-riscv64 coreutils-riscv64 dynlib-riscv64
-    RUSTC="{{stage1-rustc}}" cargo build -p kernel-boot --bin kernel-boot-riscv64 --target riscv64gc-unknown-minix --features embed_initramfs,embed_minixfs,riscv64 --release
+    MINIXFS_BLOCKS="${MINIXFS_BLOCKS:-8192}" RUSTC="{{stage1-rustc}}" cargo build -p kernel-boot --bin kernel-boot-riscv64 --target riscv64gc-unknown-minix --features embed_initramfs,embed_minixfs,riscv64 --release
 
 build-aarch64: userland-aarch64 coreutils-aarch64 dynlib-aarch64
     MINIXFS_BLOCKS="${MINIXFS_BLOCKS:-8192}" RUSTC="{{stage1-rustc}}" cargo build -p kernel-boot --bin kernel-boot-aarch64 --target aarch64-unknown-minix --features embed_initramfs,embed_minixfs,aarch64 --release

@@ -478,6 +478,19 @@ pub unsafe fn sys_hang_dump_handler(_caller: *mut crate::proc::Proc, _args: &[u6
             if rts & RtsFlags::SLOT_FREE.bits() == 0 && rts & RtsFlags::SIGNALED.bits() != 0 {
                 puts(b" SIGNALED");
             }
+            // A thread parked in PAGEFAULT is waiting for VM to resolve a fault.
+            // The address and error code say what VM was asked for, which is the
+            // difference between a fault it cannot satisfy (a livelock) and one
+            // still in flight.
+            if rts & RtsFlags::PAGEFAULT.bits() != 0 {
+                let slot = (*rp).group().as_ref().map_or(0, |main| main.p_nr as usize);
+                if let Some((addr, code)) = crate::vm::pf_info_read(slot) {
+                    puts(b" pf=");
+                    put_hex64(addr);
+                    puts(b" perr=");
+                    put_hex(code as i32);
+                }
+            }
             puts(b" rip=");
             put_hex64(frame_rip(rp));
             puts(b" rsp=");

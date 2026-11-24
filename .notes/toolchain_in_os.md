@@ -130,7 +130,9 @@ One CMake configure per arch, against `rust/src/llvm-project/llvm`, with
   `tools/c-include`, libc++ headers, `-fno-stack-protector`, `-fPIC`).
 - `LLVM_DEFAULT_TARGET_TRIPLE` = the arch's LLVM triple (`x86_64-unknown-none`),
   so the guest's clang needs no `--target` for its own programs.
-- `LLVM_ENABLE_THREADS=OFF` (the port's C heap is not thread-safe),
+- `LLVM_ENABLE_THREADS=ON` (the port's heap is futex-locked and `std` threads work:
+  `/usr/bin/threadprobe` is the gate; `KNOWN_ISSUES` item 91 records that lld's own
+  thread pool still deadlocks, so its links are pinned to `--threads=1`),
   `LLVM_ENABLE_EH=OFF`, `LLVM_ENABLE_RTTI=OFF`, `LLVM_ENABLE_ZLIB=OFF`,
   `LLVM_ENABLE_ZSTD=OFF`, `LLVM_ENABLE_TERMINFO=OFF`,
   `LLVM_ENABLE_LIBXML2=OFF`, `LLVM_ENABLE_LIBEDIT=OFF`, `BUILD_SHARED_LIBS=OFF`,
@@ -366,6 +368,59 @@ Gate: `/usr/bin/rustc --version` in the guest, `rustc /usr/src/hello.rs`, and
 the program runs. Then a bootstrap: `x.py` with that binary as stage0,
 `--host x86_64-pc-minix`.
 
+#### Phase 5 progress: the compiler compiles in the guest (2026-11-24)
+
+The gate passes: `/usr/bin/rustc --version`, `threadprobe` (a `std` program whose
+worker thread builds a TLS block and walks the sysroot), a full compile and link
+of `/usr/src/hello.rs`, and running the result, which prints `hello from Rust`
+(`cargo xtask gate rustc --arch x86`). `rustc` is a static ELF built from
+`crates/rustc-minix`, its own workspace, so `rust/` carries no scaffolding for
+it; the C++ backend is the statically selected `LlvmCodegenBackend`.
+
+What each blocker turned out to be, because three of the five looked like
+something else:
+
+- **The compiler hung while reading the sysroot.** `fs_getdents` in MFS had a
+  `while` and a `for` where a `break` on a full reply buffer re-read the same
+  block forever, so a directory with more entries than one 1024-byte reply holds
+  (the sysroot has ~50 rlibs) never finished. `crates/fs/src/mfs/protect.rs`.
+- **Four LLVM options were "unknown", including ones the binary clearly
+  contains.** The first theory was that the archive members registering them were
+  dropped by the static link, so `crates/xtask` extracted `DwarfDebug.cpp.o`,
+  `MergeFunctions.cpp.o`, `FunctionImport.cpp.o` and `InlineFunction.cpp.o` and
+  linked them again. That was wrong and harmful: the archives already provide all
+  four (both copies were visible in `.init_array`), and registering a `cl::opt`
+  twice makes LLVM's `CommandLineParser::addOption` call `report_fatal_error`. The
+  real cause was that no C++ static constructor ran at all (item 90);
+  `crates/rustc-minix/src/main.rs` now walks `.init_array` before the driver
+  starts. The extraction is gone.
+- **`Result::unwrap()` on `JoinPathsError` at `linker.rs:135`.** std's minix arm
+  in `library/std/src/sys/paths/mod.rs` took `split_paths`/`join_paths` from
+  `unsupported.rs`, whose `join_paths` always returns `Err`, so setting the
+  linker's `PATH` panicked every compile. Both are now implemented in
+  `sys/pal/minix/path.rs` with the POSIX `:` separator, next to that PAL's
+  `chdir`/`getcwd`/`temp_dir`.
+- **Undefined `<*const ()>::is_aligned_to` and `Range<usize>` iterator
+  instantiations.** The staged `/usr/lib/libminix-libc.rlib` was the archive from
+  the `rustc-minix` build graph (debug profile), while the fixture binaries link
+  the release one. `std_hello::libc_rlib` already documents why the two cannot be
+  mixed: the debug archive names generics it expects `core` to have codegen'd, and
+  the sysroot's `libcore.rlib` exports none of them. `stage()` now stages the same
+  release archive the probes use.
+- **The link never returned.** lld with its own default thread pool deadlocks;
+  `--threads=1` links the identical input in seconds. Pinned in the target spec's
+  `post_link_args` (item 91).
+
+Two smaller things: `libc/src/minix/dlfcn.rs` used `#[derive(Clone, Copy)]`
+without the crate prelude, which builds under `no_std` but not under the
+`#![no_core]` form `rustc-dep-of-std` selects, so `x.py` could not rebuild `std`
+until it imported `crate::prelude::*` (that prelude is where `derive` comes from
+in `no_core`); and `KNOWN_ISSUES` item 86's `dladdr` note is what makes
+`Dl_info` necessary at all.
+
+Next: use the in-guest compiler as stage0 for an `x.py` bootstrap with
+`--host x86_64-pc-minix`.
+
 ## 5. Constraints and traps
 
 - **Not the embedded root.** `RAMDISK_IMAGE_SIZE` is 16 MiB. A toolchain image
@@ -387,14 +442,16 @@ the program runs. Then a bootstrap: `x.py` with that binary as stage0,
   tools first.
 - **Tablegen version.** Host `llvm-tblgen` must be LLVM 23, the source in
   `rust/src/llvm-project`. The system LLVM 22's tablegen is not a substitute.
-- **No exceptions, no RTTI, no threads.** LLVM's build options and the libc++
-  runtime already agree on this. A library that assumes otherwise will fail at
-  link, not at compile.
+- **No exceptions, no RTTI.** LLVM's build options and the libc++ runtime
+  already agree on this. A library that assumes otherwise will fail at link,
+  not at compile.
 - **`posix_spawn` is absent.** If LLVM's configure detects it, the guest's clang
   can spawn the linker. Check the configure answer rather than adding a stub:
   `fork`/`execvp`/`waitpid` exist and are the fallback.
-- **`sched_getaffinity` is absent**, which is fine with `LLVM_ENABLE_THREADS=OFF`
-  but is a feature test to read, not to guess.
+- **`sched_getaffinity` is absent**, which is a feature test to read, not to
+  guess: `sysconf(_SC_NPROCESSORS_ONLN)` answers 1 (`crates/minix-libc/src/c_sys.rs`),
+  and lld's thread pool deadlocks in-guest anyway, so the port's links are pinned
+  to `--threads=1` (`KNOWN_ISSUES.md` item 91).
 - **Do not ship a `libLLVM.so`.** Static archives keep the image smaller and the
   loader out of the compiler's start-up.
 - **A toolchain boot is not a release artifact.** `just image <arch>` stays the

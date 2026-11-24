@@ -220,6 +220,7 @@ pub fn fs_getdents() -> i32 {
             let data = (*bp).data_ptr as *const Direct;
             let offset_in_block = (pos - block_start) as usize;
             let start_entry = offset_in_block / DIR_ENTRY_SIZE;
+            let mut full = false;
 
             for i in start_entry..entries_per_block {
                 let entry = &*data.add(i);
@@ -242,6 +243,13 @@ pub fn fs_getdents() -> i32 {
                 let reclen = ((raw_size + 3) & !3) as u16;
 
                 if buf_offset + reclen as usize > max_buf {
+                    // This entry does not fit in what is left of the reply. Stop
+                    // the walk here rather than retrying it: `pos` already names
+                    // it, so the next call resumes at this entry. Retrying used
+                    // to re-read the same block with the same full buffer and
+                    // break again, never advancing, so a directory with more
+                    // entries than one reply holds hung the reader.
+                    full = true;
                     break;
                 }
 
@@ -266,6 +274,9 @@ pub fn fs_getdents() -> i32 {
 
             lmfs_put_block(bp, DIRECTORY_BLOCK);
 
+            if full {
+                break;
+            }
             if pos >= dir_size || (pos / block_size) != block_num {
                 continue;
             }

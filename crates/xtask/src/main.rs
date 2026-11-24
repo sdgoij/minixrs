@@ -188,6 +188,7 @@ fn run_build(root: &Path, matches: &clap::ArgMatches) -> io::Result<bool> {
         Some(("llvm-minix", matches)) => {
             build::llvm_minix::run(root, target(matches)).map(|()| true)
         }
+        Some(("rustc-minix", matches)) => build::rustc_minix::run(root, target(matches)),
         Some(("mesa", matches)) => build::mesa_tree::run(
             root,
             &build::mesa_tree::Options {
@@ -559,6 +560,11 @@ fn command() -> clap::Command {
                 .subcommand(
                     clap::Command::new("llvm-minix")
                         .about("Cross-build clang and lld for a minix target and stage the toolchain root")
+                        .arg(target_arg("x86")),
+                )
+                .subcommand(
+                    clap::Command::new("rustc-minix")
+                        .about("Cross-build the in-guest rustc and stage it into the toolchain root")
                         .arg(target_arg("x86")),
                 )
                 .subcommand(
