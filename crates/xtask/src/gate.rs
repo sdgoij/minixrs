@@ -794,6 +794,18 @@ fn table() -> Vec<Gate> {
             "gui: a quad and a line of text from the in-house renderer, presented through the compositor, and read back from /dev/fb ({arch})",
         ),
         g(
+            "doom",
+            X86_ONLY,
+            Seconds::Fixed(180),
+            SYSTEM_256,
+            smoke_paced(
+                "tools/smoke/doom.tsv",
+                Pace::Fixed("0.02"),
+                &["doom: PASS"],
+            ),
+            "doom: the shareware IWAD runs, the first frame's pixels are read back out of /dev/fb ({arch})",
+        ),
+        g(
             "gbmtest",
             X86_ONLY,
             Seconds::Fixed(120),
@@ -1174,6 +1186,7 @@ fn with_prepare(mut gate: Gate) -> Gate {
         "gltriangle-virgl" => &[Prepare::Exact("prepare-gltriangle-virgl-x86")],
         "wlgl" => &[Prepare::Exact("prepare-wlgl-x86")],
         "gui" => &[Prepare::Exact("prepare-gui-x86")],
+        "doom" => &[Prepare::Exact("prepare-doom-x86")],
         "gbmtest" => &[Prepare::Exact("prepare-gbmtest-x86")],
         "wldmabufgl" => &[Prepare::Exact("prepare-wldmabufgl-x86")],
         "wlcompose" => &[Prepare::Exact("prepare-wlcompose-x86")],

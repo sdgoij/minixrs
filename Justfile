@@ -315,6 +315,15 @@ run target="x86" memory="256M":
 run-x86 memory: boot-image-x86 system-image-x86
     qemu-system-x86_64 -nographic -m {{memory}} -no-reboot -vga none -device bochs-display,id=fb0 -kernel target/boot-kernel-trampoline.elf -device loader,file=target/boot-kernel.bin,addr=0x200000 -drive if=none,id=disk0,file=target/images/x86_64-pc-minix/disk.img,format=raw,cache=writethrough -device virtio-blk-pci,disable-legacy=on,drive=disk0 -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0 -device virtio-tablet-pci,display=fb0
 
+# Play Doom: boot `prepare-doom-x86`'s image in an SDL window, with the shell on
+# stdio, so the terminal that types into the guest is the console Doom reads.
+# Its own recipe because `run` and `desktop` rebuild the system image and would
+# overwrite the disk this boots.
+#
+# Type `/bin/doom` at the prompt.
+run-doom-x86: prepare-doom-x86
+    qemu-system-x86_64 -display sdl -serial stdio -m 256M -no-reboot -vga none -device bochs-display,id=fb0 -kernel target/images/x86_64-pc-minix/minix-x86-boot.elf -drive if=none,id=disk0,file=target/images/x86_64-pc-minix/disk.img,format=raw,cache=writethrough -device virtio-blk-pci,disable-legacy=on,drive=disk0 -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0 -device virtio-tablet-pci,display=fb0
+
 run-riscv64 memory: boot-image-riscv64 system-image-riscv64
     qemu-system-riscv64 -machine virt -m {{memory}} -nographic -global virtio-mmio.force-legacy=off -drive if=none,id=disk0,file=target/images/riscv64gc-unknown-minix/disk.img,format=raw,cache=writethrough -device virtio-blk-device,drive=disk0 -netdev user,id=net0 -device virtio-net-device,netdev=net0 -device virtio-gpu-device -device virtio-keyboard-device -kernel target/boot-kernel-riscv64.elf
 
@@ -447,6 +456,17 @@ gui-x86: userland-x86 dynlib-x86
     @test -f target/mesa/x86/lib/libEGL.so.1 || (echo 'gui: no Mesa DSOs — run `just build-mesa x86 --build` first' >&2; exit 1)
     cargo xtask build gui x86
     @echo "gui: /bin/gui built and the Mesa DSOs staged (x86_64)"
+
+# doom: build /bin/doom from the pinned doomgeneric tree, the engine plus
+# `tools/doom/doomgeneric_minix.c`, linked against libc.a like `c-direct`.
+# `cargo xtask build doom` fetches the engine and the shareware IWAD, checked
+# against `tools/pins.ini`.
+#
+# The gate boots it and waits for the platform layer's read-back (`doom: PASS`).
+doom-x86:
+    @just libc-static x86
+    cargo xtask build doom x86
+    @echo "doom: /bin/doom built (x86_64)"
 
 # gbmtest: build /bin/gbmtest, the GBM create/export probe (§6.10 stage 3d-b-3). It links
 # `libgbm` and `libdrm` and includes the GBM/libdrm headers from the source checkouts, so it
@@ -838,6 +858,10 @@ prepare-wlgl-x86: wlgl-x86 boot-image-x86
 
 prepare-gui-x86: gui-x86 boot-image-x86
     M=target/mesa/x86; E="/lib/libdrm.so.2=$M/lib/libdrm.so.2;/lib/libEGL.so.1=$M/lib/libEGL.so.1;/lib/libgbm.so.1=$M/lib/libgbm.so.1;/lib/libexpat.so.1=$M/lib/libexpat.so.1;/lib/libgallium-25.3.6.so=$M/lib/libgallium-25.3.6.so;/lib/libGLESv2.so.2=$M/lib/libGLESv2.so.2;/lib/libz.so.1=$M/lib/libz.so.1;/lib/swrast_dri.so=$M/lib/swrast_dri.so;/bin/gui=$M/bin/gui"; MINIXFS_EXTRA="$E" MINIXFS_BLOCKS=16384 cargo run -q -p boot-image --bin mkminixfs --release -- x86_64
+    @just mkfs-x86
+
+prepare-doom-x86: doom-x86 boot-image-x86
+    MINIXFS_EXTRA='/bin/doom=target/x86_64-pc-minix/release/doom;/usr/share/games/doom/doom1.wad=target/doom-data/doom1.wad' MINIXFS_BLOCKS=16384 cargo run -q -p boot-image --bin mkminixfs --release -- x86_64
     @just mkfs-x86
 
 prepare-gbmtest-x86: gbmtest-x86 boot-image-x86

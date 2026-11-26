@@ -118,7 +118,7 @@ fn main() -> ExitCode {
             ),
             (
                 "MINIXFS_EXTRA",
-                &["/bin/", "/sbin/", "/etc/", "/lib/", "/libexec/"][..],
+                &["/bin/", "/sbin/", "/etc/", "/lib/", "/libexec/", "/usr/"][..],
             ),
         ] {
             let Ok(list) = std::env::var(var) else {

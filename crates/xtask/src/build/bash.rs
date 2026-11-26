@@ -32,6 +32,8 @@ use crate::cc;
 use crate::pin;
 use crate::toolchain;
 
+use super::{git_output, have_commit, run_git};
+
 const SRC: &str = "target/bash-src";
 /// Two configure knobs a *static* libc makes necessary, both of which upstream
 /// never sees because a shared libc interposes instead (`.notes/c_build.md` has
@@ -273,46 +275,6 @@ fn fetch_source(root: &Path, force: bool) -> io::Result<String> {
     }
     println!("[bash] source at {describe} ({}), {}", &commit[..12], src.display());
     Ok(commit)
-}
-
-/// git with the line-ending config a bash checkout needs: a Windows checkout
-/// with autocrlf writes `configure` with CRLF, and `/bin/sh^M` is not a shell.
-const GIT_CONFIG: [&str; 4] = ["-c", "core.autocrlf=false", "-c", "core.eol=lf"];
-
-fn git(args: &[String]) -> Command {
-    let mut command = Command::new("git");
-    command.args(GIT_CONFIG).args(args);
-    command
-}
-
-fn run_git(args: &[String]) -> io::Result<bool> {
-    cc::run(&mut git(args))
-}
-
-fn git_output(args: &[String]) -> io::Result<String> {
-    let output = git(args).output()?;
-    if !output.status.success() {
-        return Err(io::Error::other(format!(
-            "git {} failed: {}",
-            args.join(" "),
-            String::from_utf8_lossy(&output.stderr).trim()
-        )));
-    }
-    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
-}
-
-fn have_commit(src: &Path, commit: &str) -> io::Result<bool> {
-    Ok(git(&[
-        "-C".to_string(),
-        src.to_string_lossy().into_owned(),
-        "rev-parse".to_string(),
-        "--verify".to_string(),
-        "--quiet".to_string(),
-        format!("{commit}^{{commit}}"),
-    ])
-    .output()?
-    .status
-    .success())
 }
 
 /// Set a file's time slightly ahead of now, so make does not regenerate it.

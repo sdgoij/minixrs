@@ -1,0 +1,19 @@
+# The `doom` gate's scenario: /bin/doom, with the shareware IWAD installed at
+# /usr/share/games/doom/doom1.wad (the directory the platform layer makes the
+# working directory, because doomgeneric is built without ORIGCODE and searches
+# only there).
+#
+# The marker is the platform layer's own verdict, not the engine's: once Doom
+# has rendered a frame with more than a handful of distinct pixels, the layer
+# reads one pixel back out of the /dev/fb mapping and compares it with the
+# source pixel it just wrote, then prints `doom: PASS`. A mapping that is not
+# the live framebuffer, a blank frame, or a blit that never ran all fail it.
+#
+# The engine is in its attract loop (title screen, then the demo episodes) and
+# would never return, so the step passes `-minix-exit`: the platform layer leaves
+# once its verdict is printed and the shell has a prompt again. The command is
+# typed paced, because a console that loses a byte in a long unpaced line turns
+# an argument into a different one.
+#
+#   FEED_SCENARIO=tools/smoke/doom.tsv cargo xtask smoke <log> <seconds> <qemu command…>
+/bin/doom -minix-exit	doom: PASS
