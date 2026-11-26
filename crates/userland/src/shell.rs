@@ -1700,8 +1700,11 @@ fn run_pipeline(commands: &[ParsedCommand]) -> i32 {
     }
     let mut last_status = 0i32;
     for &pid in &pids[..n] {
-        let s = minix_rt::waitpid_status(pid);
-        if s >= 0 {
+        // A negative wait status is a legitimate status (C's `w_exitcode`
+        // shifts the exit code, so `exit(-1)` is -256). Only a negative *pid*
+        // means the wait failed.
+        let (wpid, s) = minix_rt::waitpid(pid, 0);
+        if wpid >= 0 {
             last_status = s;
         }
     }
@@ -1832,8 +1835,8 @@ fn run_parsed_command(parsed: &ParsedCommand) -> i32 {
                 minix_rt::exit(status);
             }
             // Parent: wait.
-            let status = minix_rt::waitpid_status(pid);
-            if status < 0 {
+            let (wpid, status) = minix_rt::waitpid(pid, 0);
+            if wpid < 0 {
                 write_err(b"sh: waitpid failed\n");
                 1
             } else {
@@ -1944,8 +1947,8 @@ fn run_external(cmd: &str, args: &[&str]) -> i32 {
     }
 
     // Parent: wait.
-    let status = minix_rt::waitpid_status(pid);
-    if status < 0 {
+    let (wpid, status) = minix_rt::waitpid(pid, 0);
+    if wpid < 0 {
         write_err(b"sh: waitpid failed\n");
         1
     } else {
