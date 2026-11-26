@@ -331,6 +331,24 @@ from resolving, is under `# Resolved issues`.
 
 ---
 
+## Tooling / environment (`[env]`)
+
+95. **`-display sdl` with `-serial stdio` and the x86 tablet can wedge QEMU's main
+   loop during boot.** Measured on Windows with QEMU 11.0.50: 2 of 6 boots stop with
+   the guest's last serial line at `  scheduler starting...`, and from then on QMP
+   does not answer either (`query-status` times out), so the wedged thing is QEMU's
+   main loop, not the guest. The shape is `-display sdl -serial stdio` plus
+   `-device virtio-tablet-pci,display=fb0`; in the same session, the same command
+   with `-display gtk` booted 6 of 6, with SDL and no tablet 6 of 6, and
+   `-nographic` with the tablet 5 of 5. The recipes with that shape are
+   `just desktop-x86` (which needs the pointer) and `just run-doom-x86` (which no
+   longer has one: doomgeneric starts with `usemouse = 0`). Not attributed yet: the
+   SDL mouse grab that `display=fb0` enables and QEMU's stdio chardev on an MSYS pty
+   are both in the picture.
+   (`Justfile`, `run-doom-x86`, `desktop-x86`)
+
+---
+
 # Resolved issues
 
 ## Cross-arch (`[all]`)

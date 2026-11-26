@@ -80,7 +80,9 @@ guest echoes it whole.
 `just run-doom-x86` boots the image in an SDL window with the shell on stdio, so
 the same terminal that types `/bin/doom` is the console Doom reads. The recipe is
 separate from `just run` and `just desktop` because those rebuild the system
-image, which would overwrite the disk that carries `/bin/doom` and the IWAD.
+image, which would overwrite the disk that carries `/bin/doom` and the IWAD. It
+has no `virtio-tablet-pci`: doomgeneric starts with `usemouse = 0`, and that
+device with SDL on stdio wedges QEMU's main loop (`KNOWN_ISSUES` 95).
 
 ## 5. Limits
 

@@ -320,9 +320,12 @@ run-x86 memory: boot-image-x86 system-image-x86
 # Its own recipe because `run` and `desktop` rebuild the system image and would
 # overwrite the disk this boots.
 #
+# No `virtio-tablet-pci`: doomgeneric starts with `usemouse = 0`, and that device
+# with SDL on stdio wedges QEMU's main loop (KNOWN_ISSUES 95)
+#
 # Type `/bin/doom` at the prompt.
 run-doom-x86: prepare-doom-x86
-    qemu-system-x86_64 -display sdl -serial stdio -m 256M -no-reboot -vga none -device bochs-display,id=fb0 -kernel target/images/x86_64-pc-minix/minix-x86-boot.elf -drive if=none,id=disk0,file=target/images/x86_64-pc-minix/disk.img,format=raw,cache=writethrough -device virtio-blk-pci,disable-legacy=on,drive=disk0 -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0 -device virtio-tablet-pci,display=fb0
+    qemu-system-x86_64 -display sdl -serial stdio -m 256M -no-reboot -vga none -device bochs-display,id=fb0 -kernel target/images/x86_64-pc-minix/minix-x86-boot.elf -drive if=none,id=disk0,file=target/images/x86_64-pc-minix/disk.img,format=raw,cache=writethrough -device virtio-blk-pci,disable-legacy=on,drive=disk0 -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0
 
 run-riscv64 memory: boot-image-riscv64 system-image-riscv64
     qemu-system-riscv64 -machine virt -m {{memory}} -nographic -global virtio-mmio.force-legacy=off -drive if=none,id=disk0,file=target/images/riscv64gc-unknown-minix/disk.img,format=raw,cache=writethrough -device virtio-blk-device,drive=disk0 -netdev user,id=net0 -device virtio-net-device,netdev=net0 -device virtio-gpu-device -device virtio-keyboard-device -kernel target/boot-kernel-riscv64.elf
