@@ -355,30 +355,20 @@ pub unsafe fn last_dir(resolve: &Lookup, rfp: &Fproc) -> *mut Vnode {
         return null_mut();
     }
 
-    // Find the last '/' in the path.
-    let last_slash = path_buf[..path_len].iter().rposition(|&b| b == b'/');
-
-    // Determine the parent path length.
+    // Determine the parent path length and where its resolution starts.
     // For "/x": last_slash = Some(0), parent_len = 1 (just "/")
     // For "/tmp/x": last_slash = Some(4), parent_len = 4 ("/tmp")
     // For "x": last_slash = None, parent_len = 0 (cwd)
+    // For "./x" or "a/b": last_slash = Some(1), parent_len = 1 ("." or "a"),
+    // resolved from the working directory because the path is relative.
     // As in `eat_path`: no reference is taken on the start directory, because the
     // one the caller puts is the one `advance` returns (or the explicit one below,
     // where the start directory *is* the answer).
-    let (parent_len, start_dir) = match last_slash {
-        Some(pos) => {
-            if pos == 0 {
-                // Path like "/x" — parent is the root directory.
-                (1usize, rfp.fp_rdir) // parent_len = 1 ("/")
-            } else {
-                // Path like "/tmp/x" — parent is "/tmp".
-                (pos, rfp.fp_rdir)
-            }
-        }
-        None => {
-            // No slash — path is relative. Parent is cwd.
-            (0usize, rfp.fp_cdir)
-        }
+    let (parent_len, absolute) = parent_of(path_buf, path_len);
+    let start_dir = if absolute {
+        rfp.fp_rdir
+    } else {
+        rfp.fp_cdir
     };
 
     if start_dir.is_null() {
@@ -388,18 +378,35 @@ pub unsafe fn last_dir(resolve: &Lookup, rfp: &Fproc) -> *mut Vnode {
     // If the parent path is just "/" (root), return the root directory directly.
     // No need to do a lookup — the root vnode IS the parent, and it is being handed
     // back as the result, so the caller's put needs a reference of its own.
-    if parent_len == 0 || (parent_len == 1 && path_buf[0] == b'/') {
+    if parent_len == 0 || (absolute && parent_len == 1) {
         dup_vnode(start_dir);
         return start_dir;
     }
 
-    // For paths like "/tmp/x", we need to resolve "/tmp" from the root.
-    // We don't modify the original path; instead we just pass the truncated
-    // path length to advance.
+    // For paths like "/tmp/x", we need to resolve "/tmp" from the root, and for
+    // "./x" or "a/b" we resolve "." or "a" from the working directory. We don't
+    // modify the original path; instead we just pass the truncated path length to
+    // advance.
     let mut temp_resolve = *resolve;
     temp_resolve.l_path_len = parent_len;
 
     advance(start_dir, &temp_resolve, rfp)
+}
+
+/// Split `path[..len]` into the parent prefix and whether it is absolute.
+///
+/// C's `last_dir` resolves the prefix from the process root only when the path
+/// itself starts with '/'. A relative path with a slash (`"./x"`, `"a/b"`,
+/// `"../x"`) resolves from the working directory; treating it as rooted at '/'
+/// puts the entry in the root, which is where `mkdir("./.savegame/")` used to
+/// land. Pure so the split is testable without a vnode table.
+fn parent_of(path: &[u8], len: usize) -> (usize, bool) {
+    let absolute = len > 0 && path[0] == b'/';
+    match path[..len].iter().rposition(|&b| b == b'/') {
+        Some(0) => (1, absolute),
+        Some(pos) => (pos, absolute),
+        None => (0, false),
+    }
 }
 
 /// Ignore a path's trailing separators, as C's `last_dir` does with
@@ -451,6 +458,26 @@ mod tests {
         assert_eq!(cred.vu_ngroups, 2);
         assert!(cred.in_group(200));
         assert!(!cred.in_group(300));
+    }
+
+    #[test]
+    fn an_absolute_path_resolves_from_the_root() {
+        assert_eq!(parent_of(b"/x", 2), (1, true));
+        assert_eq!(parent_of(b"/tmp/x", 6), (4, true));
+        assert_eq!(parent_of(b"/", 1), (1, true));
+    }
+
+    #[test]
+    fn a_relative_path_with_a_slash_resolves_from_the_working_directory() {
+        assert_eq!(parent_of(b"./x", 3), (1, false));
+        assert_eq!(parent_of(b"a/b", 3), (1, false));
+        assert_eq!(parent_of(b"dir/sub/x", 9), (7, false));
+        assert_eq!(parent_of(b"../x", 4), (2, false));
+    }
+
+    #[test]
+    fn a_bare_name_is_the_working_directory() {
+        assert_eq!(parent_of(b"x", 1), (0, false));
     }
 
     #[test]
