@@ -225,11 +225,13 @@ jobs:
       # The split form: a small boot image and a full system image (coreutils, GNU bash
       # because the `bash` artifact above is in place, the pinned Doom because the
       # `doom` job's two artifacts are, and the seven Mesa DSOs because the
-      # `mesa-<arch>` artifact is). The DSOs are ~36 MiB, so `MINIXFS_BLOCKS` is raised from
-      # the recipe's 32 MiB default - the system image is the artifact the 16 MiB embedded
-      # window cannot hold. `180` is the runner's emulation speed, not a budget. The gate
-      # boots what it builds and drives the smoke scenario, so the release cannot ship a
-      # system image that was never booted.
+      # `mesa-<arch>` artifact is). The DSOs are ~36 MiB and Doom and its IWAD are
+      # another ~6 MiB, so `MINIXFS_BLOCKS` is 96 MiB: riscv64 outgrew the previous
+      # 64 MiB (its userland is the largest of the three) and the builder aborts the
+      # build rather than truncate. The system image is the artifact the 16 MiB
+      # embedded window cannot hold. `180` is the runner's emulation speed, not a
+      # budget. The gate boots what it builds and drives the smoke scenario, so the
+      # release cannot ship a system image that was never booted.
       - name: Build and boot the boot image and system image
         run: |
           set -euo pipefail
@@ -239,7 +241,7 @@ jobs:
           for so in target/mesa/${{ matrix.arch }}/lib/*; do
             extra="${extra};/lib/$(basename "$so")=$so"
           done
-          MINIXFS_EXTRA="${extra#;}" MINIXFS_BLOCKS=16384 \
+          MINIXFS_EXTRA="${extra#;}" MINIXFS_BLOCKS=24576 \
             cargo xtask gate system-image --arch ${{ matrix.arch }} --timeout 180
 
       # Named without the version: the publish job is the only place that knows
