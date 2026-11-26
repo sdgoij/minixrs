@@ -662,6 +662,11 @@ async function main() {
       store: disk,
       display,
       net: net.link,
+      // A session runs until the reader ends it, so there is no total syscall budget: that bound
+      // is how a check harness fails a guest that spins, and a game makes syscalls for as long as
+      // it is open. What keeps the tab responsive is the slice bound (`SLICE_SYSCALLS` per pump,
+      // one slice per animation frame) and the park, not a count over the whole session.
+      syscallBudget: Number.MAX_SAFE_INTEGER,
       sink: {
         write: (byte) => {
           terminal.write(byte);
