@@ -245,6 +245,32 @@ pub fn keycode_to_usage(code: u16) -> Option<u16> {
         108 => 0x51, // down
         105 => 0x50, // left
         106 => 0x4F, // right
+        // Escape, tab, the function keys (KEY_F1=59 .. KEY_F10=68, then
+        // KEY_F11=87 and KEY_F12=88 after the navigation block) and the
+        // navigation block itself. A menu key is Escape in most programs, so a
+        // table that stops at the arrows drops the one key a game or a terminal
+        // multiplexer needs; the PS/2 path never needed this table and so never
+        // showed the gap.
+        1 => 0x29,   // esc
+        15 => 0x2B,  // tab
+        59 => 0x3A,  // F1
+        60 => 0x3B,  // F2
+        61 => 0x3C,  // F3
+        62 => 0x3D,  // F4
+        63 => 0x3E,  // F5
+        64 => 0x3F,  // F6
+        65 => 0x40,  // F7
+        66 => 0x41,  // F8
+        67 => 0x42,  // F9
+        68 => 0x43,  // F10
+        87 => 0x44,  // F11
+        88 => 0x45,  // F12
+        110 => 0x49, // insert
+        102 => 0x4A, // home
+        104 => 0x4B, // page up
+        111 => 0x4C, // delete
+        107 => 0x4D, // end
+        109 => 0x4E, // page down
         _ => return None,
     };
     Some(usage)
@@ -315,9 +341,31 @@ mod tests {
     }
 
     #[test]
+    fn escape_tab_function_and_navigation_keys_map() {
+        // The keys a menu, a terminal multiplexer and a file dialog need: the
+        // table used to stop at the arrows, which dropped Escape before it
+        // could reach a virtio keyboard's reader.
+        assert_eq!(keycode_to_usage(1), Some(0x29)); // esc
+        assert_eq!(keycode_to_usage(15), Some(0x2B)); // tab
+        for (i, keycode) in (59..=68).enumerate() {
+            assert_eq!(keycode_to_usage(keycode), Some(0x3A + i as u16), "keycode {keycode}");
+        }
+        assert_eq!(keycode_to_usage(87), Some(0x44)); // F11
+        assert_eq!(keycode_to_usage(88), Some(0x45)); // F12
+        for (keycode, usage) in [
+            (110, 0x49), // insert
+            (102, 0x4A), // home
+            (104, 0x4B), // page up
+            (111, 0x4C), // delete
+            (107, 0x4D), // end
+            (109, 0x4E), // page down
+        ] {
+            assert_eq!(keycode_to_usage(keycode), Some(usage), "keycode {keycode}");
+        }
+    }
+
+    #[test]
     fn unmapped_keys_return_none() {
-        assert!(keycode_to_usage(1).is_none()); // esc
-        assert!(keycode_to_usage(15).is_none()); // tab
         assert!(keycode_to_usage(100).is_none()); // alt right
         assert!(keycode_to_usage(0xFFFF).is_none());
     }
