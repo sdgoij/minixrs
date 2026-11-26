@@ -123,11 +123,20 @@ pub struct ScanRange {
 }
 
 // IOCTL constants (from `sys/ioc_fb.h`)
-
-pub const FBIOGET_VSCREENINFO: u32 = 0x4600;
-pub const FBIOPUT_VSCREENINFO: u32 = 0x4601;
-pub const FBIOGET_FSCREENINFO: u32 = 0x4602;
-pub const FBIOPAN_DISPLAY: u32 = 0x4603;
+//
+// The low 16 bits keep the Linux numbering the port started from (`0x46xx`), and the high bits
+// carry the MINIX `_IOC` size and direction. Those bits are not decoration: a user process reaches
+// `/dev/fb` through `VFS_IOCTL`, and VFS builds the magic grant that carries the argument from the
+// size and direction in the request. A bare `0x4600` encodes size 0, so the argument never crossed
+// and `FBIOGET_VSCREENINFO` came back `EFAULT`; the size is `sizeof(FbVarScreeninfo)`, which has no
+// pointer-sized field and is therefore the same 96 bytes on every target.
+pub const FBIOGET_VSCREENINFO: u32 = 0x4060_4600;
+pub const FBIOPUT_VSCREENINFO: u32 = 0x8060_4601;
+/// `sizeof(FbFixScreeninfo)` is 80 on every target: the pointer-sized `mmio_len` shortens the
+/// fields after it by 4 bytes on wasm32 and the 8-byte alignment of `mmio_start` pads the same
+/// 4 back on, so the encoded size is one number.
+pub const FBIOGET_FSCREENINFO: u32 = 0x4050_4602;
+pub const FBIOPAN_DISPLAY: u32 = 0x8060_4603;
 /// Push the framebuffer to the display (no-op on VGA-style devices whose
 /// LFB is always scanned out; virtio-gpu needs an explicit RESOURCE_FLUSH).
 pub const FBIOFLUSH: u32 = 0x4604;
@@ -148,6 +157,30 @@ pub struct FbScanoutSrc {
     pub va: u64,
     pub len: u64,
 }
+
+/// Read one pixel of the visible surface: `x` and `y` in, the XRGB8888 value out.
+///
+/// `_IOWR('F', 6, FbPixel)`: both directions, so VFS grants the caller's buffer read and write.
+/// This is how a client proves a frame reached the live surface rather than a private copy — on an
+/// arch where `/dev/fb` cannot be `mmap`ed there is no pointer to compare through instead.
+pub const FBIOGET_PIXEL: u32 = 0xC00C_4606;
+
+/// Argument of [`FBIOGET_PIXEL`].
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct FbPixel {
+    pub x: u32,
+    pub y: u32,
+    pub value: u32,
+}
+
+// The sizes the four argument-carrying request numbers encode. A struct change that moved one of
+// them would make VFS grant the wrong number of bytes, and the copy would fail at run time in a
+// place that says nothing about the cause.
+const _: () = assert!(core::mem::size_of::<FbVarScreeninfo>() == 0x60);
+const _: () = assert!(core::mem::size_of::<FbFixScreeninfo>() == 0x50);
+const _: () = assert!(core::mem::size_of::<FbPixel>() == 0x0c);
+const _: () = assert!(core::mem::size_of::<FbScanoutSrc>() == 0x10);
 
 // Arch trait
 
@@ -1035,6 +1068,35 @@ impl Framebuffer {
                     unsafe { core::ptr::read(data.as_ptr() as *const FbVarScreeninfo) };
                 arch.pan_display(minor, &info)
             }
+            FBIOGET_PIXEL => {
+                let size = core::mem::size_of::<FbPixel>();
+                if data.len() < size {
+                    return Err(DriverError::Io);
+                }
+                let mut pixel: FbPixel =
+                    unsafe { core::ptr::read_unaligned(data.as_ptr() as *const FbPixel) };
+                let var = arch.var_screeninfo(minor)?;
+                if pixel.x >= var.xres || pixel.y >= var.yres {
+                    return Err(DriverError::InvalidArgument);
+                }
+                // The row stride is the mode's, not `xres * 4`: a backend whose scanout is padded
+                // would otherwise read a pixel from the next row.
+                let fix = arch.fix_screeninfo(minor)?;
+                let offset = pixel.y as u64 * fix.line_length as u64 + pixel.x as u64 * 4;
+                let mut bytes = [0u8; 4];
+                if self.read(minor, offset, &mut bytes, arch)? != 4 {
+                    return Err(DriverError::Io);
+                }
+                pixel.value = u32::from_le_bytes(bytes);
+                let out = unsafe {
+                    core::slice::from_raw_parts(
+                        &pixel as *const FbPixel as *const u8,
+                        core::mem::size_of::<FbPixel>(),
+                    )
+                };
+                data[..size].copy_from_slice(out);
+                Ok(())
+            }
             FBIOFLUSH => arch.flush(),
             _ => Err(DriverError::InvalidArgument),
         }
@@ -1062,10 +1124,31 @@ mod tests {
 
     #[test]
     fn test_ioctl_constants() {
-        assert_eq!(FBIOGET_VSCREENINFO, 0x4600);
-        assert_eq!(FBIOPUT_VSCREENINFO, 0x4601);
-        assert_eq!(FBIOGET_FSCREENINFO, 0x4602);
-        assert_eq!(FBIOPAN_DISPLAY, 0x4603);
+        // The low 16 bits are the request; the high bits are the MINIX `_IOC` size and direction,
+        // which VFS uses to build the argument grant.
+        assert_eq!(FBIOGET_VSCREENINFO & 0xffff, 0x4600);
+        assert_eq!(FBIOPUT_VSCREENINFO & 0xffff, 0x4601);
+        assert_eq!(FBIOGET_FSCREENINFO & 0xffff, 0x4602);
+        assert_eq!(FBIOPAN_DISPLAY & 0xffff, 0x4603);
+        assert_eq!(FBIOFLUSH, 0x4604);
+        assert_eq!(FBIOGET_PIXEL & 0xffff, 0x4606);
+        // The encoded size is what VFS grants, so it must be the struct's own.
+        assert_eq!(ioc_size(FBIOGET_VSCREENINFO), size_of::<FbVarScreeninfo>());
+        assert_eq!(ioc_size(FBIOPUT_VSCREENINFO), size_of::<FbVarScreeninfo>());
+        assert_eq!(ioc_size(FBIOGET_FSCREENINFO), size_of::<FbFixScreeninfo>());
+        assert_eq!(ioc_size(FBIOPAN_DISPLAY), size_of::<FbVarScreeninfo>());
+        assert_eq!(ioc_size(FBIOGET_PIXEL), size_of::<FbPixel>());
+        // `_IOR` for a GET and `_IOW` for a PUT/PAN; `_IOWR` for the pixel, which is both.
+        assert_eq!(FBIOGET_VSCREENINFO & 0xc000_0000, 0x4000_0000);
+        assert_eq!(FBIOPUT_VSCREENINFO & 0xc000_0000, 0x8000_0000);
+        assert_eq!(FBIOGET_FSCREENINFO & 0xc000_0000, 0x4000_0000);
+        assert_eq!(FBIOPAN_DISPLAY & 0xc000_0000, 0x8000_0000);
+        assert_eq!(FBIOGET_PIXEL & 0xc000_0000, 0xc000_0000);
+    }
+
+    /// The MINIX `_IOC` size field, as VFS's `net::ioc_size` reads it.
+    fn ioc_size(request: u32) -> usize {
+        ((request >> 16) & 0x1fff) as usize
     }
 
     #[test]
@@ -1181,6 +1264,42 @@ mod tests {
         );
         assert_eq!(arch.var.xres, 800);
         assert_eq!(arch.var.yres, 600);
+    }
+
+    /// `FBIOGET_PIXEL` reads the surface at the mode's stride, in the layout the pixels are
+    /// stored in, and hands the value back in the argument struct.
+    #[test]
+    fn test_ioctl_get_pixel_reads_the_surface() {
+        let mut fb = Framebuffer::new();
+        let mut arch = NullArch::new();
+        arch.var.xres = 4;
+        arch.var.yres = 2;
+        arch.fix.line_length = 16; // 4 pixels wide
+        assert!(fb.open(0, &mut arch).is_ok());
+        let at = 16 + 2 * 4; // row 1, column 2
+        arch.mem[at..at + 4].copy_from_slice(&0x0011_2233u32.to_le_bytes());
+
+        let mut data = [0u8; size_of::<FbPixel>()];
+        data[0..4].copy_from_slice(&2u32.to_le_bytes());
+        data[4..8].copy_from_slice(&1u32.to_le_bytes());
+        assert!(fb.ioctl(0, FBIOGET_PIXEL, &mut data, &mut arch).is_ok());
+        assert_eq!(
+            u32::from_le_bytes(data[8..12].try_into().unwrap()),
+            0x0011_2233
+        );
+    }
+
+    #[test]
+    fn test_ioctl_get_pixel_outside_the_mode_is_refused() {
+        let mut fb = Framebuffer::new();
+        let mut arch = NullArch::new();
+        arch.var.xres = 4;
+        arch.var.yres = 2;
+        arch.fix.line_length = 16;
+        let mut data = [0u8; size_of::<FbPixel>()];
+        data[0..4].copy_from_slice(&4u32.to_le_bytes());
+        data[4..8].copy_from_slice(&0u32.to_le_bytes());
+        assert!(fb.ioctl(0, FBIOGET_PIXEL, &mut data, &mut arch).is_err());
     }
 
     #[test]

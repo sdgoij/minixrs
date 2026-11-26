@@ -21,8 +21,8 @@ use drivers::video::fb::CanvasArch;
 #[cfg(not(target_arch = "wasm32"))]
 use drivers::video::fb::VirtioGpuArch;
 use drivers::video::fb::{
-    FBIO_SCANOUT_SRC, FBIOFLUSH, FBIOGET_FSCREENINFO, FBIOGET_VSCREENINFO, FBIOPAN_DISPLAY,
-    FBIOPUT_VSCREENINFO, FbArch, FbBackend, FbScanoutSrc, Framebuffer,
+    FBIO_SCANOUT_SRC, FBIOFLUSH, FBIOGET_FSCREENINFO, FBIOGET_PIXEL, FBIOGET_VSCREENINFO,
+    FBIOPAN_DISPLAY, FBIOPUT_VSCREENINFO, FbArch, FbBackend, FbPixel, FbScanoutSrc, Framebuffer,
 };
 // Only the scanout re-point path names a range, and that path has no wasm build.
 #[cfg(all(target_os = "minix", not(target_arch = "wasm32")))]
@@ -752,17 +752,6 @@ unsafe fn frame_write(
 ) -> i32 {
     let va = unsafe { msg.m_payload.m2.m2l1 as u64 };
     let count = unsafe { msg.m_payload.m2.m2l2 as usize };
-    let dev = match arch.device(0) {
-        Ok(dev) => dev,
-        Err(_) => return -6, // ENXIO
-    };
-    if count == 0 || count as u64 > dev.size {
-        return -22; // EINVAL
-    }
-    let dst = match arch.mem(0) {
-        Ok(mem) => mem,
-        Err(_) => return -6, // ENXIO
-    };
     // The caller is the process whose memory holds the frame — VFS names it in m2_i3 when it
     // forwards the request, and a client that calls the driver directly *is* the caller. Both
     // shapes are the same claim: copy from the process that owns the buffer.
@@ -771,8 +760,29 @@ unsafe fn frame_write(
     } else {
         who_e
     };
-    let r = minix_rt::sys_vircopy(src_ep, va, minix_rt::SELF, dst, count);
-    if r != 0 {
+    copy_into_surface(arch, src_ep, va, count)
+}
+
+/// Copy `count` bytes of `src_ep`'s memory at `va` into the framebuffer and return the count, or a
+/// negative errno.
+///
+/// This is the whole of "a frame reaches the device" on an arch with no device `mmap`: one copy
+/// into the surface the driver presents. The destination and its bound come from the *driver*
+/// (`device`), not from a constant here, because the surface is the fb server's own buffer and how
+/// much of it is a frame depends on the mode the host named.
+fn copy_into_surface(arch: &mut dyn FbArch, src_ep: i32, va: u64, count: usize) -> i32 {
+    let dev = match arch.device(0) {
+        Ok(dev) => dev,
+        Err(_) => return -6, // ENXIO
+    };
+    if count == 0 || count as u64 > dev.size {
+        return -22; // EINVAL: no frame, or one larger than the surface
+    }
+    let dst = match arch.mem(0) {
+        Ok(mem) => mem,
+        Err(_) => return -6, // ENXIO
+    };
+    if minix_rt::sys_vircopy(src_ep, va, minix_rt::SELF, dst, count) != 0 {
         return -14; // EFAULT
     }
     count as i32
@@ -887,8 +897,27 @@ fn vm_getphys(target: i32, va: u64) -> Option<u64> {
     if pa == 0 { None } else { Some(pa) }
 }
 
-/// wasm has no device scanout to re-point.
-#[cfg(not(all(target_os = "minix", not(target_arch = "wasm32"))))]
+/// wasm has no device scanout to re-point, so `FBIO_SCANOUT_SRC` is answered by copying the
+/// caller's buffer into the surface instead.
+///
+/// This is the same request and the same struct a hardware client sends, and the same meaning:
+/// "the frame is my buffer, present it". What differs is that there is no address translation to
+/// re-point a scanout with — the surface is the fb server's own memory — so the caller's pixels are
+/// moved into it and the flush that follows presents them. A user process reaches this through
+/// `VFS_IOCTL` (the encoded request carries the struct's size), which is the only route a
+/// shell-spawned program has to the device.
+#[cfg(all(target_os = "minix", target_arch = "wasm32"))]
+fn scanout_src(user_ep: i32, src: FbScanoutSrc) -> i32 {
+    let arch = unsafe { &mut *core::ptr::addr_of_mut!(FB_BACKEND) };
+    let arch: &mut dyn FbArch = arch;
+    if src.va == 0 {
+        return -22; // EINVAL
+    }
+    copy_into_surface(arch, user_ep, src.va, src.len as usize)
+}
+
+/// Not a minix build at all (the host): nothing to answer.
+#[cfg(not(target_os = "minix"))]
 fn scanout_src(_user_ep: i32, _src: FbScanoutSrc) -> i32 {
     -25
 }
@@ -905,25 +934,32 @@ fn do_ioctl(minor: u32, request: u32, who_e: i32, grant: u32, user: i32) -> i32 
     let driver = unsafe { &mut *core::ptr::addr_of_mut!(FB_DRIVER) };
     let scratch = unsafe { &mut *core::ptr::addr_of_mut!(FB_SCRATCH) };
 
-    let (arg_size, is_out) = match request {
+    // (argument size, copy into the driver, copy back to the caller). A GET copies out only, a PUT
+    // copies in only, and the pixel read is both: it sends a coordinate and returns a value.
+    let (arg_size, copy_in, copy_out) = match request {
         FBIOGET_VSCREENINFO => (
             core::mem::size_of::<drivers::video::fb::FbVarScreeninfo>(),
+            false,
             true,
         ),
         FBIOPUT_VSCREENINFO => (
             core::mem::size_of::<drivers::video::fb::FbVarScreeninfo>(),
+            true,
             false,
         ),
         FBIOGET_FSCREENINFO => (
             core::mem::size_of::<drivers::video::fb::FbFixScreeninfo>(),
+            false,
             true,
         ),
         FBIOPAN_DISPLAY => (
             core::mem::size_of::<drivers::video::fb::FbVarScreeninfo>(),
+            true,
             false,
         ),
-        FBIO_SCANOUT_SRC => (core::mem::size_of::<FbScanoutSrc>(), false),
-        FBIOFLUSH => (0, false),
+        FBIO_SCANOUT_SRC => (core::mem::size_of::<FbScanoutSrc>(), true, false),
+        FBIOGET_PIXEL => (core::mem::size_of::<FbPixel>(), true, true),
+        FBIOFLUSH => (0, false, false),
         _ => return -25, // ENOTTY
     };
     if arg_size > scratch.len() {
@@ -932,7 +968,7 @@ fn do_ioctl(minor: u32, request: u32, who_e: i32, grant: u32, user: i32) -> i32 
 
     // Fetch the arg struct from the caller through the grant. No-arg
     // ioctls (FBIOFLUSH) come with GRANT_INVALID; skip the copy.
-    if !is_out && arg_size > 0 {
+    if copy_in && arg_size > 0 {
         if safecopy_from(who_e, grant, scratch, arg_size) != 0 {
             return -14; // EFAULT
         }
@@ -957,8 +993,12 @@ fn do_ioctl(minor: u32, request: u32, who_e: i32, grant: u32, user: i32) -> i32 
     let result = driver.ioctl(minor as usize, request, &mut data[..arg_size], arch);
     match result {
         Ok(()) => {
-            // Write results back (GET-family ioctls).
-            if is_out && safecopy_to(user, grant, &data[..arg_size]) != 0 {
+            // Write results back (GET-family and the pixel read). The first argument is the
+            // message sender, not the user endpoint: a magic grant lives in *VFS's* table, and
+            // the kernel's `verify_grant` looks the grant up in the table of the process it is
+            // given. Passing the user here looked up their table, found nothing, and answered
+            // EPERM/EFAULT.
+            if copy_out && safecopy_to(who_e, grant, &data[..arg_size]) != 0 {
                 return -14; // EFAULT
             }
             0
@@ -979,11 +1019,14 @@ fn safecopy_from(granter: i32, grant: u32, data: &mut [u8], count: usize) -> i32
     minix_rt::kernel_call(31, &mut kmsg) // SYS_SAFECOPYFROM
 }
 
-/// Copy `count` bytes to the grantee's granted buffer via SYS_SAFECOPYTO.
+/// Copy `data` into the granted buffer via SYS_SAFECOPYTO.
+///
+/// `sender` is the process whose grant table holds the grant, which for a request VFS forwarded
+/// is VFS itself, not the user whose buffer it names.
 #[cfg(target_os = "minix")]
-fn safecopy_to(grantee: i32, grant: u32, data: &[u8]) -> i32 {
+fn safecopy_to(sender: i32, grant: u32, data: &[u8]) -> i32 {
     let mut kmsg = [0u8; 64];
-    kmsg[8..12].copy_from_slice(&grantee.to_ne_bytes());
+    kmsg[8..12].copy_from_slice(&sender.to_ne_bytes());
     kmsg[12..16].copy_from_slice(&(grant as i32).to_ne_bytes());
     kmsg[16..24].copy_from_slice(&0u64.to_ne_bytes()); // offset
     kmsg[24..32].copy_from_slice(&(data.as_ptr() as u64).to_ne_bytes());
@@ -997,7 +1040,7 @@ fn safecopy_from(_granter: i32, _grant: u32, _data: &mut [u8], _count: usize) ->
 }
 
 #[cfg(not(target_os = "minix"))]
-fn safecopy_to(_grantee: i32, _grant: u32, _data: &[u8]) -> i32 {
+fn safecopy_to(_sender: i32, _grant: u32, _data: &[u8]) -> i32 {
     -14 // EFAULT
 }
 
