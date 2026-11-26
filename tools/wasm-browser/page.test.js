@@ -700,18 +700,35 @@ check(
 // the module store and exec, a 4 MiB IWAD read through MFS, the heap growth a real program needs,
 // the fb copy path and the read-back ioctl.
 //
-// `-minix-exit` is the gate's: the platform layer leaves after the verdict so the shell gets its
-// prompt back. A player does not pass it.
-for (const ch of '/bin/doom -minix-exit') press(ch);
+// The quit the reader uses, not the platform layer's shortcut: no `-minix-exit`, so Doom leaves
+// through its own menu. Esc opens the menu, `q` is Quit Game's shortcut, Enter activates it and
+// `y` confirms, and the engine answers with `I_Quit`, which walks its exit hooks. One of them is a
+// `boolean(void)` registered as a `void(void)` hook: a native call ignores the difference, but
+// wasm's `call_indirect` traps on it, so this route is what exercises the module's `I_AtExit`
+// wrapper. `-minix-exit` calls `exit` directly and never walks the hooks, which is why the gate
+// needs this one to be the player's quit.
+for (const ch of '/bin/doom') press(ch);
 press('Enter');
 check(
   'Doom runs in the page and its frame reaches the framebuffer (the read-back verdict)',
   await until(() => screen().includes('doom: PASS'), 'the Doom frame', 120000),
   `screen:\n${screen().slice(-2000)}`
 );
+
+viewOf('display').click();
+for (const key of ['Escape', 'q', 'Enter', 'y']) {
+  const event = press(key);
+  for (const fn of listeners.get('keyup') ?? []) fn(event);
+  await sleep(150);
+}
+viewOf('terminal').click();
 check(
-  'Doom leaves the way the gate asked it to, and the shell gets its prompt back',
-  await until(() => screen().includes('doom: exit'), 'the exit line', 60000),
+  'Doom quits from its own menu, the exit-hook walk completes, and the shell returns',
+  await until(
+    () => screen().includes('doom: exit') && screen().trimEnd().endsWith('#'),
+    'the exit line and the prompt',
+    60000
+  ),
   `screen:\n${screen().slice(-1000)}`
 );
 

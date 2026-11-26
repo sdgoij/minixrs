@@ -346,6 +346,10 @@ fn wasm_link_args(objects: &[PathBuf], libc: &Path, out: &Path) -> Vec<String> {
         "-Wl,--export=minix_program_main".to_string(),
         "-Wl,--export=asyncify_scratch_ptr".to_string(),
         "-Wl,--export=argv_area_ptr".to_string(),
+        // Doom registers a `boolean(void)` function as a `void(void)` exit hook. Free on a
+        // native ABI, a `call_indirect` trap on wasm; the shim's `__wrap_I_AtExit` swaps in a
+        // nullary trampoline for that one registration.
+        "-Wl,--wrap=I_AtExit".to_string(),
         "-o".to_string(),
         out.display().to_string(),
     ];
@@ -630,6 +634,10 @@ mod tests {
         assert!(args.contains(&"-Wl,--export=minix_program_main".to_string()));
         assert!(args.contains(&"-Wl,--export=argv_area_ptr".to_string()));
         assert!(args.contains(&"-Wl,--export=asyncify_scratch_ptr".to_string()));
+        assert!(
+            args.contains(&"-Wl,--wrap=I_AtExit".to_string()),
+            "the exit-hook signature mismatch is corrected by the shim's wrapper"
+        );
         assert_eq!(args.last().unwrap(), "libminix_libc.a");
     }
 

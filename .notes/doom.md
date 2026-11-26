@@ -127,6 +127,18 @@ types the command paced, because an unpaced long line lost a byte on the serial
 console (`-iwad` arrived as `-iwa1ad`), and a paced step is retried until the
 guest echoes it whole.
 
+On wasm the walk could not complete. `G_CheckDemoStatus` is a `boolean(void)`
+registered through `(atexit_func_t)`, a `void(void)` hook type; a native call
+ignores the unused return, but wasm's `call_indirect` checks the signature, so the
+first hook call trapped with "function signature mismatch" and took the guest
+down. `-minix-exit` calls `exit` directly and never walked the hooks, so the gate
+never saw it. The module's link line wraps `I_AtExit` (its own signature every
+caller agrees on) and the wasm shim hands the real one a nullary trampoline for
+that single registration, `tools/doom/doomgeneric_minix_wasm.c`; the same family
+as the `atexit` trampoline in `crates/minix-libc` and procfs's callback tag
+(`.notes/procfs.md`). The page harness now quits through the menu, so the walk is
+exercised.
+
 `just run-doom-x86` boots the image in an SDL window with the shell on stdio for
 command typing; the game itself takes the window's keyboard through `/dev/kbd`,
 so the terminal stays free. The recipe is separate from `just run` and `just
