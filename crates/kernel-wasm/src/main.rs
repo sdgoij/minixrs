@@ -263,9 +263,18 @@ pub extern "C" fn minix_boot_notify() -> i32 {
 
 /// Which process should run next, by slot, or -1 when none is runnable.
 /// The decision is the kernel's: this only reports it.
+///
+/// One clock tick goes by before the pick, because that is the one thing the host cannot do for
+/// the guest. On a hardware arch the timer interrupt advances the monotonic clock, fires expired
+/// watchdogs and charges user/system time; here nothing ever did, so `get_monotonic` — and with it
+/// `clock_gettime` and the busy-waiting `usleep` — saw the same instant forever. A program that
+/// waits on time (Doom's title screen loops on `I_Sleep(1)`) then never made progress. A tick per
+/// dispatch makes the clock a function of how much the guest runs, which is what a virtual clock
+/// is, and it is the same handler the other arches run from their timer ISR.
 #[unsafe(no_mangle)]
 pub extern "C" fn minix_step() -> i32 {
     unsafe {
+        kernel::clock::timer_int_handler();
         match kernel::sched::pick_proc() {
             Some(rp) => (*rp).p_nr,
             None => -1,

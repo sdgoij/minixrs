@@ -3068,6 +3068,18 @@ fn do_brk(msg: &mut Message) -> i32 {
         }
     };
 
+    // On a hardware arch the heap is backed page by page as it grows. A wasm instance's linear
+    // memory already holds every address in the window — the host sized it at instantiation, and
+    // the kernel reports the endpoint as the address-space handle because there is no page table
+    // — so there is nothing to allocate and nothing to map. Allocating a frame here spends the
+    // kernel's 2 MiB frame arena on memory the process can already reach, and mapping one walks a
+    // page table whose root is an endpoint. The break is the bookkeeping it is.
+    #[cfg(target_arch = "wasm32")]
+    {
+        let _ = (cr3, current_top, page_size);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
     if target > current_top {
         // Expand heap: allocate and map new pages.
         // Pages in the pre-allocated range (0x3FE00000..0x3FF00000) are

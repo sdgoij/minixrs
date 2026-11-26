@@ -410,6 +410,11 @@ pub fn qemu_exit(code: u32) -> ! {
 // kernel's `sys_brk_handler` window both have to agree with it, and the kernel
 // derives its window from `user_heap_base()` precisely so there is one source of
 // truth.
+//
+// The heap window is 12 MiB (32..44 MiB) because the first real program to use it does: Doom asks
+// for a 6 MiB zone and a 3 MiB framebuffer copy, and the 4 MiB window this had was enough for the
+// shell and nothing else. The mmap window and the stack moved up to make room; both are
+// reservations, and nothing in the wasm image maps anonymously or runs on the hardware stack.
 
 /// Nothing is mapped into a process's address space by a kernel here; there is
 /// no kernel half.
@@ -418,24 +423,24 @@ pub const fn kern_vaddr() -> u64 {
 }
 
 /// Bottom of the heap window: `[user_heap_base(), +1 MiB)` is what the kernel's
-/// brk accepts before VM would grow it.
+/// brk accepts before VM would grow it, and VM grows it as far as the limit below.
 pub const fn user_heap_base() -> u64 {
     0x0200_0000
 }
 
 /// Exclusive upper bound for brk growth, below the anonymous-mmap base.
 pub const fn user_heap_limit() -> u64 {
-    0x0240_0000
+    0x02C0_0000
 }
 
 pub const fn mmap_base() -> u64 {
-    0x0240_0000
+    0x02C0_0000
 }
 
 /// The stack region, growing down from its top. Kept clear of the heap and mmap
 /// ranges below it.
 pub const fn user_stack_base() -> u64 {
-    0x02C0_0000
+    0x02E0_0000
 }
 
 pub const fn user_stack_size() -> usize {

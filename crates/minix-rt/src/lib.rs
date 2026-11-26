@@ -259,8 +259,8 @@ pub const NR_THREAD_SELF: u64 = 64;
 // used by the kernel's exec loader (`crates/kernel/src/hal.rs` re-exports).
 // The exec frame's pointer arithmetic depends on this value. 1MB stacks on
 // x86 (base 0x0FE00000), riscv and aarch64 (base 0x3FC00000), 2MB on wasm32
-// (base 0x02C00000, above the module's static image). Note the wasm32 figure is
-// 0x02E00000 — 46 MiB — which is the top of that stack *region*; it is not
+// (base 0x02E00000, at the top of the process windows). Note the wasm32 figure is
+// 0x03000000 — 48 MiB — which is the top of that stack *region*; it is not
 // `arch_wasm32::hal::MAX_USER_ADDRESS` (0x10000000, 256 MiB), which is the
 // instance's memory ceiling and sits well above it.
 #[cfg(all(target_os = "minix", target_arch = "x86_64"))]
@@ -271,7 +271,7 @@ const USER_STACK_TOP: u64 = 0x0FF0_0000;
 ))]
 const USER_STACK_TOP: u64 = 0x3FD0_0000;
 #[cfg(all(target_os = "minix", target_arch = "wasm32"))]
-const USER_STACK_TOP: u64 = 0x02E0_0000;
+const USER_STACK_TOP: u64 = 0x0300_0000;
 
 /// The most argv entries and the most envp entries `execve` will copy.
 ///
@@ -1862,8 +1862,10 @@ pub const HEAP_LIMIT: usize = if cfg!(any(target_arch = "aarch64", target_arch =
 } else if cfg!(target_arch = "wasm32") {
     // Matches `arch_wasm32::hal::user_heap_limit()`. The 4 GiB the other targets
     // use is both unrepresentable in a 32-bit `usize` and unnecessary: a wasm
-    // instance grows only as far as the windows below the RAM disk need.
-    0x0240_0000
+    // instance grows only as far as the windows below the RAM disk need. 12 MiB
+    // because that is what a program with a 6 MiB zone and a 3 MiB framebuffer
+    // copy needs; the shell used a fraction of it.
+    0x02C0_0000
 } else {
     // Written through `u64` because every branch of a `cfg!` guard is still
     // type-checked, so the literal has to fit a 32-bit `usize` even on the
