@@ -78,12 +78,16 @@ tolower(key)` in `doomgeneric_sdl.c`). Doom compares letters literally: the quit
 confirmation is `key_menu_confirm = 'y'` and the cheat sequences are lowercase,
 so an uppercased key matches neither.
 
-The console stays as a second source, so `-nographic` and the shell can still
-type at Doom. It is put in raw mode (VMIN = VTIME = 0, so `DG_GetKey` polls and
-never blocks), and since a terminal reports presses and not releases, a console
-key is held for 250 ms after its last repeat byte and then released; with the
-terminal's own auto-repeat a held key stays held, and a tap is a press and a
-release. `ESC [ A`..`D` become the arrow keys (modifier parameters are skipped).
+When `/dev/kbd` opens it is the only input source: the console is left in
+canonical mode and never read, so the terminal behind `-serial stdio` stays the
+shell's and a keystroke typed at it does not reach the game. The console is the
+fallback when the device cannot be opened, and `-minix-console` adds it back for
+a debug session with no window. In that mode it is put in raw mode (VMIN =
+VTIME = 0, so `DG_GetKey` polls and never blocks), and since a terminal reports
+presses and not releases, a console key is held for 250 ms after its last repeat
+byte and then released; with the terminal's own auto-repeat a held key stays
+held, and a tap is a press and a release. `ESC [ A`..`D` become the arrow keys
+(modifier parameters are skipped).
 
 Doom's own bindings apply: Ctrl fires, Space is use, Shift runs, Alt strafes,
 Escape is the menu.
@@ -102,12 +106,13 @@ types the command paced, because an unpaced long line lost a byte on the serial
 console (`-iwad` arrived as `-iwa1ad`), and a paced step is retried until the
 guest echoes it whole.
 
-`just run-doom-x86` boots the image in an SDL window with the shell on stdio, so
-the same terminal that types `/bin/doom` is the console Doom reads. The recipe is
-separate from `just run` and `just desktop` because those rebuild the system
-image, which would overwrite the disk that carries `/bin/doom` and the IWAD. It
-has no `virtio-tablet-pci`: doomgeneric starts with `usemouse = 0`, and that
-device with SDL on stdio wedges QEMU's main loop (`KNOWN_ISSUES` 95).
+`just run-doom-x86` boots the image in an SDL window with the shell on stdio for
+command typing; the game itself takes the window's keyboard through `/dev/kbd`,
+so the terminal stays free. The recipe is separate from `just run` and `just
+desktop` because those rebuild the system image, which would overwrite the disk
+that carries `/bin/doom` and the IWAD. It has no `virtio-tablet-pci`:
+doomgeneric starts with `usemouse = 0`, and that device with SDL on stdio wedges
+QEMU's main loop (`KNOWN_ISSUES` 95).
 
 ## 5. Saves and errors
 

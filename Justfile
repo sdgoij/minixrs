@@ -316,7 +316,8 @@ run-x86 memory: boot-image-x86 system-image-x86
     qemu-system-x86_64 -nographic -m {{memory}} -no-reboot -vga none -device bochs-display,id=fb0 -kernel target/boot-kernel-trampoline.elf -device loader,file=target/boot-kernel.bin,addr=0x200000 -drive if=none,id=disk0,file=target/images/x86_64-pc-minix/disk.img,format=raw,cache=writethrough -device virtio-blk-pci,disable-legacy=on,drive=disk0 -netdev user,id=net0 -device virtio-net-pci,disable-legacy=on,netdev=net0 -device virtio-tablet-pci,display=fb0
 
 # Play Doom: boot `prepare-doom-x86`'s image in an SDL window, with the shell on
-# stdio, so the terminal that types into the guest is the console Doom reads.
+# stdio to type commands. Doom takes the window's keyboard through `/dev/kbd` and
+# leaves the terminal alone; pass `-minix-console` to `/bin/doom` to type at it.
 # Its own recipe because `run` and `desktop` rebuild the system image and would
 # overwrite the disk this boots.
 #

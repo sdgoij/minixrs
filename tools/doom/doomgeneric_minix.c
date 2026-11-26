@@ -8,18 +8,20 @@
  * row-wise copy into /dev/fb. The bars around the window are cleared once,
  * here, because every frame covers the same 960x600.
  *
- * The console is put in raw mode so an Esc reaches Doom instead of the
- * shell. A terminal reports presses, not releases, so a key is held for a
- * short interval after its last repeat byte and then released; a press and
- * a release are the two events doomgeneric's input loop expects. Arrow keys
- * are the `ESC [ A`..`D` sequences the console sends.
- *
- * The keyboard a window actually drives is `/dev/kbd`, the input server's
- * ring (major 20). Its events carry both the press and the release and a HID
- * usage code, so they need neither the hold timer nor the escape-sequence
+ * The keyboard a window drives is `/dev/kbd`, the input server's ring
+ * (major 20). Its events carry both the press and the release and a HID
+ * usage code, so they need neither a hold timer nor the escape-sequence
  * parsing; a program can read the ring alongside the compositor, because the
- * server keeps one cursor per reader. The console stays as a second source so
- * `-nographic` and the gate can still type at Doom.
+ * server keeps one cursor per reader. When the ring opens it is the only
+ * source, so the terminal that launched the game stays the shell's and a
+ * keystroke typed at it does not reach Doom.
+ *
+ * The console is the fallback when `/dev/kbd` cannot be opened, and
+ * `-minix-console` adds it back for a headless debug session. In that case it
+ * is put in raw mode so an Esc reaches Doom instead of the shell; a terminal
+ * reports presses, not releases, so a key is held for a short interval after
+ * its last repeat byte and then released, and arrow keys are the `ESC [ A`..`D`
+ * sequences the console sends.
  *
  * DG_DrawFrame reads one pixel back out of the mapping and compares it with
  * the source it just wrote. The comparison is the proof that the blit
@@ -243,16 +245,23 @@ void DG_Init(void) {
      */
     memset(DG_ScreenBuffer, 0, (size_t)DOOMGENERIC_RESX * DOOMGENERIC_RESY * 4);
 
-    console_raw_mode();
-    /* After console_restore, so on the atexit walk the verdict is printed while
-     * the console is still raw and the restore runs last. */
-    atexit(platform_exit);
-    I_AtExit(platform_quit, false);
-
+    /*
+     * The window's keyboard is `/dev/kbd`; the console is the fallback for an
+     * image without the input server, and `-minix-console` brings it back for
+     * a debug session with no window. When the ring opens, the terminal is
+     * left in canonical mode and never read, so it stays the shell's.
+     */
     kbd_fd = open("/dev/kbd", O_RDONLY);
     if (kbd_fd < 0) {
         fprintf(stderr, "doom: open /dev/kbd: %s (console only)\n", strerror(errno));
     }
+    if (kbd_fd < 0 || M_CheckParm("-minix-console") != 0) {
+        console_raw_mode();
+    }
+    /* After console_restore, so on the atexit walk the verdict is printed while
+     * the console is still raw and the restore runs last. */
+    atexit(platform_exit);
+    I_AtExit(platform_quit, false);
 
     printf("doom: fb %dx%d xrgb8888 pitch %lu, %dx%d x%d at (%d,%d)\n",
            fb_width, fb_height, (unsigned long)fb_pitch, win_w, win_h, scale, win_x, win_y);
