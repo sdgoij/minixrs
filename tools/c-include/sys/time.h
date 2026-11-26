@@ -6,9 +6,12 @@
 extern "C" {
 #endif
 
+/* Both fields are 64-bit for the reason `time.h` gives for `time_t`: the library
+ * writes `TimeVal`, which is two 64-bit fields on every target, so a 32-bit `long`
+ * here would put `tv_usec` in the other half of `tv_sec`. */
 struct timeval {
-    long tv_sec;
-    long tv_usec;
+    __INT64_TYPE__ tv_sec;
+    __INT64_TYPE__ tv_usec;
 };
 
 int gettimeofday(struct timeval *tv, void *tz);

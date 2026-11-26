@@ -4,13 +4,20 @@
 
 #include <stddef.h>
 
-typedef long time_t;
+/* `time_t` is 64-bit on every target, which is what MINIX's own headers say
+ * (`_BSD_TIME_T_` in `sys/arch/<arch>/include/ansi.h`). `long` coincides with that on
+ * the three 64-bit shipping targets and does not on wasm32, where it is 32 bits: the
+ * library writes a 64-bit `time_t`, so a 32-bit declaration here makes the second
+ * half of the value land in the struct's next field (and, for a smaller struct, past
+ * its end). The same holds for `tv_nsec`: `TimeSpec`/`TimeVal` in `crates/minix-libc`
+ * are two 64-bit fields on every target. */
+typedef __INT64_TYPE__ time_t;
 typedef long clock_t;
 typedef long clockid_t;
 
 struct timespec {
-    long tv_sec;
-    long tv_nsec;
+    __INT64_TYPE__ tv_sec;
+    __INT64_TYPE__ tv_nsec;
 };
 
 struct tm {
