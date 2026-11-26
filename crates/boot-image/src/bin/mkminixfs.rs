@@ -91,7 +91,8 @@ fn main() -> ExitCode {
             // boot and then fail every exec with a path error that points at the filesystem
             // rather than at the build that did not run.
             eprintln!(
-                "mkminixfs: {} not found at {} (run `sh tools/wasm-servers/run.sh`)",
+                "mkminixfs: {} not found at {} (run `sh tools/wasm-servers/build.sh`, which \
+                 stages the modules and the image's data files)",
                 bin_name,
                 src.display()
             );
