@@ -80,6 +80,9 @@ on:
       bash:
         type: string
         required: true
+      doom:
+        type: string
+        required: true
       gltriangle:
         type: string
         required: true
@@ -109,6 +112,7 @@ jobs:
       GATE_WASM_TESTS: ${{ inputs.wasm_tests }}
       GATE_WASM_WIRE_TESTS: ${{ inputs.wasm_wire_tests }}
       GATE_BASH: ${{ inputs.bash }}
+      GATE_DOOM: ${{ inputs.doom }}
       GATE_GLTRIANGLE: ${{ inputs.gltriangle }}
     steps:
       - name: Every gate in the calling run passed
@@ -126,6 +130,7 @@ jobs:
           wasm-tests:$GATE_WASM_TESTS
           wasm-wire-tests:$GATE_WASM_WIRE_TESTS
           bash:$GATE_BASH
+          doom:$GATE_DOOM
           gltriangle:$GATE_GLTRIANGLE
           EOF
           [ "$failed" = 0 ] || exit 1
@@ -185,6 +190,22 @@ jobs:
           name: mesa-${{ matrix.arch }}
           path: target/mesa/${{ matrix.arch }}/lib
 
+      # The `doom` job in `ci.yml` built the pinned engine and published it with
+      # its IWAD. Restoring both where `system-image-x86` looks is what makes the
+      # published system image carry `/bin/doom`; the self-contained image built
+      # below is the 20 MiB embedded root and does not take the 4 MiB WAD.
+      - uses: actions/download-artifact@v8
+        if: matrix.arch == 'x86'
+        with:
+          name: doom-bin-x86
+          path: target/x86_64-pc-minix/release
+
+      - uses: actions/download-artifact@v8
+        if: matrix.arch == 'x86'
+        with:
+          name: doom-iwad
+          path: target/doom-data
+
       # 120 s against a dev machine's 15 s: it is the runner's emulation speed, not
       # a budget the image has to meet. A boot that is actually broken still fails
       # here, only later.
@@ -197,8 +218,9 @@ jobs:
         run: cargo xtask gate image --arch ${{ matrix.arch }} --timeout 120
 
       # The split form: a small boot image and a full system image (coreutils, GNU bash
-      # because the `bash` artifact above is in place, and the seven Mesa DSOs because the
-      # `mesa-<arch>` artifact is). The DSOs are ~36 MiB, so `MINIXFS_BLOCKS` is raised from
+      # because the `bash` artifact above is in place, the pinned Doom on x86 because the
+      # `doom` job's two artifacts are, and the seven Mesa DSOs because the `mesa-<arch>`
+      # artifact is). The DSOs are ~36 MiB, so `MINIXFS_BLOCKS` is raised from
       # the recipe's 32 MiB default - the system image is the artifact the 16 MiB embedded
       # window cannot hold. `180` is the runner's emulation speed, not a budget. The gate
       # boots what it builds and drives the smoke scenario, so the release cannot ship a

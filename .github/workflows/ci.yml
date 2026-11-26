@@ -40,6 +40,10 @@
 # (`bash-pin`/`bash-release`): the 289 MiB clone and the C build happen only when
 # the pin has no release yet.
 #
+# `doom` builds its pin instead of fetching a release: the engine is 80 C files
+# and the IWAD a 4 MiB download, so there is no large clone to skip. It is the
+# job that proves `/bin/doom` in the system image is the binary the pin builds.
+#
 # The image jobs depend on the suites for the same reason. Both suites also run
 # locally (`cargo xtask gate boot --arch <arch>`, `cargo xtask gate qemu --arch <arch>`, on Windows too); they
 # gate on the guest's serial log through `cargo xtask gate`.
@@ -717,6 +721,85 @@ jobs:
       - name: Interactive bash
         run: cargo xtask gate interactive-bash --arch ${{ matrix.arch }} --timeout 120
 
+  # The port's game, built from the engine commit and shareware IWAD
+  # `tools/pins.ini` pins and driven through all three Doom gates. The engine is
+  # 80 C files linked against `libc.a` and the IWAD is a 4 MiB download, so this
+  # builds from the pin where `bash` fetches a release: there is no 289 MiB clone
+  # to skip.
+  #
+  # The gates prepare `system-image-x86`, which includes `/bin/doom` and the IWAD
+  # because the artifacts are in hand. That is the image a `run` recipe boots and
+  # the one `image-release.yml` injects them into, so the gate boots what ships.
+  # x86 only: the platform layer is arch-neutral, but the gates (and the bochs
+  # display and PS/2 keyboard they inject into) exist only here.
+  doom:
+    name: doom
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    needs: [rust-pin, stage1]
+    if: >-
+      !cancelled() &&
+      needs.rust-pin.result == 'success' &&
+      (needs.stage1.result == 'success' || needs.stage1.result == 'skipped')
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: false
+          token: ${{ secrets.SUBMODULE_TOKEN || github.token }}
+
+      - name: Check out the submodules
+        run: |
+          set -euo pipefail
+          git config --global url."https://github.com/".insteadOf "git@github.com:"
+          git submodule update --init --depth 1 rust coreutils libc rustix
+
+      - uses: extractions/setup-just@v4
+
+      - uses: ./.github/actions/install-clang
+
+      - uses: ./.github/actions/install-qemu
+        with:
+          arch: x86
+
+      # The recipes call `python` by that name.
+      - name: Make python resolve
+        run: sudo ln -sf /usr/bin/python3 /usr/local/bin/python
+
+      - name: Install the prebuilt stage1
+        run: just fetch-stage1 x86
+
+      # The pinned engine checkout, the IWAD held to its digest, the link against
+      # libc.a, and then the system image with both of them in it.
+      - name: Build the pinned Doom
+        run: just build-doom x86
+
+      # The timeouts are the runner's emulation speed, as everywhere else.
+      - name: The frame is read back out of /dev/fb
+        run: cargo xtask gate doom --arch x86 --timeout 180
+
+      - name: A key reaches Doom through /dev/kbd
+        run: cargo xtask gate doom-kbd --arch x86 --timeout 240
+
+      # Two boots: the save is listed from the shell, synced, and listed again
+      # after a reboot, so a write that only reached MFS's cache fails here.
+      - name: A save survives a reboot
+        run: cargo xtask gate doom-save --arch x86 --timeout 300
+
+      # `image-release.yml` restores these where `system-image-x86` looks; the
+      # `error` on a missing file keeps a rename from shipping an image without
+      # the game.
+      - uses: actions/upload-artifact@v7
+        with:
+          name: doom-bin-x86
+          path: target/x86_64-pc-minix/release/doom
+          if-no-files-found: error
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: doom-iwad
+          path: target/doom-data/doom1.wad
+          if-no-files-found: error
+
   # Decides whether the pinned Mesa/libdrm pair needs a release before anything
   # consumes one. Read-only, so it needs no write permission; `mesa` below does the
   # publishing. The trigger is the missing release, not a moved pin: a pair whose
@@ -851,7 +934,7 @@ jobs:
   # pressing anything. This job does nothing else; the work is in that file.
   release:
     name: release
-    needs: [host-tests, arch-tests, wasm-tests, wasm-wire-tests, bash, gltriangle]
+    needs: [host-tests, arch-tests, wasm-tests, wasm-wire-tests, bash, doom, gltriangle]
     # `always()`, not the implicit `success()`. With `success()`, one red gate (a flake)
     # *skips* this job, and a skipped job is not revived by "re-run failed jobs": the
     # retry goes green while `release` stays skipped, so the run reports `success` and
@@ -871,5 +954,6 @@ jobs:
       wasm_tests: ${{ needs.wasm-tests.result }}
       wasm_wire_tests: ${{ needs.wasm-wire-tests.result }}
       bash: ${{ needs.bash.result }}
+      doom: ${{ needs.doom.result }}
       gltriangle: ${{ needs.gltriangle.result }}
     secrets: inherit

@@ -15,9 +15,18 @@ by the same clang + LLD + `libc.a` line as `c-direct`.
 | Shareware IWAD | `target/doom-data/doom1.wad`, held to the digest in the same file |
 | Platform layer | `tools/doom/doomgeneric_minix.c` |
 | Builder | `cargo xtask build doom <arch>` (`crates/xtask/src/build/doom.rs`) |
-| Recipes | `just doom-x86`, `just prepare-doom-x86` |
-| Playing | `just run-doom-x86`, then `/bin/doom` at the shell; click the window and play |
+| Recipes | `just build-doom x86` (`doom-x86` is the same build), `just prepare-doom-x86` (the system image with Doom in it) |
+| Playing | `just run-doom-x86`, then `/bin/doom` at the shell; click the window and play. `just run x86` has it too once `build-doom` has run |
 | Gates | `cargo xtask gate doom --arch x86` (frame and read-back), `cargo xtask gate doom-kbd --arch x86` (a device key, the menu and the quit), `cargo xtask gate doom-save --arch x86` (a save, the shell listing, and a reboot) |
+
+The engine is not in the kernel's embedded root: the shareware IWAD is 4 MiB and
+the embedded ramdisk window is 16 MiB, so Doom goes in the *system* image
+(`system-image-x86`, the disk a `run` recipe boots) and the release's split
+image. That recipe includes `/bin/doom` and the IWAD when `just build-doom x86`
+has put them under `target/`, the same conditional rule `/bin/bash` follows, so
+a plain image build depends on neither. `ci.yml`'s `doom` job builds the pin,
+runs the three gates and publishes the two files; `image-release.yml` restores
+them before building the system image the release publishes.
 
 `doomgeneric` is a port of the Doom source with one small interface between the
 engine and a platform (`DG_Init`, `DG_DrawFrame`, `DG_SleepMs`, `DG_GetTicksMs`,
@@ -155,3 +164,6 @@ directory shows in the listing and cannot be resolved.
 - `doom-save` drives the menu with QMP keys and boots twice, so it takes about
 twice as long as `doom-kbd`. The second boot mounts read-only, because the
 first was not unmounted; it only reads the file.
+- The single-file release image (`minix-x86.elf`) does not carry Doom: it is
+the 20 MiB embedded root, and the WAD alone would take a fifth of it. The
+split `minix-x86-system.img` is where the game ships.

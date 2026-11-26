@@ -237,7 +237,9 @@ boot-image-x86: userland-x86 coreutils-x86 dynlib-x86
 # the caller's own value; the Mesa DSOs are the ~36 MiB case, `.notes/wayland.md` §6.10 stage
 # 3c-2). GNU bash is included when its artifact is present — `just build-bash <arch>`
 # locally, or the release's downloaded `bash-<arch>` — and its heavy C build is never
-# forced onto the `run-<arch>` path. The image builder reads `MINIXFS_EXTRA` /
+# forced onto the `run-<arch>` path. Doom follows the same rule on x86: `just
+# build-doom x86` (or the CI artifact) puts `/bin/doom` and the IWAD in the image,
+# and a plain image build depends on neither. The image builder reads `MINIXFS_EXTRA` /
 # `DYNLINK_BINS` / `MINIXFS_BLOCKS` itself, so a root larger than the 16 MiB embedded
 # window needs no kernel change.
 #
@@ -259,7 +261,10 @@ toolchain-root-x86:
 
 system-image-x86: boot-image-x86
     extras=""; if [ -f target/bash/x86/bash ]; then extras=/bin/bash=target/bash/x86/bash; else echo "system-image: no /bin/bash (run 'just build-bash x86' to include it)"; fi; \
-    if [ -d target/toolchain/x86/root ]; then \
+    if [ -f target/x86_64-pc-minix/release/doom ] && [ -f target/doom-data/doom1.wad ]; then \
+        extras="${extras}${extras:+;}/bin/doom=target/x86_64-pc-minix/release/doom;/usr/share/games/doom/doom1.wad=target/doom-data/doom1.wad"; \
+    else echo "system-image: no /bin/doom (run 'just build-doom x86' to include it)"; fi; \
+    if [ -z "${MINIXFS_SKIP_TOOLCHAIN:-}" ] && [ -d target/toolchain/x86/root ]; then \
         echo "system-image: including the toolchain"; \
         MINIXFS_ROOT=target/toolchain/x86/root MINIXFS_EXTRA="${extras}${MINIXFS_EXTRA:+;$MINIXFS_EXTRA}" MINIXFS_BLOCKS="${MINIXFS_BLOCKS:-196608}" MINIXFS_INODES="${MINIXFS_INODES:-16384}" cargo run -q -p boot-image --bin mkminixfs --release -- x86_64; \
     else \
@@ -461,15 +466,18 @@ gui-x86: userland-x86 dynlib-x86
     cargo xtask build gui x86
     @echo "gui: /bin/gui built and the Mesa DSOs staged (x86_64)"
 
-# doom: build /bin/doom from the pinned doomgeneric tree, the engine plus
-# `tools/doom/doomgeneric_minix.c`, linked against libc.a like `c-direct`.
-# `cargo xtask build doom` fetches the engine and the shareware IWAD, checked
-# against `tools/pins.ini`.
-#
+# doomgeneric for a minix target, from the engine commit and the shareware IWAD
+# `tools/pins.ini` pins: the engine plus `tools/doom/doomgeneric_minix.c`,
+# linked against `libc.a` like `c-direct`. `cargo xtask build doom` checks the
+# engine out and holds the IWAD to its digest; the artifact is
+# `target/<triple>/release/doom`, which `system-image-x86` includes.
+# This is the authoritative Doom build (there is no release cache).
+build-doom arch="x86" *args:
+    @just libc-static {{arch}}
+    cargo xtask build doom {{arch}} {{args}}
+
 # The gate boots it and waits for the platform layer's read-back (`doom: PASS`).
-doom-x86:
-    @just libc-static x86
-    cargo xtask build doom x86
+doom-x86: (build-doom "x86")
     @echo "doom: /bin/doom built (x86_64)"
 
 # gbmtest: build /bin/gbmtest, the GBM create/export probe (§6.10 stage 3d-b-3). It links
@@ -864,9 +872,13 @@ prepare-gui-x86: gui-x86 boot-image-x86
     M=target/mesa/x86; E="/lib/libdrm.so.2=$M/lib/libdrm.so.2;/lib/libEGL.so.1=$M/lib/libEGL.so.1;/lib/libgbm.so.1=$M/lib/libgbm.so.1;/lib/libexpat.so.1=$M/lib/libexpat.so.1;/lib/libgallium-25.3.6.so=$M/lib/libgallium-25.3.6.so;/lib/libGLESv2.so.2=$M/lib/libGLESv2.so.2;/lib/libz.so.1=$M/lib/libz.so.1;/lib/swrast_dri.so=$M/lib/swrast_dri.so;/bin/gui=$M/bin/gui"; MINIXFS_EXTRA="$E" MINIXFS_BLOCKS=16384 cargo run -q -p boot-image --bin mkminixfs --release -- x86_64
     @just mkfs-x86
 
-prepare-doom-x86: doom-x86 boot-image-x86
-    MINIXFS_EXTRA='/bin/doom=target/x86_64-pc-minix/release/doom;/usr/share/games/doom/doom1.wad=target/doom-data/doom1.wad' MINIXFS_BLOCKS=16384 cargo run -q -p boot-image --bin mkminixfs --release -- x86_64
-    @just mkfs-x86
+# The doom gates boot the image a `run` recipe boots, so the conditional
+# inclusion above is exercised rather than a private MINIXFS_EXTRA. The staged
+# toolchain is skipped: it is ~768 MiB, unrelated to Doom, and only a dev
+# machine that ran `just llvm-minix x86` has one.
+# Prepare the system image the doom gates boot, without the toolchain.
+prepare-doom-x86: doom-x86
+    MINIXFS_SKIP_TOOLCHAIN=1 just system-image-x86
 
 prepare-gbmtest-x86: gbmtest-x86 boot-image-x86
     M=target/mesa/x86; E="/lib/libdrm.so.2=$M/lib/libdrm.so.2;/lib/libgbm.so.1=$M/lib/libgbm.so.1;/lib/libexpat.so.1=$M/lib/libexpat.so.1;/lib/libgallium-25.3.6.so=$M/lib/libgallium-25.3.6.so;/lib/libz.so.1=$M/lib/libz.so.1;/lib/dri_gbm.so=$M/lib/dri_gbm.so;/bin/gbmtest=$M/bin/gbmtest"; MINIXFS_EXTRA="$E" MINIXFS_BLOCKS=16384 cargo run -q -p boot-image --bin mkminixfs --release -- x86_64
