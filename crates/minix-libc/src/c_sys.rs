@@ -1689,11 +1689,25 @@ pub unsafe extern "C" fn fchown(fd: c_int, owner: c_uint, group: c_uint) -> c_in
     }
 }
 
-/// Sleep for `usec` microseconds (busy-wait on the monotonic clock — the
-/// PM has no nanosleep call yet).
+/// Sleep for `usec` microseconds.
+///
+/// The port has no sleeping syscall, so this waits on the monotonic clock, which is the authority
+/// either way: `time` follows the host's wall clock, so the wait is real time and not "however
+/// often the guest was scheduled".
+///
+/// On a hardware arch that wait is a spin, which is what a clock read costs there. On wasm a read
+/// is a message to PM and a dispatch, so the two ends differ: a wait shorter than a frame is spun
+/// out in a handful of those round trips, which is what a game's frame schedule is, and a longer
+/// one yields back to the host between polls — the host is the only thing that can let real time
+/// pass for a *long* wait, and yielding is what keeps the rest of the system scheduled while one
+/// process sleeps. The threshold is two milliseconds: below a frame, above the cost of the round
+/// trips a spin needs.
 #[cfg(target_os = "minix")]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn usleep(usec: c_uint) -> c_int {
+    /// The longest wait that is spun out rather than handed back to the host (wasm only).
+    const SPIN_LIMIT_US: u128 = 2_000;
+
     let deadline = match minix_std::time::clock_gettime(1) {
         // CLOCK_MONOTONIC = 1
         Ok(t) => (t.tv_sec as u128) * 1_000_000 + (t.tv_nsec as u128) / 1000 + usec as u128,
@@ -1704,6 +1718,10 @@ pub unsafe extern "C" fn usleep(usec: c_uint) -> c_int {
             let now = (t.tv_sec as u128) * 1_000_000 + (t.tv_nsec as u128) / 1000;
             if now >= deadline {
                 return 0;
+            }
+            #[cfg(target_arch = "wasm32")]
+            if deadline - now > SPIN_LIMIT_US {
+                minix_rt::thread_yield();
             }
         }
         core::hint::spin_loop();
