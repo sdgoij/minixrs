@@ -20,6 +20,18 @@ struct timespec {
     __INT64_TYPE__ tv_nsec;
 };
 
+/* The size is the contract with the library, which fills this from a struct of two 64-bit
+ * fields. A declaration half that size is written past its end, and one with `long` fields where
+ * `long` is 32 bits reads the other half of `tv_sec` as `tv_nsec`: `clock_gettime` then looks
+ * like it has one-second granularity and nothing reports an error. */
+#if defined(__cplusplus) && __cplusplus >= 201103L
+static_assert(sizeof(struct timespec) == 2 * sizeof(__INT64_TYPE__),
+              "struct timespec is two 64-bit fields");
+#elif !defined(__cplusplus) && defined(__STDC_VERSION__) && __STDC_VERSION__ >= 201112L
+_Static_assert(sizeof(struct timespec) == 2 * sizeof(__INT64_TYPE__),
+               "struct timespec is two 64-bit fields");
+#endif
+
 struct tm {
     int tm_sec;
     int tm_min;

@@ -14,6 +14,16 @@ struct timeval {
     __INT64_TYPE__ tv_usec;
 };
 
+/* The contract `time.h` states for `struct timespec`, for the pair `gettimeofday` and the
+ * `utimes` calls fill in. */
+#if defined(__cplusplus) && __cplusplus >= 201103L
+static_assert(sizeof(struct timeval) == 2 * sizeof(__INT64_TYPE__),
+              "struct timeval is two 64-bit fields");
+#elif !defined(__cplusplus) && defined(__STDC_VERSION__) && __STDC_VERSION__ >= 201112L
+_Static_assert(sizeof(struct timeval) == 2 * sizeof(__INT64_TYPE__),
+               "struct timeval is two 64-bit fields");
+#endif
+
 int gettimeofday(struct timeval *tv, void *tz);
 int utimes(const char *path, const struct timeval tv[2]);
 /* As `utimes`, but on the link itself when `path` names a symlink

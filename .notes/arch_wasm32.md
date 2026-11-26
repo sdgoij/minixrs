@@ -419,10 +419,11 @@ empty rather than an error; the guest's own arithmetic was right all along.
 > A header that mirrors a Rust ABI struct names the *width*, not the C rank:
 > `__INT64_TYPE__` for a field that must be 64 bits, never `long`.
 
-Both headers now do, which is a no-op on the three 64-bit arches. The trap is a
-field that reads as "the platform's natural size": it is natural to the C
-compiler in front of it, and the library on the other side of the call is
-fixed-width.
+Both headers now do, which is a no-op on the three 64-bit arches, and both assert
+their own size against the two 64-bit fields they are declared with. That is the
+cheapest gate this trap can have: it is a compile error in whichever consumer is
+built for the target that disagrees, and no consumer is left out, since the
+assertion lives in the header the consumer is compiling.
 
 ### 5.3 Why there is no physical-address model to build
 
