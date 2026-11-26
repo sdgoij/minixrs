@@ -1,4 +1,13 @@
-/* Freestanding stdint for the minix OS (x86_64). */
+/* Freestanding stdint for the minix OS.
+ *
+ * The 64-bit types and the pointer-sized ones come from the compiler's own width
+ * macros rather than a written-down `long`. This header is compiled for both the
+ * LP64 arches and wasm32 (ILP32), and `long` is 64 bits on one and 32 on the
+ * other: `typedef unsigned long uint64_t` gave wasm32 a 32-bit `uint64_t`, so a
+ * struct a C program passed across an ioctl was half the size the Rust side read
+ * and the argument decoded as garbage. The macros are the same types on LP64
+ * (`long`/`unsigned long`), so nothing changes for the archs that were right.
+ */
 #ifndef _STDINT_H
 #define _STDINT_H
 
@@ -8,11 +17,11 @@ typedef short int16_t;
 typedef unsigned short uint16_t;
 typedef int int32_t;
 typedef unsigned int uint32_t;
-typedef long int64_t;
-typedef unsigned long uint64_t;
+typedef __INT64_TYPE__ int64_t;
+typedef __UINT64_TYPE__ uint64_t;
 
-typedef int64_t intptr_t;
-typedef uint64_t uintptr_t;
+typedef __INTPTR_TYPE__ intptr_t;
+typedef __UINTPTR_TYPE__ uintptr_t;
 
 typedef int8_t int_least8_t;
 typedef uint8_t uint_least8_t;
@@ -44,30 +53,33 @@ typedef uint64_t uintmax_t;
 #define INT32_MIN (-2147483647 - 1)
 #define INT32_MAX 2147483647
 #define UINT32_MAX 4294967295U
-#define INT64_MIN (-9223372036854775807L - 1L)
-#define INT64_MAX 9223372036854775807L
-#define UINT64_MAX 18446744073709551615UL
+#define INT64_MIN (-__INT64_MAX__ - 1)
+#define INT64_MAX __INT64_MAX__
+#define UINT64_MAX __UINT64_MAX__
+
+#define _STDINT_CAT_(a, b) a##b
+#define _STDINT_CAT(a, b) _STDINT_CAT_(a, b)
 
 #define INT8_C(x) x
 #define INT16_C(x) x
 #define INT32_C(x) x
-#define INT64_C(x) x ## L
+#define INT64_C(x) _STDINT_CAT(x, __INT64_C_SUFFIX__)
 #define UINT8_C(x) x
 #define UINT16_C(x) x
-#define UINT32_C(x) x ## U
-#define UINT64_C(x) x ## UL
+#define UINT32_C(x) x##U
+#define UINT64_C(x) _STDINT_CAT(x, __UINT64_C_SUFFIX__)
 #define INTMAX_C(x) INT64_C(x)
 #define UINTMAX_C(x) UINT64_C(x)
 
-#define SIZE_MAX UINT64_MAX
+#define SIZE_MAX __SIZE_MAX__
 
-#define INTPTR_MIN INT64_MIN
+#define INTPTR_MIN (-__INTPTR_MAX__ - 1)
 #define INTMAX_MIN INT64_MIN
 #define INTMAX_MAX INT64_MAX
 #define UINTMAX_MAX UINT64_MAX
-#define INTPTR_MAX INT64_MAX
-#define UINTPTR_MAX UINT64_MAX
-#define PTRDIFF_MIN INT64_MIN
-#define PTRDIFF_MAX INT64_MAX
+#define INTPTR_MAX __INTPTR_MAX__
+#define UINTPTR_MAX __UINTPTR_MAX__
+#define PTRDIFF_MIN (-__PTRDIFF_MAX__ - 1)
+#define PTRDIFF_MAX __PTRDIFF_MAX__
 
 #endif
