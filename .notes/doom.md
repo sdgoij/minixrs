@@ -17,7 +17,7 @@ by the same clang + LLD + `libc.a` line as `c-direct`.
 | Builder | `cargo xtask build doom <arch>` (`crates/xtask/src/build/doom.rs`) |
 | Recipes | `just doom-x86`, `just prepare-doom-x86` |
 | Playing | `just run-doom-x86`, then `/bin/doom` at the shell; click the window and play |
-| Gates | `cargo xtask gate doom --arch x86` (frame and read-back), `cargo xtask gate doom-kbd --arch x86` (a device key) |
+| Gates | `cargo xtask gate doom --arch x86` (frame and read-back), `cargo xtask gate doom-kbd --arch x86` (a device key, the menu and the quit) |
 
 `doomgeneric` is a port of the Doom source with one small interface between the
 engine and a platform (`DG_Init`, `DG_DrawFrame`, `DG_SleepMs`, `DG_GetTicksMs`,
@@ -73,13 +73,28 @@ a second consumer loses nothing. The platform layer prints `doom: kbd PASS` the
 first time an event arrives from it, and the `doom-kbd` gate asserts that line
 after QMP injects Escape, which is a real device event.
 
+Letters are lowercased, the way every upstream backend delivers them (`key =
+tolower(key)` in `doomgeneric_sdl.c`). Doom compares letters literally: the quit
+confirmation is `key_menu_confirm = 'y'` and the cheat sequences are lowercase,
+so an uppercased key matches neither.
+
 The console stays as a second source, so `-nographic` and the shell can still
 type at Doom. It is put in raw mode (VMIN = VTIME = 0, so `DG_GetKey` polls and
 never blocks), and since a terminal reports presses and not releases, a console
 key is held for 250 ms after its last repeat byte and then released; with the
 terminal's own auto-repeat a held key stays held, and a tap is a press and a
-release. `ESC [ A`..`D` become the arrow keys (modifier parameters are skipped),
-Escape is the menu, Space is use, Ctrl-C is fire (safe: raw mode clears `ISIG`).
+release. `ESC [ A`..`D` become the arrow keys (modifier parameters are skipped).
+
+Doom's own bindings apply: Ctrl fires, Space is use, Shift runs, Alt strafes,
+Escape is the menu.
+
+Quitting leaves through the engine's exit hooks. `I_Quit` walks them and, built
+without `ORIGCODE`, returns to the game loop rather than leaving the process; one
+of the hooks, `D_Endoom`, calls `exit(0)` itself (after an ENDOOM screen that is a
+stub here), so the menu's Quit Game does leave. The platform layer prints
+`doom: exit` from an `atexit` handler, which both paths run, and registers its own
+`I_AtExit` hook only as the fallback for when `D_Endoom` declines
+(`-noendoom`, testcontrols, the screensaver).
 
 `-minix-exit` makes the platform layer leave once it has printed its verdict, so
 the `doom` gate gets its shell prompt back. A player does not pass it. That gate

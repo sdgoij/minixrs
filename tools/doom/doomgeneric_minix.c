@@ -47,6 +47,7 @@
 
 #include "doomgeneric.h"
 #include "doomkeys.h"
+#include "i_system.h"
 #include "m_argv.h"
 
 /* One event of `/dev/kbd`, as `crates/servers/src/input.rs` emits it: HID usage
@@ -141,6 +142,24 @@ static void console_restore(void) {
     }
 }
 
+/*
+ * The engine's `I_Quit` walks its exit hooks and then, built without ORIGCODE,
+ * returns to the game loop rather than leaving the process. `D_Endoom` is one of
+ * the hooks and calls `exit(0)` itself, so the menu's Quit Game does leave; a
+ * hook of ours only runs when `D_Endoom` declines (`-noendoom`, testcontrols,
+ * the screensaver), so it is the fallback that keeps a quit a quit.
+ *
+ * The verdict is printed from `atexit`, which runs on both paths.
+ */
+static void platform_exit(void) {
+    printf("doom: exit\n");
+    fflush(stdout);
+}
+
+static void platform_quit(void) {
+    exit(0);
+}
+
 static void console_raw_mode(void) {
     struct termios t;
 
@@ -225,6 +244,10 @@ void DG_Init(void) {
     memset(DG_ScreenBuffer, 0, (size_t)DOOMGENERIC_RESX * DOOMGENERIC_RESY * 4);
 
     console_raw_mode();
+    /* After console_restore, so on the atexit walk the verdict is printed while
+     * the console is still raw and the restore runs last. */
+    atexit(platform_exit);
+    I_AtExit(platform_quit, false);
 
     kbd_fd = open("/dev/kbd", O_RDONLY);
     if (kbd_fd < 0) {
@@ -366,7 +389,7 @@ static int usage_to_doom(int code) {
     };
 
     if (code >= 0x04 && code <= 0x1d) {
-        return 'A' + (code - 0x04);
+        return 'a' + (code - 0x04);
     }
     if (code >= 0x1e && code <= 0x26) {
         return '1' + (code - 0x1e);
@@ -528,8 +551,14 @@ static int to_doom_key(int c) {
     case ' ':
         return KEY_USE;
     default:
+        /* Every upstream backend lowercases printable keys (`tolower` in
+         * doomgeneric_sdl.c), and Doom compares letters literally: the quit
+         * prompt wants 'y' and the cheat sequences are lowercase. */
         if (c >= 'a' && c <= 'z') {
-            return c - 'a' + 'A';
+            return c;
+        }
+        if (c >= 'A' && c <= 'Z') {
+            return c - 'A' + 'a';
         }
         if (c > 0x20 && c < 0x7f) {
             return c;
