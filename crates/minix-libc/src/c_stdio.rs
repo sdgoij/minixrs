@@ -114,6 +114,56 @@ pub unsafe extern "C" fn puts(s: *const c_char) -> c_int {
 
 type Emit<'a> = &'a mut dyn FnMut(u8);
 
+/// A byte sink that batches a formatted print into one call per chunk.
+///
+/// Formatting straight to the descriptor made every `printf` a syscall per character. That is
+/// cheap on a host and ruinous here: a console write is an IPC round trip to VFS and the tty, and
+/// on wasm the tty mirrors the console into a window server that repaints and presents a frame
+/// per update. A program's startup banner is a few thousand characters, so the cost was a few
+/// thousand round trips and a few thousand full-display presents, which is what starved every
+/// other process while a game printed. One write per chunk bounds it by the chunk size instead.
+///
+/// The chunk is small enough to sit on a formatted print's stack and large enough to hold a line.
+/// How many bytes a formatted print buffers before handing them to the sink.
+///
+/// Small enough to sit on a formatted print's stack, large enough to hold a line.
+pub(crate) const EMIT_CHUNK: usize = 256;
+
+pub(crate) struct EmitBuf<S: FnMut(&[u8])> {
+    sink: S,
+    bytes: [u8; EMIT_CHUNK],
+    len: usize,
+}
+
+impl<S: FnMut(&[u8])> EmitBuf<S> {
+    pub(crate) fn new(sink: S) -> Self {
+        Self {
+            sink,
+            bytes: [0; EMIT_CHUNK],
+            len: 0,
+        }
+    }
+
+    pub(crate) fn push(&mut self, byte: u8) {
+        if self.len == EMIT_CHUNK {
+            self.flush();
+        }
+        self.bytes[self.len] = byte;
+        self.len += 1;
+    }
+
+    /// Hand what is buffered to the sink. Called when the buffer fills and once at the end of a
+    /// print, so a formatted line reaches the descriptor whole rather than in pieces.
+    pub(crate) fn flush(&mut self) {
+        if self.len == 0 {
+            return;
+        }
+        let len = self.len;
+        self.len = 0;
+        (self.sink)(&self.bytes[..len]);
+    }
+}
+
 fn emit_pad(c: u8, n: i32, emit: &mut Emit<'_>) {
     for _ in 0..n {
         emit(c);
@@ -1098,10 +1148,13 @@ unsafe fn vformat(fmt: *const c_char, args: &mut VaList<'_>, mut emit: Emit<'_>)
 #[cfg(target_os = "minix")]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn vprintf(fmt: *const c_char, mut ap: VaList<'_>) -> c_int {
-    let mut emit = |c: u8| {
-        let _ = unsafe { putchar(c as c_int) };
-    };
-    unsafe { vformat(fmt, &mut ap, &mut emit) }
+    let mut out = EmitBuf::new(|chunk: &[u8]| {
+        let _ = unsafe { crate::write(1, chunk.as_ptr() as *const c_void, chunk.len()) };
+    });
+    let mut emit = |c: u8| out.push(c);
+    let n = unsafe { vformat(fmt, &mut ap, &mut emit) };
+    out.flush();
+    n
 }
 
 #[cfg(target_os = "minix")]
@@ -1205,15 +1258,17 @@ pub unsafe extern "C" fn vfprintf(
     } else {
         unsafe { (*stream).mem }
     };
-    let mut emit = |c: u8| {
-        let b = c;
+    let mut out = EmitBuf::new(|chunk: &[u8]| {
         if mem.is_null() {
-            let _ = unsafe { crate::write(fd, &b as *const u8 as *const c_void, 1) };
+            let _ = unsafe { crate::write(fd, chunk.as_ptr() as *const c_void, chunk.len()) };
         } else {
-            let _ = unsafe { mem_write(mem, &b as *const u8, 1) };
+            let _ = unsafe { mem_write(mem, chunk.as_ptr(), chunk.len()) };
         }
-    };
-    unsafe { vformat(fmt, &mut ap, &mut emit) }
+    });
+    let mut emit = |c: u8| out.push(c);
+    let n = unsafe { vformat(fmt, &mut ap, &mut emit) };
+    out.flush();
+    n
 }
 
 #[cfg(target_os = "minix")]
@@ -2561,6 +2616,42 @@ mod tests {
     #[cfg(target_os = "minix")]
     use core::ffi::c_int;
     use std::vec::Vec;
+
+    /// A formatted print reaches its sink in chunks, not one byte at a time: the descriptor calls
+    /// a print costs is what a console write is billed for (see `EmitBuf`), so a line has to arrive
+    /// whole. This is the rule that failed before the buffer existed, and it fails without it.
+    #[test]
+    fn emit_buf_sends_one_chunk_per_line() {
+        let mut chunks: Vec<Vec<u8>> = Vec::new();
+        let mut out = EmitBuf::new(|chunk: &[u8]| chunks.push(chunk.to_vec()));
+        for byte in b"doom: PASS\n" {
+            out.push(*byte);
+        }
+        out.flush();
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(chunks[0], b"doom: PASS\n");
+    }
+
+    /// A print longer than the chunk is still one piece per chunk, in order, with nothing lost or
+    /// repeated at the boundaries.
+    #[test]
+    fn emit_buf_chunks_long_output_in_order() {
+        let cap = EMIT_CHUNK;
+        let mut chunks: Vec<Vec<u8>> = Vec::new();
+        let mut out = EmitBuf::new(|chunk: &[u8]| chunks.push(chunk.to_vec()));
+        for i in 0..(cap * 2 + 7) {
+            out.push((i % 251) as u8);
+        }
+        out.flush();
+        out.flush();
+        assert_eq!(chunks.len(), 3);
+        assert_eq!(chunks[0].len(), cap);
+        assert_eq!(chunks[1].len(), cap);
+        assert_eq!(chunks[2].len(), 7);
+        let joined: Vec<u8> = chunks.concat();
+        assert_eq!(joined.len(), cap * 2 + 7);
+        assert!(joined.iter().enumerate().all(|(i, b)| *b == (i % 251) as u8));
+    }
 
     // Test-only entry point so the engine can be exercised without a C
     // caller. Variadic calls on the host (rustup nightly) mix pointer and
