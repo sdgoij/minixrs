@@ -732,6 +732,23 @@ check(
   `screen:\n${screen().slice(-1000)}`
 );
 
+// Doom left through `exit()`, and its process slot has to be free for the next fork: a slot the
+// host still thinks is live makes the shell's next external command `sh: fork failed`. The
+// command's own line is echoed above it, so the check waits for a line that is only the output.
+for (const ch of '/bin/echo forked-after-doom') press(ch);
+press('Enter');
+check(
+  'the shell forks again after Doom exits, so the game did not strand its slot',
+  await until(
+    () =>
+      screen().split('\n').some((line) => line.trim() === 'forked-after-doom') &&
+      !screen().includes('fork failed'),
+    'the command after Doom',
+    30000
+  ),
+  `screen:\n${screen().slice(-800)}`
+);
+
 // The session ends the way a tab ends it: the control, not the keyboard. It is the same bytes
 // the shell would get (`^U` and `exit`, which is INIT's exit — the shutdown M4 exists to run),
 // and the reason the control exists is on the other side of it: a session that ends this way

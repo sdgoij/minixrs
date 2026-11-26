@@ -297,14 +297,27 @@ pub unsafe fn fork() -> Result<i32, MinixErr> {
 
 /// Exit the current process with the given status.
 pub fn exit(status: i32) -> ! {
-    #[cfg(target_os = "minix")]
+    // On wasm the host learns a process is gone only from a trap whose last syscall was SYS_EXIT:
+    // `minix_rt::exit` issues it and then traps, and the dispatch loop records the exit from that.
+    // The PM_EXIT message below is the MINIX way and works on a CPU, but a wasm instance that
+    // sends it parks inside the send and is never resumed, so the host never sees an exit: the
+    // slot stays live and the next fork into it is refused (`sh: fork failed` for the command that
+    // follows the program). Either path reaches the same bookkeeping; `SYS_EXIT` sets
+    // SIGNALED | SIG_PENDING | SLOT_FREE and notifies PM, which is PM_EXIT's `exit_proc` from the
+    // other side.
+    #[cfg(all(target_os = "minix", target_arch = "wasm32"))]
+    minix_rt::exit(status);
+
+    #[cfg(all(target_os = "minix", not(target_arch = "wasm32")))]
     unsafe {
         let mut msg = [0u8; 64];
         msg_set_i32(&mut msg, OFF_TYPE, PM_EXIT as i32);
         msg_set_i32(&mut msg, OFF_EXIT_STATUS, status);
         let _ = sendrec(PM_PROC_NR, &mut msg);
     }
+    #[cfg(not(target_os = "minix"))]
     let _ = status;
+    #[cfg(not(all(target_os = "minix", target_arch = "wasm32")))]
     loop {
         core::hint::spin_loop();
     }

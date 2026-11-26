@@ -577,6 +577,17 @@ routes it to the kernel's process-termination path — the same path as an
 unrecoverable hardware fault. `read_fault_addr` has no equivalent; the trap
 gives no address.
 
+Exit is the same trap, and it is the one place `exit()` cannot take the CPU's
+route. On the hardware arches `_exit` sends `PM_EXIT` and PM kills the process;
+a wasm instance that sends it parks inside the send and is never resumed, so the
+host never observes an exit and keeps the slot marked live. The next fork into
+that slot is refused (`sh: fork failed` for the command after a program that
+called `exit()`, Doom's menu quit being the first to hit it).
+`minix_std::process::exit` therefore issues `SYS_EXIT` on wasm32
+(`minix_rt::exit`), which sets SIGNALED | SIG_PENDING | SLOT_FREE and notifies
+PM to do the same `exit_proc`, then traps. The host's trap handler sees the
+`SYS_EXIT` last, records the exit, and the slot is reusable.
+
 ### 6.3 Signals without sigframes
 
 `sigframe_*`, `build_sigframe`, and the naked `minix_sigreturn_trampoline` in
