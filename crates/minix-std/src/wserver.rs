@@ -6,6 +6,9 @@
 //! Requests and their replies:
 //! - `ws_create` — {x, y, w, h, title ptr/len} → wid in reply m2i1.
 //! - `ws_text` — {wid, row, col, ch} → 0.
+//! - `ws_text_row` — {wid, row, col, len, cells} → 0: a run of cells on one row, which is what a
+//!   console redraw needs. A screen that scrolled changes every cell, and one message per cell made
+//!   that 1920 IPC round trips per scrolled line; a run makes a row cost a handful.
 //! - `ws_fill` — {wid, x0, y0, x1, y1, color} → 0.
 //! - `ws_close` — {wid} → 0.
 //! - `ws_input` — {wid}: no immediate reply; when a key routes to the
@@ -29,6 +32,10 @@ pub const WS_FLUSH: u32 = WS_BASE + 6;
 pub const WS_CURSOR: u32 = WS_BASE + 7;
 pub const WS_PTR: u32 = WS_BASE + 8;
 pub const WS_PTRMODE: u32 = WS_BASE + 9;
+pub const WS_TEXT_ROW: u32 = WS_BASE + 10;
+
+/// The most cells one `WS_TEXT_ROW` carries: the payload past `wid`/`row`/`col`/`len`.
+pub const WS_TEXT_ROW_CELLS: usize = 32;
 
 // Absolute message-byte offsets (m2 layout).
 const OFF_TYPE: usize = 4;
@@ -73,6 +80,23 @@ pub fn ws_text(wid: i32, row: i32, col: i32, ch: u8) -> [u8; 64] {
     msg_set_i32(&mut msg, OFF_M2_I2, row);
     msg_set_i32(&mut msg, OFF_M2_I3, col);
     msg_set_u8(&mut msg, OFF_M2_L1, ch);
+    msg
+}
+
+/// Build a WS_TEXT_ROW request: `cells` written left to right from `col` on `row`.
+///
+/// The payload is `wid` @ 8, `row` @ 12, `col` @ 16, the run length @ 20, and the cells from @ 24 —
+/// the rest of the 48-byte payload, which is `WS_TEXT_ROW_CELLS` bytes. Redraws are deferred to
+/// `ws_flush` like `ws_text`.
+pub fn ws_text_row(wid: i32, row: i32, col: i32, cells: &[u8]) -> [u8; 64] {
+    let mut msg = [0u8; 64];
+    let n = cells.len().min(WS_TEXT_ROW_CELLS);
+    msg_set_i32(&mut msg, OFF_TYPE, WS_TEXT_ROW as i32);
+    msg_set_i32(&mut msg, OFF_M2_I1, wid);
+    msg_set_i32(&mut msg, OFF_M2_I2, row);
+    msg_set_i32(&mut msg, OFF_M2_I3, col);
+    msg_set_i32(&mut msg, OFF_M2_I3 + 4, n as i32);
+    msg[OFF_M2_L1..OFF_M2_L1 + n].copy_from_slice(&cells[..n]);
     msg
 }
 

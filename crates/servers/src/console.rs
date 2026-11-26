@@ -26,7 +26,9 @@
 //!     `v_console_lines` array (one per virtual console); this port has no console switching, so
 //!     the follow-up, not the model, is what is missing.
 
-use minix_std::wserver::{ws_create, ws_cursor, ws_flush, ws_reply_status, ws_reply_wid, ws_text};
+use minix_std::wserver::{
+    ws_create, ws_cursor, ws_flush, ws_reply_status, ws_reply_wid, ws_text_row, WS_TEXT_ROW_CELLS,
+};
 
 /// Console geometry in cells. It is `tty.rs`'s answer to `TIOCGWINSZ` on a
 /// console line, so a program's page length and this model's size cannot drift
@@ -270,6 +272,46 @@ impl Screen {
         }
     }
 
+    /// Record that the window server now holds `len` cells starting at `col`.
+    pub fn confirm_run(&mut self, row: usize, col: usize, len: usize) {
+        for c in col..col + len {
+            self.confirm(row, c);
+        }
+    }
+
+    /// Whether the window server is short of the cell at `row`/`col`.
+    pub fn changed(&self, row: usize, col: usize) -> bool {
+        self.grid[row][col] != self.sent[row][col]
+    }
+
+    /// The cell's character, as the window server should hold it.
+    pub fn char_at(&self, row: usize, col: usize) -> u8 {
+        self.grid[row][col]
+    }
+
+    /// The runs of changed cells on `row`, as (first column, length) into `out`; returns how many.
+    ///
+    /// A run is what one request carries, so it is capped at the message's cell count: a row that
+    /// scrolled is a handful of runs rather than one message per cell. Adjacent changed cells share
+    /// a run, and an unchanged cell ends it.
+    pub fn row_runs(&self, row: usize, out: &mut [(usize, usize); COLS]) -> usize {
+        let mut runs = 0;
+        let mut col = 0;
+        while col < COLS {
+            if !self.changed(row, col) {
+                col += 1;
+                continue;
+            }
+            let start = col;
+            while col < COLS && col - start < WS_TEXT_ROW_CELLS && self.changed(row, col) {
+                col += 1;
+            }
+            out[runs] = (start, col - start);
+            runs += 1;
+        }
+        runs
+    }
+
     /// Whether the window server's cursor is somewhere other than this screen's.
     pub fn cursor_stale(&self) -> bool {
         self.cursor() != self.sent_cursor
@@ -349,18 +391,24 @@ impl Console {
             return;
         }
         let mut dirty = false;
-        // Bounded by the screen's size: each round trip either confirms a cell (so the next
-        // `take_damage` moves past it) or gives up.
-        for _ in 0..ROWS * COLS {
-            let Some((row, col, ch)) = self.screen.take_damage() else {
-                break;
-            };
-            let mut msg = ws_text(self.wid, row as i32, col as i32, ch);
-            if ws_call(&mut msg) != 0 {
-                break;
+        // A row at a time, and a run of changed cells rather than a message each: a scrolled screen
+        // changes every cell, and the per-cell request this replaced made that 1920 round trips to
+        // the window server for one line of output.
+        let mut runs = [(0usize, 0usize); COLS];
+        'rows: for row in 0..ROWS {
+            let count = self.screen.row_runs(row, &mut runs);
+            for &(col, len) in &runs[..count] {
+                let mut cells = [0u8; WS_TEXT_ROW_CELLS];
+                for (i, cell) in cells[..len].iter_mut().enumerate() {
+                    *cell = self.screen.char_at(row, col + i);
+                }
+                let mut msg = ws_text_row(self.wid, row as i32, col as i32, &cells[..len]);
+                if ws_call(&mut msg) != 0 {
+                    break 'rows;
+                }
+                self.screen.confirm_run(row, col, len);
+                dirty = true;
             }
-            self.screen.confirm(row, col);
-            dirty = true;
         }
         if self.screen.cursor_stale() {
             let (row, col) = self.screen.cursor();
@@ -590,6 +638,67 @@ mod tests {
             s.feed(b);
         }
         assert_eq!(s.take_damage(), Some((0, 0, b' ')));
+    }
+
+    /// A scrolled screen changes every cell, and every cell still has to reach the window server.
+    /// The request count is what this pins: a run per request, capped at the message's cell count,
+    /// so a screenful is a handful of requests per row rather than one per character.
+    #[test]
+    fn test_a_scrolled_screen_is_a_handful_of_runs_not_one_per_cell() {
+        let mut s = Screen::new();
+        // Two screens of text, so the scroll has moved everything at least once.
+        for i in 0..(ROWS * 2) {
+            for _ in 0..COLS {
+                s.feed(b'a' + (i % 26) as u8);
+            }
+        }
+        let mut runs = [(0usize, 0usize); COLS];
+        let mut requests = 0;
+        let mut cells = 0;
+        for row in 0..ROWS {
+            let count = s.row_runs(row, &mut runs);
+            requests += count;
+            for &(_, len) in &runs[..count] {
+                cells += len;
+            }
+        }
+        assert!(
+            cells > ROWS * COLS / 2,
+            "a scroll leaves most of the screen changed, got {cells}"
+        );
+        assert!(
+            requests <= ROWS * COLS.div_ceil(WS_TEXT_ROW_CELLS),
+            "one request per run at most, got {requests}"
+        );
+        assert!(requests > 0);
+
+        // Confirming the runs is what stops them being sent again.
+        for row in 0..ROWS {
+            let count = s.row_runs(row, &mut runs);
+            for &(col, len) in &runs[..count] {
+                s.confirm_run(row, col, len);
+            }
+            assert_eq!(s.row_runs(row, &mut runs), 0);
+        }
+    }
+
+    #[test]
+    fn test_runs_merge_adjacent_changes_and_split_on_an_unchanged_cell() {
+        let mut s = Screen::new();
+        for &b in b"abcdef" {
+            s.feed(b);
+        }
+        let mut runs = [(0usize, 0usize); COLS];
+        assert_eq!(s.row_runs(0, &mut runs), 1);
+        assert_eq!(runs[0], (0, 6));
+
+        // Confirm two of the six: the changed cells either side of them are two runs.
+        s.confirm(0, 2);
+        s.confirm(0, 3);
+        let count = s.row_runs(0, &mut runs);
+        assert_eq!(count, 2);
+        assert_eq!(runs[0], (0, 2));
+        assert_eq!(runs[1], (4, 2));
     }
 
     #[test]

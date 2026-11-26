@@ -31,7 +31,7 @@ use arch_common::ipc::Message;
 use minix_std::font::FONT_8X16;
 #[cfg(target_os = "minix")]
 use minix_std::wserver::{
-    WS_CLOSE, WS_CREATE, WS_CURSOR, WS_FILL, WS_FLUSH, WS_INPUT, WS_PTRMODE, WS_TEXT,
+    WS_CLOSE, WS_CREATE, WS_CURSOR, WS_FILL, WS_FLUSH, WS_INPUT, WS_PTRMODE, WS_TEXT, WS_TEXT_ROW,
 };
 // Delivered *to* clients: a key or a pointer record the desktop routed to a window's waiter.
 #[cfg(target_os = "minix")]
@@ -1432,6 +1432,36 @@ fn handle_request(msg: &mut Message, src: i32) -> Option<i32> {
             let r = state.text(wid, row, col, ch);
             // Redraws are deferred to WS_FLUSH so a client can batch a
             // screenful of WS_TEXT/WS_FILL updates and repaint once.
+            if r.is_ok() {
+                Some(0)
+            } else {
+                Some(r.unwrap_err())
+            }
+        }
+        WS_TEXT_ROW => {
+            let wid = m.m2i1 as usize;
+            let row = m.m2i2;
+            let col = m.m2i3;
+            // `minix_std::wserver::ws_text_row`'s layout: the run length follows `col`, and the
+            // cells fill the rest of the payload.
+            let len = unsafe {
+                i32::from_le_bytes([
+                    msg.m_payload.raw[12],
+                    msg.m_payload.raw[13],
+                    msg.m_payload.raw[14],
+                    msg.m_payload.raw[15],
+                ])
+            } as usize;
+            let cells = unsafe { &msg.m_payload.raw[16..] };
+            let n = len.min(cells.len());
+            let mut r = Ok(());
+            for (i, ch) in cells[..n].iter().enumerate() {
+                r = state.text(wid, row, col + i as i32, *ch);
+                if r.is_err() {
+                    break;
+                }
+            }
+            // Deferred to WS_FLUSH, as WS_TEXT is.
             if r.is_ok() {
                 Some(0)
             } else {
