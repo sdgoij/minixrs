@@ -17,7 +17,7 @@ by the same clang + LLD + `libc.a` line as `c-direct`.
 | Builder | `cargo xtask build doom <arch>` (`crates/xtask/src/build/doom.rs`) |
 | Recipes | `just doom-x86`, `just prepare-doom-x86` |
 | Playing | `just run-doom-x86`, then `/bin/doom` at the shell; click the window and play |
-| Gates | `cargo xtask gate doom --arch x86` (frame and read-back), `cargo xtask gate doom-kbd --arch x86` (a device key, the menu and the quit) |
+| Gates | `cargo xtask gate doom --arch x86` (frame and read-back), `cargo xtask gate doom-kbd --arch x86` (a device key, the menu and the quit), `cargo xtask gate doom-save --arch x86` (a save, the shell listing, and a reboot) |
 
 `doomgeneric` is a port of the Doom source with one small interface between the
 engine and a platform (`DG_Init`, `DG_DrawFrame`, `DG_SleepMs`, `DG_GetTicksMs`,
@@ -123,8 +123,10 @@ slash from the process root, so the directory was created as `/.savegame` and
 the save failed into `/tmp/recovery.dsg`. `last_dir` now takes `fp_cdir` for a
 relative path and `fp_rdir` only for one that starts with `/`
 (`crates/servers/src/vfs/path.rs`). A second boot, after `sync`, shows
-`.savegame/doomsav0.dsg`, which is the check that the entry and the save both
-survive.
+`.savegame/doomsav0.dsg`, and `cargo xtask gate doom-save` is that check:
+New Game, save slot 0, quit to the shell, list the file, `sync`, boot again,
+list it again. Reverting the `last_dir` fix makes it fail with the engine's
+`Failed to open savegame file` and its `/tmp/recovery.dsg` fallback.
 
 `I_Error` probes for a desktop error box with
 `system(ZENITY_BINARY " --help >/dev/null 2>&1")`, and `system()` forks
@@ -150,7 +152,6 @@ directory shows in the listing and cannot be resolved.
   read. The keyboard is the window's, through `/dev/kbd`.
 - The 320x200 image is scaled with square pixels (960x600), not to Doom's 4:3
   aspect; the difference is a few percent and it keeps the scale an integer.
-- Saving is checked by hand, not by a gate: the keys walk the menu and the
-disk is inspected on the next boot. A gate would need the same paced menu
-steps plus a `sync`, and the save path is the VFS's, which the boot gate
-already exercises for directories.
+- `doom-save` drives the menu with QMP keys and boots twice, so it takes about
+twice as long as `doom-kbd`. The second boot mounts read-only, because the
+first was not unmounted; it only reads the file.

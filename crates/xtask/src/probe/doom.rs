@@ -1,4 +1,9 @@
-//! A host key reaches Doom through the input server, not the serial console.
+//! Two Doom gates that have to drive a real device and answer a real prompt.
+//!
+//! `run` (the `doom-kbd` gate) checks that a host key reaches Doom through the
+//! input server, not the serial console. `run_save` (the `doom-save` gate) saves
+//! a game, leaves to the shell, lists the file, syncs and reboots, which is the
+//! VFS write path rather than the render path.
 //!
 //! Boots the split image with a QMP socket, types `/bin/doom` at the shell, and
 //! waits for the platform layer's first-frame verdict. Then it injects Escape as a
@@ -31,8 +36,11 @@ use crate::qmp::Qmp;
 /// A port none of the other probes listens on.
 const QMP_PORT: u16 = 4476;
 
+/// The save probe boots twice, so it keeps its own two ports.
+const SAVE_QMP_PORT: u16 = 4481;
+
 /// The gate's system layout: the boot image plus the root filesystem on a disk.
-fn qemu(root: &Path) -> Command {
+fn qemu(root: &Path, qmp_port: u16) -> Command {
     let image = root.join("target/images/x86_64-pc-minix/minix-x86-boot.elf");
     let disk = root.join("target/images/x86_64-pc-minix/disk.img");
 
@@ -65,12 +73,12 @@ fn qemu(root: &Path) -> Command {
     ]);
     command
         .arg("-qmp")
-        .arg(format!("tcp:127.0.0.1:{QMP_PORT},server=on,wait=off"));
+        .arg(format!("tcp:127.0.0.1:{qmp_port},server=on,wait=off"));
     command
 }
 
 pub fn run(root: &Path) -> io::Result<bool> {
-    let mut guest = Guest::spawn(&mut qemu(root))?;
+    let mut guest = Guest::spawn(&mut qemu(root, QMP_PORT))?;
     if !guest.wait_for(b"# ", secs(120)) {
         return Ok(fail(&guest, "the guest never reached a shell prompt"));
     }
@@ -119,4 +127,132 @@ pub fn run(root: &Path) -> io::Result<bool> {
     }
     println!("doom-kbd probe: {}", if ok { "PASS" } else { "FAIL" });
     Ok(ok)
+}
+
+/// Save a game, leave to the shell, list the file, sync, reboot, list it again.
+///
+/// Doom creates `./.savegame/` with `mkdir("./.savegame/")` at startup and
+/// writes `temp.dsg`, renaming it to `doomsav0.dsg`. Both are directory
+/// operations on a relative path: `mkdir` resolves its parent through
+/// `last_dir`, and the rename works on the same name one level down. Quitting
+/// gives the shell back, so the file can be listed from outside Doom, and the
+/// reboot is what separates a save that reached the device from one that only
+/// lived in MFS's write-back cache.
+///
+/// The menu steps are the engine's own: New Game is the first row, Save Game is
+/// three rows below it, and after a save the cursor is still on Save Game, two
+/// rows above Quit Game. A press needs a tic of its own, which is what `tap`
+/// gives it.
+pub fn run_save(root: &Path) -> io::Result<bool> {
+    let mut guest = Guest::spawn(&mut qemu(root, SAVE_QMP_PORT))?;
+    if !guest.wait_for(b"# ", secs(120)) {
+        return Ok(fail(&guest, "the guest never reached a shell prompt"));
+    }
+    guest.send_paced("/bin/doom", Duration::from_millis(3))?;
+    if !guest.wait_for(b"doom: PASS", secs(90)) {
+        return Ok(fail(&guest, "Doom never rendered a verified frame"));
+    }
+
+    let mut qmp = Qmp::connect(SAVE_QMP_PORT)?;
+    thread::sleep(Duration::from_millis(500));
+
+    // New Game, the episode, the skill, and the level load.
+    for key in ["esc", "ret", "ret", "ret"] {
+        tap(&mut qmp, key)?;
+    }
+    thread::sleep(Duration::from_secs(4));
+
+    // Save Game, slot 0, a name, accept.
+    tap(&mut qmp, "esc")?;
+    for _ in 0..3 {
+        tap(&mut qmp, "down")?;
+    }
+    tap(&mut qmp, "ret")?;
+    thread::sleep(Duration::from_secs(1));
+    tap(&mut qmp, "ret")?;
+    thread::sleep(Duration::from_millis(500));
+    tap(&mut qmp, "a")?;
+    tap(&mut qmp, "ret")?;
+    thread::sleep(Duration::from_secs(2));
+
+    // A save returns to the game with the menu cursor still on Save Game.
+    let quit_anchor = guest.transcript_len();
+    tap(&mut qmp, "esc")?;
+    for _ in 0..2 {
+        tap(&mut qmp, "down")?;
+    }
+    tap(&mut qmp, "ret")?;
+    thread::sleep(Duration::from_millis(500));
+    tap(&mut qmp, "y")?;
+
+    let mut ok = step(
+        1,
+        "the save leaves the game at the shell",
+        guest.wait_for_after(b"doom: exit", quit_anchor, secs(30))
+            && guest.wait_for_after(b"# ", quit_anchor, secs(30)),
+    );
+
+    if ok {
+        // Doom ran in the data directory; the shell is still where it started.
+        let anchor = guest.transcript_len();
+        guest.send_paced("cd /usr/share/games/doom", Duration::from_millis(3))?;
+        let cd_ok = guest.wait_for_after(b"# ", anchor, secs(15));
+        let anchor = guest.transcript_len();
+        guest.send_paced("ls .savegame", Duration::from_millis(3))?;
+        let listed = guest.wait_for_after(b"doomsav0.dsg", anchor, secs(15));
+        // The recovery file is the engine's fallback when the directory or the
+        // create fails, so its message is a failure even if a file is listed.
+        let no_fallback = guest.count(b"Failed to open savegame file") == 0;
+        ok = step(
+            2,
+            "the save is a file in .savegame, not a recovery copy",
+            cd_ok && listed && no_fallback,
+        );
+    }
+
+    if ok {
+        // MFS caches writes; a QEMU that is killed without this loses them.
+        let anchor = guest.transcript_len();
+        guest.send_paced("sync", Duration::from_millis(3))?;
+        ok = step(
+            3,
+            "the guest syncs the save to the device",
+            guest.wait_for_after(b"# ", anchor, secs(15)),
+        );
+    }
+
+    if !ok {
+        eprintln!("{}", guest.tail(3000));
+    }
+    drop(qmp);
+    drop(guest);
+
+    if ok {
+        // A directory entry can reach the device without its inode; only a
+        // second boot tells a durable save from that half-written one.
+        let mut guest = Guest::spawn(&mut qemu(root, SAVE_QMP_PORT + 1))?;
+        if !guest.wait_for(b"# ", secs(120)) {
+            return Ok(fail(&guest, "the second boot never reached a shell prompt"));
+        }
+        let anchor = guest.transcript_len();
+        guest.send_paced("cd /usr/share/games/doom", Duration::from_millis(3))?;
+        let cd_ok = guest.wait_for_after(b"# ", anchor, secs(15));
+        let anchor = guest.transcript_len();
+        guest.send_paced("ls .savegame", Duration::from_millis(3))?;
+        let listed = guest.wait_for_after(b"doomsav0.dsg", anchor, secs(15));
+        ok = step(4, "the save survives a reboot", cd_ok && listed);
+        if !ok {
+            eprintln!("{}", guest.tail(3000));
+        }
+    }
+
+    println!("doom-save probe: {}", if ok { "PASS" } else { "FAIL" });
+    Ok(ok)
+}
+
+/// Press `key`, then let Doom run a tic before the next one.
+fn tap(qmp: &mut Qmp, key: &str) -> io::Result<()> {
+    qmp.press(key)?;
+    thread::sleep(Duration::from_millis(300));
+    Ok(())
 }
