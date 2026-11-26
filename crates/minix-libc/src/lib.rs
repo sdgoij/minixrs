@@ -1182,14 +1182,31 @@ pub unsafe extern "C" fn __cxa_finalize(dso: *mut c_void) {
     }
 }
 
-/// C `atexit` over the Itanium registry. The function pointer is cast to
-/// the one-arg form; the Itanium ABI calls atexit handlers with a dummy
-/// argument, which the zero-arg callee ignores.
+/// C `atexit` over the Itanium registry.
+///
+/// The registry's entries take one argument (the Itanium ABI's dummy), so a
+/// nullary handler is registered with a trampoline of that signature rather
+/// than by casting the function pointer itself. The cast is harmless on a
+/// native call ABI, where an extra argument is ignored, and a trap on wasm:
+/// `call_indirect` checks the callee's signature and a `() -> ()` function
+/// called through a `(i32) -> ()` pointer is `null function or function
+/// signature mismatch`. The pointer travels in the entry's `arg`, which is
+/// otherwise unused for a plain `atexit` handler.
 #[cfg(target_os = "minix")]
 #[unsafe(no_mangle)]
 pub extern "C" fn atexit(func: extern "C" fn()) -> c_int {
-    let f: extern "C" fn(*mut c_void) = unsafe { core::mem::transmute(func) };
-    __cxa_atexit(f, core::ptr::null_mut(), core::ptr::null_mut())
+    extern "C" fn call_nullary(arg: *mut c_void) {
+        // SAFETY: `atexit` stores the pointer of a `extern "C" fn()` in `arg`
+        // and registers this trampoline as the entry's function, so the only
+        // way here is with that pointer.
+        let f: extern "C" fn() = unsafe { core::mem::transmute(arg) };
+        f();
+    }
+    __cxa_atexit(
+        call_nullary,
+        func as *const () as *mut c_void,
+        core::ptr::null_mut(),
+    )
 }
 
 /// The dummy `__dso_handle` for statically-linked objects: its address is
