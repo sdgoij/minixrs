@@ -378,6 +378,7 @@ fn run_probe(root: &Path, matches: &clap::ArgMatches) -> io::Result<bool> {
             &mut probe::command_from(&trailing_words(matches)),
         ),
         Some(("wldemo", _)) => probe::wldemo::run(root),
+        Some(("doom", _)) => probe::doom::run(root),
         Some(("wldmabuf", matches)) => probe::wldmabuf::run(root, &trailing_words(matches)),
         Some(("wldmabufgl", matches)) => probe::wldmabufgl::run(root, &trailing_words(matches)),
         Some(("wlfull", matches)) => probe::wlfull::run(root, &trailing_words(matches)),
@@ -1030,6 +1031,10 @@ fn command() -> clap::Command {
                 .subcommand(
                     clap::Command::new("wlkey")
                         .about("A host key reaches a Wayland client, and the keymap arrives"),
+                )
+                .subcommand(
+                    clap::Command::new("doom")
+                        .about("A host key reaches Doom through the input server's /dev/kbd"),
                 )
                 .subcommand(
                     clap::Command::new("wlfocus")

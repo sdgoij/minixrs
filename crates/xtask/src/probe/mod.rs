@@ -21,6 +21,7 @@ use crate::guest::Guest;
 pub mod alloc;
 pub mod console;
 pub mod dso_share;
+pub mod doom;
 pub mod exec_loop;
 pub mod fb;
 pub mod interactive_bash;

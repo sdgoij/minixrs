@@ -16,14 +16,14 @@ by the same clang + LLD + `libc.a` line as `c-direct`.
 | Platform layer | `tools/doom/doomgeneric_minix.c` |
 | Builder | `cargo xtask build doom <arch>` (`crates/xtask/src/build/doom.rs`) |
 | Recipes | `just doom-x86`, `just prepare-doom-x86` |
-| Playing | `just run-doom-x86`, then `/bin/doom` at the shell |
-| Gate | `cargo xtask gate doom --arch x86`, scenario `tools/smoke/doom.tsv` |
+| Playing | `just run-doom-x86`, then `/bin/doom` at the shell; click the window and play |
+| Gates | `cargo xtask gate doom --arch x86` (frame and read-back), `cargo xtask gate doom-kbd --arch x86` (a device key) |
 
 `doomgeneric` is a port of the Doom source with one small interface between the
 engine and a platform (`DG_Init`, `DG_DrawFrame`, `DG_SleepMs`, `DG_GetTicksMs`,
 `DG_GetKey`, `DG_SetWindowTitle`). Upstream's platform files each own a `main`
-and a host window; minix has neither, but it has a framebuffer device and a
-console, which is the whole of what the interface asks for.
+and a host window; minix has neither, but it has a framebuffer device and an
+input ring, which is the whole of what the interface asks for.
 
 The engine is compiled with upstream's `SRC_DOOM` list minus the platform file,
 with `-DNORMALUNIX -DLINUX` (the family its sources branch on) and
@@ -63,17 +63,27 @@ than the search path is worth.
 
 ## 4. Input
 
-The console is put in raw mode (VMIN = VTIME = 0, so `DG_GetKey` polls and
-never blocks). A terminal reports presses, not releases, while Doom's input loop
-expects both, so a key is held for 250 ms after its last repeat byte and then
-released; with the terminal's own auto-repeat a held key stays held, and a tap
-is a press and a release. `ESC [ A`..`D` become the arrow keys (modifier
-parameters are skipped), Escape is the menu, Space is use, Ctrl-C is fire (safe:
-raw mode clears `ISIG`).
+Two sources feed the engine, and the one that matters for play is `/dev/kbd`, the
+input server's HID ring (major 20, `crates/servers/src/input.rs`). An event is
+`{page, code, press}`, 8 bytes little-endian: a HID usage code and both edges, so
+a key needs no synthesis and no escape-sequence parsing. A window's keyboard
+reaches the ring through QEMU's PS/2 controller. The compositor reads the same
+ring from its own cursor, which is the point of the server's per-reader design:
+a second consumer loses nothing. The platform layer prints `doom: kbd PASS` the
+first time an event arrives from it, and the `doom-kbd` gate asserts that line
+after QMP injects Escape, which is a real device event.
+
+The console stays as a second source, so `-nographic` and the shell can still
+type at Doom. It is put in raw mode (VMIN = VTIME = 0, so `DG_GetKey` polls and
+never blocks), and since a terminal reports presses and not releases, a console
+key is held for 250 ms after its last repeat byte and then released; with the
+terminal's own auto-repeat a held key stays held, and a tap is a press and a
+release. `ESC [ A`..`D` become the arrow keys (modifier parameters are skipped),
+Escape is the menu, Space is use, Ctrl-C is fire (safe: raw mode clears `ISIG`).
 
 `-minix-exit` makes the platform layer leave once it has printed its verdict, so
-the gate gets its shell prompt back. A player does not pass it. The gate types
-the command paced, because an unpaced long line lost a byte on the serial
+the `doom` gate gets its shell prompt back. A player does not pass it. That gate
+types the command paced, because an unpaced long line lost a byte on the serial
 console (`-iwad` arrived as `-iwa1ad`), and a paced step is retried until the
 guest echoes it whole.
 
@@ -92,6 +102,6 @@ device with SDL on stdio wedges QEMU's main loop (`KNOWN_ISSUES` 95).
 - No sound: the engine is built without `FEATURE_SOUND`, so `dummy.c` provides
   the mixer stubs.
 - No mouse: doomgeneric starts with `usemouse = 0`, and the tablet device is not
-  read.
+  read. The keyboard is the window's, through `/dev/kbd`.
 - The 320x200 image is scaled with square pixels (960x600), not to Doom's 4:3
   aspect; the difference is a few percent and it keeps the scale an integer.

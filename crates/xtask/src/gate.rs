@@ -806,6 +806,17 @@ fn table() -> Vec<Gate> {
             "doom: the shareware IWAD runs, the first frame's pixels are read back out of /dev/fb ({arch})",
         ),
         g(
+            "doom-kbd",
+            X86_ONLY,
+            Seconds::Fixed(240),
+            SYSTEM_256,
+            Action::Probe {
+                probe: Probe::Own("doom-kbd"),
+                qmp: false,
+            },
+            "doom-kbd: a host key reaches Doom through the input server's /dev/kbd ring ({arch})",
+        ),
+        g(
             "gbmtest",
             X86_ONLY,
             Seconds::Fixed(120),
@@ -1187,6 +1198,7 @@ fn with_prepare(mut gate: Gate) -> Gate {
         "wlgl" => &[Prepare::Exact("prepare-wlgl-x86")],
         "gui" => &[Prepare::Exact("prepare-gui-x86")],
         "doom" => &[Prepare::Exact("prepare-doom-x86")],
+        "doom-kbd" => &[Prepare::Exact("prepare-doom-x86")],
         "gbmtest" => &[Prepare::Exact("prepare-gbmtest-x86")],
         "wldmabufgl" => &[Prepare::Exact("prepare-wldmabufgl-x86")],
         "wlcompose" => &[Prepare::Exact("prepare-wlcompose-x86")],
@@ -1537,6 +1549,7 @@ fn run_probe(
         Probe::Own(name) => match name {
             "rc" => probe::rc::run(root),
             "fb" => probe::fb::run(root),
+            "doom-kbd" => probe::doom::run(root),
             "wlkey" => probe::wlkey::run(root),
             "wlfocus" => probe::wlfocus::run(root),
             "wlmotion" => probe::wlmotion::run(root),
