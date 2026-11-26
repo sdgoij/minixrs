@@ -109,7 +109,32 @@ image, which would overwrite the disk that carries `/bin/doom` and the IWAD. It
 has no `virtio-tablet-pci`: doomgeneric starts with `usemouse = 0`, and that
 device with SDL on stdio wedges QEMU's main loop (`KNOWN_ISSUES` 95).
 
-## 5. Limits
+## 5. Saves and errors
+
+With `configdir` set to `"."`, `M_GetSaveGameDir` calls `mkdir("./.savegame/")`
+and writes `./.savegame/temp.dsg`, then renames it to `doomsav0.dsg`. That one
+call found a VFS bug: `last_dir` resolved the parent of any path containing a
+slash from the process root, so the directory was created as `/.savegame` and
+the save failed into `/tmp/recovery.dsg`. `last_dir` now takes `fp_cdir` for a
+relative path and `fp_rdir` only for one that starts with `/`
+(`crates/servers/src/vfs/path.rs`). A second boot, after `sync`, shows
+`.savegame/doomsav0.dsg`, which is the check that the entry and the save both
+survive.
+
+`I_Error` probes for a desktop error box with
+`system(ZENITY_BINARY " --help >/dev/null 2>&1")`, and `system()` forks
+`/bin/sh -c`. Until the shell honoured `-c` it started an interactive prompt on
+the console instead, which is how a fatal error left the guest flooding `# `
+and needing a hard kill; the shell now runs the operand and exits. zenity is
+not in the image, so the probe reports the missing binary and the game exits;
+`-nogui` skips the probe entirely.
+
+A QEMU that is killed does not flush MFS's write-back cache, so a directory
+entry can reach the device while its inode does not. `sync` in the guest before
+killing it, or inspect the disk only after a clean exit; otherwise a new
+directory shows in the listing and cannot be resolved.
+
+## 6. Limits
 
 - The gate is x86 only. The platform layer is arch-neutral and the virtio-gpu
   backend already flushes, so RISC-V and AArch64 should work; nobody has gated
@@ -120,3 +145,7 @@ device with SDL on stdio wedges QEMU's main loop (`KNOWN_ISSUES` 95).
   read. The keyboard is the window's, through `/dev/kbd`.
 - The 320x200 image is scaled with square pixels (960x600), not to Doom's 4:3
   aspect; the difference is a few percent and it keeps the scale an integer.
+- Saving is checked by hand, not by a gate: the keys walk the menu and the
+disk is inspected on the next boot. A gate would need the same paced menu
+steps plus a `sync`, and the save path is the VFS's, which the boot gate
+already exercises for directories.
