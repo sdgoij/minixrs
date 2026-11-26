@@ -85,6 +85,13 @@ function openLink() {
 
 const net = openLink();
 
+/// `?doom` opens the page on the game. The same image is both the plain demo and the game one, so
+/// the switch is a link rather than a build: once the boot reaches the shell's prompt, the page
+/// types `/bin/doom` and shows the display. The display has to be the pane being shown because
+/// that is what gives it the keyboard (`/dev/kbd`); a game behind the terminal would receive none
+/// of it. Read at bring-up with `window.location`, the same way `?net` is.
+const autoDoom = new URLSearchParams(window.location?.search ?? '').has('doom');
+
 let host = null;
 let stopping = false;
 /// The store this tab's disk lives in, or null when it has none: the page offers to start over
@@ -218,6 +225,12 @@ async function run() {
       host.input.pending === 0
     ) {
       setStatus(describeState('awaiting-input'));
+      // The `?doom` link starts the game here, on the first real prompt, and then pumps at once
+      // rather than parking, because the command it just typed is pending work.
+      if (autoDoom && !doomStarted) {
+        startDoomOnce();
+        continue;
+      }
       await waitForInput(PARK_MS);
       continue;
     }
@@ -279,6 +292,18 @@ wireViews();
 // The pane the page opens on, set here rather than left to `index.html`'s attributes: the two agree
 // (the HTML is what a reader sees before this module runs), and what a check reads is this.
 showView('terminal');
+
+/// Whether the `?doom` boot has already typed its command, so a later idle (the shell after a
+/// quit, say) does not start it again.
+let doomStarted = false;
+
+/// The `?doom` link's one action: type the command at the first shell prompt and show the display.
+/// `send` and `showView` are up here as function declarations, so this runs from the pump below.
+function startDoomOnce() {
+  doomStarted = true;
+  send('/bin/doom\n');
+  showView('display');
+}
 
 // ---------------------------------------------------------------------- the controls
 //

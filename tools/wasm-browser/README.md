@@ -66,7 +66,7 @@ the only difference between what the checks boot and what the page boots.
 | `store.js` | the store contract, and the page's implementation of it over IndexedDB |
 | `file-store.js` | the same contract over a file, for the Node front ends |
 | `run.js` | drives the engine from Node with scripted keystrokes, over the shared smoke scenario in `tools/smoke/scenario.tsv` (22 checks) |
-| `page.test.js` | the server's MIME types, then `page.js` under a stub DOM — once with the disk, the display, the panes and their controls, once as a second tab that cannot have it (46 checks) |
+| `page.test.js` | the server's MIME types, then `page.js` under a stub DOM: once with the disk, the display, the panes and their controls, once as a second tab that cannot have it, once with `?doom` (51 checks) |
 | `net.js` | the network link (M6): the in-page gateway, and the WebSocket link a page opened with `?net=` uses |
 | `net.test.js` | the gateway's own frames, checked the way a receiver checks them (27 checks) |
 | `indexeddb.fake.js` | a stub IndexedDB, so `page.test.js` can run the real store |
@@ -154,9 +154,11 @@ checks both.
 
 The canvas and the console are **two panes of one session**, and the toggle in the header decides
 which you are looking at. Both stay live while hidden: the guest keeps drawing frames nobody is
-looking at, and a terminal you switched away from keeps its line and its scroll position. Keys go to
-the console either way — there is one console, and this port's keyboard is its input path, the way
-the UART is on the hardware arches.
+looking at, and a terminal you switched away from keeps its line and its scroll position. The pane
+being shown takes the keyboard: the console gets the bytes its line editor understands, and the
+display gets the HID usages a game reads through `/dev/kbd`, so a game has to be on the visible pane
+to be playable. `?doom` uses that: the page boots to the prompt, types `/bin/doom` and shows the
+display, which is the demo's game link.
 
 The canvas also takes **pointer** input (M5c): moving the mouse over it moves the arrow the
 compositor draws on its desktop, and a click goes to whatever the pointer is over. A pointer is the

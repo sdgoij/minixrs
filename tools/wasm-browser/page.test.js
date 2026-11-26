@@ -882,6 +882,26 @@ check(
   `status: ${status()}\ndisk: ${JSON.stringify(diskLabel())}`
 );
 
+// ---------------------------------------------------------------- ?doom opens on the game
+//
+// The deployed demo link. A third import is a third tab that sees the query, because the page reads
+// `window.location` only at bring-up; the two above booted before it was set, so they stay plain.
+// The switch itself is what is checked: the page has to show the display (a game behind the terminal
+// gets no keyboard) and it has to have typed the command, which shows up as the platform layer's
+// framebuffer line once the guest runs it.
+globalThis.window.location = { search: '?doom' };
+await import('./page.js?doom');
+check(
+  '?doom switches the page to the display when the boot reaches the prompt',
+  await until(() => paneOf('display').hidden === false, 'the display pane', 120000),
+  `display hidden=${paneOf('display').hidden} status: ${status()}`
+);
+check(
+  '?doom typed the doom command, so this tab is running the game',
+  await until(() => screen().includes('doom: fb'), 'the Doom framebuffer line', 120000),
+  `screen:\n${screen().slice(-1200)}`
+);
+
 const failed = checks.filter((c) => !c.ok);
 console.log(`\n${checks.length - failed.length}/${checks.length} checks passed`);
 process.exit(failed.length === 0 ? 0 : 1);
