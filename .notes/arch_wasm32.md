@@ -403,6 +403,27 @@ as corrupted fields rather than a link error. A static size assertion per messag
 struct, as `clock.rs` already does for `MinixTimer`, is the cheap way to hold the
 line.
 
+The same trap sits one layer out, at the C boundary, and it cost more time than
+anything else in this port. `tools/c-include/time.h` declared `struct timespec {
+long tv_sec; long tv_nsec; }`, and `sys/time.h` the same for `struct timeval`.
+`long` is 64 bits on the three shipping arches and 32 on wasm32, while
+`minix_std::time::TimeSpec` (and MINIX's own headers, where `time_t` is
+`_BSD_TIME_T_`) is two 64-bit fields on every target. The library wrote a 64-bit
+`tv_sec` over an 8-byte struct, so `tv_nsec` read back the high half of `tv_sec`:
+zero. Nothing failed. `clock_gettime` simply had one-second granularity, so
+`usleep(1 ms)` could not return inside a second, and Doom's tic loop spent a full
+second per frame (with `gametic` crawling at 5/s while the clock advanced at 35).
+The evidence was a print of `tv_sec`/`tv_nsec` showing the nanoseconds field
+empty rather than an error; the guest's own arithmetic was right all along.
+
+> A header that mirrors a Rust ABI struct names the *width*, not the C rank:
+> `__INT64_TYPE__` for a field that must be 64 bits, never `long`.
+
+Both headers now do, which is a no-op on the three 64-bit arches. The trap is a
+field that reads as "the platform's natural size": it is natural to the C
+compiler in front of it, and the library on the other side of the call is
+fixed-width.
+
 ### 5.3 Why there is no physical-address model to build
 
 M1–M2 left `SYS_UMAP` and `SYS_VUMAP` answering `EFAULT`: their result is a
@@ -851,6 +872,16 @@ bytes, a whole repaint only when the *windows* change (create, close, move, resi
 split appears on the host's side of the seam: `display.js` copies a presented frame and converts it
 at the next animation frame, so two hundred presents during a burst cost two hundred memcpys and one
 canvas upload. A display refreshes on its own clock; the guest cannot make it refresh per byte.
+
+**What an update cost, measured.** Doom's startup banner made this concrete: `printf` emitted one
+`write` per character, so every byte of a 1500-character banner became a CDEV message, a console
+update of one cell (one `WS_TEXT`) and a flush that presented a 3 MiB frame. That was thousands of
+window-server round trips and thousands of presents, with everything else on the machine waiting
+behind the tty, and it is what the browser demo reported as a spent syscall budget. Two changes
+took it apart: `printf`/`fprintf` collect into a 256-byte buffer, so a line is one write per chunk,
+and the console reports its damage as runs (`WS_TEXT_ROW`, up to 32 cells per message) rather than
+one cell per request, so a screen that scrolled is a handful of requests per row instead of 1920.
+The number to watch is the request count per console update.
 
 **Two dispositions worth keeping.** A host with **no** display does not stop the compositor: the
 surface is its own memory, so it composes either way — a client's window is a window — and its
