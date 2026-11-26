@@ -521,6 +521,18 @@ than static), or move the layout — and grow the instance — so the windows st
 above `__heap_base`. Either is a change to how a wasm instance is sized, not a
 drop-in.
 
+**Current layout (the second fix, applied).** The windows were moved above the
+image and the instance sized to cover them: heap base `0x0200_0000` (32 MiB),
+heap limit and `mmap_base` `0x02C0_0000` (44 MiB), stack `0x02E0_0000`..48 MiB,
+and the RAM disk window at 48 MiB. The heap window is 12 MiB rather than 4
+because the first real program to use it does: Doom asks for a 6 MiB zone and a
+3 MiB framebuffer copy, and 4 MiB was enough for the shell and nothing else.
+`do_brk` on wasm only moves the break: the linear memory already holds the
+address, so there is nothing to allocate and no page table to write (and the
+endpoint this port reports as the address space is not one). The stale numbers
+in the paragraph above are left as written because they are the measurement
+that motivated the move.
+
 ## 6. Privilege, traps, signals
 
 ### 6.1 No rings
