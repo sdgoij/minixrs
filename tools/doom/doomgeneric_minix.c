@@ -29,6 +29,13 @@
  * frame that is both varied and verified prints `doom: PASS`, which is the
  * gate's marker.
  *
+ * On wasm `/dev/fb` cannot be mapped at all: the surface is the fb server's
+ * own memory and there are no page tables to map a physical range through.
+ * The device is a copy-in one there, so the drawing buffer is `calloc`'d, a
+ * frame is the whole surface written with `FBIO_SCANOUT_SRC` and presented
+ * with `FBIOFLUSH`, and the read-back is a `FBIOGET_PIXEL` ioctl. Everything
+ * above those three calls is the same code on every arch.
+ *
  * doomgeneric is built without ORIGCODE, so the IWAD search is the working
  * directory (`FILES_DIR` is "."); DG_Init enters the data directory so a
  * plain `/bin/doom` finds the shareware WAD with no arguments.
@@ -64,9 +71,28 @@ struct input_event {
 /* The server copies at most 48 bytes per read (six events). */
 #define INPUT_EVENTS_MAX 6
 
-/* From `drivers/video/fb.rs`, the fb server's ioctl tags. */
-#define FBIOGET_VSCREENINFO 0x4600
+/* From `drivers/video/fb.rs`, the fb server's ioctl tags.
+ *
+ * The high bits of each are the MINIX `_IOC` size and direction, not decoration: a user program
+ * reaches `/dev/fb` through `VFS_IOCTL`, and VFS builds the magic grant that carries the argument
+ * from them. A bare `0x4600` encodes size 0 and the argument never crosses. */
+#define FBIOGET_VSCREENINFO 0x40604600 /* _IOR('F', 0, struct fb_var_screeninfo) */
 #define FBIOFLUSH 0x4604
+#define FBIO_SCANOUT_SRC 0x80104605 /* _IOW('F', 5, struct fb_scanout_src) */
+#define FBIOGET_PIXEL 0xC00C4606    /* _IOWR('F', 6, struct fb_pixel) */
+
+/* `FBIO_SCANOUT_SRC`: a buffer in the caller's address space, presented as the scanout. */
+struct fb_scanout_src {
+    uint64_t va;
+    uint64_t len;
+};
+
+/* `FBIOGET_PIXEL`: the pixel at `x`,`y` in, its XRGB8888 value out. */
+struct fb_pixel {
+    uint32_t x;
+    uint32_t y;
+    uint32_t value;
+};
 
 /* The image installs `doom1.wad` here, and the engine searches its working
  * directory for an IWAD, so DG_Init makes this the working directory. */
@@ -111,6 +137,33 @@ static int win_h;
 static unsigned long frames;
 static int reported;
 static int exit_after_pass;
+
+/*
+ * On wasm the framebuffer cannot be mapped: the fb server's surface is its own memory and there
+ * are no page tables to map a physical range through, so `/dev/fb` is a copy-in device and the
+ * drawing buffer is ours. A frame is then two calls, the whole surface to the device and the flush
+ * that presents it. On every other arch the buffer is the mapping and only the flush is needed.
+ */
+#if defined(__wasm__)
+static void present_canvas(void) {
+    struct fb_scanout_src src;
+
+    if (fb_fd < 0 || fb_base == NULL) {
+        return;
+    }
+    src.va = (uint64_t)(uintptr_t)fb_base;
+    src.len = (uint64_t)fb_pitch * (uint64_t)fb_height;
+    if (ioctl(fb_fd, FBIO_SCANOUT_SRC, &src) != 0) {
+        fprintf(stderr, "doom: FBIO_SCANOUT_SRC va=%lx len=%lx: %s\n",
+                (unsigned long)src.va, (unsigned long)src.len, strerror(errno));
+    }
+    ioctl(fb_fd, FBIOFLUSH, NULL);
+}
+#else
+static void present_canvas(void) {
+    ioctl(fb_fd, FBIOFLUSH, NULL);
+}
+#endif
 
 /* Keyboard. */
 #define KEY_QUEUE 32
@@ -207,6 +260,16 @@ void DG_Init(void) {
 
     fb_pitch = (size_t)fb_width * 4;
     if (fb_fd >= 0) {
+#if defined(__wasm__)
+        /* No device mapping here: the surface is the fb server's memory, so the buffer a frame is
+         * drawn into is ours and `present_canvas` copies it in. Zeroed, because the bars around
+         * the window are never written again. */
+        fb_base = calloc(1, fb_pitch * (size_t)fb_height);
+        if (fb_base == NULL) {
+            fprintf(stderr, "doom: calloc %lu for the canvas failed\n",
+                    (unsigned long)(fb_pitch * (size_t)fb_height));
+        }
+#else
         void *base = mmap(NULL, fb_pitch * (size_t)fb_height, PROT_READ | PROT_WRITE,
                           MAP_SHARED, fb_fd, 0);
         if (base == MAP_FAILED) {
@@ -214,6 +277,7 @@ void DG_Init(void) {
             base = NULL;
         }
         fb_base = base;
+#endif
     }
 
     scale = fb_width / DOOMGENERIC_RESX;
@@ -236,7 +300,7 @@ void DG_Init(void) {
         for (y = 0; y < fb_height; y++) {
             memset(fb_base + (size_t)y * fb_pitch, 0, fb_pitch);
         }
-        ioctl(fb_fd, FBIOFLUSH, NULL);
+        present_canvas();
     }
 
     /*
@@ -318,14 +382,32 @@ void DG_DrawFrame(void) {
             memcpy(out, row, (size_t)win_w * 4);
         }
     }
-    ioctl(fb_fd, FBIOFLUSH, NULL);
+    present_canvas();
 
     frames++;
 
     if (!reported && frames >= 2) {
         uint32_t expect = src[(DOOMGENERIC_RESY / 2) * DOOMGENERIC_RESX + DOOMGENERIC_RESX / 2];
-        uint32_t got = dst[(size_t)(win_y + win_h / 2) * dest_pitch + win_x + win_w / 2];
         int colors = distinct_pixels(8);
+        uint32_t got;
+
+#if defined(__wasm__)
+        /* The read-back goes through the device, not a pointer: the surface is the fb server's
+         * memory and this process has no mapping of it. The same comparison, so `doom: PASS`
+         * means the same thing on both kinds of arch. */
+        struct fb_pixel probe;
+        probe.x = (uint32_t)(win_x + win_w / 2);
+        probe.y = (uint32_t)(win_y + win_h / 2);
+        probe.value = 0;
+        if (ioctl(fb_fd, FBIOGET_PIXEL, &probe) != 0) {
+            printf("doom: FAIL read-back ioctl: %s\n", strerror(errno));
+            fflush(stdout);
+            exit(1);
+        }
+        got = probe.value;
+#else
+        got = dst[(size_t)(win_y + win_h / 2) * dest_pitch + win_x + win_w / 2];
+#endif
 
         if (got != expect) {
             printf("doom: FAIL read-back 0x%08lx, wrote 0x%08lx\n",

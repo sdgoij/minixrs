@@ -275,7 +275,7 @@ pub const INITRAMFS_BINS: &[&str] = &[
     "/sbin/init",
 ];
 
-/// Programs a **wasm32** image carries: destination path → module file name in the target's
+/// Programs and data a **wasm32** image carries: destination path → file name in the target's
 /// release directory.
 ///
 /// The other archs' image holds ELF executables, one per `BOOT_BINS` entry, and the port execs
@@ -302,6 +302,12 @@ pub const WASM_MODULES: &[(&str, &str)] = &[
     ("/bin/cat", "program.async.wasm"),
     ("/bin/forktest", "program.async.wasm"),
     ("/bin/ping", "program.async.wasm"),
+    // Doom, the browser demo's game: a module of its own rather than an arm of the multicall
+    // program — it is several times the program's size and nothing else needs it — plus the
+    // shareware IWAD it opens in the directory its Unix build searches. `cargo xtask build
+    // doom-wasm` stages both in the release directory.
+    ("/bin/doom", "doom.async.wasm"),
+    ("/usr/share/games/doom/doom1.wad", "doom1.wad"),
 ];
 
 /// `/etc/rc`: what runs before the shell exists.

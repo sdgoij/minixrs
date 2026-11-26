@@ -265,8 +265,14 @@ function showView(which) {
 }
 
 function wireViews() {
-  elements.viewTerminal.addEventListener('click', () => showView('terminal'));
-  elements.viewDisplay.addEventListener('click', () => showView('display'));
+  elements.viewTerminal.addEventListener('click', () => {
+    releaseHeldKeys();
+    showView('terminal');
+  });
+  elements.viewDisplay.addEventListener('click', () => {
+    releaseHeldKeys();
+    showView('display');
+  });
 }
 
 wireViews();
@@ -364,8 +370,84 @@ function send(bytes) {
   if (wake !== null) wake();
 }
 
+// The guest's display takes the keyboard when it is the pane being shown, and sends it to the
+// input server (`/dev/kbd`) instead of the console. That is what makes a game playable: Doom reads
+// the HID ring, not the terminal, and the terminal's line editor would eat a space or an Escape
+// before Doom ever saw it. The records are HID usages, the same shape a real keyboard produces, so
+// nothing in the guest changes between this and the hardware arches.
+//
+// The mapping is by `event.code` — the physical key — first, because that is what a HID usage
+// names: the guest translates it, and `shift` is a key of its own rather than a modifier on each
+// letter. `event.key` is the fallback for a browser (or a test) that has no `code`.
+const KEY_PAGE = 0x0007;
+const HID_USAGE_BY_CODE = {
+  KeyA: 0x04, KeyB: 0x05, KeyC: 0x06, KeyD: 0x07, KeyE: 0x08, KeyF: 0x09, KeyG: 0x0a,
+  KeyH: 0x0b, KeyI: 0x0c, KeyJ: 0x0d, KeyK: 0x0e, KeyL: 0x0f, KeyM: 0x10, KeyN: 0x11,
+  KeyO: 0x12, KeyP: 0x13, KeyQ: 0x14, KeyR: 0x15, KeyS: 0x16, KeyT: 0x17, KeyU: 0x18,
+  KeyV: 0x19, KeyW: 0x1a, KeyX: 0x1b, KeyY: 0x1c, KeyZ: 0x1d,
+  Digit1: 0x1e, Digit2: 0x1f, Digit3: 0x20, Digit4: 0x21, Digit5: 0x22, Digit6: 0x23,
+  Digit7: 0x24, Digit8: 0x25, Digit9: 0x26, Digit0: 0x27,
+  Enter: 0x28, NumpadEnter: 0x28, Escape: 0x29, Backspace: 0x2a, Tab: 0x2b, Space: 0x2c,
+  Minus: 0x2d, Equal: 0x2e, BracketLeft: 0x2f, BracketRight: 0x30, Backslash: 0x31,
+  Semicolon: 0x33, Quote: 0x34, Backquote: 0x35, Comma: 0x36, Period: 0x37, Slash: 0x38,
+  Insert: 0x49, Home: 0x4a, PageUp: 0x4b, Delete: 0x4c, End: 0x4d, PageDown: 0x4e,
+  ArrowRight: 0x4f, ArrowLeft: 0x50, ArrowDown: 0x51, ArrowUp: 0x52,
+  ControlLeft: 0xe0, ControlRight: 0xe4, ShiftLeft: 0xe1, ShiftRight: 0xe5,
+  AltLeft: 0xe2, AltRight: 0xe6,
+};
+for (let i = 0; i < 12; i += 1) HID_USAGE_BY_CODE[`F${i + 1}`] = 0x3a + i;
+
+const HID_USAGE_BY_KEY = {
+  Enter: 0x28, Escape: 0x29, Backspace: 0x2a, Tab: 0x2b, ' ': 0x2c,
+  ArrowRight: 0x4f, ArrowLeft: 0x50, ArrowDown: 0x51, ArrowUp: 0x52,
+  Insert: 0x49, Home: 0x4a, PageUp: 0x4b, Delete: 0x4c, End: 0x4d, PageDown: 0x4e,
+  Control: 0xe0, Shift: 0xe1, Alt: 0xe2,
+};
+for (let i = 0; i < 12; i += 1) HID_USAGE_BY_KEY[`F${i + 1}`] = 0x3a + i;
+for (let c = 0; c < 26; c += 1) {
+  HID_USAGE_BY_KEY[String.fromCharCode(97 + c)] = 0x04 + c;
+  HID_USAGE_BY_KEY[String.fromCharCode(65 + c)] = 0x04 + c;
+}
+for (let d = 1; d <= 9; d += 1) HID_USAGE_BY_KEY[String(d)] = 0x1d + d;
+Object.assign(HID_USAGE_BY_KEY, {
+  '0': 0x27, '-': 0x2d, '=': 0x2e, '[': 0x2f, ']': 0x30, '\\': 0x31, ';': 0x33,
+  "'": 0x34, '`': 0x35, ',': 0x36, '.': 0x37, '/': 0x38,
+});
+
+/// The HID usage a key event names, or `undefined` for a key the guest has no use for.
+function usageOf(event) {
+  const byCode = HID_USAGE_BY_CODE[event.code];
+  if (byCode !== undefined) return byCode;
+  if (typeof event.key === 'string' && event.key.length === 1) {
+    return HID_USAGE_BY_KEY[event.key.toLowerCase()];
+  }
+  return HID_USAGE_BY_KEY[event.key];
+}
+
+/// Whether the display pane is the one on screen, which is what gives it the keyboard.
+const displayHasKeyboard = () => elements.display.hidden === false;
+
+/// Keys currently held, so an auto-repeat is not a second press and a pane switch releases them:
+/// a key the guest thinks is down when the reader walks away never comes up.
+const heldUsages = new Set();
+
+function releaseHeldKeys() {
+  for (const usage of heldUsages) sendInput(KEY_PAGE, usage, 0);
+  heldUsages.clear();
+}
+
 window.addEventListener('keydown', (event) => {
   if (host === null) return;
+  if (displayHasKeyboard()) {
+    const usage = usageOf(event);
+    if (usage === undefined) return;
+    event.preventDefault();
+    if (!heldUsages.has(usage)) {
+      heldUsages.add(usage);
+      sendInput(KEY_PAGE, usage, 1);
+    }
+    return;
+  }
   if (event.metaKey || event.altKey) return;
   if (event.ctrlKey) {
     if (event.key.length === 1) {
@@ -388,6 +470,17 @@ window.addEventListener('keydown', (event) => {
     send(event.key);
   }
 });
+
+window.addEventListener('keyup', (event) => {
+  if (host === null || !displayHasKeyboard()) return;
+  const usage = usageOf(event);
+  if (usage === undefined) return;
+  event.preventDefault();
+  heldUsages.delete(usage);
+  sendInput(KEY_PAGE, usage, 0);
+});
+
+window.addEventListener('blur', releaseHeldKeys);
 
 window.addEventListener('paste', (event) => {
   if (host === null) return;

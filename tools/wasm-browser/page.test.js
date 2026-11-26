@@ -520,6 +520,21 @@ check(
   `screen hidden=${paneOf('screen').hidden} last=${JSON.stringify(screen().slice(-20))}`
 );
 
+// The keyboard follows the pane. With the display showing, a key is the guest display's input
+// (`/dev/kbd`), the same HID record a real keyboard sends, and must not land on the shell's line:
+// the console's editor would eat a space or an Escape before a game ever saw it. Typed at the
+// terminal pane the same key is the console's, which the checks above and below already cover.
+viewOf('display').click();
+const beforeKey = screen();
+press('q');
+await untilStable(50, 2000);
+check(
+  'with the display showing, a key goes to the guest display and not to the console',
+  screen() === beforeKey,
+  `screen grew: ${beforeKey.length} -> ${screen().length}; last=${JSON.stringify(screen().slice(-40))}`
+);
+viewOf('terminal').click();
+
 // The symptom this page must not have: a row rendered twice. The composition is two disjoint
 // slices of one line and the line above it, so a duplicate can only mean the model was read
 // twice — which is what a reader reported once, and what this pins down.
@@ -673,6 +688,31 @@ check(
     'the ping reply'
   ),
   `screen:\n${screen()}`
+);
+
+// ------------------------------------------------------- Doom, the demo's game
+//
+// The whole display path with a program that actually uses it: Doom is a separate wasm module in
+// the image, it reaches `/dev/fb` through VFS (a copy-in device here — there is no mapping to
+// write through), paints its 320x200 frame scaled into the host's mode, presents it with
+// `FBIO_SCANOUT_SRC` and `FBIOFLUSH`, and reads a pixel back out of the *driver* to prove the
+// frame arrived. `doom: PASS` is that read-back agreeing with the source, so this one line covers
+// the module store and exec, a 4 MiB IWAD read through MFS, the heap growth a real program needs,
+// the fb copy path and the read-back ioctl.
+//
+// `-minix-exit` is the gate's: the platform layer leaves after the verdict so the shell gets its
+// prompt back. A player does not pass it.
+for (const ch of '/bin/doom -minix-exit') press(ch);
+press('Enter');
+check(
+  'Doom runs in the page and its frame reaches the framebuffer (the read-back verdict)',
+  await until(() => screen().includes('doom: PASS'), 'the Doom frame', 120000),
+  `screen:\n${screen().slice(-2000)}`
+);
+check(
+  'Doom leaves the way the gate asked it to, and the shell gets its prompt back',
+  await until(() => screen().includes('doom: exit'), 'the exit line', 60000),
+  `screen:\n${screen().slice(-1000)}`
 );
 
 // The session ends the way a tab ends it: the control, not the keyboard. It is the same bytes

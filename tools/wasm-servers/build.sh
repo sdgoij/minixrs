@@ -92,6 +92,13 @@ wasm_release="$root/target/wasm32-minix/release"
 mkdir -p "$wasm_release"
 cp "$here/build/program.async.wasm" "$wasm_release/program.async.wasm"
 
+# Doom, the browser demo's game: the same engine the hardware arches run, built for plain wasm32
+# against the port's wasm32-minix C library and Asyncify'd. `doom-wasm` also fetches the pinned
+# engine and the shareware IWAD, and stages both where the image builder reads them, so the image
+# below carries `/bin/doom` and `/usr/share/games/doom/doom1.wad`.
+echo "== building the Doom module =="
+(cd "$root" && cargo xtask build doom-wasm)
+
 image="$root/target/images/wasm32-minix/minixfs.img"
 echo "== building the wasm boot filesystem image =="
 (cd "$root" && cargo run -q -p boot-image --bin mkminixfs wasm32)

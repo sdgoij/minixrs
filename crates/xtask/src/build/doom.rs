@@ -154,6 +154,206 @@ pub fn run(root: &Path, target: Option<&str>) -> io::Result<bool> {
     Ok(true)
 }
 
+/// Where a wasm32 image expects the module and the IWAD: beside `program.async.wasm`,
+/// which `tools/wasm-servers/build.sh` stages there for the image builder.
+const WASM_RELEASE: &str = "target/wasm32-minix/release";
+const WASM_PROGRAM: &str = "doom.async.wasm";
+const WASM_WAD: &str = "doom1.wad";
+/// The module before Asyncify.
+const WASM_RAW: &str = "target/doom/wasm32/doom.wasm";
+
+/// Build Doom as a wasm32 module for the browser demo.
+///
+/// The same engine and platform layer as the hardware builds, compiled for plain `wasm32` and
+/// linked against the port's C library for `wasm32-minix`, then Asyncify'd — a module the host's
+/// dispatch loop cannot drive at all without that pass. The output and the shareware IWAD are
+/// staged where `mkminixfs` reads a wasm32 image from.
+pub fn run_wasm(root: &Path) -> io::Result<bool> {
+    let rustc = wasm_rustc(root).ok_or_else(toolchain::missing_stage1)?;
+    fetch(root)?;
+
+    let release = root.join(WASM_RELEASE);
+    let work = root.join("target").join("doom").join("wasm32");
+    fs::create_dir_all(&release)?;
+    fs::create_dir_all(&work)?;
+
+    if !build_wasm_libc(root, &rustc)? {
+        return Ok(false);
+    }
+    let libc = release.join("libminix_libc.a");
+    if !libc.is_file() {
+        return Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            format!("{} was not produced", libc.display()),
+        ));
+    }
+
+    let src = root.join(SRC).join("doomgeneric");
+    let cflags = wasm_cflags(root, &src)?;
+    let mut objects = Vec::with_capacity(ENGINE.len() + 2);
+    for name in ENGINE {
+        let object = work.join(format!("{name}.o"));
+        if !compile(&cflags, &src.join(format!("{name}.c")), &object)? {
+            return Ok(false);
+        }
+        objects.push(object);
+    }
+    let platform_object = work.join("doomgeneric_minix.o");
+    if !compile(
+        &cflags,
+        &root.join("tools").join("doom").join("doomgeneric_minix.c"),
+        &platform_object,
+    )? {
+        return Ok(false);
+    }
+    objects.push(platform_object);
+    // The module contract a wasm program exports (`minix_program_main`, the argv area, the
+    // Asyncify scratch region). Three symbols, so it is not part of the engine or the platform
+    // layer — the same shim shape on any wasm build.
+    let shim_object = work.join("doomgeneric_minix_wasm.o");
+    if !compile(
+        &cflags,
+        &root
+            .join("tools")
+            .join("doom")
+            .join("doomgeneric_minix_wasm.c"),
+        &shim_object,
+    )? {
+        return Ok(false);
+    }
+    objects.push(shim_object);
+
+    let raw = root.join(WASM_RAW);
+    let mut link = Command::new("clang");
+    link.args(wasm_link_args(&objects, &libc, &raw));
+    if !cc::run(&mut link)? {
+        return Ok(false);
+    }
+
+    let wasm_opt = wasm_opt(root)?;
+    let module = release.join(WASM_PROGRAM);
+    let mut asyncify = Command::new("node");
+    asyncify
+        .arg(&wasm_opt)
+        .arg("--asyncify")
+        .arg(&raw)
+        .arg("-o")
+        .arg(&module);
+    if !cc::run(&mut asyncify)? {
+        return Ok(false);
+    }
+
+    let wad = root.join(WAD);
+    fs::copy(&wad, release.join(WASM_WAD))?;
+    println!("wrote {} and {}", module.display(), release.join(WASM_WAD).display());
+    Ok(true)
+}
+
+/// The stage1 rustc the wasm library build needs, honouring the same `MINIXRS_RUSTC` override
+/// `tools/wasm-servers/build.sh` uses when the checkout's own stage1 belongs to another host.
+fn wasm_rustc(root: &Path) -> Option<PathBuf> {
+    if let Some(path) = std::env::var_os("MINIXRS_RUSTC")
+        && !path.is_empty()
+    {
+        return Some(PathBuf::from(path));
+    }
+    toolchain::find_stage1_rustc(root)
+}
+
+/// `libminix_libc.a` for `wasm32-minix`: the library the C module links against, and the reason the
+/// module's only imports are `env.memory` and `env.minix_syscall`.
+fn build_wasm_libc(root: &Path, rustc: &Path) -> io::Result<bool> {
+    let mut cargo = Command::new(toolchain::cargo());
+    cargo
+        .current_dir(root)
+        .args([
+            "rustc",
+            "--release",
+            "-p",
+            "minix-libc",
+            "--target",
+            "wasm32-minix",
+            "--features",
+            "staticlib",
+            "--crate-type",
+            "staticlib",
+        ])
+        .env("RUSTC", rustc);
+    cc::run(&mut cargo)
+}
+
+/// Binaryen's wasm-opt, the Asyncify pass. Not in the repository (`tools/fork-spike/.gitignore`
+/// keeps `.tools/` out), so it is named rather than guessed at, the way the scripts do.
+fn wasm_opt(root: &Path) -> io::Result<PathBuf> {
+    let path = std::env::var_os("WASM_OPT")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            root.join("tools")
+                .join("fork-spike")
+                .join(".tools")
+                .join("node_modules")
+                .join("binaryen")
+                .join("bin")
+                .join("wasm-opt")
+        });
+    if !path.is_file() {
+        return Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            format!(
+                "Binaryen not found at {}; install with `npm install binaryen --prefix tools/fork-spike/.tools --no-save`, or point WASM_OPT at one",
+                path.display()
+            ),
+        ));
+    }
+    Ok(path)
+}
+
+/// The C flags for the wasm module: the same freestanding set as the hardware builds, an explicit
+/// `--target=wasm32`, and the port's headers.
+fn wasm_cflags(root: &Path, src: &Path) -> io::Result<Vec<String>> {
+    let mut flags = vec![
+        "--target=wasm32".to_string(),
+        "-ffreestanding".to_string(),
+        "-fno-builtin".to_string(),
+        "-O2".to_string(),
+        "-c".to_string(),
+    ];
+    flags.extend(cc::compile_flags(root)?);
+    flags.push(format!("-I{}", root.join("tools").join("doom").display()));
+    flags.push(format!("-I{}", src.display()));
+    for define in DEFINES {
+        flags.push(format!("-D{define}"));
+    }
+    flags.push("-w".to_string());
+    Ok(flags)
+}
+
+/// The wasm link line, as a vector so the per-module flags can be asserted.
+fn wasm_link_args(objects: &[PathBuf], libc: &Path, out: &Path) -> Vec<String> {
+    let mut args = vec![
+        "--target=wasm32".to_string(),
+        "-nostdlib".to_string(),
+        // The same arrangement the Rust program module links with: no `_start`, the host's memory,
+        // a 1 MiB shadow stack below the statics, and the three addresses the host names.
+        "-Wl,--no-entry".to_string(),
+        "-Wl,--allow-undefined".to_string(),
+        "-Wl,--import-memory".to_string(),
+        "-Wl,--initial-memory=50331648".to_string(),
+        "-Wl,--max-memory=268435456".to_string(),
+        "-Wl,--stack-first".to_string(),
+        "-Wl,-z,stack-size=1048576".to_string(),
+        "-Wl,--export=minix_program_main".to_string(),
+        "-Wl,--export=asyncify_scratch_ptr".to_string(),
+        "-Wl,--export=argv_area_ptr".to_string(),
+        "-o".to_string(),
+        out.display().to_string(),
+    ];
+    args.extend(objects.iter().map(|object| object.display().to_string()));
+    args.push(libc.display().to_string());
+    args
+}
+
 /// Check out the pinned engine and make sure the pinned IWAD is on disk.
 pub fn fetch(root: &Path) -> io::Result<()> {
     let pins = pin::load(root)?;
@@ -419,5 +619,24 @@ mod tests {
                 .ends_with("target/doom-data/doom1.wad")
         );
         assert!(SRC.replace('\\', "/").ends_with("target/doom-src"));
+    }
+
+    #[test]
+    fn the_wasm_module_links_the_contract_a_program_module_exports() {
+        let objects = vec![PathBuf::from("d_main.o")];
+        let args = wasm_link_args(&objects, Path::new("libminix_libc.a"), Path::new("doom.wasm"));
+        assert!(args.contains(&"--target=wasm32".to_string()));
+        assert!(args.contains(&"-Wl,--import-memory".to_string()));
+        assert!(args.contains(&"-Wl,--export=minix_program_main".to_string()));
+        assert!(args.contains(&"-Wl,--export=argv_area_ptr".to_string()));
+        assert!(args.contains(&"-Wl,--export=asyncify_scratch_ptr".to_string()));
+        assert_eq!(args.last().unwrap(), "libminix_libc.a");
+    }
+
+    #[test]
+    fn the_wasm_build_stages_where_the_image_builder_reads() {
+        assert_eq!(WASM_RELEASE, "target/wasm32-minix/release");
+        assert_eq!(WASM_PROGRAM, "doom.async.wasm");
+        assert_eq!(WASM_WAD, "doom1.wad");
     }
 }

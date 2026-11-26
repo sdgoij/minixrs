@@ -131,11 +131,11 @@ static mut EXEC_FRAME_BUF: [u8; EXEC_FRAME_MAX] = [0u8; EXEC_FRAME_MAX];
 /// whole program. The port's one program module carries the shell, the applets and `ping`, and it
 /// grows with them: 141 KiB when this bound was written, 368 KiB once the shell learned to
 /// complete paths, and a module that will not fit is refused rather than truncated: a truncated
-/// wasm module is not a smaller program, it is an invalid one. A megabyte is the same order as the
-/// exec frame's own bound below and leaves the shell room to keep growing; VFS's instance has tens
-/// of megabytes for this buffer.
+/// wasm module is not a smaller program, it is an invalid one. 2 MiB covers the multicall and a
+/// separate program module the size of Doom's (979 KiB before Asyncify grows it), and VFS's
+/// instance has tens of megabytes for this buffer.
 #[cfg(target_arch = "wasm32")]
-const EXEC_MODULE_MAX: usize = 1024 * 1024;
+const EXEC_MODULE_MAX: usize = 2 * 1024 * 1024;
 
 #[cfg(target_arch = "wasm32")]
 static mut EXEC_MODULE_BUF: [u8; EXEC_MODULE_MAX] = [0u8; EXEC_MODULE_MAX];

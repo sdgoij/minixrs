@@ -177,6 +177,7 @@ fn run_build(root: &Path, matches: &clap::ArgMatches) -> io::Result<bool> {
         Some(("c-hello", matches)) => build::c_hello::run(root, target(matches)),
         Some(("c-direct", matches)) => build::c_direct::run(root, target(matches)),
         Some(("doom", matches)) => build::doom::run(root, target(matches)),
+        Some(("doom-wasm", _)) => build::doom::run_wasm(root),
         Some(("libc-static", matches)) => build::libc_static::run(root, target(matches)),
         Some(("std-hello", matches)) => build::std_hello::run(root, target(matches)),
         Some(("dynlibc", matches)) => build::dynlibc::run(root, target(matches)),
@@ -532,6 +533,10 @@ fn command() -> clap::Command {
                     clap::Command::new("doom")
                         .about("doomgeneric against /dev/fb and /dev/kbd, with the shareware IWAD")
                         .arg(target_arg("x86")),
+                )
+                .subcommand(
+                    clap::Command::new("doom-wasm")
+                        .about("doomgeneric as a wasm32 module for the browser demo"),
                 )
                 .subcommand(
                     clap::Command::new("libc-static")
