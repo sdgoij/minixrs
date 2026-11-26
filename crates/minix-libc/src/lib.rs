@@ -1541,11 +1541,19 @@ pub unsafe extern "C" fn mmap(
     prot: c_int,
     flags: c_int,
     fd: c_int,
-    offset: i64,
+    offset: c_long,
 ) -> *mut c_void {
     unsafe {
-        let r =
-            minix_std::vmem::mmap(addr as *mut u8, length, prot, flags, fd, offset) as *mut c_void;
+        // `offset` is `off_t`, which the headers make `long`: 64 bits on the LP64
+        // arches and 32 on wasm32, where it has to match the C caller.
+        let r = minix_std::vmem::mmap(
+            addr as *mut u8,
+            length,
+            prot,
+            flags,
+            fd,
+            offset as i64,
+        ) as *mut c_void;
         if (r as usize) == usize::MAX {
             // MAP_FAILED; the vmem layer discards the errno, so use a generic.
             set_errno(12); // ENOMEM

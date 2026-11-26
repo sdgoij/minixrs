@@ -2393,16 +2393,22 @@ pub unsafe extern "C" fn fread(
 
 /// POSIX `fseek()`: `lseek` the stream's fd. Discards the `ungetc` pushback
 /// and clears the EOF indicator, as C requires.
+///
+/// The offset is C's `long`, not the 64-bit `off_t` the syscall path carries:
+/// the two are the same type on the LP64 arches, and on wasm32 (ILP32) `long` is
+/// 32 bits, which is what the compiler calls this with. Declaring `i64` there
+/// linked with a signature-mismatch warning and read the wrong half of the
+/// result.
 #[cfg(target_os = "minix")]
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn fseek(stream: *mut FILE, offset: i64, whence: c_int) -> c_int {
+pub unsafe extern "C" fn fseek(stream: *mut FILE, offset: c_long, whence: c_int) -> c_int {
     if stream.is_null() {
         return -1;
     }
     let st = unsafe { &mut *stream };
     st.pushback_len = 0;
     st.flags &= !F_EOF;
-    if crate::lseek(st.fd, offset, whence) < 0 {
+    if crate::lseek(st.fd, offset as i64, whence) < 0 {
         st.flags |= F_ERR;
         -1
     } else {
@@ -2410,28 +2416,29 @@ pub unsafe extern "C" fn fseek(stream: *mut FILE, offset: i64, whence: c_int) ->
     }
 }
 
-/// POSIX `ftell()`: the stream's current offset.
+/// POSIX `ftell()`: the stream's current offset, in C's `long`.
 #[cfg(target_os = "minix")]
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn ftell(stream: *mut FILE) -> i64 {
+pub unsafe extern "C" fn ftell(stream: *mut FILE) -> c_long {
     const SEEK_CUR: c_int = 1;
     if stream.is_null() {
         return -1;
     }
-    unsafe { crate::lseek((*stream).fd, 0, SEEK_CUR) }
+    unsafe { crate::lseek((*stream).fd, 0, SEEK_CUR) as c_long }
 }
 
-/// POSIX `fseeko()`: the `off_t` form of [`fseek`].
+/// POSIX `fseeko()`: the `off_t` form of [`fseek`], which the headers give the
+/// same width as `long`.
 #[cfg(target_os = "minix")]
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn fseeko(stream: *mut FILE, offset: i64, whence: c_int) -> c_int {
+pub unsafe extern "C" fn fseeko(stream: *mut FILE, offset: c_long, whence: c_int) -> c_int {
     unsafe { fseek(stream, offset, whence) }
 }
 
 /// POSIX `ftello()`: the `off_t` form of [`ftell`].
 #[cfg(target_os = "minix")]
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn ftello(stream: *mut FILE) -> i64 {
+pub unsafe extern "C" fn ftello(stream: *mut FILE) -> c_long {
     unsafe { ftell(stream) }
 }
 
