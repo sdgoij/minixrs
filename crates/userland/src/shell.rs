@@ -53,7 +53,53 @@ fn is_builtin_cmd(cmd: &str) -> bool {
 // Public entry point — replaces the old inline `sh` in lib.rs
 // ---------------------------------------------------------------------------
 
+/// What `sh` was asked to run, decided from `argv`.
+#[cfg(any(target_os = "minix", test))]
+#[derive(Debug, PartialEq, Eq)]
+enum Invocation<'a> {
+    /// No command operand: the interactive prompt.
+    Interactive,
+    /// `sh -c <command>`: run this command line once and exit.
+    Command(&'a str),
+    /// `sh -c` with nothing after it.
+    MissingCommand,
+}
+
+/// Classify `sh`'s arguments; `args[0]` is the program name.
+///
+/// Options are scanned until `-c` or a non-option operand. Anything that is not
+/// the `-c` form stays interactive, which is what the console session relies on.
+#[cfg(any(target_os = "minix", test))]
+fn classify_args<'a>(args: &'a [&'a str]) -> Invocation<'a> {
+    for (i, arg) in args.iter().enumerate().skip(1) {
+        if *arg == "-c" {
+            return match args.get(i + 1) {
+                Some(command) => Invocation::Command(command),
+                None => Invocation::MissingCommand,
+            };
+        }
+        if !arg.starts_with('-') {
+            break;
+        }
+    }
+    Invocation::Interactive
+}
+
 pub fn sh(args: &[&str]) -> i32 {
+    // `system()` and scripts run `sh -c <command>`: run one line, then exit.
+    // Starting the interactive loop instead leaves the child shell reading the
+    // console, which is how Doom's `I_Error` popup flooded the terminal.
+    #[cfg(target_os = "minix")]
+    {
+        match classify_args(args) {
+            Invocation::Command(text) => return run_text(text),
+            Invocation::MissingCommand => {
+                write_err(b"sh: -c requires an argument\n");
+                return 2;
+            }
+            Invocation::Interactive => {}
+        }
+    }
     // init recorded this process as the console session (`record_session` in
     // `lib.rs`), and the pid survives both execs, so this is the entry it owns.
     #[cfg(all(target_os = "minix", not(target_arch = "wasm32")))]
@@ -126,7 +172,8 @@ fn sh_loop(_args: &[&str]) -> i32 {
             // (quotes and the bytes they protect are compacted out), so the
             // words borrow it; history already holds the line as typed.
             let mut spans = [(0usize, 0usize); 32];
-            let mut raw_argc = match tokenize(&mut buf, line_len, &mut spans) {
+            let mut raw_tokens = [""; 32];
+            let mut raw_argc = match split_line(&mut buf, line_len, &mut spans, &mut raw_tokens) {
                 Ok(n) => n,
                 Err(TokenizeError::UnmatchedQuote(q)) => {
                     write_err(b"sh: unexpected EOF while looking for matching `");
@@ -138,10 +185,6 @@ fn sh_loop(_args: &[&str]) -> i32 {
                     continue;
                 }
             };
-            let mut raw_tokens = [""; 32];
-            for (i, &(start, len)) in spans[..raw_argc].iter().enumerate() {
-                raw_tokens[i] = core::str::from_utf8(&buf[start..start + len]).unwrap_or("");
-            }
 
             if raw_argc == 0 {
                 continue;
@@ -177,6 +220,65 @@ fn sh_loop(_args: &[&str]) -> i32 {
             }
         }
     }
+}
+
+/// Run one command line the way the prompt runs a line it has read: `-c`
+/// operands and any other single-shot use share the tokenizer, `&&` chains,
+/// pipelines, `>` redirects and trailing `&`.
+#[cfg(target_os = "minix")]
+fn run_text(text: &str) -> i32 {
+    let mut buf = [0u8; 512];
+    let bytes = text.as_bytes();
+    if bytes.len() > buf.len() {
+        write_err(b"sh: command line too long\n");
+        return 2;
+    }
+    buf[..bytes.len()].copy_from_slice(bytes);
+    let mut spans = [(0usize, 0usize); 32];
+    let mut raw_tokens = [""; 32];
+    let mut raw_argc = match split_line(&mut buf, bytes.len(), &mut spans, &mut raw_tokens) {
+        Ok(n) => n,
+        Err(TokenizeError::UnmatchedQuote(q)) => {
+            write_err(b"sh: unexpected EOF while looking for matching `");
+            write_err(&[q]);
+            write_err(b"'\n");
+            return 2;
+        }
+    };
+    if raw_argc == 0 {
+        return 0;
+    }
+    let mut background = false;
+    if raw_tokens[raw_argc - 1] == "&" {
+        background = true;
+        raw_argc -= 1;
+        if raw_argc == 0 {
+            return 0;
+        }
+    }
+    if background {
+        run_background(&raw_tokens[..raw_argc]);
+        return 0;
+    }
+    let status = run_chain(&raw_tokens, raw_argc);
+    if status == SH_EXIT { 0 } else { status }
+}
+
+/// Tokenize `line[..len]` in place and hand back the words, which borrow the
+/// same buffer. The interactive loop and `run_text` differ in what they do
+/// with the result, not in how a line is split.
+#[cfg(target_os = "minix")]
+fn split_line<'a>(
+    line: &'a mut [u8],
+    len: usize,
+    spans: &'a mut [(usize, usize); 32],
+    words: &mut [&'a str; 32],
+) -> Result<usize, TokenizeError> {
+    let argc = tokenize(line, len, spans)?;
+    for (i, &(start, word_len)) in spans[..argc].iter().enumerate() {
+        words[i] = core::str::from_utf8(&line[start..start + word_len]).unwrap_or("");
+    }
+    Ok(argc)
 }
 
 // ---------------------------------------------------------------------------
@@ -2328,6 +2430,29 @@ mod tests {
         assert_eq!(
             tokenize(&mut buf, line.len(), &mut spans),
             Err(TokenizeError::UnmatchedQuote(b'\''))
+        );
+    }
+
+    #[test]
+    fn dash_c_selects_the_command_form() {
+        // The form `system()` uses: one operand, run once, then exit.
+        assert_eq!(
+            classify_args(&["/bin/sh", "-c", "echo hi"]),
+            Invocation::Command("echo hi")
+        );
+    }
+
+    #[test]
+    fn a_bare_sh_or_a_script_operand_stays_interactive() {
+        assert_eq!(classify_args(&["/bin/sh"]), Invocation::Interactive);
+        assert_eq!(classify_args(&["/bin/sh", "rc"]), Invocation::Interactive);
+    }
+
+    #[test]
+    fn dash_c_without_a_command_is_missing() {
+        assert_eq!(
+            classify_args(&["/bin/sh", "-c"]),
+            Invocation::MissingCommand
         );
     }
 
