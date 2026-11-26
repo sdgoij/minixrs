@@ -71,6 +71,9 @@ function emit(byte) {
 }
 
 let cycles = 0;
+// Wall-clock milliseconds, the guest's timer device (the kernel turns them into ticks).
+const nowMillis = () =>
+  BigInt(Math.floor((globalThis.performance ?? { now: () => Date.now() }).now()));
 let haltCode = null;
 
 // ------------------------------------------------------- cross-process copy
@@ -126,6 +129,7 @@ const kernel = new WebAssembly.Instance(kernelModule, {
     host_console_available: () => 0,
     // The HAL declares this returning u64, so it must come back as a BigInt.
     host_cycles: () => BigInt((cycles += 1000)),
+    host_millis: nowMillis,
     host_halt: (code) => {
       haltCode = code;
     },

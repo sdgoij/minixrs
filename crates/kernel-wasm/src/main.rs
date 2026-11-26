@@ -264,21 +264,44 @@ pub extern "C" fn minix_boot_notify() -> i32 {
 /// Which process should run next, by slot, or -1 when none is runnable.
 /// The decision is the kernel's: this only reports it.
 ///
-/// One clock tick goes by before the pick, because that is the one thing the host cannot do for
-/// the guest. On a hardware arch the timer interrupt advances the monotonic clock, fires expired
-/// watchdogs and charges user/system time; here nothing ever did, so `get_monotonic` — and with it
-/// `clock_gettime` and the busy-waiting `usleep` — saw the same instant forever. A program that
-/// waits on time (Doom's title screen loops on `I_Sleep(1)`) then never made progress. A tick per
-/// dispatch makes the clock a function of how much the guest runs, which is what a virtual clock
-/// is, and it is the same handler the other arches run from their timer ISR.
+/// The clock is advanced first, because time is the one thing the guest cannot produce for itself
+/// here. A hardware arch takes a timer interrupt; there is none, so the ticks the host's wall clock
+/// says have passed are run through the same handler. Advancing by *elapsed real time* rather than
+/// once per call matters: one tick per dispatch made the clock follow how busy the dispatcher was,
+/// so a program that reads it (Doom paces its game loop off it, and busy-waits in `usleep` on it)
+/// saw minutes pass in a frame and ran its simulation far too fast, while the busy-wait itself cost
+/// thousands of syscalls.
 #[unsafe(no_mangle)]
 pub extern "C" fn minix_step() -> i32 {
     unsafe {
-        kernel::clock::timer_int_handler();
+        advance_clock();
         match kernel::sched::pick_proc() {
             Some(rp) => (*rp).p_nr,
             None => -1,
         }
+    }
+}
+
+/// Run the timer handler for every tick the host's wall clock says has passed.
+///
+/// The catch-up is bounded per call so one step cannot spend minutes in the handler after the host
+/// was not pumping (a backgrounded tab); the surplus is applied by the following steps, which is
+/// why the target is derived from the wall clock every time rather than a stored remainder.
+unsafe fn advance_clock() {
+    use core::sync::atomic::Ordering;
+
+    /// More than a host normally owes in one step, and small enough that a long pause is caught up
+    /// over a few steps rather than in one.
+    const MAX_CATCHUP: u64 = 8;
+
+    let hz = kernel::glo::SYSTEM_HZ.load(Ordering::Relaxed) as u64;
+    let target = unsafe { arch_wasm32::millis() } * hz / 1000;
+    let mut mono = kernel::clock::get_monotonic();
+    let mut budget = MAX_CATCHUP;
+    while mono < target && budget > 0 {
+        unsafe { kernel::clock::timer_int_handler() };
+        mono += 1;
+        budget -= 1;
     }
 }
 

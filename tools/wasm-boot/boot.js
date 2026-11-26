@@ -42,6 +42,9 @@ let consoleOut = '';
 const consolePending = [];
 let consoleWrites = 0;
 let cycles = 0;
+// Wall-clock milliseconds, the guest's timer device (the kernel turns them into ticks).
+const nowMillis = () =>
+  BigInt(Math.floor((globalThis.performance ?? { now: () => Date.now() }).now()));
 let haltCode = null;
 
 const imports = {
@@ -57,6 +60,7 @@ const imports = {
     // clock terminates instead of hanging the host.
     // The HAL declares this returning u64, so it must come back as a BigInt.
     host_cycles: () => BigInt((cycles += 1000)),
+    host_millis: nowMillis,
     host_halt: (code) => {
       haltCode = code;
     },
@@ -102,6 +106,7 @@ const expectedImports = [
   'host_console_read',
   'host_console_available',
   'host_cycles',
+  'host_millis',
   'host_halt',
   'host_copy_between',
   'host_exec_module',

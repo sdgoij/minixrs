@@ -411,6 +411,15 @@ export function createHost({
   let haltCode = null;
   let cycles = 0;
 
+  /// The host's wall clock, in whole milliseconds: the guest's timer device.
+  ///
+  /// `host_cycles` stays a counter that advances on every read, which is what keeps the
+  /// scheduling accounting deterministic. Time itself is real: the kernel turns elapsed
+  /// milliseconds into ticks, so a program that waits or paces (`usleep`, a game loop) follows
+  /// seconds rather than how often the host happened to dispatch it.
+  const nowMillis = () =>
+    BigInt(Math.floor((globalThis.performance ?? { now: () => Date.now() }).now()));
+
   const memoryFor = (proc) => {
     if (proc < 0) return kernel.exports.memory;
     const st = procAt(proc);
@@ -727,6 +736,7 @@ export function createHost({
           cycles += 1000;
           return BigInt(cycles);
         },
+        host_millis: nowMillis,
         host_console_write: (b) => sink.write(b & 0xff),
         host_console_read: () => (queue.length === 0 ? -1 : queue.shift()),
         host_console_available: () => queue.length,
@@ -921,6 +931,7 @@ export function createHost({
         cycles += 1000;
         return BigInt(cycles);
       },
+      host_millis: nowMillis,
       host_halt: (code) => {
         haltCode = code;
       },

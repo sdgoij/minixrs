@@ -151,6 +151,10 @@ function emit(byte) {
 }
 
 let cycles = 0;
+// The guest's timer device: real milliseconds, which the kernel turns into ticks. `host_cycles`
+// stays the deterministic counter the scheduling accounting uses.
+const nowMillis = () =>
+  BigInt(Math.floor((globalThis.performance ?? { now: () => Date.now() }).now()));
 let haltCode = null;
 
 // ------------------------------------------------------- cross-process copy
@@ -435,6 +439,7 @@ const kernel = new WebAssembly.Instance(kernelModule, {
     },
     host_console_available: () => consoleInput.length,
     host_cycles: () => BigInt((cycles += 1000)),
+    host_millis: nowMillis,
     host_halt: (code) => {
       haltCode = code;
     },

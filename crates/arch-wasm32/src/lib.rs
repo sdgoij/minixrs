@@ -31,6 +31,13 @@ unsafe extern "C" {
     fn host_console_available() -> i32;
     /// Monotonic cycle count.
     fn host_cycles() -> u64;
+    /// Wall-clock milliseconds since the host started, monotonic.
+    ///
+    /// The clock a real machine gets from its timer device. Nothing on this port advances time on
+    /// its own: `minix_step` reads this and runs the timer handler for the ticks that have passed,
+    /// which is what makes `clock_gettime` (and a program waiting on time) follow real seconds
+    /// rather than how often the host happens to dispatch.
+    fn host_millis() -> u64;
     /// Report a terminal condition and stop the instance.
     fn host_halt(code: u32);
     /// Copy `bytes` between two address spaces. `proc` is a process number, or
@@ -191,6 +198,10 @@ mod no_host {
     pub unsafe fn host_cycles() -> u64 {
         0
     }
+    /// A clock that does not run, for the same reason.
+    pub unsafe fn host_millis() -> u64 {
+        0
+    }
     /// Loud, because there is nothing to return and nothing to stop: a build with no host that
     /// reaches the halt path is a test exercising something that needs one.
     pub unsafe fn host_halt(code: u32) -> ! {
@@ -323,6 +334,11 @@ pub(crate) fn console_available() -> i32 {
 pub(crate) fn cycles() -> u64 {
     // SAFETY: see `console_write`.
     unsafe { host_cycles() }
+}
+
+pub fn millis() -> u64 {
+    // SAFETY: see `console_write`.
+    unsafe { host_millis() }
 }
 
 /// The host's next queued input record, as `(page, code, press)`, or `None` when it has none.
