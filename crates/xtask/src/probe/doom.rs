@@ -3,7 +3,9 @@
 //! `run` (the `doom-kbd` gate) checks that a host key reaches Doom through the
 //! input server, not the serial console. `run_save` (the `doom-save` gate) saves
 //! a game, leaves to the shell, lists the file, syncs and reboots, which is the
-//! VFS write path rather than the render path.
+//! VFS write path rather than the render path. Both run on every arch: x86's
+//! keys come from the PS/2 controller and the others' from the virtio keyboard,
+//! and the display is a bochs framebuffer or a virtio-gpu one.
 //!
 //! Boots the split image with a QMP socket, types `/bin/doom` at the shell, and
 //! waits for the platform layer's first-frame verdict. Then it injects Escape as a
@@ -40,46 +42,114 @@ const QMP_PORT: u16 = 4476;
 const SAVE_QMP_PORT: u16 = 4481;
 
 /// The gate's system layout: the boot image plus the root filesystem on a disk.
-fn qemu(root: &Path, qmp_port: u16) -> Command {
-    let image = root.join("target/images/x86_64-pc-minix/minix-x86-boot.elf");
-    let disk = root.join("target/images/x86_64-pc-minix/disk.img");
+///
+/// Each arch boots the image its `system-image-<arch>` recipe writes, with the
+/// devices its gate line carries: a bochs display and the PS/2 keyboard on x86,
+/// a virtio-gpu display and virtio-keyboard on riscv64/aarch64. The probe cannot
+/// take the gate's own command because it needs a QMP socket on its own port and
+/// no tablet (the x86 recipe's `-nographic` line is the one the gate uses, and it
+/// has one).
+fn qemu(root: &Path, arch: &str, qmp_port: u16) -> Command {
+    let (triple, boot) = match arch {
+        "x86" => ("x86_64-pc-minix", "minix-x86-boot.elf"),
+        "riscv64" => ("riscv64gc-unknown-minix", "minix-riscv64-boot.elf"),
+        _ => ("aarch64-unknown-minix", "minix-aarch64-boot.elf"),
+    };
+    let image = root.join("target/images").join(triple).join(boot);
+    let disk = root.join("target/images").join(triple).join("disk.img");
+    let drive = format!(
+        "if=none,id=disk0,file={},format=raw,cache=writethrough",
+        disk.display()
+    );
 
-    let mut command = Command::new("qemu-system-x86_64");
-    command.args([
-        "-nographic",
-        "-monitor",
-        "none",
-        "-m",
-        "256M",
-        "-no-reboot",
-        "-vga",
-        "none",
-        "-device",
-        "bochs-display,id=fb0",
-    ]);
-    command.arg("-kernel").arg(image);
-    command.args([
-        "-drive",
-        &format!(
-            "if=none,id=disk0,file={},format=raw,cache=writethrough",
-            disk.display()
-        ),
-        "-device",
-        "virtio-blk-pci,disable-legacy=on,drive=disk0",
-        "-netdev",
-        "user,id=net0",
-        "-device",
-        "virtio-net-pci,disable-legacy=on,netdev=net0",
-    ]);
+    let mut command = match arch {
+        "x86" => {
+            let mut command = Command::new("qemu-system-x86_64");
+            command.args([
+                "-nographic",
+                "-monitor",
+                "none",
+                "-m",
+                "256M",
+                "-no-reboot",
+                "-vga",
+                "none",
+                "-device",
+                "bochs-display,id=fb0",
+            ]);
+            command.arg("-kernel").arg(image);
+            command.args([
+                "-drive",
+                &drive,
+                "-device",
+                "virtio-blk-pci,disable-legacy=on,drive=disk0",
+                "-netdev",
+                "user,id=net0",
+                "-device",
+                "virtio-net-pci,disable-legacy=on,netdev=net0",
+            ]);
+            command
+        }
+        "riscv64" => {
+            let mut command = Command::new("qemu-system-riscv64");
+            command.args(["-machine", "virt", "-m", "256M", "-nographic", "-monitor", "none"]);
+            virtio_devices(&mut command, &drive, &image);
+            command
+        }
+        _ => {
+            let mut command = Command::new("qemu-system-aarch64");
+            command.args([
+                "-machine",
+                "virt",
+                "-cpu",
+                "cortex-a57",
+                "-m",
+                "256M",
+                "-nographic",
+                "-monitor",
+                "none",
+                "-no-reboot",
+            ]);
+            virtio_devices(&mut command, &drive, &image);
+            command
+        }
+    };
     command
         .arg("-qmp")
         .arg(format!("tcp:127.0.0.1:{qmp_port},server=on,wait=off"));
     command
 }
 
-pub fn run(root: &Path) -> io::Result<bool> {
-    let mut guest = Guest::spawn(&mut qemu(root, QMP_PORT))?;
-    if !guest.wait_for(b"# ", secs(120)) {
+/// The virtio-mmio devices riscv64 and aarch64 carry: the disk, the display the
+/// frame is blitted into, and the keyboard the keys come from.
+fn virtio_devices(command: &mut Command, drive: &str, image: &Path) {
+    command.args(["-global", "virtio-mmio.force-legacy=off"]);
+    command.args([
+        "-drive",
+        drive,
+        "-device",
+        "virtio-blk-device,drive=disk0",
+        "-device",
+        "virtio-gpu-device",
+        "-device",
+        "virtio-keyboard-device",
+    ]);
+    command.arg("-kernel").arg(image);
+}
+
+/// Boot to a prompt takes far longer under TCG than on x86's KVM-less but
+/// better-tuned emulation; the gates' own per-arch budgets say the same.
+fn boot_timeout(arch: &str) -> Duration {
+    if arch == "x86" {
+        secs(120)
+    } else {
+        secs(300)
+    }
+}
+
+pub fn run(root: &Path, arch: &str) -> io::Result<bool> {
+    let mut guest = Guest::spawn(&mut qemu(root, arch, QMP_PORT))?;
+    if !guest.wait_for(b"# ", boot_timeout(arch)) {
         return Ok(fail(&guest, "the guest never reached a shell prompt"));
     }
 
@@ -143,9 +213,9 @@ pub fn run(root: &Path) -> io::Result<bool> {
 /// three rows below it, and after a save the cursor is still on Save Game, two
 /// rows above Quit Game. A press needs a tic of its own, which is what `tap`
 /// gives it.
-pub fn run_save(root: &Path) -> io::Result<bool> {
-    let mut guest = Guest::spawn(&mut qemu(root, SAVE_QMP_PORT))?;
-    if !guest.wait_for(b"# ", secs(120)) {
+pub fn run_save(root: &Path, arch: &str) -> io::Result<bool> {
+    let mut guest = Guest::spawn(&mut qemu(root, arch, SAVE_QMP_PORT))?;
+    if !guest.wait_for(b"# ", boot_timeout(arch)) {
         return Ok(fail(&guest, "the guest never reached a shell prompt"));
     }
     guest.send_paced("/bin/doom", Duration::from_millis(3))?;
@@ -230,8 +300,8 @@ pub fn run_save(root: &Path) -> io::Result<bool> {
     if ok {
         // A directory entry can reach the device without its inode; only a
         // second boot tells a durable save from that half-written one.
-        let mut guest = Guest::spawn(&mut qemu(root, SAVE_QMP_PORT + 1))?;
-        if !guest.wait_for(b"# ", secs(120)) {
+        let mut guest = Guest::spawn(&mut qemu(root, arch, SAVE_QMP_PORT + 1))?;
+        if !guest.wait_for(b"# ", boot_timeout(arch)) {
             return Ok(fail(&guest, "the second boot never reached a shell prompt"));
         }
         let anchor = guest.transcript_len();

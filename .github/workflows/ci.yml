@@ -42,7 +42,8 @@
 #
 # `doom` builds its pin instead of fetching a release: the engine is 80 C files
 # and the IWAD a 4 MiB download, so there is no large clone to skip. It is the
-# job that proves `/bin/doom` in the system image is the binary the pin builds.
+# job that proves `/bin/doom` in each arch's system image is the binary the pin
+# builds.
 #
 # The image jobs depend on the suites for the same reason. Both suites also run
 # locally (`cargo xtask gate boot --arch <arch>`, `cargo xtask gate qemu --arch <arch>`, on Windows too); they
@@ -722,25 +723,35 @@ jobs:
         run: cargo xtask gate interactive-bash --arch ${{ matrix.arch }} --timeout 120
 
   # The port's game, built from the engine commit and shareware IWAD
-  # `tools/pins.ini` pins and driven through all three Doom gates. The engine is
-  # 80 C files linked against `libc.a` and the IWAD is a 4 MiB download, so this
-  # builds from the pin where `bash` fetches a release: there is no 289 MiB clone
-  # to skip.
+  # `tools/pins.ini` pins and driven through all three Doom gates on every arch.
+  # The engine is 80 C files linked against `libc.a` and the IWAD is a 4 MiB
+  # download, so this builds from the pin where `bash` fetches a release: there
+  # is no 289 MiB clone to skip.
   #
-  # The gates prepare `system-image-x86`, which includes `/bin/doom` and the IWAD
-  # because the artifacts are in hand. That is the image a `run` recipe boots and
-  # the one `image-release.yml` injects them into, so the gate boots what ships.
-  # x86 only: the platform layer is arch-neutral, but the gates (and the bochs
-  # display and PS/2 keyboard they inject into) exist only here.
+  # The gates prepare `system-image-<arch>`, which includes `/bin/doom` and the
+  # IWAD because the artifacts are in hand. That is the image a `run` recipe boots
+  # and the one `image-release.yml` injects them into, so the gate boots what
+  # ships. x86's keys reach Doom through the PS/2 controller, the other arches'
+  # through the virtio keyboard; the frame path is the same code on all three.
   doom:
-    name: doom
+    name: doom (${{ matrix.arch }})
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    timeout-minutes: 60
     needs: [rust-pin, stage1]
     if: >-
       !cancelled() &&
       needs.rust-pin.result == 'success' &&
       (needs.stage1.result == 'success' || needs.stage1.result == 'skipped')
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86
+            triple: x86_64-pc-minix
+          - arch: riscv64
+            triple: riscv64gc-unknown-minix
+          - arch: aarch64
+            triple: aarch64-unknown-minix
     steps:
       - uses: actions/checkout@v7
         with:
@@ -759,42 +770,45 @@ jobs:
 
       - uses: ./.github/actions/install-qemu
         with:
-          arch: x86
+          arch: ${{ matrix.arch }}
 
       # The recipes call `python` by that name.
       - name: Make python resolve
         run: sudo ln -sf /usr/bin/python3 /usr/local/bin/python
 
       - name: Install the prebuilt stage1
-        run: just fetch-stage1 x86
+        run: just fetch-stage1 ${{ matrix.arch }}
 
-      # The pinned engine checkout, the IWAD held to its digest, the link against
-      # libc.a, and then the system image with both of them in it.
+      # The pinned engine checkout, the IWAD held to its digest, and the link
+      # against libc.a. The gates' preparation then builds the system image with
+      # both of them in it.
       - name: Build the pinned Doom
-        run: just build-doom x86
+        run: just build-doom ${{ matrix.arch }}
 
-      # The timeouts are the runner's emulation speed, as everywhere else.
+      # The timeouts are the runner's emulation speed, as everywhere else; TCG
+      # on riscv64/aarch64 is slower than x86's, and a ceiling costs nothing.
       - name: The frame is read back out of /dev/fb
-        run: cargo xtask gate doom --arch x86 --timeout 180
+        run: cargo xtask gate doom --arch ${{ matrix.arch }} --timeout 420
 
       - name: A key reaches Doom through /dev/kbd
-        run: cargo xtask gate doom-kbd --arch x86 --timeout 240
+        run: cargo xtask gate doom-kbd --arch ${{ matrix.arch }} --timeout 600
 
       # Two boots: the save is listed from the shell, synced, and listed again
       # after a reboot, so a write that only reached MFS's cache fails here.
       - name: A save survives a reboot
-        run: cargo xtask gate doom-save --arch x86 --timeout 300
+        run: cargo xtask gate doom-save --arch ${{ matrix.arch }} --timeout 900
 
-      # `image-release.yml` restores these where `system-image-x86` looks; the
+      # `image-release.yml` restores these where `system-image-<arch>` looks; the
       # `error` on a missing file keeps a rename from shipping an image without
-      # the game.
+      # the game. The IWAD is the same for every arch, so it is published once.
       - uses: actions/upload-artifact@v7
         with:
-          name: doom-bin-x86
-          path: target/x86_64-pc-minix/release/doom
+          name: doom-bin-${{ matrix.arch }}
+          path: target/${{ matrix.triple }}/release/doom
           if-no-files-found: error
 
       - uses: actions/upload-artifact@v7
+        if: matrix.arch == 'x86'
         with:
           name: doom-iwad
           path: target/doom-data/doom1.wad

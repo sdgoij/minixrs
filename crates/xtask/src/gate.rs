@@ -795,8 +795,8 @@ fn table() -> Vec<Gate> {
         ),
         g(
             "doom",
-            X86_ONLY,
-            Seconds::Fixed(180),
+            ALL,
+            per(180, 600, 600),
             SYSTEM_256,
             smoke_paced(
                 "tools/smoke/doom.tsv",
@@ -807,22 +807,22 @@ fn table() -> Vec<Gate> {
         ),
         g(
             "doom-kbd",
-            X86_ONLY,
-            Seconds::Fixed(240),
+            ALL,
+            per(240, 600, 600),
             SYSTEM_256,
             Action::Probe {
-                probe: Probe::Own("doom-kbd"),
+                probe: Probe::OwnArch("doom-kbd"),
                 qmp: false,
             },
             "doom-kbd: a host key reaches Doom through the input server's /dev/kbd ring ({arch})",
         ),
         g(
             "doom-save",
-            X86_ONLY,
-            Seconds::Fixed(300),
+            ALL,
+            per(300, 900, 900),
             SYSTEM_256,
             Action::Probe {
-                probe: Probe::Own("doom-save"),
+                probe: Probe::OwnArch("doom-save"),
                 qmp: false,
             },
             "doom-save: Doom writes .savegame/doomsav0.dsg and it survives a reboot ({arch})",
@@ -1208,9 +1208,9 @@ fn with_prepare(mut gate: Gate) -> Gate {
         "gltriangle-virgl" => &[Prepare::Exact("prepare-gltriangle-virgl-x86")],
         "wlgl" => &[Prepare::Exact("prepare-wlgl-x86")],
         "gui" => &[Prepare::Exact("prepare-gui-x86")],
-        "doom" => &[Prepare::Exact("prepare-doom-x86")],
-        "doom-kbd" => &[Prepare::Exact("prepare-doom-x86")],
-        "doom-save" => &[Prepare::Exact("prepare-doom-x86")],
+        "doom" => &[Prepare::Arch("prepare-doom")],
+        "doom-kbd" => &[Prepare::Arch("prepare-doom")],
+        "doom-save" => &[Prepare::Arch("prepare-doom")],
         "gbmtest" => &[Prepare::Exact("prepare-gbmtest-x86")],
         "wldmabufgl" => &[Prepare::Exact("prepare-wldmabufgl-x86")],
         "wlcompose" => &[Prepare::Exact("prepare-wlcompose-x86")],
@@ -1561,8 +1561,6 @@ fn run_probe(
         Probe::Own(name) => match name {
             "rc" => probe::rc::run(root),
             "fb" => probe::fb::run(root),
-            "doom-kbd" => probe::doom::run(root),
-            "doom-save" => probe::doom::run_save(root),
             "wlkey" => probe::wlkey::run(root),
             "wlfocus" => probe::wlfocus::run(root),
             "wlmotion" => probe::wlmotion::run(root),
@@ -1573,6 +1571,8 @@ fn run_probe(
         },
         Probe::OwnArch(name) => match name {
             "alloc" => probe::alloc::run(root, arch.name, gate.layout_for(arch).memory),
+            "doom-kbd" => probe::doom::run(root, arch.name),
+            "doom-save" => probe::doom::run_save(root, arch.name),
             other => Err(unknown_probe(other)),
         },
         Probe::ExecLoop => probe::exec_loop::run(

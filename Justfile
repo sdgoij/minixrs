@@ -284,7 +284,11 @@ boot-image-riscv64: userland-riscv64 coreutils-riscv64 dynlib-riscv64
     cp target/boot-kernel-riscv64.elf target/images/riscv64gc-unknown-minix/minix-riscv64-boot.elf
 
 system-image-riscv64: boot-image-riscv64
-    extras=""; if [ -f target/bash/riscv64/bash ]; then extras=/bin/bash=target/bash/riscv64/bash; else echo "system-image: no /bin/bash (run 'just build-bash riscv64' to include it)"; fi; MINIXFS_EXTRA="${extras}${MINIXFS_EXTRA:+;$MINIXFS_EXTRA}" MINIXFS_BLOCKS="${MINIXFS_BLOCKS:-8192}" cargo run -q -p boot-image --bin mkminixfs --release -- riscv64
+    extras=""; if [ -f target/bash/riscv64/bash ]; then extras=/bin/bash=target/bash/riscv64/bash; else echo "system-image: no /bin/bash (run 'just build-bash riscv64' to include it)"; fi; \
+    if [ -f target/riscv64gc-unknown-minix/release/doom ] && [ -f target/doom-data/doom1.wad ]; then \
+        extras="${extras}${extras:+;}/bin/doom=target/riscv64gc-unknown-minix/release/doom;/usr/share/games/doom/doom1.wad=target/doom-data/doom1.wad"; \
+    else echo "system-image: no /bin/doom (run 'just build-doom riscv64' to include it)"; fi; \
+    MINIXFS_EXTRA="${extras}${MINIXFS_EXTRA:+;$MINIXFS_EXTRA}" MINIXFS_BLOCKS="${MINIXFS_BLOCKS:-8192}" cargo run -q -p boot-image --bin mkminixfs --release -- riscv64
     @just mkfs-riscv64
 
 boot-image-aarch64: userland-aarch64 coreutils-aarch64 dynlib-aarch64
@@ -294,7 +298,11 @@ boot-image-aarch64: userland-aarch64 coreutils-aarch64 dynlib-aarch64
     cp target/boot-kernel-aarch64.elf target/images/aarch64-unknown-minix/minix-aarch64-boot.elf
 
 system-image-aarch64: boot-image-aarch64
-    extras=""; if [ -f target/bash/aarch64/bash ]; then extras=/bin/bash=target/bash/aarch64/bash; else echo "system-image: no /bin/bash (run 'just build-bash aarch64' to include it)"; fi; MINIXFS_EXTRA="${extras}${MINIXFS_EXTRA:+;$MINIXFS_EXTRA}" MINIXFS_BLOCKS="${MINIXFS_BLOCKS:-8192}" cargo run -q -p boot-image --bin mkminixfs --release -- aarch64
+    extras=""; if [ -f target/bash/aarch64/bash ]; then extras=/bin/bash=target/bash/aarch64/bash; else echo "system-image: no /bin/bash (run 'just build-bash aarch64' to include it)"; fi; \
+    if [ -f target/aarch64-unknown-minix/release/doom ] && [ -f target/doom-data/doom1.wad ]; then \
+        extras="${extras}${extras:+;}/bin/doom=target/aarch64-unknown-minix/release/doom;/usr/share/games/doom/doom1.wad=target/doom-data/doom1.wad"; \
+    else echo "system-image: no /bin/doom (run 'just build-doom aarch64' to include it)"; fi; \
+    MINIXFS_EXTRA="${extras}${MINIXFS_EXTRA:+;$MINIXFS_EXTRA}" MINIXFS_BLOCKS="${MINIXFS_BLOCKS:-8192}" cargo run -q -p boot-image --bin mkminixfs --release -- aarch64
     @just mkfs-aarch64
 
 # Boot the split pair: the minimal boot image plus the disk filesystem.
@@ -873,12 +881,18 @@ prepare-gui-x86: gui-x86 boot-image-x86
     @just mkfs-x86
 
 # The doom gates boot the image a `run` recipe boots, so the conditional
-# inclusion above is exercised rather than a private MINIXFS_EXTRA. The staged
-# toolchain is skipped: it is ~768 MiB, unrelated to Doom, and only a dev
+# inclusion above is exercised rather than a private MINIXFS_EXTRA. On x86 the
+# staged toolchain is skipped: it is ~768 MiB, unrelated to Doom, and only a dev
 # machine that ran `just llvm-minix x86` has one.
-# Prepare the system image the doom gates boot, without the toolchain.
+prepare-doom arch="x86":
+    @just prepare-doom-{{arch}}
+
 prepare-doom-x86: doom-x86
     MINIXFS_SKIP_TOOLCHAIN=1 just system-image-x86
+
+prepare-doom-riscv64: (build-doom "riscv64") system-image-riscv64
+
+prepare-doom-aarch64: (build-doom "aarch64") system-image-aarch64
 
 prepare-gbmtest-x86: gbmtest-x86 boot-image-x86
     M=target/mesa/x86; E="/lib/libdrm.so.2=$M/lib/libdrm.so.2;/lib/libgbm.so.1=$M/lib/libgbm.so.1;/lib/libexpat.so.1=$M/lib/libexpat.so.1;/lib/libgallium-25.3.6.so=$M/lib/libgallium-25.3.6.so;/lib/libz.so.1=$M/lib/libz.so.1;/lib/dri_gbm.so=$M/lib/dri_gbm.so;/bin/gbmtest=$M/bin/gbmtest"; MINIXFS_EXTRA="$E" MINIXFS_BLOCKS=16384 cargo run -q -p boot-image --bin mkminixfs --release -- x86_64

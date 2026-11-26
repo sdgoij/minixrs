@@ -378,8 +378,10 @@ fn run_probe(root: &Path, matches: &clap::ArgMatches) -> io::Result<bool> {
             &mut probe::command_from(&trailing_words(matches)),
         ),
         Some(("wldemo", _)) => probe::wldemo::run(root),
-        Some(("doom", _)) => probe::doom::run(root),
-        Some(("doom-save", _)) => probe::doom::run_save(root),
+        Some(("doom", matches)) => probe::doom::run(root, target(matches).unwrap_or("x86")),
+        Some(("doom-save", matches)) => {
+            probe::doom::run_save(root, target(matches).unwrap_or("x86"))
+        }
         Some(("wldmabuf", matches)) => probe::wldmabuf::run(root, &trailing_words(matches)),
         Some(("wldmabufgl", matches)) => probe::wldmabufgl::run(root, &trailing_words(matches)),
         Some(("wlfull", matches)) => probe::wlfull::run(root, &trailing_words(matches)),
@@ -1035,11 +1037,13 @@ fn command() -> clap::Command {
                 )
                 .subcommand(
                     clap::Command::new("doom")
-                        .about("A host key reaches Doom through the input server's /dev/kbd"),
+                        .about("A host key reaches Doom through the input server's /dev/kbd")
+                        .arg(target_arg("x86")),
                 )
                 .subcommand(
                     clap::Command::new("doom-save")
-                        .about("A saved game reaches the disk and survives a reboot"),
+                        .about("A saved game reaches the disk and survives a reboot")
+                        .arg(target_arg("x86")),
                 )
                 .subcommand(
                     clap::Command::new("wlfocus")

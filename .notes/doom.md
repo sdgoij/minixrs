@@ -1,8 +1,10 @@
 # DOOM: doomgeneric on minix
 
-Status: **runs**. The shareware episode boots to its attract demo on x86_64,
-drawn into `/dev/fb`; the console drives the menus, and `cargo xtask gate doom
---arch x86` holds the first frame to a read-back of the live mapping.
+Status: **runs**, and plays, on x86_64, RISC-V64 and AArch64. The shareware
+episode boots to its attract demo, drawn into `/dev/fb`; `cargo xtask gate doom
+--arch <arch>` holds the first frame to a read-back of the live mapping, and on
+every arch `doom-kbd` quits through the menu and `doom-save` saves a game that
+survives a reboot.
 
 Doom is the port's first game: about 80 translation units of 1993-era C, built
 by the same clang + LLD + `libc.a` line as `c-direct`.
@@ -16,17 +18,18 @@ by the same clang + LLD + `libc.a` line as `c-direct`.
 | Platform layer | `tools/doom/doomgeneric_minix.c` |
 | Builder | `cargo xtask build doom <arch>` (`crates/xtask/src/build/doom.rs`) |
 | Recipes | `just build-doom x86` (`doom-x86` is the same build), `just prepare-doom-x86` (the system image with Doom in it) |
-| Playing | `just run-doom-x86`, then `/bin/doom` at the shell; click the window and play. `just run x86` has it too once `build-doom` has run |
-| Gates | `cargo xtask gate doom --arch x86` (frame and read-back), `cargo xtask gate doom-kbd --arch x86` (a device key, the menu and the quit), `cargo xtask gate doom-save --arch x86` (a save, the shell listing, and a reboot) |
+| Playing | `just run-doom-x86`, then `/bin/doom` at the shell; click the window and play. `just run <arch>` has it too once `build-doom` has run |
+| Gates | `cargo xtask gate doom|doom-kbd|doom-save --arch <arch>`, on all three arches (frame and read-back, a device key and the quit, a save across a reboot) |
 
 The engine is not in the kernel's embedded root: the shareware IWAD is 4 MiB and
 the embedded ramdisk window is 16 MiB, so Doom goes in the *system* image
-(`system-image-x86`, the disk a `run` recipe boots) and the release's split
-image. That recipe includes `/bin/doom` and the IWAD when `just build-doom x86`
-has put them under `target/`, the same conditional rule `/bin/bash` follows, so
-a plain image build depends on neither. `ci.yml`'s `doom` job builds the pin,
-runs the three gates and publishes the two files; `image-release.yml` restores
-them before building the system image the release publishes.
+(`system-image-<arch>`, the disk a `run` recipe boots) and the release's split
+image. Those recipes include `/bin/doom` and the IWAD when `just build-doom
+<arch>` has put them under `target/`, the same conditional rule `/bin/bash`
+follows, so a plain image build depends on neither. `ci.yml`'s `doom` job builds
+the pin on all three arches, runs the three gates and publishes the binaries;
+`image-release.yml` restores them before building the system image the release
+publishes.
 
 `doomgeneric` is a port of the Doom source with one small interface between the
 engine and a platform (`DG_Init`, `DG_DrawFrame`, `DG_SleepMs`, `DG_GetTicksMs`,
@@ -98,6 +101,15 @@ byte and then released; with the terminal's own auto-repeat a held key stays
 held, and a tap is a press and a release. `ESC [ A`..`D` become the arrow keys
 (modifier parameters are skipped).
 
+On riscv64 and aarch64 the keys arrive as Linux keycodes from the virtio
+keyboard, and `keycode_to_usage` (`crates/drivers/src/input/virtio_input.rs`)
+translates them to HID usages. That table had letters, digits, the arrows,
+Enter, Backspace, Space, punctuation and the modifiers, and stopped there:
+Escape, Tab, the function keys and the navigation block fell through as
+unmapped and the ring never saw them. x86 never noticed, because the PS/2 path
+delivers HID usages directly. The table now carries them; the `doom-kbd` gate on
+those arches is what caught it (Escape is the menu key).
+
 Doom's own bindings apply: Ctrl fires, Space is use, Shift runs, Alt strafes,
 Escape is the menu.
 
@@ -152,9 +164,6 @@ directory shows in the listing and cannot be resolved.
 
 ## 6. Limits
 
-- The gate is x86 only. The platform layer is arch-neutral and the virtio-gpu
-  backend already flushes, so RISC-V and AArch64 should work; nobody has gated
-  them yet.
 - No sound: the engine is built without `FEATURE_SOUND`, so `dummy.c` provides
   the mixer stubs.
 - No mouse: doomgeneric starts with `usemouse = 0`, and the tablet device is not
