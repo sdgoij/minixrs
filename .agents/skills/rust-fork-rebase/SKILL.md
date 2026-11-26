@@ -32,9 +32,21 @@ change breaks `just bootstrap` / the coreutils build.
   (`Unknown command line argument '-wasm-use-legacy-eh=false'`), which reads as a target-spec
   bug. Remove `rust/build/<host>/llvm/.llvm-stamp` — as the stamp's own message says — and
   re-run; the LLVM rebuild is the long part of that bootstrap.
-- `[llvm] download-ci-llvm = true`, so builds fetch a prebuilt LLVM. The in-tree
-  `rust/src/llvm-project` gitlink is irrelevant to builds — a stale checkout just shows as
-  ` M src/llvm-project` and can be ignored (or updated later; the objects are usually local).
+- **CI reuses LLVM and LLD across pin bumps.** That same stamp is why
+  `toolchain-release.yml` publishes the installed `llvm/{bin,lib,include}` and `lld/bin`
+  trees (plus their `.llvm-stamp`/`.lld-stamp`) as its own release, tagged
+  `llvm-<pin>-<config>-clang<version>-<host>`: the tag carries the `src/llvm-project`
+  gitlink, the LLVM-affecting bootstrap sources (`rust_config.rs`, `llvm.rs`, the bootstrap
+  config) and the clang version, so a fork-only change restores both and skips the builds,
+  and only the Rust half rebuilds. LLD's stamp is existence-only, but it is built from the
+  same checkout and shipped in the same asset, so it matches. Move the LLVM pin or the LLVM
+  config, or delete the `llvm-*` release, to force the full build. It is a release rather
+  than an Actions cache because the stage1 for a new pin is usually built on a feature
+  branch, and a cache is scoped to the branch that saved it.
+- `[llvm] download-ci-llvm = false`, so builds compile the in-tree `rust/src/llvm-project`
+  checkout from source. Its gitlink is the LLVM pin, which is why a rust-only change does not
+  rebuild it and why the LLVM release is tagged by it. A modified checkout shows as
+  ` M src/llvm-project` and enters the stamp's `git status` hash, forcing the rebuild.
 - The stage1 toolchain used by every userland/server/smoke build is
   `rust/build/<host>/stage1/bin/rustc[.exe]`; its sysroot is
   `rust/build/<host>/stage1/lib/rustlib/<triple>/lib/`.

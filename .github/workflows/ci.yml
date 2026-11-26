@@ -467,9 +467,13 @@ jobs:
             echo "- build needed: **${needed}**"
           } >> "$GITHUB_STEP_SUMMARY"
 
-  # One LLVM build, and only when the pin has no toolchain yet - it runs before
-  # anything that would consume one. This calls the workflow the operator can also
-  # run by hand, so the build and its publishing rules keep one home.
+  # One stage1 release, and only when the pin has no toolchain yet - it runs
+  # before anything that would consume one. This calls the workflow the operator
+  # can also run by hand, so the build and its publishing rules keep one home.
+  # The LLVM and LLD inside it are published separately, keyed by
+  # `src/llvm-project` (see `toolchain-release.yml`), so a pin bump that leaves
+  # LLVM where it was rebuilds only the Rust half rather than paying the 45-90
+  # minute LLVM build again.
   stage1:
     name: stage1
     needs: rust-pin

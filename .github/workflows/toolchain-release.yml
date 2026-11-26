@@ -5,11 +5,24 @@
 # Manual or automatic: `workflow_dispatch` rebuilds and republishes on demand
 # (after an LLVM or clang pin change, say), and `ci.yml` calls it - through
 # `workflow_call` - when the pinned rust commit has no release yet, before
-# anything consumes one. One run is one LLVM build, and the result stays valid
-# until the pinned rust commit changes. The tag *is* that commit, so consumers
-# resolve it exactly - `cargo xtask fetch-stage1` derives the same tag from the
-# commit the `rust` submodule pins, which is why the toolchain can never be
-# stale.
+# anything consumes one. The tag *is* that commit, so consumers resolve it
+# exactly - `cargo xtask fetch-stage1` derives the same tag from the commit the
+# `rust` submodule pins, which is why the toolchain can never be stale.
+#
+# The build is split in two because its halves move at different rates. LLVM,
+# and the LLD built from the same sources, dominate the 45-90 minute part, and
+# `x.py` keys its LLVM stamp on `src/llvm-project` alone
+# (`utils/build_stamp.rs::generate_smart_stamp_hash`), so a fork change that
+# leaves the LLVM pin where it was does not need to rebuild them. Their installed
+# trees are published on one release of their own, tagged
+# by the LLVM commit, the bootstrap flags that change the build
+# (`rust_config.rs`, `llvm.rs`), the clang version and the host; a run restores
+# them from there before `just bootstrap`, and only the Rust side (stage1 rustc
+# and the sysroots) is rebuilt. The CMake object directories (`llvm/build` is a
+# few GiB) are not part of the asset: nothing after the build reads them, and the
+# installed trees resolve their paths from their own location, so the asset is
+# not tied to a workspace path. The stage1 asset still contains only `stage1/`,
+# which has LLVM linked in, so consumers are unaffected.
 #
 # The release lives here rather than on the fork, because the built-in
 # `GITHUB_TOKEN` can only write its own repository: that keeps the whole thing
@@ -94,13 +107,177 @@ jobs:
           git submodule update --init --depth 1 rust coreutils libc rustix
           git -C rust submodule update --init --depth 1 src/llvm-project library/backtrace
 
+      # The LLVM identity is not the stage1 identity: `x.py`'s LLVM stamp hashes
+      # `src/llvm-project`, not the fork, so a rust-only pin bump can reuse an
+      # LLVM built earlier. The stamp also ignores the bootstrap config (the
+      # `rust-fork-rebase` skill records that trap), so the flags that decide the
+      # build are part of the tag explicitly: the generated `[llvm] targets` live
+      # in `rust_config.rs`, `llvm.rs` holds the CMake flags, and bootstrap's
+      # config files hold the defaults those flags are read from. The clang major
+      # version is there because `rustc_llvm` compiles its C++ shims with the host
+      # compiler and against these libraries. LLD is built from the same
+      # `src/llvm-project` checkout, so it travels under the same tag.
+      - name: Resolve the LLVM build identity
+        id: llvm
+        run: |
+          set -euo pipefail
+          host="$(rustc -vV | sed -n 's/^host: //p')"
+          [ -n "$host" ] || { echo '!! rustc -vV did not report a host triple' >&2; exit 1; }
+          llvm_sha="$(git -C rust rev-parse HEAD:src/llvm-project)"
+          checkout="$(git -C rust/src/llvm-project rev-parse HEAD)"
+          [ "$checkout" = "$llvm_sha" ] || {
+            echo "!! src/llvm-project is at ${checkout}, not the pinned ${llvm_sha}" >&2
+            exit 1
+          }
+          config="$(cat crates/xtask/src/rust_config.rs \
+                       rust/src/bootstrap/src/core/build_steps/llvm.rs \
+                       rust/src/bootstrap/src/core/config/config.rs \
+                       rust/src/bootstrap/src/core/config/toml/llvm.rs \
+                     | sha256sum | cut -c1-12)"
+          clang="$(clang --version | sed -n '1s/.*version //p' | cut -d' ' -f1 | cut -d. -f1)"
+          case "$clang" in
+            '' | *[!0-9]*) echo '!! cannot read the clang major version' >&2; exit 1 ;;
+          esac
+          tag="llvm-${llvm_sha}-${config}-clang${clang}-${host}"
+          {
+            echo "host=${host}"
+            echo "sha=${llvm_sha}"
+            echo "config=${config}"
+            echo "clang=${clang}"
+            echo "root=rust/build/${host}"
+            echo "llvm_dir=rust/build/${host}/llvm"
+            echo "lld_dir=rust/build/${host}/lld"
+            echo "tag=${tag}"
+            echo "asset=stage1-build-${host}.tar.xz"
+          } >> "$GITHUB_OUTPUT"
+          echo "LLVM ${llvm_sha:0:12}, config ${config}, clang ${clang}: ${tag}"
+
+      # An installed tree is relocatable: `llvm-config` and the CMake config
+      # resolve their paths from the tree's own location, the LLVM stamp hashes
+      # the `src/llvm-project` checkout rather than any path, and LLD's stamp is
+      # existence-only while `lld/bin/lld` is statically linked. So the asset
+      # unpacks at whatever `rust/build/<host>` this checkout has, which is also
+      # why it is a release asset rather than an Actions cache: a cache is scoped
+      # to the branch that saved it, and the stage1 for a new pin is usually built
+      # on a feature branch before it reaches `main`.
+      - name: Restore the LLVM and LLD build
+        id: llvm-release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          LLVM_TAG: ${{ steps.llvm.outputs.tag }}
+          BUILD_ASSET: ${{ steps.llvm.outputs.asset }}
+          BUILD_ROOT: ${{ steps.llvm.outputs.root }}
+          LLVM_DIR: ${{ steps.llvm.outputs.llvm_dir }}
+          LLD_DIR: ${{ steps.llvm.outputs.lld_dir }}
+        run: |
+          set -euo pipefail
+          if ! gh release view "$LLVM_TAG" >/dev/null 2>&1; then
+            echo 'restored=false' >> "$GITHUB_OUTPUT"
+            echo "no ${LLVM_TAG} yet; this run builds LLVM and LLD"
+            exit 0
+          fi
+          tmp="$(mktemp -d)"
+          if ! gh release download "$LLVM_TAG" \
+                 --pattern "$BUILD_ASSET" --pattern SHA256SUMS --dir "$tmp"; then
+            echo 'restored=false' >> "$GITHUB_OUTPUT"
+            echo "${LLVM_TAG} has no ${BUILD_ASSET}; this run builds LLVM and LLD"
+            exit 0
+          fi
+          if [ ! -f "$tmp/$BUILD_ASSET" ] || [ ! -f "$tmp/SHA256SUMS" ]; then
+            echo 'restored=false' >> "$GITHUB_OUTPUT"
+            echo "${LLVM_TAG} is missing ${BUILD_ASSET}; this run builds LLVM and LLD"
+            exit 0
+          fi
+          (cd "$tmp" && sha256sum -c SHA256SUMS)
+          rm -rf "$LLVM_DIR" "$LLD_DIR"
+          mkdir -p "$BUILD_ROOT"
+          tar -xJf "$tmp/$BUILD_ASSET" -C "$BUILD_ROOT"
+          rm -rf "$tmp"
+          "$LLVM_DIR/bin/llvm-config" --version
+          "$LLD_DIR/bin/lld" --version
+          echo 'restored=true' >> "$GITHUB_OUTPUT"
+          echo "restored ${BUILD_ASSET} from ${LLVM_TAG}"
+
       - uses: extractions/setup-just@v4
 
       # `all` builds a sysroot for the host, the three minix targets, their
       # `-elf` (position-independent) forms and `wasm32-minix`, so one asset
-      # serves every arch job and the wasm one.
+      # serves every arch job and the wasm one. With the LLVM and LLD stamps
+      # restored, this is the Rust half only.
       - name: Build the stage1 toolchain
         run: just bootstrap all
+
+      # Publish even if the Rust side fails after the LLVM/LLD build: those trees
+      # are the part worth keeping, and the next run then rebuilds only Rust.
+      - name: Check the LLVM and LLD build is complete
+        id: llvm-built
+        if: always() && steps.llvm-release.outputs.restored != 'true'
+        env:
+          LLVM_DIR: ${{ steps.llvm.outputs.llvm_dir }}
+          LLD_DIR: ${{ steps.llvm.outputs.lld_dir }}
+        run: |
+          set -euo pipefail
+          if [ -f "$LLVM_DIR/.llvm-stamp" ] && [ -d "$LLVM_DIR/lib" ] \
+             && [ -d "$LLVM_DIR/include" ] && "$LLVM_DIR/bin/llvm-config" --version \
+             && [ -f "$LLD_DIR/.lld-stamp" ] && "$LLD_DIR/bin/lld" --version; then
+            echo 'complete=true' >> "$GITHUB_OUTPUT"
+          else
+            echo 'complete=false' >> "$GITHUB_OUTPUT"
+            echo '::warning::the LLVM/LLD build did not finish, so it is not published'
+          fi
+
+      # `continue-on-error`: these trees are an accelerator, and failing to
+      # publish them must not keep the stage1 release from being published. The
+      # next run then rebuilds them. Only the installed trees are packaged - the
+      # CMake object directories (`llvm/build` alone is a few GiB) are not read
+      # after the build. `llvm/bin` carries `llvm-config` and `llvm-tblgen` (LLD
+      # needs the latter), `llvm/lib` the static libraries `rustc_llvm` links,
+      # `llvm/include` the headers it compiles against; `lld/bin` has the linker
+      # `copy_lld_artifacts` installs as `rust-lld`. The `.llvm-stamp` and
+      # `.lld-stamp` are what make x.py skip the two builds.
+      - name: Publish the LLVM and LLD build
+        if: always() && steps.llvm-release.outputs.restored != 'true' && steps.llvm-built.outputs.complete == 'true'
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          LLVM_TAG: ${{ steps.llvm.outputs.tag }}
+          BUILD_ASSET: ${{ steps.llvm.outputs.asset }}
+          BUILD_ROOT: ${{ steps.llvm.outputs.root }}
+          LLVM_SHA: ${{ steps.llvm.outputs.sha }}
+          LLVM_HOST: ${{ steps.llvm.outputs.host }}
+          LLVM_CONFIG: ${{ steps.llvm.outputs.config }}
+          LLVM_CLANG: ${{ steps.llvm.outputs.clang }}
+        run: |
+          set -euo pipefail
+          tmp="$(mktemp -d)"
+          tar -cJf "$tmp/$BUILD_ASSET" -C "$BUILD_ROOT" \
+            llvm/bin llvm/lib llvm/include llvm/.llvm-stamp \
+            lld/bin lld/.lld-stamp
+          (cd "$tmp" && sha256sum "$BUILD_ASSET" > SHA256SUMS)
+          notes="$(printf '%s\n' \
+            "Installed LLVM and LLD trees from \`src/llvm-project\` commit \`${LLVM_SHA}\`," \
+            "built from source on \`${LLVM_HOST}\`." \
+            "" \
+            "- llvm: \`${LLVM_SHA}\`" \
+            "- config: \`${LLVM_CONFIG}\` (\`rust_config.rs\`, \`llvm.rs\`)" \
+            "- clang: \`${LLVM_CLANG}\`" \
+            "- payload: \`llvm/{bin,lib,include,.llvm-stamp}\` and \`lld/{bin,.lld-stamp}\` (no CMake build directories)" \
+            "" \
+            "Consumed by \`toolchain-release.yml\` so a rust-only pin bump rebuilds only the" \
+            "Rust half of the stage1. Tagged by the LLVM pin, not the rust commit, so the" \
+            "asset outlives the stage1 that built it.")"
+          if gh release view "${LLVM_TAG}" > /dev/null 2>&1; then
+            gh release upload "${LLVM_TAG}" --clobber "${tmp}/${BUILD_ASSET}" "${tmp}/SHA256SUMS"
+            gh release edit "${LLVM_TAG}" --prerelease --notes "${notes}"
+          else
+            gh release create "${LLVM_TAG}" \
+              --prerelease \
+              --title "llvm+lld ${LLVM_SHA:0:12} (${LLVM_HOST})" \
+              --notes "${notes}" \
+              "${tmp}/${BUILD_ASSET}" "${tmp}/SHA256SUMS"
+          fi
+          rm -rf "$tmp"
+          echo "published ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/releases/tag/${LLVM_TAG}"
 
       - name: Package
         id: package
