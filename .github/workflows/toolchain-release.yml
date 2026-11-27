@@ -145,8 +145,6 @@ jobs:
             echo "config=${config}"
             echo "clang=${clang}"
             echo "root=rust/build/${host}"
-            echo "llvm_dir=rust/build/${host}/llvm"
-            echo "lld_dir=rust/build/${host}/lld"
             echo "tag=${tag}"
             echo "asset=stage1-build-${host}.tar.xz"
           } >> "$GITHUB_OUTPUT"
@@ -167,8 +165,6 @@ jobs:
           LLVM_TAG: ${{ steps.llvm.outputs.tag }}
           BUILD_ASSET: ${{ steps.llvm.outputs.asset }}
           BUILD_ROOT: ${{ steps.llvm.outputs.root }}
-          LLVM_DIR: ${{ steps.llvm.outputs.llvm_dir }}
-          LLD_DIR: ${{ steps.llvm.outputs.lld_dir }}
         run: |
           set -euo pipefail
           if ! gh release view "$LLVM_TAG" >/dev/null 2>&1; then
@@ -189,12 +185,11 @@ jobs:
             exit 0
           fi
           (cd "$tmp" && sha256sum -c SHA256SUMS)
-          rm -rf "$LLVM_DIR" "$LLD_DIR"
+          rm -rf "$BUILD_ROOT/llvm" "$BUILD_ROOT/lld"
           mkdir -p "$BUILD_ROOT"
           tar -xJf "$tmp/$BUILD_ASSET" -C "$BUILD_ROOT"
           rm -rf "$tmp"
-          "$LLVM_DIR/bin/llvm-config" --version
-          "$LLD_DIR/bin/lld" --version
+          cargo xtask stage1-build check --root "$BUILD_ROOT"
           echo 'restored=true' >> "$GITHUB_OUTPUT"
           echo "restored ${BUILD_ASSET} from ${LLVM_TAG}"
 
@@ -213,13 +208,10 @@ jobs:
         id: llvm-built
         if: always() && steps.llvm-release.outputs.restored != 'true'
         env:
-          LLVM_DIR: ${{ steps.llvm.outputs.llvm_dir }}
-          LLD_DIR: ${{ steps.llvm.outputs.lld_dir }}
+          BUILD_ROOT: ${{ steps.llvm.outputs.root }}
         run: |
           set -euo pipefail
-          if [ -f "$LLVM_DIR/.llvm-stamp" ] && [ -d "$LLVM_DIR/lib" ] \
-             && [ -d "$LLVM_DIR/include" ] && "$LLVM_DIR/bin/llvm-config" --version \
-             && [ -f "$LLD_DIR/.lld-stamp" ] && "$LLD_DIR/bin/lld" --version; then
+          if cargo xtask stage1-build check --root "$BUILD_ROOT"; then
             echo 'complete=true' >> "$GITHUB_OUTPUT"
           else
             echo 'complete=false' >> "$GITHUB_OUTPUT"

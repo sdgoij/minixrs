@@ -37,6 +37,7 @@ mod push_status;
 mod qmp;
 mod rust_config;
 mod smoke;
+mod stage1_build;
 mod toolchain;
 mod verify_stage1;
 
@@ -114,6 +115,7 @@ fn main() -> ExitCode {
                 .expect("clap defaults the target");
             rust_config::run(&root, token).map(|()| true)
         }
+        Some(("stage1-build", matches)) => stage1_build::run(&root, matches),
         Some(("minix-ld", matches)) => run_minix_ld(&root, matches),
         Some(("llvm-config", matches)) => {
             let build_root = matches
@@ -1067,6 +1069,23 @@ fn command() -> clap::Command {
                         .value_name("TARGET")
                         .default_value("all")
                         .help("all, or one of x86, riscv64, aarch64"),
+                ),
+        )
+        .subcommand(
+            clap::Command::new("stage1-build")
+                .about("The stage1 release's LLVM/LLD build asset")
+                .subcommand_required(true)
+                .arg_required_else_help(true)
+                .subcommand(
+                    clap::Command::new("check")
+                        .about("Check that an LLVM/LLD build tree is complete")
+                        .arg(
+                            clap::Arg::new("root")
+                                .long("root")
+                                .value_name("DIR")
+                                .default_value("rust/build/host")
+                                .help("rust/build/<host>: the directory holding llvm/ and lld/"),
+                        ),
                 ),
         )
 }

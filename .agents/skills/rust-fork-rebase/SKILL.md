@@ -42,7 +42,10 @@ change breaks `just bootstrap` / the coreutils build.
   same checkout and shipped in the same asset, so it matches. Move the LLVM pin or the LLVM
   config, or delete the `llvm-*` release, to force the full build. It is a release rather
   than an Actions cache because the stage1 for a new pin is usually built on a feature
-  branch, and a cache is scoped to the branch that saved it.
+  branch, and a cache is scoped to the branch that saved it. The completeness check is
+  `cargo xtask stage1-build check --root rust/build/<host>`, a structural check covered by
+  `cargo test -p xtask`; it does not execute `lld`, because `lld` is the multi-driver and a
+  bare `lld --version` exits 1.
 - `[llvm] download-ci-llvm = false`, so builds compile the in-tree `rust/src/llvm-project`
   checkout from source. Its gitlink is the LLVM pin, which is why a rust-only change does not
   rebuild it and why the LLVM release is tagged by it. A modified checkout shows as
