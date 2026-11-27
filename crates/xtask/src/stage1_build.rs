@@ -212,6 +212,8 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn a_binary_without_an_execute_bit_is_not_complete() {
+        use std::os::unix::fs::PermissionsExt;
+
         let dir = temp_dir("minixrs-xtask-stage1-build-no-exec-bit");
         complete_tree(&dir);
         let lld = dir.join("lld/bin").join(toolchain::exe("lld"));
